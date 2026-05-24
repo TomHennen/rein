@@ -5,13 +5,15 @@
   },
   "remoteUser": "vscode",
   "containerEnv": {
-    "REIN_DEV_MODE": "1"
+    "REIN_DEV_MODE": "1",
+    "REIN_APP_PRIVATE_KEY_PATH": "/home/vscode/.config/rein-credentials/app.pem"
   },
   "mounts": [
-    "source=${localEnv:HOME}/.config/rein-dev-secrets,target=/home/vscode/.config/rein-dev-secrets,type=bind,consistency=cached"
+    "source=${localEnv:HOME}/.config/rein-credentials,target=/home/vscode/.config/rein-credentials,type=bind,consistency=cached,readonly"
   ],
   "runArgs": [
-    "--network=bridge"
+    "--network=bridge",
+    "--env-file=${localWorkspaceFolder}/.devcontainer/devcontainer.env"
   ],
   "customizations": {
     "vscode": {
@@ -26,15 +28,5 @@
       }
     }
   },
-  "postCreateCommand": "go mod download && echo 'Container ready. See PLAN.md for next steps.'",
-  "remoteEnv": {
-    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
-    "REIN_APP_PRIVATE_KEY_PATH": "/home/vscode/.config/rein-dev-secrets/app.pem",
-    "REIN_APP_CLIENT_ID": "${localEnv:REIN_APP_CLIENT_ID}",
-    "REIN_APP_ID": "${localEnv:REIN_APP_ID}",
-    "REIN_APP_INSTALLATION_ID": "${localEnv:REIN_APP_INSTALLATION_ID}",
-    "REIN_TEST_REPO_A": "${localEnv:REIN_TEST_REPO_A}",
-    "REIN_TEST_REPO_B": "${localEnv:REIN_TEST_REPO_B}",
-    "REIN_GITHUB_USERNAME": "${localEnv:REIN_GITHUB_USERNAME}"
-  }
+  "postCreateCommand": "go mod download 2>/dev/null || true; echo 'Container ready. Authenticate Claude Code with `claude` on first use.'"
 }
