@@ -37,13 +37,7 @@ jobs:
       contents: write      # release job needs this to publish on tag push
       id-token: write      # SLSA generator needs this for OIDC token
       actions: read        # SLSA generator inspects the run's workflow
-    uses: TomHennen/wrangle/.github/workflows/build_and_publish_go.yml@__WRANGLE_GO_MERGE_SHA__
+    uses: TomHennen/wrangle/.github/workflows/build_and_publish_go.yml@45ae358f45793f9790c1c124ea2093dcd1fed31f
     with:
       # Path to the Go module (default '.' is fine; rein lives at repo root)
       path: '.'
-      # Run race detector by default; disable if you add CGO_ENABLED=0 cross builds
-      run-race-detector: true
-      # Enforce gofmt with auto-skip of generated files (// Code generated ... DO NOT EDIT.)
-      run-gofmt-check: true
-      # Publish on tag push only
-      release-events: tag-only
