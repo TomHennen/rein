@@ -6,7 +6,7 @@
 
 **Working repos:** Two throwaway repos identified by `$REIN_TEST_REPO_A` and `$REIN_TEST_REPO_B` env vars. App config is in `$REIN_APP_CLIENT_ID`, `$REIN_APP_ID`, `$REIN_APP_INSTALLATION_ID`. App private key is at `$REIN_APP_PRIVATE_KEY_PATH`.
 
-**Devcontainer is provided.** Do not modify `.devcontainer/`. If additional tooling is needed, add a note under "tooling requests" at the bottom of this file.
+**Dev environment.** Development happens directly in this Linux VM. Source `./dev-env` at the start of each session to load REIN_* env vars. If additional tooling is needed (Go libraries, system packages), add a note under "tooling requests" at the bottom of this file.
 
 ## How to work this plan
 

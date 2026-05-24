@@ -19,15 +19,16 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 
 - Proxy: `github.com/elazarl/goproxy` (BSD)
 - GitHub App tokens: `github.com/jferrl/go-githubauth` (MIT)
-- Key storage: `github.com/99designs/keyring` (MIT) — auto-selects Keychain on host Mac, file backend in devcontainer
-- Hardware keys (Phase 1+): `github.com/facebookincubator/sks` (Apache 2.0)
+- Key storage: `github.com/99designs/keyring` (MIT) — uses Secret Service backend (libsecret/D-Bus) on Linux when available, file backend otherwise
+- Hardware keys (Phase 1+): `github.com/facebookincubator/sks` (Apache 2.0). Not used in Phase 0.
 - CLI: `github.com/spf13/cobra`
 
 ## Dev environment
 
-- Everything runs inside the devcontainer. Don't modify `.devcontainer/`.
-- Secure Enclave is not available in the container (Phase 1 hardware key work happens on host).
-- App config is in `REIN_*` env vars. Key at `$REIN_APP_PRIVATE_KEY_PATH`. Run `env | grep REIN` to verify.
+- Development happens directly in this Linux VM. There is no devcontainer.
+- Source `./dev-env` at the start of each work session to load the `REIN_*` environment variables.
+- The GitHub App private key is at `$REIN_APP_PRIVATE_KEY_PATH` (`~/.config/rein-credentials/app.pem`).
+- Secure Enclave is not available on Linux. Phase 0 uses the `99designs/keyring` file backend. Phase 1's hardware-backed work would require TPM2 (if this VM has one) or shift to a Mac host.
 - srt sandbox is out of scope for Phase 0.
 
 ## CI/CD
