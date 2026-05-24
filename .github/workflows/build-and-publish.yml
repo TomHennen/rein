@@ -1,0 +1,49 @@
+# Build and publish rein via wrangle's Go build type.
+#
+# Calls TomHennen/wrangle's reusable Go workflow for:
+#   - Source-stage checks (gofmt, go vet, go test, govulncheck) on every push/PR
+#   - Release: goreleaser publish + SBOM + SLSA L3 provenance on tag push
+#   - Verify: post-publish slsa-verifier sanity check
+#
+# Adopting wrangle's reusable workflow means rein gets supply-chain hygiene
+# from commit one. See https://github.com/TomHennen/wrangle for the design.
+#
+# ACTION REQUIRED before first run:
+#   The `uses:` reference below pins to wrangle's main-branch merge SHA of
+#   #238 ("Implement Go build type (v0.1)"). Replace __WRANGLE_GO_MERGE_SHA__
+#   with the actual SHA. You can find it with:
+#     gh api repos/TomHennen/wrangle/commits/main --jq '.sha'
+#   or look at the merged PR's "Merged" commit on github.com.
+#
+# Pin discipline: never use a branch ref (`@main`) for security-sensitive
+# reusable workflows. Always pin to a specific commit SHA. When wrangle
+# updates its Go workflow, bump this pin deliberately.
+
+name: build-and-publish
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    permissions:
+      contents: write      # release job needs this to publish on tag push
+      id-token: write      # SLSA generator needs this for OIDC token
+      actions: read        # SLSA generator inspects the run's workflow
+    uses: TomHennen/wrangle/.github/workflows/build_and_publish_go.yml@__WRANGLE_GO_MERGE_SHA__
+    with:
+      # Path to the Go module (default '.' is fine; rein lives at repo root)
+      path: '.'
+      # Run race detector by default; disable if you add CGO_ENABLED=0 cross builds
+      run-race-detector: true
+      # Enforce gofmt with auto-skip of generated files (// Code generated ... DO NOT EDIT.)
+      run-gofmt-check: true
+      # Publish on tag push only
+      release-events: tag-only

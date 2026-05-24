@@ -1,0 +1,40 @@
+{
+  "name": "rein-dev",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "remoteUser": "vscode",
+  "containerEnv": {
+    "REIN_DEV_MODE": "1"
+  },
+  "mounts": [
+    "source=${localEnv:HOME}/.config/rein-dev-secrets,target=/home/vscode/.config/rein-dev-secrets,type=bind,consistency=cached"
+  ],
+  "runArgs": [
+    "--network=bridge"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go",
+        "anthropic.claude-code"
+      ],
+      "settings": {
+        "go.toolsManagement.autoUpdate": false,
+        "go.lintTool": "golangci-lint",
+        "go.lintFlags": ["--fast"]
+      }
+    }
+  },
+  "postCreateCommand": "go mod download && echo 'Container ready. See PLAN.md for next steps.'",
+  "remoteEnv": {
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+    "REIN_APP_PRIVATE_KEY_PATH": "/home/vscode/.config/rein-dev-secrets/app.pem",
+    "REIN_APP_CLIENT_ID": "${localEnv:REIN_APP_CLIENT_ID}",
+    "REIN_APP_ID": "${localEnv:REIN_APP_ID}",
+    "REIN_APP_INSTALLATION_ID": "${localEnv:REIN_APP_INSTALLATION_ID}",
+    "REIN_TEST_REPO_A": "${localEnv:REIN_TEST_REPO_A}",
+    "REIN_TEST_REPO_B": "${localEnv:REIN_TEST_REPO_B}",
+    "REIN_GITHUB_USERNAME": "${localEnv:REIN_GITHUB_USERNAME}"
+  }
+}

@@ -1,0 +1,65 @@
+# goreleaser config for rein.
+#
+# Wrangle's Go build type wraps goreleaser; it does not replace it.
+# This file is the minimum needed for a SLSA L3 release. See
+# https://goreleaser.com/customization/ for the full set of options.
+#
+# Reproducibility flags (-trimpath, -buildvcs=false) are the wrangle Go
+# build type's recommended baseline; they ensure builds match SLSA
+# provenance verification.
+
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: rein
+    main: ./cmd/rein
+    binary: rein
+    env:
+      # rein uses cgo for hardware-backed key custody (facebookincubator/sks)
+      # so CGO_ENABLED=0 is not an option.
+      - CGO_ENABLED=1
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - format: tar.gz
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "arm64" }}arm64
+      {{- else }}{{ .Arch }}{{ end }}
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  # Wrangle pins this filename for the SLSA verify step
+  name_template: 'checksums.txt'
+
+snapshot:
+  name_template: '{{ incpatch .Version }}-next'
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
