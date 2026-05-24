@@ -50,7 +50,7 @@
 - The subcommand reads the git credential protocol from stdin (host, protocol, path, etc.), determines whether the request is for github.com, mints a fresh installation token for the configured repo, and writes the credential back to stdout per the git credential helper protocol.
 - Tokens are minted on demand; no caching yet (Checkpoint 3 will add caching).
 - **Always return a credential** (TM-G8). Even if no session is active, return a placeholder read-only credential rather than erroring or returning empty.
-- Configure git in the devcontainer to use this helper: `git config --global credential.https://github.com.helper "/path/to/rein credential-helper"`.
+- Configure git to use this helper for github.com: `git config --global credential.https://github.com.helper "/path/to/rein credential-helper"`. (For Phase 0 we configure git globally for this user on this VM; later checkpoints will scope it to the wrapped process.)
 - Test: `git clone https://github.com/<owner>/agentcreds-validation-a.git` should succeed using broker-minted creds.
 
 **Success criterion:** `git clone` against the throwaway repo succeeds. Helper logs show it was invoked, what credentials it returned, what was minted from GitHub.
@@ -145,7 +145,7 @@
 
 **Estimate:** 3-5 hours.
 
-**Goal:** End-to-end test with a real Claude session inside the devcontainer. `rein run -- claude` (or equivalent) launches claude in an environment where the credential helper is in place. Claude is given a real-ish task (modify a file, commit, push). The broker handles the full lifecycle.
+**Goal:** End-to-end test with a real Claude session on this VM. `rein run -- claude` (or equivalent) launches claude in an environment where the credential helper is in place. Claude is given a real-ish task (modify a file, commit, push). The broker handles the full lifecycle.
 
 **Implementation:**
 - `rein run` subcommand: sets up the credential helper config in a way that's local to the wrapped process (not global git config), launches the wrapped command, monitors it.
@@ -181,9 +181,12 @@ Phase 0 is also when to clean up: the spike at `cmd/spike-token/` is throwaway; 
 
 (Append entries here as you work. Format: date — issue — proposed resolution.)
 
+- 2026-05-24 — Checkpoint 1 spike used `REIN_APP_CLIENT_ID` (string Client ID, matches design §4.2.4's recommendation for new apps) rather than the int64 `REIN_APP_ID` named in PLAN.md's CP1 description. Both work; `go-githubauth.NewApplicationTokenSource` is generic over `int64 | string`. Resolution: prefer Client ID throughout; PLAN wording was loose, no design change needed.
+- 2026-05-24 — CP1 spike scoped the installation token via `Repositories: []string{"<name>"}` rather than `RepositoryIDs: []int64{...}` (PLAN wording). Names avoid an extra `GET /repos` lookup and the API enforces scope identically. Resolution: name-based scoping is the default unless we need IDs for a specific reason later.
+
 ## Tooling requests
 
-(If you find the devcontainer is missing something, propose changes here. Don't edit `.devcontainer/` directly. Format: date — what's needed — why.)
+(If you find this VM is missing something, propose changes here rather than installing system packages silently. Format: date — what's needed — why.)
 
 ---
 
