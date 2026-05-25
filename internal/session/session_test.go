@@ -114,6 +114,24 @@ repos:
 		if s.ID != "sess_dev_001" || s.Role != "implement" || len(s.Repos) != 1 || s.Repos[0] != "TomHennen/agentcreds-validation-a" {
 			t.Errorf("got %+v", s)
 		}
+		if s.Issue != 0 {
+			t.Errorf("Issue should default to 0 when omitted, got %d", s.Issue)
+		}
+	})
+
+	t.Run("session with issue field (CP5)", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "issue.yaml")
+		body := "id: x\nrole: implement\nrepos:\n  - o/r\nissue: 73\n"
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		s, err := LoadFromFile(p)
+		if err != nil {
+			t.Fatalf("LoadFromFile: %v", err)
+		}
+		if s.Issue != 73 {
+			t.Errorf("Issue = %d, want 73", s.Issue)
+		}
 	})
 	t.Run("malformed YAML → error", func(t *testing.T) {
 		p := filepath.Join(t.TempDir(), "bad.yaml")

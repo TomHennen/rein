@@ -49,9 +49,20 @@ type Session struct {
 
 	// Created records when the session was minted, for audit. Optional
 	// in the file; if missing, treated as "Phase 0 dev session, age
-	// unknown". CP5 makes this required and enforces hard_ttl against
-	// it.
+	// unknown". CP5+ may make this required and enforce hard_ttl
+	// against it.
 	Created time.Time `yaml:"created_at,omitempty"`
+
+	// Issue is the bound GitHub issue number for human confirmation
+	// (CP5). When a write operation requires confirmation, the human
+	// types this number to approve. Different sessions bound to
+	// different issues have different correct answers — that's the
+	// non-replayability property per design §2.2.
+	//
+	// A zero value means "no confirmation required" — sessions
+	// authored before CP5 (env-fallback included) keep working without
+	// the prompt. The prompt is opt-in via the file's `issue:` field.
+	Issue int `yaml:"issue,omitempty"`
 }
 
 // Contains reports whether the given owner/name is within this

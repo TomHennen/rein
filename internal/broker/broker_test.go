@@ -386,6 +386,158 @@ func TestReadCache(t *testing.T) {
 	})
 }
 
+// TestConfirmWrite covers the CP5 human-in-the-loop hook: write mints
+// are gated on the ConfirmWrite predicate; denial returns TM-G8
+// placeholder; nil ConfirmWrite is pre-CP5 behavior.
+func TestConfirmWrite(t *testing.T) {
+	helperStdin := "protocol=https\nhost=github.com\npath=owner/repo\n\n"
+
+	t.Run("approved write proceeds to mint", func(t *testing.T) {
+		read := &stubMinter{token: "should-not-be-used-read"}
+		write := &stubMinter{token: "ghs_write"}
+		var seen []string
+		cfg := Config{
+			MintRead:    read.Mint,
+			MintWrite:   write.Mint,
+			Logger:      discardLogger(),
+			DetectWrite: alwaysWrite,
+			InScope:     func(r string) bool { return true },
+			ConfirmWrite: func(r string) bool {
+				seen = append(seen, r)
+				return true
+			},
+		}
+		var stdout bytes.Buffer
+		if err := RunCredentialHelper("get", strings.NewReader(helperStdin), &stdout, cfg); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "password=ghs_write") {
+			t.Errorf("expected write token, got %q", stdout.String())
+		}
+		if len(seen) != 1 || seen[0] != "owner/repo" {
+			t.Errorf("ConfirmWrite saw %v, want [owner/repo]", seen)
+		}
+		if write.Calls() != 1 {
+			t.Errorf("write mint calls = %d, want 1", write.Calls())
+		}
+	})
+
+	t.Run("denied write returns TM-G8 placeholder; never mints", func(t *testing.T) {
+		read := &stubMinter{token: "should-not-be-used-read"}
+		write := &stubMinter{token: "should-not-be-used-write"}
+		cfg := Config{
+			MintRead:     read.Mint,
+			MintWrite:    write.Mint,
+			Logger:       discardLogger(),
+			DetectWrite:  alwaysWrite,
+			InScope:      func(r string) bool { return true },
+			ConfirmWrite: func(r string) bool { return false },
+		}
+		var stdout bytes.Buffer
+		if err := RunCredentialHelper("get", strings.NewReader(helperStdin), &stdout, cfg); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "password=rein-placeholder-out-of-scope") {
+			t.Errorf("expected TM-G8 placeholder, got %q", stdout.String())
+		}
+		if write.Calls() != 0 {
+			t.Errorf("write mint must NOT be called on denial; got %d", write.Calls())
+		}
+	})
+
+	t.Run("nil ConfirmWrite proceeds without prompting (pre-CP5 behavior)", func(t *testing.T) {
+		read := &stubMinter{token: "should-not-be-used"}
+		write := &stubMinter{token: "ghs_write"}
+		cfg := Config{
+			MintRead:    read.Mint,
+			MintWrite:   write.Mint,
+			Logger:      discardLogger(),
+			DetectWrite: alwaysWrite,
+			InScope:     func(r string) bool { return true },
+			// ConfirmWrite intentionally nil
+		}
+		var stdout bytes.Buffer
+		if err := RunCredentialHelper("get", strings.NewReader(helperStdin), &stdout, cfg); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "password=ghs_write") {
+			t.Errorf("expected write token, got %q", stdout.String())
+		}
+	})
+
+	t.Run("ConfirmWrite NOT called for read operations", func(t *testing.T) {
+		read := &stubMinter{token: "ghs_read"}
+		write := &stubMinter{token: "should-not-be-used"}
+		var called bool
+		cfg := Config{
+			MintRead:    read.Mint,
+			MintWrite:   write.Mint,
+			Logger:      discardLogger(),
+			DetectWrite: alwaysRead,
+			InScope:     func(r string) bool { return true },
+			ConfirmWrite: func(r string) bool {
+				called = true
+				return true
+			},
+		}
+		var stdout bytes.Buffer
+		if err := RunCredentialHelper("get", strings.NewReader(helperStdin), &stdout, cfg); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if called {
+			t.Error("ConfirmWrite must NOT be called for read operations")
+		}
+	})
+
+	t.Run("ConfirmWrite NOT called when scope-check refused", func(t *testing.T) {
+		read := &stubMinter{token: "should-not-be-used"}
+		write := &stubMinter{token: "should-not-be-used"}
+		var called bool
+		cfg := Config{
+			MintRead:    read.Mint,
+			MintWrite:   write.Mint,
+			Logger:      discardLogger(),
+			DetectWrite: alwaysWrite,
+			InScope:     func(r string) bool { return false }, // refuses
+			ConfirmWrite: func(r string) bool {
+				called = true
+				return true
+			},
+		}
+		var stdout bytes.Buffer
+		if err := RunCredentialHelper("get", strings.NewReader(helperStdin), &stdout, cfg); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if called {
+			t.Error("ConfirmWrite must NOT be called when scope-check refuses")
+		}
+	})
+
+	t.Run("ConfirmWrite panic is recovered → denial", func(t *testing.T) {
+		write := &stubMinter{token: "should-not-be-used"}
+		cfg := Config{
+			MintRead:    (&stubMinter{token: "x"}).Mint,
+			MintWrite:   write.Mint,
+			Logger:      discardLogger(),
+			DetectWrite: alwaysWrite,
+			InScope:     func(r string) bool { return true },
+			ConfirmWrite: func(r string) bool {
+				panic("simulated prompter failure")
+			},
+		}
+		var stdout bytes.Buffer
+		if err := RunCredentialHelper("get", strings.NewReader(helperStdin), &stdout, cfg); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "password=rein-placeholder-out-of-scope") {
+			t.Errorf("expected TM-G8 placeholder on panic, got %q", stdout.String())
+		}
+		if write.Calls() != 0 {
+			t.Errorf("write mint must NOT be called when prompter panics")
+		}
+	})
+}
+
 // TestRevokeOnStoreErase covers the CP3.6 hardening: write tokens get
 // revoked when git signals it's done with them, tightening the effective
 // TTL well below GitHub's 1h floor. Cached read tokens must NOT be

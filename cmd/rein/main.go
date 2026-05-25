@@ -32,6 +32,7 @@ import (
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/session"
+	"github.com/TomHennen/rein/internal/ui/prompt"
 )
 
 const (
@@ -136,7 +137,60 @@ func runCredentialHelper(action string) error {
 		// without useHttpPath=true continue to work. install-shim's
 		// instructions recommend setting useHttpPath for strict
 		// enforcement.
+		ConfirmWrite: buildConfirmWrite(sess, logger),
 	})
+}
+
+// buildConfirmWrite returns a ConfirmWrite predicate backed by the
+// production /dev/tty prompter, OR nil if the session doesn't bind an
+// issue (no prompt requested). Tests bypass this by constructing
+// broker.Config directly.
+//
+// The 60-second prompt timeout gives the human room to react while
+// preventing an indefinite hang if they walked away. Phase 1's
+// status-app prompter can use a longer (or no) timeout.
+func buildConfirmWrite(sess session.Session, logger *log.Logger) func(repo string) bool {
+	if sess.Issue == 0 {
+		// Silent disable is a footgun if the session role would
+		// normally need write capability. Log a WARN so the operator
+		// knows the human gate isn't active.
+		if isWriteCapableRole(sess.Role) {
+			logger.Printf("WARN: ConfirmWrite disabled for write-capable role %q (session has no `issue:` field). Write tokens will mint without human confirmation. Add `issue: <number>` to the session file to enable the prompt.", sess.Role)
+		} else {
+			logger.Printf("ConfirmWrite: disabled (session has no bound issue)")
+		}
+		return nil
+	}
+	prompter := prompt.TTYPrompter{}
+	return func(repo string) bool {
+		req := prompt.Request{
+			SessionID: sess.ID,
+			Role:      sess.Role,
+			Repo:      repo,
+			Action:    "git push (write token mint)",
+			Issue:     sess.Issue,
+			Timeout:   60 * time.Second,
+		}
+		ok, err := prompter.Confirm(context.Background(), req)
+		if err != nil {
+			logger.Printf("ConfirmWrite: prompter error: %v; denying", err)
+			return false
+		}
+		return ok
+	}
+}
+
+// isWriteCapableRole returns true for the design's roles whose
+// implement-tier permissions include write access. Used by
+// buildConfirmWrite to decide whether silent-disable (no prompt)
+// warrants a WARN. CP4-CP5 roles are coarse; CP6+ will move this
+// to the role catalog.
+func isWriteCapableRole(role string) bool {
+	switch role {
+	case "implement", "triage", "review", "release":
+		return true
+	}
+	return false
 }
 
 // bareRepoName extracts "name" from "owner/name". The App installation

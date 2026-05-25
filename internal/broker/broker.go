@@ -143,6 +143,24 @@ type Config struct {
 	//
 	// Empty string = "allow".
 	EmptyPathScope string
+
+	// ConfirmWrite is the human-in-the-loop hook called BEFORE minting
+	// a write token (after DetectWrite returned true and InScope
+	// passed). Returns true if the human approved, false to refuse
+	// (TM-G8 placeholder returned, same as out-of-scope refusal).
+	// Nil disables confirmation — every write proceeds to mint.
+	//
+	// The caller's implementation typically reads /dev/tty for the
+	// human's response. The broker doesn't care how the answer was
+	// obtained; it just consults the predicate.
+	//
+	// TM-G5 (design §5.3): confirmation defends against prompt-injection-
+	// driven scope escalation. The human's input is the non-replayable
+	// piece — different bound issues yield different correct answers.
+	//
+	// The repo passed in is the normalized owner/name (same as
+	// InScope), so the implementer can include it in the prompt text.
+	ConfirmWrite func(repo string) bool
 }
 
 // RunCredentialHelper drives the protocol for one invocation. action is the
@@ -272,9 +290,46 @@ func handleGet(attrs map[string]string, stdout io.Writer, cfg Config) error {
 	}
 
 	if isWriteIntent(cfg) {
+		if !checkConfirmWrite(attrs["path"], cfg) {
+			// Human-in-the-loop denial. Shares the placeholder string
+			// with out-of-scope refusal on purpose: TM-G8 wants single
+			// vocabulary for "credential present but not honored." Log
+			// lines distinguish the two refusal reasons. A reviewer
+			// suggested a distinct string ("rein-placeholder-confirm-
+			// denied") for credential-only triage; the trade-off is
+			// log-vs-credential-value distinguishability. Sticking with
+			// single placeholder for now.
+			return writeCredential(stdout, "x-access-token", "rein-placeholder-out-of-scope")
+		}
 		return serveWrite(stdout, cfg)
 	}
 	return serveRead(stdout, cfg)
+}
+
+// checkConfirmWrite invokes the ConfirmWrite hook (if configured) and
+// returns true to proceed, false to refuse. A nil ConfirmWrite means
+// no confirmation required (pre-CP5 behavior).
+//
+// A panic in the hook is recovered and treated as denial — TM-G8 must
+// not be undermined by a buggy prompter.
+func checkConfirmWrite(path string, cfg Config) (approved bool) {
+	if cfg.ConfirmWrite == nil {
+		return true
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			cfg.Logger.Printf("ConfirmWrite panicked: %v; denying", r)
+			approved = false
+		}
+	}()
+	repo := pathToRepo(path)
+	approved = cfg.ConfirmWrite(repo)
+	if approved {
+		cfg.Logger.Printf("ConfirmWrite: APPROVED for repo=%q", repo)
+	} else {
+		cfg.Logger.Printf("ConfirmWrite: DENIED for repo=%q; returning TM-G8 placeholder", repo)
+	}
+	return approved
 }
 
 // checkScopeCeiling consults Config.InScope. Returns true (proceed) when:
