@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -381,6 +382,146 @@ func TestReadCache(t *testing.T) {
 			t.Errorf("cache file mode = %o, want 0600", mode)
 		}
 	})
+}
+
+// TestRevokeOnStoreErase covers the CP3.6 hardening: write tokens get
+// revoked when git signals it's done with them, tightening the effective
+// TTL well below GitHub's 1h floor. Cached read tokens must NOT be
+// revoked (they stay reusable for the session).
+func TestRevokeOnStoreErase(t *testing.T) {
+	helperStdin := func(token string) string {
+		return "protocol=https\nhost=github.com\nusername=x-access-token\npassword=" + token + "\n\n"
+	}
+
+	stubRevoker := func(t *testing.T) (func(ctx context.Context, tok string) error, *atomic.Int64, *struct {
+		mu     sync.Mutex
+		tokens []string
+	}) {
+		var n atomic.Int64
+		seen := &struct {
+			mu     sync.Mutex
+			tokens []string
+		}{}
+		fn := func(ctx context.Context, tok string) error {
+			n.Add(1)
+			seen.mu.Lock()
+			seen.tokens = append(seen.tokens, tok)
+			seen.mu.Unlock()
+			return nil
+		}
+		return fn, &n, seen
+	}
+
+	for _, action := range []string{"store", "erase"} {
+		t.Run(action+": non-cached token (write) gets revoked", func(t *testing.T) {
+			dir := t.TempDir()
+			cache := filepath.Join(dir, "cache.json")
+			writeCacheFile(t, cache, "ghs_the_cached_read", time.Now().Add(45*time.Minute))
+
+			revoke, calls, seen := stubRevoker(t)
+			cfg := Config{
+				MintRead:      (&stubMinter{token: "unused"}).Mint,
+				Logger:        discardLogger(),
+				ReadCachePath: cache,
+				Revoke:        revoke,
+			}
+			var stdout bytes.Buffer
+			err := RunCredentialHelper(action, strings.NewReader(helperStdin("ghs_fresh_write_token")), &stdout, cfg)
+			if err != nil {
+				t.Fatalf("RunCredentialHelper: %v", err)
+			}
+			if calls.Load() != 1 {
+				t.Fatalf("revoke calls = %d, want 1", calls.Load())
+			}
+			if seen.tokens[0] != "ghs_fresh_write_token" {
+				t.Errorf("revoked token = %q, want %q", seen.tokens[0], "ghs_fresh_write_token")
+			}
+		})
+
+		t.Run(action+": cached read token is NOT revoked", func(t *testing.T) {
+			dir := t.TempDir()
+			cache := filepath.Join(dir, "cache.json")
+			writeCacheFile(t, cache, "ghs_cached_read", time.Now().Add(45*time.Minute))
+
+			revoke, calls, _ := stubRevoker(t)
+			cfg := Config{
+				MintRead:      (&stubMinter{token: "unused"}).Mint,
+				Logger:        discardLogger(),
+				ReadCachePath: cache,
+				Revoke:        revoke,
+			}
+			var stdout bytes.Buffer
+			err := RunCredentialHelper(action, strings.NewReader(helperStdin("ghs_cached_read")), &stdout, cfg)
+			if err != nil {
+				t.Fatalf("RunCredentialHelper: %v", err)
+			}
+			if calls.Load() != 0 {
+				t.Errorf("revoke calls = %d, want 0 (cached read must not be revoked)", calls.Load())
+			}
+		})
+
+		t.Run(action+": empty password attr is a no-op", func(t *testing.T) {
+			revoke, calls, _ := stubRevoker(t)
+			cfg := Config{
+				MintRead: (&stubMinter{token: "unused"}).Mint,
+				Logger:   discardLogger(),
+				Revoke:   revoke,
+			}
+			var stdout bytes.Buffer
+			err := RunCredentialHelper(action, strings.NewReader("protocol=https\nhost=github.com\n\n"), &stdout, cfg)
+			if err != nil {
+				t.Fatalf("RunCredentialHelper: %v", err)
+			}
+			if calls.Load() != 0 {
+				t.Errorf("revoke calls = %d, want 0", calls.Load())
+			}
+		})
+
+		t.Run(action+": non-github.com host is a no-op", func(t *testing.T) {
+			revoke, calls, _ := stubRevoker(t)
+			cfg := Config{
+				MintRead: (&stubMinter{token: "unused"}).Mint,
+				Logger:   discardLogger(),
+				Revoke:   revoke,
+			}
+			var stdout bytes.Buffer
+			err := RunCredentialHelper(action, strings.NewReader("protocol=https\nhost=gitlab.com\nusername=x\npassword=ghs_some_token\n\n"), &stdout, cfg)
+			if err != nil {
+				t.Fatalf("RunCredentialHelper: %v", err)
+			}
+			if calls.Load() != 0 {
+				t.Errorf("revoke calls = %d, want 0 for non-github host", calls.Load())
+			}
+		})
+
+		t.Run(action+": revoke failure does not propagate", func(t *testing.T) {
+			cfg := Config{
+				MintRead: (&stubMinter{token: "unused"}).Mint,
+				Logger:   discardLogger(),
+				Revoke: func(ctx context.Context, tok string) error {
+					return errors.New("simulated GitHub 503")
+				},
+			}
+			var stdout bytes.Buffer
+			err := RunCredentialHelper(action, strings.NewReader(helperStdin("ghs_some_token")), &stdout, cfg)
+			if err != nil {
+				t.Fatalf("RunCredentialHelper returned error on revoke failure: %v (must be best-effort)", err)
+			}
+		})
+
+		t.Run(action+": no Revoke configured is a no-op", func(t *testing.T) {
+			cfg := Config{
+				MintRead: (&stubMinter{token: "unused"}).Mint,
+				Logger:   discardLogger(),
+				// Revoke intentionally nil
+			}
+			var stdout bytes.Buffer
+			err := RunCredentialHelper(action, strings.NewReader(helperStdin("ghs_some_token")), &stdout, cfg)
+			if err != nil {
+				t.Fatalf("RunCredentialHelper: %v", err)
+			}
+		})
+	}
 }
 
 // TestParseAttrsURL confirms the url= backfill matches what git sends in the

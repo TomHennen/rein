@@ -104,6 +104,14 @@ type Config struct {
 	// push to surface a 403 — observable and recoverable. The reverse
 	// would silently over-grant.
 	DetectWrite func() bool
+
+	// Revoke optionally revokes an installation token server-side. When
+	// non-nil, the helper calls it on the store/erase actions for any
+	// token that doesn't match the cached read token — effectively
+	// tightening write-token TTL to "push duration + revoke latency"
+	// rather than the GitHub-imposed ~1h. Best-effort: failures are
+	// logged and ignored.
+	Revoke func(ctx context.Context, token string) error
 }
 
 // RunCredentialHelper drives the protocol for one invocation. action is the
@@ -142,9 +150,7 @@ func RunCredentialHelper(action string, stdin io.Reader, stdout io.Writer, cfg C
 
 	switch action {
 	case "store", "erase":
-		// Stateless helper; nothing to persist or forget. The read cache
-		// is broker-owned, not driven by git's store/erase signals.
-		return nil
+		return handleStoreErase(attrs, cfg)
 	case "get":
 		return handleGet(attrs, stdout, cfg)
 	default:
@@ -153,10 +159,83 @@ func RunCredentialHelper(action string, stdin io.Reader, stdout io.Writer, cfg C
 	}
 }
 
+// handleStoreErase opportunistically revokes a write token whose useful
+// life is over. Git invokes the helper with store on a successful auth
+// and with erase on rejected auth; both fire AFTER the operation, with
+// the just-used credential on stdin. The helper compares the presented
+// token to the cached read token (if any) — a match means git is
+// re-presenting our cached read, which we want to keep alive for the
+// session, so we leave it. A non-match means it's a fresh write mint
+// whose usefulness is over, and we revoke it to tighten its TTL from
+// GitHub's ~1h down to "operation duration + revoke latency".
+//
+// All work here is best-effort: no Revoke configured, host wrong,
+// missing token attribute, or revoke API failure — all silently
+// degrade to "leave token alive until its native TTL." The helper
+// always returns nil (exit 0); a failed revoke is never a credential
+// failure.
+func handleStoreErase(attrs map[string]string, cfg Config) error {
+	if cfg.Revoke == nil {
+		return nil
+	}
+	if attrs["host"] != "github.com" || attrs["protocol"] != "https" {
+		return nil
+	}
+	token := attrs["password"]
+	if token == "" {
+		return nil
+	}
+
+	// If the presented token is the cached read token, git is just
+	// re-presenting what we already gave it for a fetch — keep the
+	// cache warm and don't revoke. If the cache file is missing
+	// (rare: tmpfs eviction, cache dir manually wiped), we treat the
+	// presented token as a write and revoke. The cost of a false
+	// positive is a wasted read mint on the next get — TTL annoyance,
+	// not a security or correctness issue.
+	if cached, ok := readCacheRaw(cfg); ok && cached.Token == token {
+		cfg.Logger.Printf("store/erase: token matches cached read; leaving alive")
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.MintTimeout)
+	defer cancel()
+	if err := cfg.Revoke(ctx, token); err != nil {
+		cfg.Logger.Printf("store/erase: revoke failed (best-effort): %v", err)
+		return nil
+	}
+	cfg.Logger.Printf("store/erase: revoked token (len=%d) — effective TTL ended at operation completion", len(token))
+	return nil
+}
+
+// readCacheRaw is readCache without the skew check — used by store/erase
+// to identify a cached read token that may already be within the refresh
+// window. We don't want to revoke a token that we'd otherwise still hand
+// out as a cache hit on the next call.
+func readCacheRaw(cfg Config) (cachedToken, bool) {
+	if cfg.ReadCachePath == "" {
+		return cachedToken{}, false
+	}
+	body, err := os.ReadFile(cfg.ReadCachePath)
+	if err != nil {
+		return cachedToken{}, false
+	}
+	var c cachedToken
+	if err := json.Unmarshal(body, &c); err != nil {
+		return cachedToken{}, false
+	}
+	return c, true
+}
+
 // applyDefaults fills zero-valued duration fields with the package defaults.
 func (c *Config) applyDefaults() {
 	if c.ReadCacheSkew == 0 {
 		c.ReadCacheSkew = 30 * time.Second
+	}
+	if c.MintTimeout == 0 {
+		// Git users feel this on every mint and every revoke. Tight but
+		// not aggressive.
+		c.MintTimeout = 5 * time.Second
 	}
 }
 

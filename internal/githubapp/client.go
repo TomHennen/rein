@@ -12,6 +12,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"time"
 
@@ -87,25 +89,72 @@ func (c *Client) MintWriteToken(ctx context.Context) (token string, expiresAt ti
 	})
 }
 
-// MintGhSessionToken returns an installation token shaped for the `gh`
-// CLI session used in Phase 0 (CP3.5): contents:read + issues:write +
-// pull_requests:write + metadata:read. It deliberately omits contents:write
-// because git push already routes through the credential helper's
-// dedicated write-tier mint — granting it here too would over-broaden
-// what `gh api` and similar low-level subcommands could do.
+// MintGhSessionToken returns an installation token shaped for the design's
+// `implement` role (§4.2.2): contents:write + issues:write +
+// pull_requests:write + metadata:read. Used to back the `gh` CLI session.
 //
-// Known limitation of the narrower grant: `gh pr merge`, `gh release
-// create`, and `gh repo edit` need contents:write and will 403 with this
-// token. Phase 0 agents should perform merges via local git push instead.
-// Phase 1's sandbox+proxy will discriminate per-HTTP-call at the network
-// boundary and remove this restriction.
+// Permissioning rationale: the token is single-repo-scoped (one repo today,
+// session-scoped in CP4+), so the blast radius of contents:write here is
+// the same as that of a successful git push to the same repo — they're
+// the same logical capability surface. A narrower grant (contents:read
+// only) was tried briefly but broke `gh pr merge`, which is necessary for
+// any workflow that uses branch-protection rules requiring PR-only merges
+// into the protected branch. The defense-in-depth from the narrower grant
+// was small in Shape B (an agent that can capture a git write token has
+// equivalent capability anyway).
+//
+// Surface to call out for Shape A reviewers: pull_requests:write also
+// confers PR review/approve capability. Branch-protection rules that
+// require N approvals from non-authors treat the App's bot identity as
+// a valid approver path; a session that legitimately holds this token
+// could approve its own PR via gh. CP4+ should pair this with the
+// "agent-delegated commits don't count as second signer" property
+// proposed in design §4.2.8.
+//
+// 5-minute TTL on this token (per design §4.2.5) is not enforceable at the
+// GitHub API layer — installation tokens always return ~1h. CP3.6's
+// shim revokes the previous token whenever it mints a fresh one, which
+// approximates the 5m effective window for active sessions.
 func (c *Client) MintGhSessionToken(ctx context.Context) (token string, expiresAt time.Time, err error) {
 	return c.mint(ctx, &githubauth.InstallationPermissions{
-		Contents:     githubauth.Ptr("read"),
+		Contents:     githubauth.Ptr("write"),
 		Issues:       githubauth.Ptr("write"),
 		PullRequests: githubauth.Ptr("write"),
 		Metadata:     githubauth.Ptr("read"),
 	})
+}
+
+// RevokeToken calls DELETE /installation/token authenticated as the supplied
+// installation token, which revokes that exact token server-side. Used to
+// tighten the effective write-token TTL — design §4.2.5 asks for ~5min;
+// GitHub returns 1h; revoking after the operation is done approximates the
+// 5-min target.
+//
+// This is a Client method only by convention (matches NewClient/Mint*);
+// the call doesn't actually need any of Client's config because the token
+// itself authenticates the request. The 5s timeout is honored via ctx.
+//
+// Best-effort: callers should log + ignore the error. A failed revoke is
+// not a security problem (token still expires at its native ~1h).
+func (c *Client) RevokeToken(ctx context.Context, token string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, "https://api.github.com/installation/token", nil)
+	if err != nil {
+		return fmt.Errorf("build revoke request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("revoke: %w", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("revoke: unexpected status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (c *Client) mint(ctx context.Context, perms *githubauth.InstallationPermissions) (string, time.Time, error) {

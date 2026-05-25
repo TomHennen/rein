@@ -3,6 +3,7 @@
 /spike-token
 /rein
 /rein-git
+/rein-gh
 
 # Editor / OS noise
 .vscode/

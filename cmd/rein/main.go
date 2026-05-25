@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/TomHennen/rein/internal/broker"
+	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/githubapp"
 )
 
@@ -82,7 +83,7 @@ func usage() {
 // returned here are programming/config errors — credential-mint failures
 // are handled inside the broker per TM-G8.
 func runCredentialHelper(action string) error {
-	cfg, err := loadConfigFromEnv()
+	appCfg, err := config.LoadAppConfig()
 	if err != nil {
 		return err
 	}
@@ -93,7 +94,7 @@ func runCredentialHelper(action string) error {
 	}
 	defer closeLog()
 
-	client, err := githubapp.NewClient(cfg.app)
+	client, err := githubapp.NewClient(appCfg)
 	if err != nil {
 		return err
 	}
@@ -105,7 +106,7 @@ func runCredentialHelper(action string) error {
 		return client.MintWriteToken(ctx)
 	})
 
-	stateDir, err := reinStateDir()
+	stateDir, err := config.StateDir()
 	if err != nil {
 		return err
 	}
@@ -117,6 +118,7 @@ func runCredentialHelper(action string) error {
 		Logger:        logger,
 		ReadCachePath: filepath.Join(stateDir, "cache", "read-token.json"),
 		DetectWrite:   func() bool { return detectWriteIntent(logger) },
+		Revoke:        client.RevokeToken,
 	})
 }
 
@@ -290,7 +292,7 @@ func optionConsumesNextArg(a string) bool {
 // File mode 0600 in a 0700 parent. The token is never logged. POSIX-sh
 // syntax only — fish users will need to translate.
 func ghAuth() error {
-	cfg, err := loadConfigFromEnv()
+	appCfg, err := config.LoadAppConfig()
 	if err != nil {
 		return err
 	}
@@ -301,7 +303,7 @@ func ghAuth() error {
 	}
 	defer closeLog()
 
-	client, err := githubapp.NewClient(cfg.app)
+	client, err := githubapp.NewClient(appCfg)
 	if err != nil {
 		return err
 	}
@@ -318,7 +320,7 @@ func ghAuth() error {
 		time.Until(expiresAt).Round(time.Second),
 		len(token))
 
-	stateDir, err := reinStateDir()
+	stateDir, err := config.StateDir()
 	if err != nil {
 		return err
 	}
@@ -374,10 +376,11 @@ func ghAuth() error {
 	return nil
 }
 
-// installShim writes the rein-git binary to a known location under the
-// state dir and prints the PATH-prepend instruction. Idempotent.
+// installShim writes the rein-git and rein-gh shim binaries to a known
+// location under the state dir and prints the PATH-prepend instruction.
+// Idempotent — running install-shim repeatedly is safe.
 func installShim() error {
-	stateDir, err := reinStateDir()
+	stateDir, err := config.StateDir()
 	if err != nil {
 		return err
 	}
@@ -385,37 +388,48 @@ func installShim() error {
 	if err := os.MkdirAll(shimDir, 0o700); err != nil {
 		return fmt.Errorf("create shim dir: %w", err)
 	}
-	shimDst := filepath.Join(shimDir, "git")
 
-	// Locate the rein-git binary built alongside rein. Heuristic: look for
-	// it next to the current executable.
 	self, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locate self: %w", err)
 	}
-	candidate := filepath.Join(filepath.Dir(self), "rein-git")
-	if _, err := os.Stat(candidate); err != nil {
-		// Last resort: PATH search (might find a globally-installed one).
-		if p, err := exec.LookPath("rein-git"); err == nil {
-			candidate = p
-		} else {
-			return fmt.Errorf("rein-git binary not found next to %s or on PATH; build it first (go build -o bin/rein-git ./cmd/rein-git)", self)
+	selfDir := filepath.Dir(self)
+
+	shims := []struct{ name, intent string }{
+		{"rein-git", "git"},
+		{"rein-gh", "gh"},
+	}
+	for _, s := range shims {
+		src, err := locateBinary(s.name, selfDir)
+		if err != nil {
+			return err
 		}
+		dst := filepath.Join(shimDir, s.intent)
+		if err := copyFile(src, dst, 0o700); err != nil {
+			return fmt.Errorf("install %s: %w", s.intent, err)
+		}
+		fmt.Printf("installed shim: %s -> %s\n", dst, s.name)
 	}
 
-	if err := copyFile(candidate, shimDst, 0o700); err != nil {
-		return fmt.Errorf("install shim: %w", err)
-	}
-
-	fmt.Printf("installed shim: %s\n", shimDst)
-	fmt.Printf("                (intercepts `git` and sets REIN_GIT_OP)\n\n")
+	fmt.Println()
 	fmt.Println("To activate, prepend the shim dir to $PATH before launching agents:")
 	fmt.Printf("  export PATH=%s:$PATH\n\n", shellQuote(shimDir))
 	fmt.Println("Verify with:")
-	fmt.Println("  which git    # should resolve to the shim")
+	fmt.Println("  which git gh    # both should resolve to the shim dir")
 	fmt.Println()
 	fmt.Println("CP6's `rein run` wrapper will set PATH per-wrapped-process.")
 	return nil
+}
+
+func locateBinary(name, selfDir string) (string, error) {
+	candidate := filepath.Join(selfDir, name)
+	if _, err := os.Stat(candidate); err == nil {
+		return candidate, nil
+	}
+	if p, err := exec.LookPath(name); err == nil {
+		return p, nil
+	}
+	return "", fmt.Errorf("%s binary not found next to %s or on PATH; build it first (go build -o bin/%s ./cmd/%s)", name, filepath.Join(selfDir, "rein"), name, name)
 }
 
 func copyFile(src, dst string, mode os.FileMode) error {
@@ -429,64 +443,9 @@ func copyFile(src, dst string, mode os.FileMode) error {
 	return nil
 }
 
-type config struct {
-	app githubapp.Config
-}
-
-func loadConfigFromEnv() (config, error) {
-	required := []string{
-		"REIN_APP_CLIENT_ID",
-		"REIN_APP_PRIVATE_KEY_PATH",
-		"REIN_APP_INSTALLATION_ID",
-		"REIN_TEST_REPO_A",
-	}
-	for _, k := range required {
-		if os.Getenv(k) == "" {
-			return config{}, fmt.Errorf("missing env var %s (did you source ./dev-env?)", k)
-		}
-	}
-	installationID, err := strconv.ParseInt(os.Getenv("REIN_APP_INSTALLATION_ID"), 10, 64)
-	if err != nil {
-		return config{}, fmt.Errorf("REIN_APP_INSTALLATION_ID not an int64: %w", err)
-	}
-
-	slug := os.Getenv("REIN_TEST_REPO_A")
-	_, repoName, ok := strings.Cut(slug, "/")
-	if !ok || repoName == "" {
-		return config{}, fmt.Errorf("REIN_TEST_REPO_A %q is not owner/name", slug)
-	}
-
-	return config{
-		app: githubapp.Config{
-			ClientID:       os.Getenv("REIN_APP_CLIENT_ID"),
-			PrivateKeyPath: os.Getenv("REIN_APP_PRIVATE_KEY_PATH"),
-			InstallationID: installationID,
-			RepoName:       repoName,
-		},
-	}, nil
-}
-
-// reinStateDir is $XDG_STATE_HOME/rein (defaulting to ~/.local/state/rein).
-// Created with mode 0700 on first use.
-func reinStateDir() (string, error) {
-	base := os.Getenv("XDG_STATE_HOME")
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("locate home dir: %w", err)
-		}
-		base = filepath.Join(home, ".local", "state")
-	}
-	dir := filepath.Join(base, "rein")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("create state dir: %w", err)
-	}
-	return dir, nil
-}
-
 // openLog returns a logger writing to <state-dir>/helper.log.
 func openLog() (*log.Logger, func(), error) {
-	dir, err := reinStateDir()
+	dir, err := config.StateDir()
 	if err != nil {
 		return nil, nil, err
 	}
