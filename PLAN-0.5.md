@@ -356,6 +356,16 @@ checkpoint, but it should land before Phase 1 starts.
 
 (Append entries here as you work. Format: date — issue — proposed resolution.)
 
+- 2026-05-25 — CP2 step 6 "$TMUX child probe" deliberately simplified to a
+  direct env check in `checkTmuxEnv` (`cmd/rein/doctor.go`). The spec's
+  literal child-probe would catch a future regression where doctor itself
+  scrubs env before spawning children, but nothing in `cmd/rein` does
+  that today and Go's `exec.Command` inherits env automatically. The
+  real concern from phase0_findings — `$TMUX` unset at `rein run` launch
+  time — is what the env check actually surfaces, since doctor sees the
+  same env the user's shell would pass to `rein run`. If env-scrubbing
+  ever lands in doctor or the wrapper, swap in a 10-line child probe.
+
 ## Tooling requests
 
 (If you find this VM is missing something for Phase 0.5 specifically,

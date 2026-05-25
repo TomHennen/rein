@@ -70,6 +70,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "rein init: %v\n", err)
 			os.Exit(1)
 		}
+	case "doctor":
+		if err := runDoctor(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "rein doctor: %v\n", err)
+			os.Exit(1)
+		}
 	case "install-shim":
 		if err := installShim(); err != nil {
 			fmt.Fprintf(os.Stderr, "rein install-shim: %v\n", err)
@@ -108,6 +113,7 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, "  rein init [--skip-mint-check] [--no-symlink]")
+	fmt.Fprintln(os.Stderr, "  rein doctor")
 	fmt.Fprintln(os.Stderr, "  rein credential-helper {get|store|erase}")
 	fmt.Fprintln(os.Stderr, "  rein install-shim")
 	fmt.Fprintln(os.Stderr, "  rein gh-auth")
