@@ -5,7 +5,8 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 ## Read first
 
 - `docs/design.md` — full design. §0 TL;DR is enough for routine work; read specific sections as needed.
-- `PLAN.md` — current phase and checkpoint sequence.
+- `PLAN-0.5.md` — current phase plan (CP1-CP7). Replaces `PLAN.md` (Phase 0 record, historical).
+- `phase0_findings.md` — what Phase 0 actually built + the 7 design corrections to the original PLAN.md + the 4 Shape B limits observed empirically. Read before doing Phase 0.5 design work; don't re-derive.
 
 ## Hard constraints
 
@@ -30,6 +31,7 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 - The GitHub App private key is at `$REIN_APP_PRIVATE_KEY_PATH` (`~/.config/rein-credentials/app.pem`).
 - Secure Enclave is not available on Linux. Phase 0 uses the `99designs/keyring` file backend. Phase 1's hardware-backed work would require TPM2 (if this VM has one) or shift to a Mac host.
 - srt sandbox is out of scope for Phase 0.
+- run `gofmt -w .` before all commits.
 
 ## CI/CD
 
@@ -37,6 +39,16 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 - `.goreleaser.yml` is the adopter-owned release config wrangle wraps.
 - Don't modify either of these files casually. They're load-bearing for supply-chain hygiene.
 
+## Working style
+
+- Call `advisor()` before substantive work and before declaring a checkpoint done. The advice is high-value; skipping costs more than running it.
+- Spawn a reviewer subagent (Agent tool, `claude` type) after each checkpoint's implementation, before surfacing to the human. Brief tightly; ask for real findings only.
+- Use `TaskCreate` / `TaskUpdate` to track checkpoint progress; mark `in_progress` when starting, `completed` when done.
+- Stop-and-surface at every checkpoint per the current PLAN's discipline section. Don't proceed past a gate without human verification.
+- File GitHub issues for deferred items via `gh issue create`. Don't bury followups in commit messages alone — they get lost.
+- No emojis in files unless explicitly requested.
+- For interactive tests (anything needing `/dev/tty`, browser, or tmux popup), write a manual script the human runs in their real terminal. Phase 0 used `/tmp/cp*-manual-test.sh`; same pattern.
+
 ## When something surprises you
 
-Note it in PLAN.md under "notes / blockers / design corrections needed" and surface it to the human. Don't silently work around design mismatches.
+Note it in the current PLAN's "notes / blockers / design corrections needed" section and surface it to the human. Don't silently work around design mismatches.

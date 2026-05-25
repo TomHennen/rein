@@ -6,19 +6,19 @@
 //
 // ObtainApproval tries layers in order until one resolves:
 //
-//   1. Existing approval record (internal/approvals). If a valid record
-//      covers the current session signature, return true immediately.
-//   2. Inline /dev/tty prompt. If a controlling terminal is reachable
-//      (typically: a developer at a shell), prompt and record on
-//      approval. Fast for interactive use.
-//   3. Tmux popup. If $TMUX is set, spawn `tmux popup -E "rein approval
-//      grant"` and wait for it to close. The popup runs the grant
-//      subcommand, which uses /dev/tty inside the popup's pty. After
-//      close, re-check the approval record.
-//   4. Helpful stderr + deny. If none of the above resolved, emit a
-//      message to stderr telling the user to run `rein approval grant`
-//      in another terminal, then deny. The user runs it, retries the
-//      operation.
+//  1. Existing approval record (internal/approvals). If a valid record
+//     covers the current session signature, return true immediately.
+//  2. Inline /dev/tty prompt. If a controlling terminal is reachable
+//     (typically: a developer at a shell), prompt and record on
+//     approval. Fast for interactive use.
+//  3. Tmux popup. If $TMUX is set, spawn `tmux popup -E "rein approval
+//     grant"` and wait for it to close. The popup runs the grant
+//     subcommand, which uses /dev/tty inside the popup's pty. After
+//     close, re-check the approval record.
+//  4. Helpful stderr + deny. If none of the above resolved, emit a
+//     message to stderr telling the user to run `rein approval grant`
+//     in another terminal, then deny. The user runs it, retries the
+//     operation.
 //
 // # Shape B limit
 //

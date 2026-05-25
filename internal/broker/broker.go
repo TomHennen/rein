@@ -259,7 +259,6 @@ func handleStoreErase(attrs map[string]string, cfg Config) error {
 	return nil
 }
 
-
 // applyDefaults fills zero-valued duration fields with the package defaults.
 func (c *Config) applyDefaults() {
 	if c.ReadCacheSkew == 0 {

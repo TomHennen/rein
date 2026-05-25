@@ -205,8 +205,8 @@ func buildConfirmWrite(sess session.Session, stateDir string, logger *log.Logger
 //   - status: show the cached approval (or "none")
 //   - clear:  remove the approval; next write re-prompts
 //   - grant:  interactively approve write access for the current
-//             session. Reads /dev/tty only (no CLI flag) — see
-//             package internal/ui/grant for why.
+//     session. Reads /dev/tty only (no CLI flag) — see
+//     package internal/ui/grant for why.
 func runApproval(sub string) error {
 	stateDir, err := config.StateDir()
 	if err != nil {
@@ -670,7 +670,7 @@ func openLog() (*log.Logger, func(), error) {
 
 // shellQuote returns a POSIX-safe single-quoted form for embedding in
 // shell commands. Single quotes preserve all characters except themselves,
-// which we escape via the '...'\''... idiom.
+// which we escape via the '...'\”... idiom.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

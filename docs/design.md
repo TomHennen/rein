@@ -1,7 +1,7 @@
 # Design Doc: `rein` — An Agent Credential Broker for GitHub Development Workflows
 
-**Status:** Draft for evaluation by Tom (author). Validation complete; ready for Phase 0 build decision.
-**Date:** May 23, 2026
+**Status:** Pre-Phase-0 design (v3). Phase 0 is built; design corrections from implementation are tracked in `phase0_findings.md` and summarized in §13 below. Read §13 alongside this doc — several mechanisms here (Shape A proxy assumptions, 5-min write TTL, helper-sees-/git-receive-pack) turned out not to hold; the corrections are non-trivial.
+**Date:** May 23, 2026 (Phase 0 close: May 25, 2026 — see `phase0_findings.md`)
 **Version:** v3 (incorporates §12 validation findings + comparative analysis vs. Agent Vault, Claude Code Cloud, cloud workload identity, current IETF/Sigstore landscape)
 **Companion to:** `wrangle` (supply-chain scanner running on GitHub Actions; provides the release pipeline for `rein` itself)
 
@@ -1029,3 +1029,37 @@ This section preserved as a record of pre-build validation. Findings have been w
 | §12.8  | review            | medium     | App-posted comments are programmatically distinguishable (`user.type: Bot`, `[bot]` suffix). Visually mediocre without a custom avatar — falls back to user's avatar. Drove the fixed-avatar shipped with `rein` (§2.1). |
 
 Net result: design is buildable. Failures are fail-soft. The §12.6 finding (Sigstore non-viability in 2026) drove the most significant design change — the broker-as-CA inversion. The §12.7 finding required a small TM-G6 substitute. Everything else is woven into the design above.
+
+---
+
+## 13. Phase 0 implementation corrections (added May 25, 2026)
+
+Phase 0 of `rein` is built. The implementation produced seven concrete corrections to the design above; this section lists each correction with a one-line summary and a pointer to the section it amends. The authoritative record is `phase0_findings.md` at the repo root; this section is a navigation aid so a reader of §1-§12 knows which assumptions to update.
+
+| Correction | Affects | Summary |
+|---|---|---|
+| **C1: Helper can't see smart-protocol endpoint** | §4.2.5 ("Two-tier token issuance") | The credential helper's `path` attribute is the repo URL path (`owner/repo.git` with `useHttpPath=true`), never `/git-upload-pack` or `/git-receive-pack`. Git asks for credentials at the repo level, before deciding fetch vs push. Phase 0's Shape B substitute is a PATH-shim (`cmd/rein-git`) that sets `REIN_GIT_OP=read|write` in env, with a `/proc` ancestor-walk fallback. |
+| **C2: Pre-push hook fires too late** | §4.2.5 (intent signal pattern) | The pre-push hook runs AFTER git successfully retrieves remote refs, which already requires a write-capable token. A hook can't be used as the write-intent signal in Shape B. |
+| **C3: `credential.useHttpPath=true` is required for strict scope** | §4.2.2 (scope ceilings) | Without it, the helper sees `path=""` and can only fall back to server-side scope enforcement. Phase 0's `rein install-shim` prints the config recommendation; `rein run` sets it per-process. |
+| **C4: Per-write prompting is UX-hostile; design §2.2 was always right** | §2.2 (session start ceremony) | PLAN.md CP5's literal "single prompt presented to human for the push" was misread as per-write. Approve-once-per-session with a configurable TTL (Phase 0 default 4h, matching §4.2.2's `default_read_ttl`) is the right pattern and aligns with §2.2. |
+| **C5: `/dev/tty` is unavailable inside agent TUIs' subprocesses** | §2.2 (prompt channel), §5.3 TM-G5 | Claude detaches `/dev/tty` from its Bash-tool subprocess (but preserves it for `!` shell escape). Phase 0 builds a layered grant flow: try `/dev/tty` → try tmux popup (if `$TMUX` set) → emit helpful stderr with grant-from-another-terminal instructions. Sandbox composition (Shape A) is the architectural fix; out-of-band status app channel (per §2.2) closes the remaining gap. |
+| **C6: GitHub's installation-token mint TTL is fixed at ~1h** | §4.2.5 ("5-minute write TTL") | `POST /app/installations/{id}/access_tokens` does not accept a custom expiration. The 5-minute effective write window is achieved broker-side via `DELETE /installation/token` on the credential-helper's store/erase action (effective TTL = "operation duration + revoke RTT"). |
+| **C7: `gh` writes bypass the git credential helper entirely** | §4 (architecture) | `gh` reads `GH_TOKEN` env or `~/.config/gh/hosts.yml`. Without coverage, an agent could TM-G8-displace at the API layer. Phase 0 adds `cmd/rein-gh` (PATH-shim, same pattern as rein-git) which gates `gh` writes through the same `ConfirmWrite` approval flow, with two-tier read-cached / write-JIT minting and revoke-on-gh-exit. On denial, sets `GH_TOKEN=rein-placeholder-denied` to prevent fallback to the user's `hosts.yml`. |
+
+### Shape B limits observed empirically
+
+The design's §5.1 threat table is honest that Shape B is weaker than Shape A. Phase 0 observed specific failure modes:
+
+1. **TM-G5 is bypassable by an agent with shell access.** An agent that reads `dev-session.yaml` knows the issue number; it could run `rein approval grant` itself. Issue #12 (nonce-via-tty) marginally hardens; Shape A sandbox is the architectural fix.
+2. **Tokens are reachable from any UID-shared process.** `GH_TOKEN` env, cache files, env-source files — all UID-readable. Phase 1 sandbox closes this.
+3. **`/dev/tty` and `$TMUX` propagation are agent-implementation-dependent.** Layered discovery (C5 above) handles known cases.
+
+### Phase 1 questions the corrections raise
+
+- Status-app channel (out-of-band prompt) becomes more important: layer 4 (helpful stderr) is the only reliably-working channel for agent-driven writes in Shape B.
+- Token-mint rate-limit handling (transient 401 "Bad credentials" under burst): per-session caching, batched revokes, backoff. Empirical surprise from Phase 0 testing.
+- Cross-platform: Phase 0 is Linux-only for the `/proc` fallback in `DetectWrite`. macOS proc-tree is Phase 0.5 (issue #8); Windows is later.
+
+### Reading order from here
+
+For Phase 1 design work: read §1-§12 above as the original design intent, then `phase0_findings.md` for what was actually built and learned, then `PLAN-0.5.md` for the operator-UX work that closes the most visible gaps before Phase 1's architectural work begins. The 15 GitHub issues (#6-#15) capture specific followups by category.
