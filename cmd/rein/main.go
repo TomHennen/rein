@@ -5,14 +5,15 @@
 //     protocol; reads target App config from REIN_* env vars; routes
 //     between read and write tiers per the REIN_GIT_OP env (set by the
 //     rein-git shim) with a process-tree fallback on Linux.
-//   - install-shim: writes the rein-git shim binary to a known location
-//     and prints the PATH-prepend instruction.
-//   - gh-auth: mints an implement-role token for the `gh` CLI and writes
-//     a sourceable env file (CP3.5).
-//
-// Future checkpoints add sessions, scope ceilings, prompts, and a top-level
-// `rein run` wrapper that does the helper + shim + gh-auth wiring
-// per-process.
+//   - install-shim: writes rein-git, rein-gh, and rein binaries into a
+//     known shim directory under $XDG_STATE_HOME/rein/shim.
+//   - gh-auth: mints a read-tier token for the `gh` CLI and writes a
+//     sourceable env file (CP3.5).
+//   - approval {status|clear|grant}: inspect, revoke, or interactively
+//     grant the cached human approval (CP5/CP5.5).
+//   - run -- <cmd> [args...]: launch the wrapped command with rein's
+//     git credential helper, gh shim, and session scope ceiling
+//     in effect — without polluting the user's global git config (CP6).
 package main
 
 import (
@@ -83,6 +84,13 @@ func main() {
 			fmt.Fprintf(os.Stderr, "rein approval: %v\n", err)
 			os.Exit(1)
 		}
+	case "run":
+		code, err := runWrapped(os.Args[2:])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "rein run: %v\n", err)
+			os.Exit(code)
+		}
+		os.Exit(code)
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -98,6 +106,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  rein install-shim")
 	fmt.Fprintln(os.Stderr, "  rein gh-auth")
 	fmt.Fprintln(os.Stderr, "  rein approval {status|clear|grant}")
+	fmt.Fprintln(os.Stderr, "  rein run -- <cmd> [args...]")
 }
 
 // runCredentialHelper wires env-derived config to the broker. All errors
