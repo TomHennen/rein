@@ -34,7 +34,7 @@ import (
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/session"
-	"github.com/TomHennen/rein/internal/ui/prompt"
+	"github.com/TomHennen/rein/internal/ui/grant"
 )
 
 const (
@@ -97,7 +97,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  rein credential-helper {get|store|erase}")
 	fmt.Fprintln(os.Stderr, "  rein install-shim")
 	fmt.Fprintln(os.Stderr, "  rein gh-auth")
-	fmt.Fprintln(os.Stderr, "  rein approval {status|clear}")
+	fmt.Fprintln(os.Stderr, "  rein approval {status|clear|grant}")
 }
 
 // runCredentialHelper wires env-derived config to the broker. All errors
@@ -159,16 +159,9 @@ func runCredentialHelper(action string) error {
 	})
 }
 
-// buildConfirmWrite returns a ConfirmWrite predicate that:
-//  1. Honors an existing approval record (no prompt) if it covers
-//     the current session signature and hasn't expired.
-//  2. Otherwise prompts via /dev/tty; on approval, writes a new
-//     approval record valid for approvalTTL.
-//
-// Per-write prompting was the original CP5 interpretation but felt
-// excessive for productive sessions; design §2.2's prompt is a
-// scope-establishment ceremony, not a per-operation gate. The
-// approval record makes it once-per-session.
+// buildConfirmWrite returns a ConfirmWrite predicate that delegates to
+// internal/ui/grant's layered approval flow: check existing record →
+// try /dev/tty → tmux popup if $TMUX → helpful stderr + deny.
 //
 // Returns nil when the session doesn't bind an issue — no prompt
 // requested, no approval needed. Tests bypass this by constructing
@@ -182,62 +175,29 @@ func buildConfirmWrite(sess session.Session, stateDir string, logger *log.Logger
 		}
 		return nil
 	}
-	sig := approvals.SignatureOf(sess)
-	approvalPath := approvals.Path(stateDir)
-	prompter := prompt.TTYPrompter{}
-
+	cfg := grant.Config{
+		StateDir:      stateDir,
+		TTL:           approvalTTL,
+		PromptTimeout: 60 * time.Second,
+		Logger:        logger,
+		// Stderr, Prompter, TmuxRunner default to production
+		// (os.Stderr, TTYPrompter, DefaultTmuxRunner).
+	}
 	return func(repo string) bool {
-		// Check for existing approval first.
-		if rec, err := approvals.Read(approvalPath); err == nil {
-			if approvals.Valid(rec, sig, time.Now()) {
-				logger.Printf("ConfirmWrite: covered by existing approval (granted at %s, valid until %s)",
-					rec.ApprovedAt.Format(time.RFC3339),
-					rec.ExpiresAt.Format(time.RFC3339))
-				return true
-			}
-			logger.Printf("ConfirmWrite: existing approval mismatched or expired (sig_match=%v, expires=%s); re-prompting",
-				rec.Signature == sig, rec.ExpiresAt.Format(time.RFC3339))
-		} else if !errors.Is(err, os.ErrNotExist) {
-			logger.Printf("ConfirmWrite: approval load failed: %v; re-prompting", err)
-		}
-
-		req := prompt.Request{
-			SessionID: sess.ID,
-			Role:      sess.Role,
-			Repo:      repo,
-			Action:    fmt.Sprintf("write access for this session (covers writes until +%s)", approvalTTL),
-			Issue:     sess.Issue,
-			Timeout:   60 * time.Second,
-		}
-		ok, err := prompter.Confirm(context.Background(), req)
-		if err != nil {
-			logger.Printf("ConfirmWrite: prompter error: %v; denying", err)
-			return false
-		}
-		if !ok {
-			return false
-		}
-
-		// Persist approval so subsequent writes within TTL skip prompt.
-		now := time.Now()
-		newRec := approvals.Record{
-			Signature:  sig,
-			SessionID:  sess.ID,
-			ApprovedAt: now,
-			ExpiresAt:  now.Add(approvalTTL),
-		}
-		if err := approvals.Write(approvalPath, newRec); err != nil {
-			logger.Printf("ConfirmWrite: approval write failed (continuing): %v", err)
-		} else {
-			logger.Printf("ConfirmWrite: APPROVED; approval recorded (valid until %s)",
-				newRec.ExpiresAt.Format(time.RFC3339))
-		}
-		return true
+		return grant.ObtainApproval(context.Background(), grant.Request{
+			Session: sess,
+			Action:  "git push (write token mint)",
+			Repo:    repo,
+		}, cfg)
 	}
 }
 
-// runApproval handles `rein approval {status|clear}` — the operator's
-// escape hatches for inspecting or revoking the cached human approval.
+// runApproval handles `rein approval {status|clear|grant}`:
+//   - status: show the cached approval (or "none")
+//   - clear:  remove the approval; next write re-prompts
+//   - grant:  interactively approve write access for the current
+//             session. Reads /dev/tty only (no CLI flag) — see
+//             package internal/ui/grant for why.
 func runApproval(sub string) error {
 	stateDir, err := config.StateDir()
 	if err != nil {
@@ -275,8 +235,33 @@ func runApproval(sub string) error {
 		}
 		fmt.Println("approval cleared; next write will prompt")
 		return nil
+	case "grant":
+		sess, src, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
+		if err != nil {
+			return err
+		}
+		if sess.Issue == 0 {
+			return fmt.Errorf("session %q (source=%s) has no `issue:` field; nothing to grant", sess.ID, src)
+		}
+		logger, closeLog, err := openLog()
+		if err != nil {
+			return err
+		}
+		defer closeLog()
+		logger.Printf("approval grant: session=%q source=%s", sess.ID, src)
+		cfg := grant.Config{
+			StateDir:      stateDir,
+			TTL:           approvalTTL,
+			PromptTimeout: 60 * time.Second,
+			Logger:        logger,
+		}
+		if grant.Grant(context.Background(), sess, cfg) {
+			fmt.Printf("approval recorded (valid for %s)\n", approvalTTL)
+			return nil
+		}
+		return fmt.Errorf("approval denied or cancelled")
 	default:
-		fmt.Fprintf(os.Stderr, "rein approval: unknown subcommand %q (want status|clear)\n", sub)
+		fmt.Fprintf(os.Stderr, "rein approval: unknown subcommand %q (want status|clear|grant)\n", sub)
 		os.Exit(2)
 	}
 	return nil

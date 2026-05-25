@@ -37,6 +37,7 @@ import (
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/session"
+	"github.com/TomHennen/rein/internal/ui/grant"
 )
 
 const (
@@ -48,6 +49,10 @@ const (
 	// mintTimeout caps each mint and revoke call. gh users feel this
 	// directly on cache-miss; keep tight.
 	mintTimeout = 5 * time.Second
+
+	// approvalTTL mirrors cmd/rein's value. Kept in sync manually for
+	// Phase 0; CP6+ should centralize.
+	approvalTTL = 4 * time.Hour
 
 	// reentryEnv is set by the shim before exec'ing the real gh, so any
 	// re-entrant shim invocation (gh forking itself internally) skips the
@@ -169,6 +174,71 @@ func loadAppCfgWithSession(logger *log.Logger) (githubapp.Config, error) {
 	return appCfg, nil
 }
 
+// execGhWithoutToken is the denial path: fork real gh with a
+// deliberately-invalid GH_TOKEN so gh doesn't fall back to the user's
+// hosts.yml and silently succeed with the user's PAT. This mirrors the
+// credential helper's TM-G8 placeholder behavior: always emit
+// SOMETHING the operator can see fail, rather than no token at all.
+//
+// We also empty GITHUB_TOKEN so tools that read it as a fallback don't
+// pick up a different value from the inherited env.
+//
+// Shape B limit: a determined agent could `unset GH_TOKEN` itself and
+// re-run, hitting hosts.yml. This is a fail-closed gate for well-behaved
+// agents; adversarial bypass requires Shape A sandbox. Documented in
+// internal/ui/grant's package doc.
+func execGhWithoutToken(realGh string, args []string) int {
+	env := os.Environ()
+	env = append(env, "GH_TOKEN=rein-placeholder-denied")
+	env = append(env, "GITHUB_TOKEN=")
+	// Short-circuit the shim's re-entry guard on the denial path too,
+	// so gh forking itself internally doesn't re-trigger the prompt
+	// and emit a duplicate helpful-stderr message.
+	env = append(env, reentryEnv+"=1")
+	cmd := exec.Command(realGh, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = env
+	return exitCodeFromRunErr(cmd.Run())
+}
+
+// argSummary returns a short representation of the gh subcommand for
+// log/prompt clarity. "issue create" rather than "issue create --title
+// 'long thing' --body 'lots of text'".
+func argSummary(args []string) string {
+	out := ""
+	count := 0
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		if count == 0 {
+			out = a
+		} else {
+			out += " " + a
+		}
+		count++
+		if count >= 2 {
+			break
+		}
+	}
+	if out == "" {
+		return "<unknown>"
+	}
+	return out
+}
+
+// isWriteCapableRole mirrors cmd/rein's helper; we copy to avoid a
+// cross-package dependency from a tiny CLI to another tiny CLI.
+func isWriteCapableRole(role string) bool {
+	switch role {
+	case "implement", "triage", "review", "release":
+		return true
+	}
+	return false
+}
+
 // bareRepoName extracts the "name" half of "owner/name". The App
 // installation already pins the owner, so the mint API only accepts the
 // bare name.
@@ -189,6 +259,33 @@ func runWrite(realGh string, args []string, stateDir string, logger *log.Logger)
 	appCfg, cfgErr := loadAppCfgWithSession(logger)
 	var token string
 	var client *githubapp.Client
+
+	// Gate write mints behind the human-in-the-loop approval flow, the
+	// same gate the credential helper uses for git writes. Closes the
+	// CP5 hole where gh writes minted without prompting.
+	if cfgErr == nil {
+		sess, _, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
+		if err == nil && sess.Issue != 0 {
+			cfg := grant.Config{
+				StateDir:      stateDir,
+				TTL:           approvalTTL,
+				PromptTimeout: 60 * time.Second,
+				Logger:        logger,
+			}
+			req := grant.Request{
+				Session: sess,
+				Action:  fmt.Sprintf("gh %s (write)", argSummary(args)),
+				Repo:    sess.Repos[0],
+			}
+			if !grant.ObtainApproval(context.Background(), req, cfg) {
+				logger.Printf("write tier: human approval denied; execing gh without GH_TOKEN")
+				return execGhWithoutToken(realGh, args)
+			}
+		} else if err == nil && sess.Issue == 0 && isWriteCapableRole(sess.Role) {
+			logger.Printf("WARN: write tier proceeding without confirmation (session %q has no `issue:` field)", sess.ID)
+		}
+	}
+
 	if cfgErr != nil {
 		logger.Printf("write tier: %v; execing gh without GH_TOKEN", cfgErr)
 	} else if c, err := githubapp.NewClient(appCfg); err != nil {
