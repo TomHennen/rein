@@ -1,9 +1,11 @@
 // Package githubapp wraps jferrl/go-githubauth with the surface rein needs:
-// minting installation tokens scoped to a single repository with a fixed
-// permission set.
+// minting installation tokens scoped to a single repository, in either a
+// read-only or read+write permission shape.
 //
-// In Phase 0 this is just enough to back the credential helper. Caching,
-// two-tier read/write splits, and JIT write minting come in later checkpoints.
+// MintReadOnlyToken is used for cached session reads (TTL bounded by what
+// GitHub returns, which is 1h in practice). MintWriteToken is used JIT at
+// push time — never cached — per design §4.2.5. Both tokens are scoped to
+// the same single repository.
 package githubapp
 
 import (
@@ -65,6 +67,27 @@ func NewClient(cfg Config) (*Client, error) {
 // the configured repository with permissions {contents:read, metadata:read}.
 // It honors ctx for cancellation and timeout.
 func (c *Client) MintReadOnlyToken(ctx context.Context) (token string, expiresAt time.Time, err error) {
+	return c.mint(ctx, &githubauth.InstallationPermissions{
+		Contents: githubauth.Ptr("read"),
+		Metadata: githubauth.Ptr("read"),
+	})
+}
+
+// MintWriteToken returns a fresh installation access token scoped to the
+// configured repository with permissions {contents:write, metadata:read}.
+// The design specifies a 5-minute TTL on write tokens (§4.2.5); the GitHub
+// installation-token API does not currently accept a custom expiration on
+// the create endpoint (it always returns 1h), so the effective TTL is
+// whatever GitHub returns. Single-use semantics are enforced by the
+// broker (never cache write tokens; mint per push).
+func (c *Client) MintWriteToken(ctx context.Context) (token string, expiresAt time.Time, err error) {
+	return c.mint(ctx, &githubauth.InstallationPermissions{
+		Contents: githubauth.Ptr("write"),
+		Metadata: githubauth.Ptr("read"),
+	})
+}
+
+func (c *Client) mint(ctx context.Context, perms *githubauth.InstallationPermissions) (string, time.Time, error) {
 	keyPEM, err := os.ReadFile(c.cfg.PrivateKeyPath)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("read private key: %w", err)
@@ -77,10 +100,7 @@ func (c *Client) MintReadOnlyToken(ctx context.Context) (token string, expiresAt
 
 	opts := &githubauth.InstallationTokenOptions{
 		Repositories: []string{c.cfg.RepoName},
-		Permissions: &githubauth.InstallationPermissions{
-			Contents: githubauth.Ptr("read"),
-			Metadata: githubauth.Ptr("read"),
-		},
+		Permissions:  perms,
 	}
 
 	instSrc := githubauth.NewInstallationTokenSource(

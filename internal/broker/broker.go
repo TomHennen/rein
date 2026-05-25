@@ -1,12 +1,41 @@
 // Package broker implements the git credential-helper protocol on top of
-// a github-app-backed token minter.
+// a github-app-backed token minter, with a two-tier read/write split per
+// design §4.2.5.
 //
 // The defining invariant is TM-G8 (design §5.3): for any github.com get
 // request, the helper MUST exit 0 with a non-empty credential block — never
 // empty, never error. An empty/error return triggers downstream agents
 // (validated against Claude Code in §12.1) to run `gh auth setup-git`,
 // silently rewriting ~/.gitconfig and displacing the broker. The placeholder
-// path in handleGet is what enforces this when the real mint fails.
+// path inside the read and write branches enforces this when the real mint
+// fails.
+//
+// # Two-tier split (CP3)
+//
+// Each get invocation decides between a cached read token and a freshly-
+// minted write token based on a "write intent" signal supplied by the
+// caller. Because the git credential-helper protocol asks for credentials
+// at the repo-URL level (before deciding fetch vs push), the helper alone
+// cannot tell what operation is about to happen. PLAN's original
+// /git-receive-pack path inspection turned out not to exist (2026-05-25
+// note in PLAN.md), and a pre-push hook fires too late (after refs are
+// retrieved, which already requires write-capable creds for a push).
+//
+// The chosen Shape B mechanism is a PATH shim (`cmd/rein-git`) that sets
+// REIN_GIT_OP before exec'ing the real git; the env propagates through to
+// the credential helper. The shim is the primary signal. The fallback is
+// process-tree introspection (the helper walks /proc to find `git push`
+// or `git send-pack` in its ancestor chain). The broker package is
+// signal-agnostic — both forms are wrapped in a Config.DetectWrite
+// callback the caller (cmd/rein) provides.
+//
+// This is a routing signal, not a security boundary. Misdetection causes a
+// wrong-tier mint, not a security breach — the role's permissions ceiling
+// (enforced by GitHub at the token-mint API) remains authoritative.
+//
+// In Shape A (Phase 1+, sandbox-composed) the proxy inspects actual HTTP
+// method/path at the network boundary and supplies the same signal more
+// definitively. The broker logic in this package is reused unchanged.
 //
 // Non-github.com hosts get an empty credential block on purpose — that is
 // the credential-helper protocol's "I don't handle this host" signal, and
@@ -17,31 +46,64 @@ package broker
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
 
-// MintFunc mints a fresh read-only installation token. Returned as a
-// function (rather than an interface) so tests can stub trivially.
+// MintFunc mints a fresh installation token (read or write, depending on
+// which MintFunc this is). Returned as a function (rather than an interface)
+// so tests can stub trivially.
 type MintFunc func(ctx context.Context) (token string, expiresAt time.Time, err error)
 
-// Config controls credential-helper behavior.
+// Config controls credential-helper behavior. Logger and MintRead are
+// always required; MintWrite is required only if DetectWrite is set.
 type Config struct {
-	// Mint produces an installation token for the configured repo. Required.
-	Mint MintFunc
+	// MintRead produces a read-only installation token. Used both for direct
+	// read serving and to refill the read-token cache.
+	MintRead MintFunc
+
+	// MintWrite produces a write installation token. Called when DetectWrite
+	// signals true. Never cached.
+	MintWrite MintFunc
 
 	// MintTimeout caps each mint attempt. On timeout we fall back to the
-	// placeholder (TM-G8). 5s is comfortable for the GitHub installation
-	// token API in normal conditions; git users will feel a longer wait.
+	// TM-G8 placeholder for github.com get requests.
 	MintTimeout time.Duration
 
-	// Logger is used for forensic logging. Required. The helper must never
-	// log raw token values — only metadata (expiry, length, scope).
+	// Logger receives forensic log lines. The helper must never log raw
+	// token values — only metadata (expiry, length, scope).
 	Logger *log.Logger
+
+	// ReadCachePath is the file path where the most recent read token is
+	// cached as JSON. Empty disables the cache (every read mints fresh).
+	// Phase 0 uses a file because each helper invocation is a separate
+	// process; Phase 1's daemon will hold the cache in memory.
+	ReadCachePath string
+
+	// ReadCacheSkew refreshes the cached read token when it has less than
+	// this much time left, to avoid handing out a token that expires in
+	// flight. Defaults to 30s if zero.
+	ReadCacheSkew time.Duration
+
+	// DetectWrite returns true when this helper invocation is for a write
+	// operation. Nil disables write detection (every get serves the cached
+	// read path). The implementation is intentionally pluggable: cmd/rein
+	// provides one that inspects REIN_GIT_OP (set by the rein-git shim)
+	// with a process-tree fallback; tests stub it; Phase 1's proxy provides
+	// a variant driven by HTTP method/path inspection.
+	//
+	// The callback should be fail-closed (return false when the signal is
+	// absent or ambiguous): a wrong-tier mint defaulting to read causes a
+	// push to surface a 403 — observable and recoverable. The reverse
+	// would silently over-grant.
+	DetectWrite func() bool
 }
 
 // RunCredentialHelper drives the protocol for one invocation. action is the
@@ -55,9 +117,13 @@ func RunCredentialHelper(action string, stdin io.Reader, stdout io.Writer, cfg C
 	if cfg.Logger == nil {
 		return fmt.Errorf("broker: Logger is required")
 	}
-	if cfg.Mint == nil {
-		return fmt.Errorf("broker: Mint is required")
+	if cfg.MintRead == nil {
+		return fmt.Errorf("broker: MintRead is required")
 	}
+	if cfg.DetectWrite != nil && cfg.MintWrite == nil {
+		return fmt.Errorf("broker: MintWrite is required when DetectWrite is set")
+	}
+	cfg.applyDefaults()
 
 	attrs, err := parseAttrs(stdin, cfg.Logger)
 	if err != nil {
@@ -76,14 +142,21 @@ func RunCredentialHelper(action string, stdin io.Reader, stdout io.Writer, cfg C
 
 	switch action {
 	case "store", "erase":
-		// Stateless helper; nothing to persist or forget.
+		// Stateless helper; nothing to persist or forget. The read cache
+		// is broker-owned, not driven by git's store/erase signals.
 		return nil
 	case "get":
 		return handleGet(attrs, stdout, cfg)
 	default:
-		// Unknown verb — treat as no-op, do not error.
 		cfg.Logger.Printf("unknown action %q; no-op", action)
 		return nil
+	}
+}
+
+// applyDefaults fills zero-valued duration fields with the package defaults.
+func (c *Config) applyDefaults() {
+	if c.ReadCacheSkew == 0 {
+		c.ReadCacheSkew = 30 * time.Second
 	}
 }
 
@@ -93,33 +166,143 @@ func handleGet(attrs map[string]string, stdout io.Writer, cfg Config) error {
 	protocol := attrs["protocol"]
 
 	// Only github.com over HTTPS is in scope. SSH (and any other protocol)
-	// uses key-based auth and would just fail with a Bearer token; declining
-	// is correct. Non-github.com hosts likewise fall through.
+	// uses key-based auth and would just fail with a Bearer token.
 	if host != "github.com" || protocol != "https" {
 		cfg.Logger.Printf("not handled: protocol=%q host=%q; returning empty", protocol, host)
 		return nil
 	}
 
+	if isWriteIntent(cfg) {
+		return serveWrite(stdout, cfg)
+	}
+	return serveRead(stdout, cfg)
+}
+
+// isWriteIntent invokes the caller-supplied DetectWrite, defaulting to
+// false when none is configured. A panic in the callback is recovered and
+// treated as "no write intent" — TM-G8 must never be brought down by a
+// detector bug.
+func isWriteIntent(cfg Config) (write bool) {
+	if cfg.DetectWrite == nil {
+		return false
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			cfg.Logger.Printf("DetectWrite panicked: %v; defaulting to read", r)
+			write = false
+		}
+	}()
+	write = cfg.DetectWrite()
+	if write {
+		cfg.Logger.Printf("write intent detected")
+	}
+	return write
+}
+
+// serveWrite mints a fresh write token and writes it to stdout. On mint
+// failure it returns the TM-G8 placeholder.
+func serveWrite(stdout io.Writer, cfg Config) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.MintTimeout)
 	defer cancel()
-
-	token, expiresAt, err := cfg.Mint(ctx)
+	token, expiresAt, err := cfg.MintWrite(ctx)
 	if err != nil {
-		// TM-G8: never empty for github.com get. Return a placeholder.
-		// For CP2 a non-empty sentinel satisfies the helper-level invariant
-		// ("never empty, never error"); git will fail with 401 against it.
-		// Phase 1 should harden this into a real-but-narrow read-only token
-		// so a sufficiently determined agent doesn't react to the 401 by
-		// running `gh auth setup-git` anyway.
-		cfg.Logger.Printf("mint failed: %v; returning TM-G8 placeholder credential", err)
+		cfg.Logger.Printf("write mint failed: %v; returning TM-G8 placeholder credential", err)
 		return writeCredential(stdout, "x-access-token", "rein-placeholder-mint-failed")
 	}
-
-	cfg.Logger.Printf("mint succeeded: expires_at=%s ttl=%s token_len=%d",
+	cfg.Logger.Printf("write mint succeeded: tier=write expires_at=%s ttl=%s token_len=%d",
 		expiresAt.Format(time.RFC3339),
 		time.Until(expiresAt).Round(time.Second),
 		len(token))
 	return writeCredential(stdout, "x-access-token", token)
+}
+
+// serveRead returns a valid cached read token if present, or mints a fresh
+// one and caches it. On mint failure it returns the TM-G8 placeholder.
+func serveRead(stdout io.Writer, cfg Config) error {
+	if cached, ok := readCache(cfg); ok {
+		cfg.Logger.Printf("read cache hit: expires_at=%s ttl=%s token_len=%d",
+			cached.ExpiresAt.Format(time.RFC3339),
+			time.Until(cached.ExpiresAt).Round(time.Second),
+			len(cached.Token))
+		return writeCredential(stdout, "x-access-token", cached.Token)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.MintTimeout)
+	defer cancel()
+	token, expiresAt, err := cfg.MintRead(ctx)
+	if err != nil {
+		cfg.Logger.Printf("read mint failed: %v; returning TM-G8 placeholder credential", err)
+		return writeCredential(stdout, "x-access-token", "rein-placeholder-mint-failed")
+	}
+	cfg.Logger.Printf("read mint succeeded: tier=read expires_at=%s ttl=%s token_len=%d",
+		expiresAt.Format(time.RFC3339),
+		time.Until(expiresAt).Round(time.Second),
+		len(token))
+	writeCache(cfg, cachedToken{Token: token, ExpiresAt: expiresAt})
+	return writeCredential(stdout, "x-access-token", token)
+}
+
+// cachedToken is the on-disk representation of a cached read token.
+type cachedToken struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// readCache returns the cached read token when present and not within the
+// expiry skew. Any error (file missing, corrupt JSON, near expiry) is a
+// cache miss; the caller will mint fresh.
+func readCache(cfg Config) (cachedToken, bool) {
+	if cfg.ReadCachePath == "" {
+		return cachedToken{}, false
+	}
+	body, err := os.ReadFile(cfg.ReadCachePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			cfg.Logger.Printf("read cache load failed: %v; will mint fresh", err)
+		}
+		return cachedToken{}, false
+	}
+	var c cachedToken
+	if err := json.Unmarshal(body, &c); err != nil {
+		cfg.Logger.Printf("read cache corrupt: %v; will mint fresh", err)
+		return cachedToken{}, false
+	}
+	if time.Until(c.ExpiresAt) <= cfg.ReadCacheSkew {
+		cfg.Logger.Printf("read cache expired or within skew (expires=%s); will mint fresh",
+			c.ExpiresAt.Format(time.RFC3339))
+		return cachedToken{}, false
+	}
+	return c, true
+}
+
+// writeCache persists a freshly-minted read token. Failures are logged and
+// swallowed — caching is best-effort; the operation still succeeds with the
+// token already returned to git.
+func writeCache(cfg Config, c cachedToken) {
+	if cfg.ReadCachePath == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(cfg.ReadCachePath), 0o700); err != nil {
+		cfg.Logger.Printf("read cache mkdir failed: %v; continuing without cache", err)
+		return
+	}
+	body, err := json.Marshal(c)
+	if err != nil {
+		cfg.Logger.Printf("read cache marshal failed: %v; continuing without cache", err)
+		return
+	}
+	// Write to a tempfile and rename for atomicity — a half-written file
+	// would look corrupt to the next reader.
+	tmp := cfg.ReadCachePath + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+		cfg.Logger.Printf("read cache write failed: %v; continuing without cache", err)
+		return
+	}
+	if err := os.Rename(tmp, cfg.ReadCachePath); err != nil {
+		cfg.Logger.Printf("read cache rename failed: %v; continuing without cache", err)
+		_ = os.Remove(tmp)
+		return
+	}
 }
 
 // parseAttrs reads git's credential attribute block: one key=value per line,
