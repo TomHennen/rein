@@ -87,6 +87,27 @@ func (c *Client) MintWriteToken(ctx context.Context) (token string, expiresAt ti
 	})
 }
 
+// MintGhSessionToken returns an installation token shaped for the `gh`
+// CLI session used in Phase 0 (CP3.5): contents:read + issues:write +
+// pull_requests:write + metadata:read. It deliberately omits contents:write
+// because git push already routes through the credential helper's
+// dedicated write-tier mint — granting it here too would over-broaden
+// what `gh api` and similar low-level subcommands could do.
+//
+// Known limitation of the narrower grant: `gh pr merge`, `gh release
+// create`, and `gh repo edit` need contents:write and will 403 with this
+// token. Phase 0 agents should perform merges via local git push instead.
+// Phase 1's sandbox+proxy will discriminate per-HTTP-call at the network
+// boundary and remove this restriction.
+func (c *Client) MintGhSessionToken(ctx context.Context) (token string, expiresAt time.Time, err error) {
+	return c.mint(ctx, &githubauth.InstallationPermissions{
+		Contents:     githubauth.Ptr("read"),
+		Issues:       githubauth.Ptr("write"),
+		PullRequests: githubauth.Ptr("write"),
+		Metadata:     githubauth.Ptr("read"),
+	})
+}
+
 func (c *Client) mint(ctx context.Context, perms *githubauth.InstallationPermissions) (string, time.Time, error) {
 	keyPEM, err := os.ReadFile(c.cfg.PrivateKeyPath)
 	if err != nil {

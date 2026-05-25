@@ -7,9 +7,12 @@
 //     rein-git shim) with a process-tree fallback on Linux.
 //   - install-shim: writes the rein-git shim binary to a known location
 //     and prints the PATH-prepend instruction.
+//   - gh-auth: mints an implement-role token for the `gh` CLI and writes
+//     a sourceable env file (CP3.5).
 //
 // Future checkpoints add sessions, scope ceilings, prompts, and a top-level
-// `rein run` wrapper that does the helper + shim wiring per-process.
+// `rein run` wrapper that does the helper + shim + gh-auth wiring
+// per-process.
 package main
 
 import (
@@ -54,6 +57,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "rein install-shim: %v\n", err)
 			os.Exit(1)
 		}
+	case "gh-auth":
+		if err := ghAuth(); err != nil {
+			fmt.Fprintf(os.Stderr, "rein gh-auth: %v\n", err)
+			os.Exit(1)
+		}
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -67,6 +75,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, "  rein credential-helper {get|store|erase}")
 	fmt.Fprintln(os.Stderr, "  rein install-shim")
+	fmt.Fprintln(os.Stderr, "  rein gh-auth")
 }
 
 // runCredentialHelper wires env-derived config to the broker. All errors
@@ -251,6 +260,118 @@ func optionConsumesNextArg(a string) bool {
 		return false
 	}
 	return optionsThatTakeArg[a]
+}
+
+// ghAuth mints a gh-session installation token and writes a sourceable
+// POSIX-shell file at <state-dir>/gh-env.sh that exports GH_TOKEN.
+// Sourcing the file makes `gh` route through rein's mint without touching
+// the user's ~/.config/gh/hosts.yml.
+//
+// Why GH_TOKEN env over rewriting hosts.yml: no backup/restore lifecycle,
+// no risk of clobbering the user's gh auth, and matches CP6's `rein run`
+// model where the env is injected per-process. Trade-off: the env file
+// has to be re-sourced when the token expires (~1h GitHub-imposed TTL).
+//
+// Token permissions are deliberately narrower than the design's full
+// `implement` role: contents:read + issues:write + pull_requests:write +
+// metadata:read. Specifically NO contents:write — git push already routes
+// through the credential helper with its dedicated write-tier mint, so
+// granting it here too would over-broaden `gh api` and similar low-level
+// subcommands. Known consequence: `gh pr merge`, `gh release create`,
+// and `gh repo edit` 403 with this token; agents should perform merges
+// via local git push instead.
+//
+// Why only GH_TOKEN (not GITHUB_TOKEN): GITHUB_TOKEN is honored by many
+// tools beyond gh (Go SDK, hub, act, gitleaks, etc.). Setting it from
+// here would broadly shadow other tools' auth choices for the shell's
+// lifetime. Users who want it elsewhere can `export GITHUB_TOKEN=$GH_TOKEN`
+// themselves.
+//
+// File mode 0600 in a 0700 parent. The token is never logged. POSIX-sh
+// syntax only — fish users will need to translate.
+func ghAuth() error {
+	cfg, err := loadConfigFromEnv()
+	if err != nil {
+		return err
+	}
+
+	logger, closeLog, err := openLog()
+	if err != nil {
+		return err
+	}
+	defer closeLog()
+
+	client, err := githubapp.NewClient(cfg.app)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), mintTimeout)
+	defer cancel()
+	token, expiresAt, err := client.MintGhSessionToken(ctx)
+	if err != nil {
+		logger.Printf("gh-auth mint failed: %v", err)
+		return fmt.Errorf("mint gh session token: %w", err)
+	}
+	logger.Printf("gh-auth mint succeeded: tier=gh-session expires_at=%s ttl=%s token_len=%d",
+		expiresAt.Format(time.RFC3339),
+		time.Until(expiresAt).Round(time.Second),
+		len(token))
+
+	stateDir, err := reinStateDir()
+	if err != nil {
+		return err
+	}
+	envPath := filepath.Join(stateDir, "gh-env.sh")
+	body := fmt.Sprintf(""+
+		"# rein gh-auth env (CP3.5). POSIX-shell syntax — sh/bash/zsh only.\n"+
+		"# Source this file before launching an agent that uses `gh`:\n"+
+		"#   . %s\n"+
+		"# Expires at: %s (re-run `rein gh-auth` and re-source before then).\n"+
+		"export GH_TOKEN=%s\n",
+		envPath,
+		expiresAt.Format(time.RFC3339),
+		shellQuote(token),
+	)
+	// Atomic write: CreateTemp in the destination dir, write+chmod, rename.
+	// CreateTemp avoids the fixed-name race when two `rein gh-auth` runs
+	// happen concurrently.
+	tmp, err := os.CreateTemp(stateDir, "gh-env.sh.*")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op if rename succeeds
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod temp: %w", err)
+	}
+	if _, err := tmp.WriteString(body); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write gh-env: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close gh-env: %w", err)
+	}
+	if err := os.Rename(tmpName, envPath); err != nil {
+		return fmt.Errorf("rename gh-env: %w", err)
+	}
+
+	// Print sourcing instructions to stderr so callers piping stdout
+	// (eval, command substitution) don't get noise. Stdout is silent on
+	// purpose — there's no good thing to put there that doesn't risk
+	// token leakage.
+	fmt.Fprintf(os.Stderr, "wrote %s (mode 0600)\n", envPath)
+	fmt.Fprintf(os.Stderr, "expires at %s (TTL %s)\n",
+		expiresAt.Format(time.RFC3339),
+		time.Until(expiresAt).Round(time.Second))
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "To activate, source the env file in the shell that will launch your agent:")
+	fmt.Fprintf(os.Stderr, "  . %s\n", envPath)
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "Re-run `rein gh-auth` and re-source before the TTL elapses.")
+	fmt.Fprintln(os.Stderr, "CP6's `rein run` will inject this env per-process automatically.")
+	return nil
 }
 
 // installShim writes the rein-git binary to a known location under the
