@@ -46,15 +46,16 @@ package broker
 import (
 	"bufio"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/TomHennen/rein/internal/tokencache"
 )
 
 // MintFunc mints a fresh installation token (read or write, depending on
@@ -193,9 +194,11 @@ func handleStoreErase(attrs map[string]string, cfg Config) error {
 	// presented token as a write and revoke. The cost of a false
 	// positive is a wasted read mint on the next get — TTL annoyance,
 	// not a security or correctness issue.
-	if cached, ok := readCacheRaw(cfg); ok && cached.Token == token {
-		cfg.Logger.Printf("store/erase: token matches cached read; leaving alive")
-		return nil
+	if cfg.ReadCachePath != "" {
+		if cached, err := tokencache.Read(cfg.ReadCachePath); err == nil && cached.Token == token {
+			cfg.Logger.Printf("store/erase: token matches cached read; leaving alive")
+			return nil
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.MintTimeout)
@@ -208,24 +211,6 @@ func handleStoreErase(attrs map[string]string, cfg Config) error {
 	return nil
 }
 
-// readCacheRaw is readCache without the skew check — used by store/erase
-// to identify a cached read token that may already be within the refresh
-// window. We don't want to revoke a token that we'd otherwise still hand
-// out as a cache hit on the next call.
-func readCacheRaw(cfg Config) (cachedToken, bool) {
-	if cfg.ReadCachePath == "" {
-		return cachedToken{}, false
-	}
-	body, err := os.ReadFile(cfg.ReadCachePath)
-	if err != nil {
-		return cachedToken{}, false
-	}
-	var c cachedToken
-	if err := json.Unmarshal(body, &c); err != nil {
-		return cachedToken{}, false
-	}
-	return c, true
-}
 
 // applyDefaults fills zero-valued duration fields with the package defaults.
 func (c *Config) applyDefaults() {
@@ -298,7 +283,7 @@ func serveWrite(stdout io.Writer, cfg Config) error {
 // serveRead returns a valid cached read token if present, or mints a fresh
 // one and caches it. On mint failure it returns the TM-G8 placeholder.
 func serveRead(stdout io.Writer, cfg Config) error {
-	if cached, ok := readCache(cfg); ok {
+	if cached, ok := loadCachedRead(cfg); ok {
 		cfg.Logger.Printf("read cache hit: expires_at=%s ttl=%s token_len=%d",
 			cached.ExpiresAt.Format(time.RFC3339),
 			time.Until(cached.ExpiresAt).Round(time.Second),
@@ -317,71 +302,34 @@ func serveRead(stdout io.Writer, cfg Config) error {
 		expiresAt.Format(time.RFC3339),
 		time.Until(expiresAt).Round(time.Second),
 		len(token))
-	writeCache(cfg, cachedToken{Token: token, ExpiresAt: expiresAt})
+	if cfg.ReadCachePath != "" {
+		if err := tokencache.Write(cfg.ReadCachePath, tokencache.Entry{Token: token, ExpiresAt: expiresAt}); err != nil {
+			cfg.Logger.Printf("read cache write failed: %v; continuing without cache", err)
+		}
+	}
 	return writeCredential(stdout, "x-access-token", token)
 }
 
-// cachedToken is the on-disk representation of a cached read token.
-type cachedToken struct {
-	Token     string    `json:"token"`
-	ExpiresAt time.Time `json:"expires_at"`
-}
-
-// readCache returns the cached read token when present and not within the
-// expiry skew. Any error (file missing, corrupt JSON, near expiry) is a
-// cache miss; the caller will mint fresh.
-func readCache(cfg Config) (cachedToken, bool) {
+// loadCachedRead returns the cached read token when present and not within
+// the expiry skew. Any error (file missing, corrupt, near expiry) is a
+// cache miss; the caller mints fresh.
+func loadCachedRead(cfg Config) (tokencache.Entry, bool) {
 	if cfg.ReadCachePath == "" {
-		return cachedToken{}, false
+		return tokencache.Entry{}, false
 	}
-	body, err := os.ReadFile(cfg.ReadCachePath)
+	e, err := tokencache.Read(cfg.ReadCachePath)
 	if err != nil {
-		if !os.IsNotExist(err) {
+		if !errors.Is(err, os.ErrNotExist) {
 			cfg.Logger.Printf("read cache load failed: %v; will mint fresh", err)
 		}
-		return cachedToken{}, false
+		return tokencache.Entry{}, false
 	}
-	var c cachedToken
-	if err := json.Unmarshal(body, &c); err != nil {
-		cfg.Logger.Printf("read cache corrupt: %v; will mint fresh", err)
-		return cachedToken{}, false
-	}
-	if time.Until(c.ExpiresAt) <= cfg.ReadCacheSkew {
+	if !e.Valid(cfg.ReadCacheSkew) {
 		cfg.Logger.Printf("read cache expired or within skew (expires=%s); will mint fresh",
-			c.ExpiresAt.Format(time.RFC3339))
-		return cachedToken{}, false
+			e.ExpiresAt.Format(time.RFC3339))
+		return tokencache.Entry{}, false
 	}
-	return c, true
-}
-
-// writeCache persists a freshly-minted read token. Failures are logged and
-// swallowed — caching is best-effort; the operation still succeeds with the
-// token already returned to git.
-func writeCache(cfg Config, c cachedToken) {
-	if cfg.ReadCachePath == "" {
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(cfg.ReadCachePath), 0o700); err != nil {
-		cfg.Logger.Printf("read cache mkdir failed: %v; continuing without cache", err)
-		return
-	}
-	body, err := json.Marshal(c)
-	if err != nil {
-		cfg.Logger.Printf("read cache marshal failed: %v; continuing without cache", err)
-		return
-	}
-	// Write to a tempfile and rename for atomicity — a half-written file
-	// would look corrupt to the next reader.
-	tmp := cfg.ReadCachePath + ".tmp"
-	if err := os.WriteFile(tmp, body, 0o600); err != nil {
-		cfg.Logger.Printf("read cache write failed: %v; continuing without cache", err)
-		return
-	}
-	if err := os.Rename(tmp, cfg.ReadCachePath); err != nil {
-		cfg.Logger.Printf("read cache rename failed: %v; continuing without cache", err)
-		_ = os.Remove(tmp)
-		return
-	}
+	return e, true
 }
 
 // parseAttrs reads git's credential attribute block: one key=value per line,

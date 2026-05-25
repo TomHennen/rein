@@ -1,143 +1,82 @@
 package main
 
-import (
-	"encoding/json"
-	"io"
-	"log"
-	"os"
-	"path/filepath"
-	"testing"
-	"time"
-)
+import "testing"
 
-func TestLoadCachedToken(t *testing.T) {
-	t.Run("missing file → not ok", func(t *testing.T) {
-		_, ok := loadCachedToken(filepath.Join(t.TempDir(), "absent.json"))
-		if ok {
-			t.Fatal("expected !ok for missing file")
-		}
-	})
-	t.Run("malformed JSON → not ok", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "bad.json")
-		mustWrite(t, path, "{not-json")
-		_, ok := loadCachedToken(path)
-		if ok {
-			t.Fatal("expected !ok for malformed JSON")
-		}
-	})
-	t.Run("valid round trip", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), "ok.json")
-		want := cachedToken{Token: "ghs_xyz", ExpiresAt: time.Now().Add(45 * time.Minute).Truncate(time.Second)}
-		body, _ := json.Marshal(want)
-		mustWrite(t, path, string(body))
-		got, ok := loadCachedToken(path)
-		if !ok {
-			t.Fatal("expected ok")
-		}
-		if got.Token != want.Token {
-			t.Errorf("token = %q, want %q", got.Token, want.Token)
-		}
-	})
-}
+func TestClassify(t *testing.T) {
+	tests := []struct {
+		name string
+		argv []string
+		want string
+	}{
+		// Empty/help.
+		{"no args", nil, "unknown"},
+		{"--version", []string{"--version"}, "unknown"},
+		{"--help", []string{"--help"}, "unknown"},
 
-func TestWriteCachedToken(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "subdir", "tok.json")
-	tok := cachedToken{Token: "ghs_abc", ExpiresAt: time.Now().Add(30 * time.Minute)}
-	if err := writeCachedToken(path, tok); err != nil {
-		t.Fatalf("writeCachedToken: %v", err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if mode := info.Mode().Perm(); mode != 0o600 {
-		t.Errorf("file mode = %o, want 0600", mode)
-	}
-	got, ok := loadCachedToken(path)
-	if !ok {
-		t.Fatal("expected ok after write")
-	}
-	if got.Token != tok.Token {
-		t.Errorf("token round-trip mismatch: got %q", got.Token)
-	}
-}
+		// Read commands.
+		{"repo view", []string{"repo", "view"}, "read"},
+		{"issue list", []string{"issue", "list"}, "read"},
+		{"issue view", []string{"issue", "view", "123"}, "read"},
+		{"pr view", []string{"pr", "view"}, "read"},
+		{"pr diff", []string{"pr", "diff", "42"}, "read"},
+		{"pr status", []string{"pr", "status"}, "read"},
+		{"workflow list", []string{"workflow", "list"}, "read"},
+		{"run watch (read-only polling)", []string{"run", "watch", "111"}, "read"},
+		{"release list", []string{"release", "list"}, "read"},
 
-// TestEnsureFreshToken_CacheHit verifies that a non-stale cache short-
-// circuits the mint path. We can't directly test the mint path without
-// a real GitHub client; the e2e test covers it.
-func TestEnsureFreshToken_CacheHit(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "gh-token.json")
-	want := "ghs_cached_and_fresh"
-	writeOrFatal(t, path, cachedToken{Token: want, ExpiresAt: time.Now().Add(45 * time.Minute)})
+		// Write commands.
+		{"issue create", []string{"issue", "create", "--title", "x"}, "write"},
+		{"issue comment", []string{"issue", "comment", "1", "--body", "hi"}, "write"},
+		{"issue close", []string{"issue", "close", "1"}, "write"},
+		{"pr create", []string{"pr", "create", "--title", "x"}, "write"},
+		{"pr merge", []string{"pr", "merge", "42", "--squash"}, "write"},
+		{"pr review (any args)", []string{"pr", "review", "42", "--approve"}, "write"},
+		{"release create", []string{"release", "create", "v1.0"}, "write"},
+		{"workflow run", []string{"workflow", "run", "ci.yml"}, "write"},
+		{"repo edit", []string{"repo", "edit", "--description", "x"}, "write"},
+		{"repo sync", []string{"repo", "sync"}, "write"},
+		{"secret set", []string{"secret", "set", "FOO", "--body", "x"}, "write"},
+		{"variable set", []string{"variable", "set", "BAR", "--body", "x"}, "write"},
+		{"run rerun", []string{"run", "rerun", "111"}, "write"},
+		{"run cancel", []string{"run", "cancel", "111"}, "write"},
 
-	logger := discardLogger(t)
-	got, err := ensureFreshToken(path, logger)
-	if err != nil {
-		t.Fatalf("ensureFreshToken: %v", err)
+		// gh api defaults to GET (read).
+		{"api GET", []string{"api", "/repos/foo/bar"}, "read"},
+		{"api explicit GET", []string{"api", "/repos/foo/bar", "-X", "GET"}, "read"},
+		{"api explicit GET --method=", []string{"api", "/repos/foo/bar", "--method=GET"}, "read"},
+
+		// gh api with mutating method or fields → write.
+		{"api -X PUT", []string{"api", "/repos/foo/bar/contents/x", "-X", "PUT"}, "write"},
+		{"api -X POST", []string{"api", "/repos/foo/bar/issues", "-X", "POST"}, "write"},
+		{"api -X PATCH", []string{"api", "/x", "-X", "PATCH"}, "write"},
+		{"api -X DELETE", []string{"api", "/repos/foo/bar", "-X", "DELETE"}, "write"},
+		{"api --method=POST", []string{"api", "/x", "--method=POST"}, "write"},
+		{"api -f field", []string{"api", "/repos/foo/bar/issues", "-f", "title=x"}, "write"},
+		{"api -F field", []string{"api", "/x", "-F", "name=value"}, "write"},
+		{"api --field=", []string{"api", "/x", "--field=foo=bar"}, "write"},
+		{"api --raw-field", []string{"api", "/x", "--raw-field", "k=v"}, "write"},
+
+		// Subcommands not in the table → read (safer default).
+		{"unknown noun", []string{"newcmd"}, "read"},
+		{"unknown verb", []string{"issue", "totally-new-action"}, "read"},
+		{"new gh extension", []string{"copilot", "explain"}, "read"},
+
+		// Options before verb are skipped to find the verb.
+		{"repo --json X view", []string{"repo", "--json", "name", "view"}, "read"},
+		{"issue --repo foo/bar create", []string{"issue", "--repo", "foo/bar", "create"}, "write"},
+
+		// gh codespace ssh (write — modifies/uses a remote codespace).
+		{"codespace ssh", []string{"codespace", "ssh"}, "read"}, // not in table; defaults to read
+
+		// Things that wouldn't be misclassified.
+		{"verb name shadows another", []string{"issue", "create", "list"}, "write"},
 	}
-	if got != want {
-		t.Errorf("token = %q, want %q", got, want)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classify(tc.argv)
+			if got != tc.want {
+				t.Errorf("classify(%v) = %q, want %q", tc.argv, got, tc.want)
+			}
+		})
 	}
-}
-
-// TestEnsureFreshToken_StaleCacheTriggersMintAttempt asserts that a
-// near-expiry token isn't returned as-is. We can't actually run a mint
-// in a unit test (needs the App key + network), but we can verify the
-// "skip cache" branch by observing that the function returns an error
-// when env vars are unset (because mint requires them).
-func TestEnsureFreshToken_StaleCacheTriggersMintAttempt(t *testing.T) {
-	// Ensure REIN_* env is unset for this test
-	for _, k := range []string{"REIN_APP_CLIENT_ID", "REIN_APP_PRIVATE_KEY_PATH", "REIN_APP_INSTALLATION_ID", "REIN_TEST_REPO_A"} {
-		old := os.Getenv(k)
-		os.Unsetenv(k)
-		defer os.Setenv(k, old)
-	}
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "gh-token.json")
-	writeOrFatal(t, path, cachedToken{Token: "ghs_stale", ExpiresAt: time.Now().Add(30 * time.Second)})
-
-	logger := discardLogger(t)
-	_, err := ensureFreshToken(path, logger)
-	if err == nil {
-		t.Fatal("expected error from missing REIN_* env when cache is stale")
-	}
-}
-
-func TestEnsureFreshToken_AbsentCacheTriggersMintAttempt(t *testing.T) {
-	for _, k := range []string{"REIN_APP_CLIENT_ID", "REIN_APP_PRIVATE_KEY_PATH", "REIN_APP_INSTALLATION_ID", "REIN_TEST_REPO_A"} {
-		old := os.Getenv(k)
-		os.Unsetenv(k)
-		defer os.Setenv(k, old)
-	}
-	logger := discardLogger(t)
-	_, err := ensureFreshToken(filepath.Join(t.TempDir(), "absent.json"), logger)
-	if err == nil {
-		t.Fatal("expected error from missing REIN_* env when cache is absent")
-	}
-}
-
-// --- helpers ---
-
-func mustWrite(t *testing.T, path, body string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
-}
-
-func writeOrFatal(t *testing.T, path string, c cachedToken) {
-	t.Helper()
-	body, err := json.Marshal(c)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	mustWrite(t, path, string(body))
-}
-
-func discardLogger(t *testing.T) *log.Logger {
-	t.Helper()
-	return log.New(io.Discard, "", 0)
 }

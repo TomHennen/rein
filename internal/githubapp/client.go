@@ -89,6 +89,24 @@ func (c *Client) MintWriteToken(ctx context.Context) (token string, expiresAt ti
 	})
 }
 
+// MintGhReadOnlyToken returns a read-only installation token shaped for
+// gh read subcommands (gh repo view, gh issue list, gh pr view, etc.):
+// contents:read + issues:read + pull_requests:read + metadata:read.
+//
+// This is the "long-lived cacheable" tier of the gh two-tier model
+// (CP3.7). The cached token sits on disk for up to its full ~1h TTL;
+// limiting it to read-only means an exfil during that window grants
+// read-only capability, not full implement-role write capability.
+// Mirrors the principle behind the git read/write split in CP3.
+func (c *Client) MintGhReadOnlyToken(ctx context.Context) (token string, expiresAt time.Time, err error) {
+	return c.mint(ctx, &githubauth.InstallationPermissions{
+		Contents:     githubauth.Ptr("read"),
+		Issues:       githubauth.Ptr("read"),
+		PullRequests: githubauth.Ptr("read"),
+		Metadata:     githubauth.Ptr("read"),
+	})
+}
+
 // MintGhSessionToken returns an installation token shaped for the design's
 // `implement` role (§4.2.2): contents:write + issues:write +
 // pull_requests:write + metadata:read. Used to back the `gh` CLI session.
@@ -112,9 +130,11 @@ func (c *Client) MintWriteToken(ctx context.Context) (token string, expiresAt ti
 // proposed in design §4.2.8.
 //
 // 5-minute TTL on this token (per design §4.2.5) is not enforceable at the
-// GitHub API layer — installation tokens always return ~1h. CP3.6's
-// shim revokes the previous token whenever it mints a fresh one, which
-// approximates the 5m effective window for active sessions.
+// GitHub API layer — installation tokens always return ~1h. CP3.7 mints
+// this tier JIT per gh write call (no caching) and revokes it via
+// RevokeToken as soon as gh exits, giving an effective TTL of
+// "gh process lifetime + revoke RTT" — typically sub-second, far below
+// the 5-min target.
 func (c *Client) MintGhSessionToken(ctx context.Context) (token string, expiresAt time.Time, err error) {
 	return c.mint(ctx, &githubauth.InstallationPermissions{
 		Contents:     githubauth.Ptr("write"),

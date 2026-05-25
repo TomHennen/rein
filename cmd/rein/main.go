@@ -29,6 +29,7 @@ import (
 
 	"github.com/TomHennen/rein/internal/broker"
 	"github.com/TomHennen/rein/internal/config"
+	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
 )
 
@@ -274,14 +275,14 @@ func optionConsumesNextArg(a string) bool {
 // model where the env is injected per-process. Trade-off: the env file
 // has to be re-sourced when the token expires (~1h GitHub-imposed TTL).
 //
-// Token permissions are deliberately narrower than the design's full
-// `implement` role: contents:read + issues:write + pull_requests:write +
-// metadata:read. Specifically NO contents:write — git push already routes
-// through the credential helper with its dedicated write-tier mint, so
-// granting it here too would over-broaden `gh api` and similar low-level
-// subcommands. Known consequence: `gh pr merge`, `gh release create`,
-// and `gh repo edit` 403 with this token; agents should perform merges
-// via local git push instead.
+// Token tier: READ-ONLY (issues:read + pulls:read + contents:read +
+// metadata:read), shared with the rein-gh shim's read-tier cache (CP3.7).
+// The env file gets sourced into a user shell and the token sits in env
+// for the shell's lifetime — read-only keeps blast radius tight if
+// exfiltrated. Users who need write capability via gh should use the
+// rein-gh shim (rein install-shim; PATH-front), which mints fresh write
+// tokens JIT per call and revokes them when gh exits. Adding a
+// `--tier=write` flag here is a deliberate future opt-in, not a default.
 //
 // Why only GH_TOKEN (not GITHUB_TOKEN): GITHUB_TOKEN is honored by many
 // tools beyond gh (Go SDK, hub, act, gitleaks, etc.). Setting it from
@@ -303,32 +304,41 @@ func ghAuth() error {
 	}
 	defer closeLog()
 
-	client, err := githubapp.NewClient(appCfg)
+	stateDir, err := config.StateDir()
 	if err != nil {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), mintTimeout)
-	defer cancel()
-	token, expiresAt, err := client.MintGhSessionToken(ctx)
+	// Use the same read-tier token + cache as the rein-gh shim. The
+	// token written to the env file has only {issues:read, pulls:read,
+	// contents:read, metadata:read} — exfil from a shell's env grants
+	// read-only capability. Users who need write capability via gh
+	// should use the shim (PATH-front), which mints write tokens JIT
+	// per-call and revokes them on gh exit.
+	client, err := githubapp.NewClient(appCfg)
 	if err != nil {
-		logger.Printf("gh-auth mint failed: %v", err)
-		return fmt.Errorf("mint gh session token: %w", err)
+		return err
 	}
-	logger.Printf("gh-auth mint succeeded: tier=gh-session expires_at=%s ttl=%s token_len=%d",
-		expiresAt.Format(time.RFC3339),
-		time.Until(expiresAt).Round(time.Second),
-		len(token))
-
-	stateDir, err := config.StateDir()
+	token, expiresAt, err := ghsession.EnsureFresh(
+		ghsession.ReadCachePath(stateDir),
+		appCfg,
+		client.MintGhReadOnlyToken,
+		5*time.Minute,
+		mintTimeout,
+		logger,
+	)
 	if err != nil {
 		return err
 	}
 	envPath := filepath.Join(stateDir, "gh-env.sh")
 	body := fmt.Sprintf(""+
-		"# rein gh-auth env (CP3.5). POSIX-shell syntax — sh/bash/zsh only.\n"+
+		"# rein gh-auth env (CP3.5/CP3.7). POSIX-shell syntax — sh/bash/zsh only.\n"+
 		"# Source this file before launching an agent that uses `gh`:\n"+
 		"#   . %s\n"+
+		"# Token tier: READ-ONLY (issues:read + pulls:read + contents:read + metadata:read).\n"+
+		"# For write capability via gh, use the rein-gh shim (rein install-shim;\n"+
+		"# PATH-front). The shim mints fresh write tokens JIT per-call and\n"+
+		"# revokes them on gh exit.\n"+
 		"# Expires at: %s (re-run `rein gh-auth` and re-source before then).\n"+
 		"export GH_TOKEN=%s\n",
 		envPath,

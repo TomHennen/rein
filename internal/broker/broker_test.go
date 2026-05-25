@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/TomHennen/rein/internal/tokencache"
 )
 
 // stubMinter exposes a configurable token+err MintFunc and a call counter.
@@ -189,7 +191,7 @@ func TestDetectWrite(t *testing.T) {
 		}
 		// Read cache should be untouched (still holds original cached value).
 		body, _ := os.ReadFile(cache)
-		var c cachedToken
+		var c tokencache.Entry
 		_ = json.Unmarshal(body, &c)
 		if c.Token != "ghs_cached_read" {
 			t.Errorf("write path should not have overwritten read cache; cache.Token = %q", c.Token)
@@ -367,7 +369,7 @@ func TestReadCache(t *testing.T) {
 		if err != nil {
 			t.Fatalf("cache should exist after mint: %v", err)
 		}
-		var c cachedToken
+		var c tokencache.Entry
 		if err := json.Unmarshal(body, &c); err != nil {
 			t.Fatalf("cache body not valid JSON: %v", err)
 		}
@@ -589,7 +591,7 @@ func mustWrite(t *testing.T, path, body string) {
 
 func writeCacheFile(t *testing.T, path, token string, expiresAt time.Time) {
 	t.Helper()
-	body, err := json.Marshal(cachedToken{Token: token, ExpiresAt: expiresAt})
+	body, err := json.Marshal(tokencache.Entry{Token: token, ExpiresAt: expiresAt})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
