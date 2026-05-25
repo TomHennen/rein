@@ -526,6 +526,153 @@ func TestRevokeOnStoreErase(t *testing.T) {
 	}
 }
 
+// TestScopeCeiling covers the CP4 InScope predicate: in-scope requests
+// proceed normally; out-of-scope requests get the TM-G8 placeholder; the
+// empty-path policy chooses between allow (default) and refuse.
+func TestScopeCeiling(t *testing.T) {
+	makeStdin := func(path string) string {
+		s := "protocol=https\nhost=github.com\n"
+		if path != "" {
+			s += "path=" + path + "\n"
+		}
+		return s + "\n"
+	}
+
+	t.Run("in-scope repo proceeds to read mint", func(t *testing.T) {
+		read := &stubMinter{token: "ghs_read"}
+		cfg := Config{
+			MintRead: read.Mint,
+			Logger:   discardLogger(),
+			InScope:  func(r string) bool { return r == "owner/in-scope-repo" },
+		}
+		var stdout bytes.Buffer
+		if err := RunCredentialHelper("get", strings.NewReader(makeStdin("owner/in-scope-repo.git")), &stdout, cfg); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "password=ghs_read") {
+			t.Errorf("expected real token, got %q", stdout.String())
+		}
+		if read.Calls() != 1 {
+			t.Errorf("read mint calls = %d, want 1", read.Calls())
+		}
+	})
+
+	t.Run("out-of-scope repo refused with TM-G8 placeholder", func(t *testing.T) {
+		read := &stubMinter{token: "should-not-be-used"}
+		cfg := Config{
+			MintRead: read.Mint,
+			Logger:   discardLogger(),
+			InScope:  func(r string) bool { return r == "owner/in-scope-repo" },
+		}
+		var stdout bytes.Buffer
+		if err := RunCredentialHelper("get", strings.NewReader(makeStdin("owner/other-repo.git")), &stdout, cfg); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "password=rein-placeholder-out-of-scope") {
+			t.Errorf("expected out-of-scope placeholder, got %q", stdout.String())
+		}
+		if read.Calls() != 0 {
+			t.Errorf("read mint calls = %d, want 0 (refusal must not call mint)", read.Calls())
+		}
+	})
+
+	t.Run("empty path with EmptyPathScope=allow (default)", func(t *testing.T) {
+		read := &stubMinter{token: "ghs_read"}
+		cfg := Config{
+			MintRead: read.Mint,
+			Logger:   discardLogger(),
+			InScope:  func(r string) bool { return false }, // would refuse if checked
+		}
+		var stdout bytes.Buffer
+		if err := RunCredentialHelper("get", strings.NewReader(makeStdin("")), &stdout, cfg); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "password=ghs_read") {
+			t.Errorf("default allow should have proceeded to mint, got %q", stdout.String())
+		}
+	})
+
+	t.Run("empty path with EmptyPathScope=refuse", func(t *testing.T) {
+		read := &stubMinter{token: "should-not-be-used"}
+		cfg := Config{
+			MintRead:       read.Mint,
+			Logger:         discardLogger(),
+			InScope:        func(r string) bool { return true },
+			EmptyPathScope: "refuse",
+		}
+		var stdout bytes.Buffer
+		if err := RunCredentialHelper("get", strings.NewReader(makeStdin("")), &stdout, cfg); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "password=rein-placeholder-out-of-scope") {
+			t.Errorf("refuse mode should have placeholder'd, got %q", stdout.String())
+		}
+	})
+
+	t.Run("nil InScope disables scope enforcement (pre-CP4 behavior)", func(t *testing.T) {
+		read := &stubMinter{token: "ghs_read"}
+		cfg := Config{
+			MintRead: read.Mint,
+			Logger:   discardLogger(),
+			// InScope intentionally nil
+		}
+		var stdout bytes.Buffer
+		if err := RunCredentialHelper("get", strings.NewReader(makeStdin("any/repo.git")), &stdout, cfg); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "password=ghs_read") {
+			t.Errorf("nil InScope should proceed normally, got %q", stdout.String())
+		}
+	})
+
+	t.Run("scope refusal does NOT trigger write mint even if DetectWrite=true", func(t *testing.T) {
+		read := &stubMinter{token: "should-not-be-used"}
+		write := &stubMinter{token: "should-not-be-used-write"}
+		cfg := Config{
+			MintRead:    read.Mint,
+			MintWrite:   write.Mint,
+			Logger:      discardLogger(),
+			DetectWrite: alwaysWrite,
+			InScope:     func(r string) bool { return false },
+		}
+		var stdout bytes.Buffer
+		if err := RunCredentialHelper("get", strings.NewReader(makeStdin("any/repo.git")), &stdout, cfg); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "password=rein-placeholder-out-of-scope") {
+			t.Errorf("expected out-of-scope placeholder, got %q", stdout.String())
+		}
+		if write.Calls() != 0 || read.Calls() != 0 {
+			t.Errorf("expected no mints; got read=%d write=%d", read.Calls(), write.Calls())
+		}
+	})
+
+	t.Run("path normalization: case-insensitive + .git suffix tolerated", func(t *testing.T) {
+		read := &stubMinter{token: "ghs_read"}
+		seen := []string{}
+		cfg := Config{
+			MintRead: read.Mint,
+			Logger:   discardLogger(),
+			InScope: func(r string) bool {
+				seen = append(seen, r)
+				return r == "TomHennen/agentcreds-validation-a"
+			},
+		}
+		var stdout bytes.Buffer
+		// Path contains uppercase + .git; pathToRepo doesn't lowercase
+		// (the caller's InScope does). Confirm caller sees the raw form.
+		if err := RunCredentialHelper("get", strings.NewReader(makeStdin("TomHennen/agentcreds-validation-a.git")), &stdout, cfg); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "password=ghs_read") {
+			t.Errorf("expected real token, got %q", stdout.String())
+		}
+		if len(seen) != 1 || seen[0] != "TomHennen/agentcreds-validation-a" {
+			t.Errorf("InScope received %v, want [TomHennen/agentcreds-validation-a]", seen)
+		}
+	})
+}
+
 // TestParseAttrsURL confirms the url= backfill matches what git sends in the
 // modern protocol (gitcredentials(7)).
 func TestParseAttrsURL(t *testing.T) {

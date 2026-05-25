@@ -31,6 +31,7 @@ import (
 	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
+	"github.com/TomHennen/rein/internal/session"
 )
 
 const (
@@ -95,6 +96,16 @@ func runCredentialHelper(action string) error {
 	}
 	defer closeLog()
 
+	sess, sessSource, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
+	if err != nil {
+		return err
+	}
+	// Override the App config's repo with the session's first repo. CP4
+	// has single-repo sessions; multi-repo sessions in CP5+ will need
+	// per-mint repo selection.
+	appCfg.RepoName = bareRepoName(sess.Repos[0])
+	logger.Printf("session: id=%q role=%q repos=%v source=%s", sess.ID, sess.Role, sess.Repos, sessSource)
+
 	client, err := githubapp.NewClient(appCfg)
 	if err != nil {
 		return err
@@ -120,7 +131,22 @@ func runCredentialHelper(action string) error {
 		ReadCachePath: filepath.Join(stateDir, "cache", "read-token.json"),
 		DetectWrite:   func() bool { return detectWriteIntent(logger) },
 		Revoke:        client.RevokeToken,
+		InScope:       sess.Contains,
+		// EmptyPathScope stays "" (= allow): existing test setups
+		// without useHttpPath=true continue to work. install-shim's
+		// instructions recommend setting useHttpPath for strict
+		// enforcement.
 	})
+}
+
+// bareRepoName extracts "name" from "owner/name". The App installation
+// pins the owner, so the mint API only accepts the bare name.
+func bareRepoName(ownerSlashName string) string {
+	_, name, ok := strings.Cut(ownerSlashName, "/")
+	if !ok {
+		return ownerSlashName
+	}
+	return name
 }
 
 // detectWriteIntent is the Shape B discriminator. Primary signal: REIN_GIT_OP
@@ -304,6 +330,13 @@ func ghAuth() error {
 	}
 	defer closeLog()
 
+	sess, sessSource, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
+	if err != nil {
+		return err
+	}
+	appCfg.RepoName = bareRepoName(sess.Repos[0])
+	logger.Printf("gh-auth session: id=%q repos=%v source=%s", sess.ID, sess.Repos, sessSource)
+
 	stateDir, err := config.StateDir()
 	if err != nil {
 		return err
@@ -427,7 +460,13 @@ func installShim() error {
 	fmt.Println("Verify with:")
 	fmt.Println("  which git gh    # both should resolve to the shim dir")
 	fmt.Println()
-	fmt.Println("CP6's `rein run` wrapper will set PATH per-wrapped-process.")
+	fmt.Println("For strict session scope enforcement (CP4+), also set:")
+	fmt.Println("  git config --global credential.useHttpPath true")
+	fmt.Println("Without it, the helper can't tell which repo git is asking for and")
+	fmt.Println("will defer to the token's server-side scope check (still safe; less")
+	fmt.Println("informative when an out-of-scope request is refused).")
+	fmt.Println()
+	fmt.Println("CP6's `rein run` wrapper will set PATH + git config per-wrapped-process.")
 	return nil
 }
 

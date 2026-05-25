@@ -36,6 +36,7 @@ import (
 	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
+	"github.com/TomHennen/rein/internal/session"
 )
 
 const (
@@ -126,9 +127,9 @@ func runReadAndExec(realGh string, args []string, stateDir string, logger *log.L
 // own hosts.yml-based auth and surface its own error rather than a
 // shim-level error.
 func readTierToken(stateDir string, logger *log.Logger) string {
-	appCfg, err := config.LoadAppConfig()
+	appCfg, err := loadAppCfgWithSession(logger)
 	if err != nil {
-		logger.Printf("read tier: config unavailable: %v; execing gh without GH_TOKEN", err)
+		logger.Printf("read tier: %v; execing gh without GH_TOKEN", err)
 		return ""
 	}
 	client, err := githubapp.NewClient(appCfg)
@@ -151,17 +152,45 @@ func readTierToken(stateDir string, logger *log.Logger) string {
 	return token
 }
 
+// loadAppCfgWithSession returns the App config overridden with the
+// session's repo. CP4 sessions have one repo; CP5+ multi-repo will
+// require per-call repo selection.
+func loadAppCfgWithSession(logger *log.Logger) (githubapp.Config, error) {
+	appCfg, err := config.LoadAppConfig()
+	if err != nil {
+		return githubapp.Config{}, err
+	}
+	sess, src, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
+	if err != nil {
+		return githubapp.Config{}, fmt.Errorf("load session: %w", err)
+	}
+	appCfg.RepoName = bareRepoName(sess.Repos[0])
+	logger.Printf("session: id=%q repos=%v source=%s", sess.ID, sess.Repos, src)
+	return appCfg, nil
+}
+
+// bareRepoName extracts the "name" half of "owner/name". The App
+// installation already pins the owner, so the mint API only accepts the
+// bare name.
+func bareRepoName(ownerSlashName string) string {
+	_, name, ok := strings.Cut(ownerSlashName, "/")
+	if !ok {
+		return ownerSlashName
+	}
+	return name
+}
+
 // runWrite mints a fresh write-tier token (no cache), forks the real gh
 // with GH_TOKEN set, waits for it to exit, best-effort revokes the
 // token, and returns gh's exit code. On mint failure we still exec gh
 // (without GH_TOKEN) so the user gets gh's "needs auth" error instead
 // of a shim error.
 func runWrite(realGh string, args []string, stateDir string, logger *log.Logger) int {
-	appCfg, cfgErr := config.LoadAppConfig()
+	appCfg, cfgErr := loadAppCfgWithSession(logger)
 	var token string
 	var client *githubapp.Client
 	if cfgErr != nil {
-		logger.Printf("write tier: config unavailable: %v; execing gh without GH_TOKEN", cfgErr)
+		logger.Printf("write tier: %v; execing gh without GH_TOKEN", cfgErr)
 	} else if c, err := githubapp.NewClient(appCfg); err != nil {
 		logger.Printf("write tier: NewClient failed: %v; execing gh without GH_TOKEN", err)
 	} else {

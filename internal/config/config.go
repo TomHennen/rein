@@ -67,3 +67,17 @@ func StateDir() (string, error) {
 	}
 	return dir, nil
 }
+
+// ConfigDir is $XDG_CONFIG_HOME/rein (defaulting to ~/.config/rein).
+// Does NOT create the directory — config files are user-edited.
+func ConfigDir() (string, error) {
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("locate home dir: %w", err)
+		}
+		base = filepath.Join(home, ".config")
+	}
+	return filepath.Join(base, "rein"), nil
+}

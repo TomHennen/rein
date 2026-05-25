@@ -113,6 +113,36 @@ type Config struct {
 	// rather than the GitHub-imposed ~1h. Best-effort: failures are
 	// logged and ignored.
 	Revoke func(ctx context.Context, token string) error
+
+	// InScope returns true when the requested github.com repo (as
+	// "owner/name") is within the session's scope ceiling. Called
+	// for every github.com get with a non-empty repo derived from the
+	// credential helper's `path` attribute. Nil disables scope
+	// enforcement (every github.com get is implicitly in-scope —
+	// pre-CP4 behavior).
+	//
+	// Refusal: an out-of-scope request returns the TM-G8 placeholder
+	// (never empty), with a clear log line naming the requested repo.
+	// The caller's InScope implementation is responsible for any
+	// session-wide accounting (the broker just consults the predicate).
+	//
+	// EmptyPathScope governs what happens when path is empty (caller
+	// hasn't set credential.useHttpPath=true).
+	InScope func(repo string) bool
+
+	// EmptyPathScope controls the behavior when InScope is set but the
+	// path attribute is empty (git wasn't configured with
+	// credential.useHttpPath=true). The helper cannot determine which
+	// repo is being requested.
+	//
+	//   "allow"  — proceed (default if InScope is nil); the token
+	//              itself will enforce server-side. Single-repo
+	//              sessions are safe with this.
+	//   "refuse" — return TM-G8 placeholder; force the operator to
+	//              enable useHttpPath for strict enforcement.
+	//
+	// Empty string = "allow".
+	EmptyPathScope string
 }
 
 // RunCredentialHelper drives the protocol for one invocation. action is the
@@ -236,10 +266,64 @@ func handleGet(attrs map[string]string, stdout io.Writer, cfg Config) error {
 		return nil
 	}
 
+	if !checkScopeCeiling(attrs["path"], cfg) {
+		// Out of scope. TM-G8: return placeholder, never empty.
+		return writeCredential(stdout, "x-access-token", "rein-placeholder-out-of-scope")
+	}
+
 	if isWriteIntent(cfg) {
 		return serveWrite(stdout, cfg)
 	}
 	return serveRead(stdout, cfg)
+}
+
+// checkScopeCeiling consults Config.InScope. Returns true (proceed) when:
+//   - InScope is nil (scope enforcement disabled), OR
+//   - path normalizes to an owner/repo that InScope accepts.
+//
+// Returns false (refuse with placeholder) when InScope is set and the
+// repo is out of scope. Empty-path behavior follows EmptyPathScope.
+//
+// A refusal is logged with both the requested repo and (for help) a
+// reminder to check the session's allowed list.
+func checkScopeCeiling(path string, cfg Config) bool {
+	if cfg.InScope == nil {
+		return true
+	}
+	repo := pathToRepo(path)
+	if repo == "" {
+		// Caller hasn't configured useHttpPath=true (path attr is empty).
+		switch cfg.EmptyPathScope {
+		case "refuse":
+			cfg.Logger.Printf("scope check: path attr empty (set credential.useHttpPath=true); EmptyPathScope=refuse; returning TM-G8 placeholder")
+			return false
+		default: // "" or "allow"
+			cfg.Logger.Printf("scope check: path attr empty (set credential.useHttpPath=true for strict scope-check); allowing — token's repo scope still enforces server-side")
+			return true
+		}
+	}
+	if cfg.InScope(repo) {
+		return true
+	}
+	cfg.Logger.Printf("scope check: REFUSED repo=%q (not in session's scope ceiling); returning TM-G8 placeholder", repo)
+	return false
+}
+
+// pathToRepo extracts owner/repo from a credential-helper `path`
+// attribute. Strips ".git", trailing slash, takes the first two
+// segments. Returns "" if the path doesn't have owner/repo shape.
+func pathToRepo(path string) string {
+	path = strings.TrimSpace(path)
+	path = strings.TrimPrefix(path, "/")
+	path = strings.TrimSuffix(path, "/")
+	if len(path) >= 4 && strings.EqualFold(path[len(path)-4:], ".git") {
+		path = path[:len(path)-4]
+	}
+	parts := strings.SplitN(path, "/", 3)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return ""
+	}
+	return parts[0] + "/" + parts[1]
 }
 
 // isWriteIntent invokes the caller-supplied DetectWrite, defaulting to
