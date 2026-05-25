@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TomHennen/rein/internal/approvals"
 	"github.com/TomHennen/rein/internal/broker"
 	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/ghsession"
@@ -39,6 +41,12 @@ const (
 	// mintTimeout caps each installation-token mint. Git users feel this
 	// latency directly when the helper is invoked, so keep it tight.
 	mintTimeout = 5 * time.Second
+
+	// approvalTTL is how long an approval covers writes for a session
+	// before the human must re-confirm. 4h matches design §4.2.2's
+	// default_read_ttl for the implement role — same span of human
+	// attention.
+	approvalTTL = 4 * time.Hour
 )
 
 func main() {
@@ -66,6 +74,15 @@ func main() {
 			fmt.Fprintf(os.Stderr, "rein gh-auth: %v\n", err)
 			os.Exit(1)
 		}
+	case "approval":
+		if len(os.Args) < 3 {
+			usage()
+			os.Exit(2)
+		}
+		if err := runApproval(os.Args[2]); err != nil {
+			fmt.Fprintf(os.Stderr, "rein approval: %v\n", err)
+			os.Exit(1)
+		}
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -80,6 +97,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  rein credential-helper {get|store|erase}")
 	fmt.Fprintln(os.Stderr, "  rein install-shim")
 	fmt.Fprintln(os.Stderr, "  rein gh-auth")
+	fmt.Fprintln(os.Stderr, "  rein approval {status|clear}")
 }
 
 // runCredentialHelper wires env-derived config to the broker. All errors
@@ -137,23 +155,26 @@ func runCredentialHelper(action string) error {
 		// without useHttpPath=true continue to work. install-shim's
 		// instructions recommend setting useHttpPath for strict
 		// enforcement.
-		ConfirmWrite: buildConfirmWrite(sess, logger),
+		ConfirmWrite: buildConfirmWrite(sess, stateDir, logger),
 	})
 }
 
-// buildConfirmWrite returns a ConfirmWrite predicate backed by the
-// production /dev/tty prompter, OR nil if the session doesn't bind an
-// issue (no prompt requested). Tests bypass this by constructing
-// broker.Config directly.
+// buildConfirmWrite returns a ConfirmWrite predicate that:
+//  1. Honors an existing approval record (no prompt) if it covers
+//     the current session signature and hasn't expired.
+//  2. Otherwise prompts via /dev/tty; on approval, writes a new
+//     approval record valid for approvalTTL.
 //
-// The 60-second prompt timeout gives the human room to react while
-// preventing an indefinite hang if they walked away. Phase 1's
-// status-app prompter can use a longer (or no) timeout.
-func buildConfirmWrite(sess session.Session, logger *log.Logger) func(repo string) bool {
+// Per-write prompting was the original CP5 interpretation but felt
+// excessive for productive sessions; design §2.2's prompt is a
+// scope-establishment ceremony, not a per-operation gate. The
+// approval record makes it once-per-session.
+//
+// Returns nil when the session doesn't bind an issue — no prompt
+// requested, no approval needed. Tests bypass this by constructing
+// broker.Config directly.
+func buildConfirmWrite(sess session.Session, stateDir string, logger *log.Logger) func(repo string) bool {
 	if sess.Issue == 0 {
-		// Silent disable is a footgun if the session role would
-		// normally need write capability. Log a WARN so the operator
-		// knows the human gate isn't active.
 		if isWriteCapableRole(sess.Role) {
 			logger.Printf("WARN: ConfirmWrite disabled for write-capable role %q (session has no `issue:` field). Write tokens will mint without human confirmation. Add `issue: <number>` to the session file to enable the prompt.", sess.Role)
 		} else {
@@ -161,13 +182,30 @@ func buildConfirmWrite(sess session.Session, logger *log.Logger) func(repo strin
 		}
 		return nil
 	}
+	sig := approvals.SignatureOf(sess)
+	approvalPath := approvals.Path(stateDir)
 	prompter := prompt.TTYPrompter{}
+
 	return func(repo string) bool {
+		// Check for existing approval first.
+		if rec, err := approvals.Read(approvalPath); err == nil {
+			if approvals.Valid(rec, sig, time.Now()) {
+				logger.Printf("ConfirmWrite: covered by existing approval (granted at %s, valid until %s)",
+					rec.ApprovedAt.Format(time.RFC3339),
+					rec.ExpiresAt.Format(time.RFC3339))
+				return true
+			}
+			logger.Printf("ConfirmWrite: existing approval mismatched or expired (sig_match=%v, expires=%s); re-prompting",
+				rec.Signature == sig, rec.ExpiresAt.Format(time.RFC3339))
+		} else if !errors.Is(err, os.ErrNotExist) {
+			logger.Printf("ConfirmWrite: approval load failed: %v; re-prompting", err)
+		}
+
 		req := prompt.Request{
 			SessionID: sess.ID,
 			Role:      sess.Role,
 			Repo:      repo,
-			Action:    "git push (write token mint)",
+			Action:    fmt.Sprintf("write access for this session (covers writes until +%s)", approvalTTL),
 			Issue:     sess.Issue,
 			Timeout:   60 * time.Second,
 		}
@@ -176,8 +214,72 @@ func buildConfirmWrite(sess session.Session, logger *log.Logger) func(repo strin
 			logger.Printf("ConfirmWrite: prompter error: %v; denying", err)
 			return false
 		}
-		return ok
+		if !ok {
+			return false
+		}
+
+		// Persist approval so subsequent writes within TTL skip prompt.
+		now := time.Now()
+		newRec := approvals.Record{
+			Signature:  sig,
+			SessionID:  sess.ID,
+			ApprovedAt: now,
+			ExpiresAt:  now.Add(approvalTTL),
+		}
+		if err := approvals.Write(approvalPath, newRec); err != nil {
+			logger.Printf("ConfirmWrite: approval write failed (continuing): %v", err)
+		} else {
+			logger.Printf("ConfirmWrite: APPROVED; approval recorded (valid until %s)",
+				newRec.ExpiresAt.Format(time.RFC3339))
+		}
+		return true
 	}
+}
+
+// runApproval handles `rein approval {status|clear}` — the operator's
+// escape hatches for inspecting or revoking the cached human approval.
+func runApproval(sub string) error {
+	stateDir, err := config.StateDir()
+	if err != nil {
+		return err
+	}
+	path := approvals.Path(stateDir)
+
+	switch sub {
+	case "status":
+		rec, err := approvals.Read(path)
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Println("no approval record (next write will prompt)")
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		now := time.Now()
+		fmt.Printf("approval record: %s\n", path)
+		fmt.Printf("  session_id:  %s\n", rec.SessionID)
+		fmt.Printf("  signature:   %s\n", rec.Signature[:12]+"...")
+		fmt.Printf("  approved_at: %s\n", rec.ApprovedAt.Format(time.RFC3339))
+		fmt.Printf("  expires_at:  %s (%s remaining)\n",
+			rec.ExpiresAt.Format(time.RFC3339),
+			time.Until(rec.ExpiresAt).Round(time.Second))
+		if now.After(rec.ExpiresAt) {
+			fmt.Println("  status:      EXPIRED (next write will prompt)")
+		} else {
+			fmt.Println("  status:      VALID (writes for this session skip the prompt)")
+		}
+		return nil
+	case "clear":
+		if err := approvals.Clear(path); err != nil {
+			return err
+		}
+		fmt.Println("approval cleared; next write will prompt")
+		return nil
+	default:
+		fmt.Fprintf(os.Stderr, "rein approval: unknown subcommand %q (want status|clear)\n", sub)
+		os.Exit(2)
+	}
+	return nil
 }
 
 // isWriteCapableRole returns true for the design's roles whose
