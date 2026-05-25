@@ -38,6 +38,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/TomHennen/rein/internal/approvals"
@@ -198,10 +199,27 @@ func ObtainApproval(ctx context.Context, req Request, cfg Config) bool {
 	// Layer 4: emit helpful stderr and deny. The user has to run
 	// `rein approval grant` in another terminal and retry the
 	// operation.
+	//
+	// We print both the bare `rein approval grant` (works if the user
+	// has rein on PATH — install-shim places rein in the shim dir
+	// alongside git/gh shims, so prepending shim dir to PATH gives
+	// them `rein`) AND an absolute path discovered from os.Executable
+	// (covers the case where they're running from a build tree).
 	fmt.Fprintln(cfg.Stderr)
 	fmt.Fprintf(cfg.Stderr, "rein: write blocked for %s on %s\n", req.Action, req.Repo)
 	fmt.Fprintln(cfg.Stderr, "  To grant write access for this session, in another terminal run:")
 	fmt.Fprintln(cfg.Stderr, "    rein approval grant")
+	if abs, err := os.Executable(); err == nil {
+		// The caller is typically a shim (cmd/rein-gh or cmd/rein-git)
+		// in the same dir as a copy of `rein` placed by install-shim.
+		// Compute that sibling path so the message has a working
+		// absolute reference even if PATH isn't set up yet.
+		if reinPath := filepath.Join(filepath.Dir(abs), "rein"); fileExists(reinPath) {
+			fmt.Fprintf(cfg.Stderr, "  (or with absolute path: %s approval grant)\n", reinPath)
+		} else {
+			fmt.Fprintf(cfg.Stderr, "  (or with absolute path: %s approval grant)\n", abs)
+		}
+	}
 	fmt.Fprintln(cfg.Stderr, "  Then retry your operation.")
 	fmt.Fprintln(cfg.Stderr)
 	cfg.Logger.Printf("grant: DENIED — no /dev/tty, no tmux; emitted helpful stderr")
@@ -261,6 +279,16 @@ func Grant(ctx context.Context, sess session.Session, cfg Config) bool {
 	}
 	recordApproval(cfg, sig, sess.ID)
 	return true
+}
+
+// fileExists reports whether path resolves to a regular file/symlink
+// that we can stat. Used to detect whether `rein` is co-located with
+// the calling shim binary.
+func fileExists(path string) bool {
+	if _, err := os.Stat(path); err == nil {
+		return true
+	}
+	return false
 }
 
 func joinRepos(repos []string) string {

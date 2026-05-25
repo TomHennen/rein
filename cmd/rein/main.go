@@ -595,6 +595,16 @@ func installShim() error {
 		fmt.Printf("installed shim: %s -> %s\n", dst, s.name)
 	}
 
+	// Also place a copy of rein itself in the shim dir so users who
+	// prepend the shim dir to PATH get `rein` available without a
+	// separate install step. Useful for commands like
+	// `rein approval grant` from a fresh terminal.
+	reinDst := filepath.Join(shimDir, "rein")
+	if err := copyFile(self, reinDst, 0o700); err != nil {
+		return fmt.Errorf("install rein into shim dir: %w", err)
+	}
+	fmt.Printf("installed: %s (rein itself, so adding shim dir to PATH gives you `rein`)\n", reinDst)
+
 	fmt.Println()
 	fmt.Println("To activate, prepend the shim dir to $PATH before launching agents:")
 	fmt.Printf("  export PATH=%s:$PATH\n\n", shellQuote(shimDir))
