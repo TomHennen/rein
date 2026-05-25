@@ -204,30 +204,28 @@ func ObtainApproval(ctx context.Context, req Request, cfg Config) bool {
 	}
 
 	// Layer 4: emit helpful stderr and deny. The user has to run
-	// `rein approval grant` in another terminal and retry the
-	// operation.
+	// `rein approval grant` in another terminal and retry.
 	//
-	// We print both the bare `rein approval grant` (works if the user
-	// has rein on PATH — install-shim places rein in the shim dir
-	// alongside git/gh shims, so prepending shim dir to PATH gives
-	// them `rein`) AND an absolute path discovered from os.Executable
-	// (covers the case where they're running from a build tree).
-	fmt.Fprintln(cfg.Stderr)
-	fmt.Fprintf(cfg.Stderr, "rein: write blocked for %s on %s\n", req.Action, req.Repo)
-	fmt.Fprintln(cfg.Stderr, "  To grant write access for this session, in another terminal run:")
-	fmt.Fprintln(cfg.Stderr, "    rein approval grant")
+	// We lead with the absolute path because a fresh terminal often
+	// doesn't have the shim dir on PATH. Mention the bare form as
+	// the convenience option for users with PATH set up.
+	reinCmd := "rein"
 	if abs, err := os.Executable(); err == nil {
-		// The caller is typically a shim (cmd/rein-gh or cmd/rein-git)
-		// in the same dir as a copy of `rein` placed by install-shim.
-		// Compute that sibling path so the message has a working
-		// absolute reference even if PATH isn't set up yet.
-		if reinPath := filepath.Join(filepath.Dir(abs), "rein"); fileExists(reinPath) {
-			fmt.Fprintf(cfg.Stderr, "  (or with absolute path: %s approval grant)\n", reinPath)
+		if rp := filepath.Join(filepath.Dir(abs), "rein"); fileExists(rp) {
+			reinCmd = rp
 		} else {
-			fmt.Fprintf(cfg.Stderr, "  (or with absolute path: %s approval grant)\n", abs)
+			reinCmd = abs
 		}
 	}
-	fmt.Fprintln(cfg.Stderr, "  Then retry your operation.")
+	fmt.Fprintln(cfg.Stderr)
+	fmt.Fprintf(cfg.Stderr, "rein: write blocked for %s on %s\n", req.Action, req.Repo)
+	fmt.Fprintln(cfg.Stderr, "  To grant write access for this session, in ANOTHER terminal run:")
+	fmt.Fprintf(cfg.Stderr, "    %s approval grant\n", reinCmd)
+	fmt.Fprintln(cfg.Stderr, "  (or just `rein approval grant` if you've added the shim dir to your PATH)")
+	fmt.Fprintln(cfg.Stderr, "  Then retry your operation here.")
+	fmt.Fprintln(cfg.Stderr)
+	fmt.Fprintln(cfg.Stderr, "  Note: invoking grant from this same terminal (e.g. claude's `!` shell")
+	fmt.Fprintln(cfg.Stderr, "  escape) won't work — the agent's bash subprocess has no /dev/tty.")
 	fmt.Fprintln(cfg.Stderr)
 	cfg.Logger.Printf("grant: DENIED — no /dev/tty, no tmux; emitted helpful stderr")
 	return false
@@ -252,19 +250,30 @@ func recordApproval(cfg Config, sig, sessionID string) {
 }
 
 // Grant is the entry point for the `rein approval grant` subcommand.
-// It always reads from /dev/tty (the prompter); no CLI flag accepts
-// the issue number. This makes a malicious or confused agent supply
-// the answer only by actively addressing /dev/tty, not by reading a
-// file and passing the number on a command line.
+// It tries /dev/tty first (no CLI flag accepts the issue number —
+// design §5.3 TM-G5 wants the answer to arrive via /dev/tty so a
+// confused or malicious agent can't supply it via a CLI arg). If
+// /dev/tty isn't available AND $TMUX is set, it falls back to
+// spawning a tmux popup that runs `rein approval grant` itself —
+// the popup's pty IS a /dev/tty, so the inner invocation completes
+// via layer 1 and writes the approval record. The outer call then
+// sees the record and returns true.
 //
-// On approval, writes the approval record so subsequent operations
-// within the TTL skip the prompt.
+// Recursion is bounded: the popup's grant invocation has a tty, so
+// it never hits the popup branch itself.
+//
+// If neither path resolves (no tty, no tmux), Grant returns false
+// with a helpful error logged. The subcommand surfaces this to the
+// user.
 func Grant(ctx context.Context, sess session.Session, cfg Config) bool {
 	if cfg.Logger == nil {
 		cfg.Logger = log.New(io.Discard, "", 0)
 	}
 	if cfg.Prompter == nil {
 		cfg.Prompter = prompt.TTYPrompter{}
+	}
+	if cfg.TmuxRunner == nil {
+		cfg.TmuxRunner = DefaultTmuxRunner
 	}
 	sig := approvals.SignatureOf(sess)
 	pr := prompt.Request{
@@ -276,16 +285,41 @@ func Grant(ctx context.Context, sess session.Session, cfg Config) bool {
 		Timeout:   cfg.PromptTimeout,
 	}
 	approved, err := cfg.Prompter.Confirm(ctx, pr)
-	if err != nil {
-		cfg.Logger.Printf("grant subcommand: prompter error: %v", err)
+	switch {
+	case err == nil && approved:
+		recordApproval(cfg, sig, sess.ID)
+		return true
+	case err == nil:
+		cfg.Logger.Printf("grant subcommand: denied (wrong answer)")
+		return false
+	case errors.Is(err, prompt.ErrCancelled):
+		cfg.Logger.Printf("grant subcommand: cancelled")
 		return false
 	}
-	if !approved {
-		cfg.Logger.Printf("grant subcommand: denied")
-		return false
+
+	// No /dev/tty. Try tmux popup if available — common case is the
+	// user running `! rein approval grant` from inside claude that
+	// itself was launched from inside tmux.
+	cfg.Logger.Printf("grant subcommand: /dev/tty unavailable (%v); trying tmux popup", err)
+	if os.Getenv("TMUX") != "" {
+		reinCmd := "rein"
+		if abs, err := os.Executable(); err == nil {
+			if rp := filepath.Join(filepath.Dir(abs), "rein"); fileExists(rp) {
+				reinCmd = rp
+			}
+		}
+		ctxPopup, cancel := context.WithTimeout(ctx, 90*time.Second)
+		defer cancel()
+		_ = cfg.TmuxRunner(ctxPopup, []string{reinCmd, "approval", "grant"})
+		if rec, err := approvals.Read(approvals.Path(cfg.StateDir)); err == nil {
+			if approvals.Valid(rec, sig, time.Now()) {
+				cfg.Logger.Printf("grant subcommand: APPROVED via tmux popup")
+				return true
+			}
+		}
 	}
-	recordApproval(cfg, sig, sess.ID)
-	return true
+	cfg.Logger.Printf("grant subcommand: DENIED — no /dev/tty, no tmux popup")
+	return false
 }
 
 // fileExists reports whether path resolves to a regular file/symlink
