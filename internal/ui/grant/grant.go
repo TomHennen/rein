@@ -181,12 +181,19 @@ func ObtainApproval(ctx context.Context, req Request, cfg Config) bool {
 
 	// Layer 3: tmux popup if we're inside tmux.
 	if os.Getenv("TMUX") != "" {
-		// Re-check approval after popup closes; popup's grant
-		// subcommand writes the record on success.
-		cfg.Logger.Printf("grant: launching tmux popup")
+		// Pass an absolute path to rein so the popup's shell doesn't
+		// need a configured PATH. Same sibling-of-shim trick as the
+		// stderr message.
+		reinCmd := "rein"
+		if abs, err := os.Executable(); err == nil {
+			if rp := filepath.Join(filepath.Dir(abs), "rein"); fileExists(rp) {
+				reinCmd = rp
+			}
+		}
+		cfg.Logger.Printf("grant: launching tmux popup (%s approval grant)", reinCmd)
 		ctxPopup, cancel := context.WithTimeout(ctx, 90*time.Second)
 		defer cancel()
-		if err := cfg.TmuxRunner(ctxPopup, []string{"rein", "approval", "grant"}); err != nil {
+		if err := cfg.TmuxRunner(ctxPopup, []string{reinCmd, "approval", "grant"}); err != nil {
 			cfg.Logger.Printf("grant: tmux popup failed: %v; falling through", err)
 		}
 		if rec, err := approvals.Read(path); err == nil && approvals.Valid(rec, sig, time.Now()) {
