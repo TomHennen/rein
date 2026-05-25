@@ -65,6 +65,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "rein credential-helper: %v\n", err)
 			os.Exit(1)
 		}
+	case "init":
+		if err := runInit(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "rein init: %v\n", err)
+			os.Exit(1)
+		}
 	case "install-shim":
 		if err := installShim(); err != nil {
 			fmt.Fprintf(os.Stderr, "rein install-shim: %v\n", err)
@@ -102,6 +107,7 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
+	fmt.Fprintln(os.Stderr, "  rein init [--skip-mint-check] [--no-symlink]")
 	fmt.Fprintln(os.Stderr, "  rein credential-helper {get|store|erase}")
 	fmt.Fprintln(os.Stderr, "  rein install-shim")
 	fmt.Fprintln(os.Stderr, "  rein gh-auth")
@@ -569,22 +575,60 @@ func ghAuth() error {
 	return nil
 }
 
-// installShim writes the rein-git and rein-gh shim binaries to a known
-// location under the state dir and prints the PATH-prepend instruction.
-// Idempotent — running install-shim repeatedly is safe.
+// resolveSelf returns the absolute, symlink-resolved path of the running
+// rein binary. EvalSymlinks failure falls back to the unresolved path —
+// the only well-known case where it errors is genuinely exotic and
+// aborting init/install-shim would be a worse outcome than copying
+// through one extra layer of symlink.
+func resolveSelf() (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("locate self: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(self); err == nil {
+		return resolved, nil
+	}
+	return self, nil
+}
+
+// installShim is the top-level `rein install-shim` entry point: places
+// shim binaries and then prints the full activation help. `rein init`
+// uses installShimFiles directly so it can roll up the chatty
+// activation help into its own end-of-run summary.
 func installShim() error {
-	stateDir, err := config.StateDir()
+	shimDir, installed, err := installShimFiles()
 	if err != nil {
 		return err
 	}
-	shimDir := filepath.Join(stateDir, "shim")
+	for _, line := range installed {
+		fmt.Println(line)
+	}
+	printShimActivationHelp(shimDir)
+	return nil
+}
+
+// installShimFiles places the rein-git, rein-gh, and rein binaries in
+// the state dir's shim subdirectory and returns one "installed X" line
+// per binary for the caller to log however it wants. Idempotent — safe
+// to re-run.
+//
+// Splitting this out from installShim lets `rein init` keep its tight
+// progress output (no 14-line PATH-activation block interleaved with
+// init's other steps) while standalone `rein install-shim` keeps its
+// full operator-friendly explanation.
+func installShimFiles() (shimDir string, installed []string, err error) {
+	stateDir, err := config.StateDir()
+	if err != nil {
+		return "", nil, err
+	}
+	shimDir = filepath.Join(stateDir, "shim")
 	if err := os.MkdirAll(shimDir, 0o700); err != nil {
-		return fmt.Errorf("create shim dir: %w", err)
+		return "", nil, fmt.Errorf("create shim dir: %w", err)
 	}
 
-	self, err := os.Executable()
+	self, err := resolveSelf()
 	if err != nil {
-		return fmt.Errorf("locate self: %w", err)
+		return "", nil, err
 	}
 	selfDir := filepath.Dir(self)
 
@@ -595,25 +639,31 @@ func installShim() error {
 	for _, s := range shims {
 		src, err := locateBinary(s.name, selfDir)
 		if err != nil {
-			return err
+			return "", nil, err
 		}
 		dst := filepath.Join(shimDir, s.intent)
 		if err := copyFile(src, dst, 0o700); err != nil {
-			return fmt.Errorf("install %s: %w", s.intent, err)
+			return "", nil, fmt.Errorf("install %s: %w", s.intent, err)
 		}
-		fmt.Printf("installed shim: %s -> %s\n", dst, s.name)
+		installed = append(installed, fmt.Sprintf("installed shim: %s -> %s", dst, s.name))
 	}
 
-	// Also place a copy of rein itself in the shim dir so users who
-	// prepend the shim dir to PATH get `rein` available without a
-	// separate install step. Useful for commands like
-	// `rein approval grant` from a fresh terminal.
+	// Place a copy of rein itself in the shim dir so users who prepend
+	// the shim dir to PATH get `rein` available without a separate
+	// install step. Useful for `rein approval grant` from a fresh
+	// terminal.
 	reinDst := filepath.Join(shimDir, "rein")
 	if err := copyFile(self, reinDst, 0o700); err != nil {
-		return fmt.Errorf("install rein into shim dir: %w", err)
+		return "", nil, fmt.Errorf("install rein into shim dir: %w", err)
 	}
-	fmt.Printf("installed: %s (rein itself, so adding shim dir to PATH gives you `rein`)\n", reinDst)
+	installed = append(installed, fmt.Sprintf("installed: %s (rein itself, so adding shim dir to PATH gives you `rein`)", reinDst))
+	return shimDir, installed, nil
+}
 
+// printShimActivationHelp emits the operator-facing PATH-prepend +
+// useHttpPath guidance. Stable output for standalone install-shim;
+// suppressed by `rein init` (which rolls its own end-of-run summary).
+func printShimActivationHelp(shimDir string) {
 	fmt.Println()
 	fmt.Println("To activate, prepend the shim dir to $PATH before launching agents:")
 	fmt.Printf("  export PATH=%s:$PATH\n\n", shellQuote(shimDir))
@@ -627,7 +677,6 @@ func installShim() error {
 	fmt.Println("informative when an out-of-scope request is refused).")
 	fmt.Println()
 	fmt.Println("CP6's `rein run` wrapper will set PATH + git config per-wrapped-process.")
-	return nil
 }
 
 func locateBinary(name, selfDir string) (string, error) {
