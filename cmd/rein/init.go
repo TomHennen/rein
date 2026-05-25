@@ -50,8 +50,12 @@ func runInit(args []string) error {
 	fs := flag.NewFlagSet("rein init", flag.ContinueOnError)
 	var skipMint bool
 	var noSymlink bool
+	var noAlias bool
+	var shellOverride string
 	fs.BoolVar(&skipMint, "skip-mint-check", false, "skip the App credentials network check (useful for repeated re-runs; GitHub's installation-token mint has secondary rate limits)")
 	fs.BoolVar(&noSymlink, "no-symlink", false, "skip creating the ~/.local/bin/rein symlink")
+	fs.BoolVar(&noAlias, "no-alias", false, "skip writing the `alias claude='rein run -- claude'` block to your shell rc")
+	fs.StringVar(&shellOverride, "shell", "", "shell to target for alias setup (bash|zsh|fish); defaults to $SHELL")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -155,12 +159,44 @@ func runInit(args []string) error {
 		return fmt.Errorf("stat %s: %w", sessionPath, err)
 	}
 
+	aliasActive := false
+	if !noAlias {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("locate home dir: %w", err)
+		}
+		shell := detectShell(shellOverride)
+		plan, err := buildAliasPlan(shell, home)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("  alias:      target shell=%s, rc=%s\n", plan.shell, plan.rcPath)
+		outcome, err := installShellAlias(plan)
+		if err != nil {
+			return fmt.Errorf("install shell alias: %w", err)
+		}
+		fmt.Printf("              %s\n", outcome.summary)
+		aliasActive = outcome.active
+		// Fire the --no-symlink coupling WARN only when something was
+		// freshly written; re-runs that report "already current" don't
+		// need the operator's attention again.
+		if outcome.changed && noSymlink {
+			fmt.Fprintln(os.Stderr, "  WARN:       --no-symlink + alias means the alias relies on `rein` being on $PATH some other way; verify in a fresh shell")
+		}
+	} else {
+		fmt.Println("  alias:      skipped (--no-alias)")
+	}
+
 	fmt.Println()
 	fmt.Println("rein init: done.")
 	fmt.Println("Next:")
 	fmt.Printf("  - edit %s to set `issue:` to a real GitHub issue number\n", sessionPath)
-	fmt.Println("  - run `rein run -- claude` (or another agent) to launch with rein in effect")
-	fmt.Println("  - run `rein doctor` to verify everything is wired up (Phase 0.5 CP2; not yet implemented)")
+	if aliasActive {
+		fmt.Println("  - open a new shell (or `source` your rc) so the `claude` alias is live, then run `claude`")
+	} else {
+		fmt.Println("  - run `rein run -- claude` (or another agent) to launch with rein in effect")
+	}
+	fmt.Println("  - run `rein doctor` to verify everything is wired up")
 	return nil
 }
 

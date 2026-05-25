@@ -366,6 +366,19 @@ checkpoint, but it should land before Phase 1 starts.
   same env the user's shell would pass to `rein run`. If env-scrubbing
   ever lands in doctor or the wrapper, swap in a 10-line child probe.
 
+- 2026-05-25 — CP3 used `# BEGIN rein-credentials managed block` / `# END
+  rein-credentials managed block` markers instead of the PLAN's
+  illustrative `# BEGIN rein` / `# END rein`. The longer form is
+  collision-safer for shared rc files; no behavior change.
+
+- 2026-05-25 — CP3 writes the fish alias to
+  `$XDG_CONFIG_HOME/fish/functions/claude.fish` (the fish autoload
+  location, one function per file) rather than `config.fish`. This
+  integrates with fish's `functions --erase` / `funced` UX and avoids
+  re-evaluating the function on every shell startup. BEGIN/END markers
+  remain inside the file so re-runs can recognize it as rein's vs a
+  user-authored function.
+
 ## Tooling requests
 
 (If you find this VM is missing something for Phase 0.5 specifically,
