@@ -103,6 +103,29 @@ func TestObtainApproval_Layer2_TTYDenied(t *testing.T) {
 	}
 }
 
+// cancellingPrompter simulates Ctrl-C or 60s prompt-timeout.
+type cancellingPrompter struct{}
+
+func (cancellingPrompter) Confirm(ctx context.Context, _ prompt.Request) (bool, error) {
+	return false, prompt.ErrCancelled
+}
+
+func TestObtainApproval_Layer2_TTYCancelled(t *testing.T) {
+	sess := sampleSession()
+	stderr := &bytes.Buffer{}
+	cfg := defaultCfg(t, cancellingPrompter{}, stderr, nil)
+	approved := ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, cfg)
+	if approved {
+		t.Fatal("Ctrl-C / timeout must deny")
+	}
+	// Layer 4 stderr must NOT fire — the human cancelled deliberately;
+	// telling them to run grant elsewhere is wrong (they had the
+	// prompt right in front of them).
+	if strings.Contains(stderr.String(), "To grant write access") {
+		t.Errorf("Ctrl-C/timeout must not emit layer-4 stderr; got %q", stderr.String())
+	}
+}
+
 func TestObtainApproval_Layer4_HelpfulStderr(t *testing.T) {
 	t.Setenv("TMUX", "") // ensure layer 3 doesn't fire
 	sess := sampleSession()

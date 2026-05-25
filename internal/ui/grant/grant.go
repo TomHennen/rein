@@ -32,6 +32,7 @@ package grant
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -147,7 +148,10 @@ func ObtainApproval(ctx context.Context, req Request, cfg Config) bool {
 
 	// Layer 2: inline /dev/tty prompt. Works for users at a regular
 	// shell. Inside agent TUIs that detach the controlling terminal,
-	// this returns ErrNoTTY and we fall through.
+	// the prompter returns ErrNoTTY and we fall through to layer 3.
+	// A Ctrl-C OR prompt-timeout is an EXPLICIT human denial — that
+	// returns ErrCancelled, and we short-circuit (no further layers,
+	// no helpful-stderr; the human knew what they were doing).
 	pr := prompt.Request{
 		SessionID: req.Session.ID,
 		Role:      req.Session.Role,
@@ -165,7 +169,12 @@ func ObtainApproval(ctx context.Context, req Request, cfg Config) bool {
 	case err == nil:
 		cfg.Logger.Printf("grant: DENIED via /dev/tty (input mismatched)")
 		return false
+	case errors.Is(err, prompt.ErrCancelled):
+		cfg.Logger.Printf("grant: CANCELLED via /dev/tty (Ctrl-C or timeout)")
+		return false
 	default:
+		// ErrNoTTY or other open-failure: prompter couldn't even ask.
+		// Fall through to tmux popup / helpful stderr.
 		cfg.Logger.Printf("grant: /dev/tty unavailable (%v); trying tmux popup", err)
 	}
 
