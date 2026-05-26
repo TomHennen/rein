@@ -12,6 +12,18 @@ bypasses from skipped or podged setup steps.
 corrections, Shape B limits, and open Phase 1 questions that Phase 0
 produced. Phase 0.5 builds on those rather than re-deriving them.
 
+## Status (last updated 2026-05-26)
+
+| CP | Status | Commit | Notes |
+|---|---|---|---|
+| CP1 | **done** | `b0ac6e8` | `rein init` local scaffolding (dirs, shim install, ~/.local/bin symlink, env validation, real read-only mint check, session-file scaffold). |
+| CP2 | **done** | `0a470e8` | `rein doctor` — 8 read-only checks; color/no-color/CLICOLOR_FORCE; rate-limit-aware mint hint. |
+| CP3 | **done** | `d78a097` | shell-rc alias (bash/zsh/fish) with managed BEGIN/END block, foreign-alias guard, duplicate-block self-heal, fish autoload location. Unit-tested. |
+| CP4 | **done** | (this commit) | Manifest-flow DESIGN doc at `docs/init-manifest-design.md`; companion research at `docs/rein-manifest-flow-research.md`. Reviewer pass complete (5 should-fix items applied). Ready for CP5. |
+| CP5 | **pending** | — | Implementation against CP4 design. Next checkpoint to start. |
+| CP6 | **done** | (this commit) | macOS proc-tree fallback via build-tagged `proctree_{linux,darwin,other}.go`. Linux unchanged; darwin uses `ps -ax`-snapshot walk (no cgo); other platforms get a no-op stub so cross-compile stays green. **Tom needs to run macOS e2e to fully close GitHub issue #8.** |
+| CP7 | **pending** | — | README onboarding walkthrough. Should land after CP5 so the install flow being documented exists. |
+
 **Working repos:** Throwaway repos only (same as Phase 0). The init
 flow will help the user point at their own throwaways during setup;
 no Phase 0.5 step should touch a real repo.
@@ -378,6 +390,32 @@ checkpoint, but it should land before Phase 1 starts.
   re-evaluating the function on every shell startup. BEGIN/END markers
   remain inside the file so re-runs can recognize it as rein's vs a
   user-authored function.
+
+- 2026-05-26 — CP4 design ratified by reviewer pass. Five should-fix
+  items were applied to the design doc before this commit: parent-dir
+  fsync after rename (closes the durability window the original draft
+  named but didn't fully close); UI-only PEM-write-failure recovery
+  (no longer points at a `rein import-pem` command that doesn't ship
+  in CP5 — that's a Stage 2 polish followup tracked in §Out-of-scope);
+  explicit env-var bridge state-transition table (six rows, covers
+  Phase 0 dev path and post-manifest steady state); explicit
+  `--skip-audit` + `--resume` semantics (skipped audit leaves
+  `phase: primary_done`, can be added later without `--force`); App-
+  name entropy bumped 24→40 bits.
+
+- 2026-05-26 — CP6 darwin proc-tree `ps` shell-out hardened: pinned
+  `LC_ALL=C` and `PATH=/bin:/usr/bin`, explicit `cmd.Stdin = nil`.
+  Defense-in-depth (the call runs inside the credential helper); also
+  immunizes the column-parser against locale-dependent `ps` output
+  variations. The Linux helper-log line for a positive proctree match
+  now appends `(platform=linux)` — minor format change worth flagging
+  if anyone scrapes the helper log.
+
+- 2026-05-26 — `docs/rein-manifest-flow-research.md` checked in as the
+  empirical companion to CP4's `docs/init-manifest-design.md`. It is
+  long-form context (818 lines) sourced from a deep-research pass;
+  the design doc references its section numbers for anything the
+  design itself doesn't restate.
 
 ## Tooling requests
 

@@ -25,7 +25,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
@@ -313,8 +312,10 @@ func bareRepoName(ownerSlashName string) string {
 
 // detectWriteIntent is the Shape B discriminator. Primary signal: REIN_GIT_OP
 // in this process's environment, set by the rein-git shim before git was
-// invoked. Fallback: walk /proc to find `git push` or `git send-pack` in the
-// ancestor chain (Linux only; macOS would need a libproc port).
+// invoked. Fallback: a per-platform proc-tree walk that looks for `git push`
+// or `git send-pack` in the ancestor chain. The walk is implemented in
+// proctree_{linux,darwin,other}.go; platforms without a real implementation
+// have a no-op stub that returns no match.
 //
 // Fail-closed: returns false (read) when no positive evidence of a write op
 // exists. Misclassification at this layer routes a push through the read
@@ -334,76 +335,16 @@ func detectWriteIntent(logger *log.Logger) bool {
 		logger.Printf("REIN_GIT_OP=%q is unrecognized; falling back to process-tree detection", op)
 	}
 
-	if runtime.GOOS != "linux" {
-		// macOS process-tree introspection needs libproc; not implemented
-		// in Phase 0. Without the shim signal, default to read.
-		logger.Printf("no REIN_GIT_OP and platform %q not supported for proc-tree fallback; defaulting to read", runtime.GOOS)
+	if procTreePlatform == "unsupported" {
+		logger.Printf("no REIN_GIT_OP and proc-tree fallback not implemented for %q; defaulting to read", runtime.GOOS)
 		return false
 	}
 
 	if write, src := detectFromProcTree(); write {
-		logger.Printf("write intent: process-tree fallback found %q in ancestor chain", src)
+		logger.Printf("write intent: process-tree fallback found %q in ancestor chain (platform=%s)", src, procTreePlatform)
 		return true
 	}
 	return false
-}
-
-// detectFromProcTree walks the process tree up to a fixed depth looking
-// for a `git push` or `git send-pack` invocation. Returns the matching
-// cmdline (as a single string) for log purposes. Linux-only.
-//
-// We trust the chain if the ancestor at any level is `git push` /
-// `git send-pack`. We don't try to verify the chain's authenticity (e.g.,
-// by checking that intermediate processes are git's transport helpers) —
-// this is a routing signal, not a security boundary. An attacker who can
-// spoof their argv to fake a git push only gets the wrong tier minted;
-// they cannot exceed the role's permissions ceiling enforced server-side.
-const procTreeDepth = 6
-
-func detectFromProcTree() (bool, string) {
-	pid := os.Getpid()
-	for i := 0; i < procTreeDepth; i++ {
-		ppid, err := readPPid(pid)
-		if err != nil || ppid <= 1 {
-			return false, ""
-		}
-		cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", ppid))
-		if err != nil {
-			return false, ""
-		}
-		args := splitCmdline(cmdline)
-		if isGitVerb(args, "push") || isGitVerb(args, "send-pack") {
-			return true, strings.Join(args, " ")
-		}
-		pid = ppid
-	}
-	return false, ""
-}
-
-func readPPid(pid int) (int, error) {
-	body, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
-	if err != nil {
-		return 0, err
-	}
-	for _, line := range strings.Split(string(body), "\n") {
-		if strings.HasPrefix(line, "PPid:") {
-			f := strings.Fields(line)
-			if len(f) >= 2 {
-				return strconv.Atoi(f[1])
-			}
-		}
-	}
-	return 0, fmt.Errorf("no PPid for pid %d", pid)
-}
-
-// splitCmdline parses a /proc/<pid>/cmdline NUL-separated buffer into argv.
-func splitCmdline(b []byte) []string {
-	s := string(b)
-	s = strings.TrimRight(s, "\x00")
-	if s == "" {
-		return nil
-	}
-	return strings.Split(s, "\x00")
 }
 
 // isGitVerb returns true if argv looks like `git <verb>` or `git <opts...> <verb>`.
