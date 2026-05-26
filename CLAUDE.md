@@ -46,6 +46,7 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 - Use `TaskCreate` / `TaskUpdate` to track checkpoint progress; mark `in_progress` when starting, `completed` when done.
 - Stop-and-surface at every checkpoint per the current PLAN's discipline section. Don't proceed past a gate without human verification.
 - File GitHub issues for deferred items via `gh issue create`. Don't bury followups in commit messages alone — they get lost.
+- **Fix smells now, don't defer.** When you notice a fixable code smell during work — formatting inconsistency, hand-counted spacing, a missing escape-hatch env var, a cleanup the reviewer flagged as a nit — fix it in the same pass. Don't ask "fix or defer?"; don't surface it as a deferred item; don't leave it for someone else. Only surface for decision when the fix changes behavior in a way the human should weigh in on (security, API shape, user-visible UX). Pure source-cleanliness fixes are decisions you should already be making. Bias: prefer fixing slightly more than feels necessary over asking.
 - No emojis in files unless explicitly requested.
 - For interactive tests (anything needing `/dev/tty`, browser, or tmux popup), write a manual script the human runs in their real terminal. Phase 0 used `/tmp/cp*-manual-test.sh`; same pattern.
 

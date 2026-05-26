@@ -19,9 +19,12 @@ builds:
     main: ./cmd/rein
     binary: rein
     env:
-      # rein uses cgo for hardware-backed key custody (facebookincubator/sks)
-      # so CGO_ENABLED=0 is not an option.
-      - CGO_ENABLED=1
+      # CGO_ENABLED=0: rein has no cgo dependencies in Phase 0 / 0.5.
+      # Phase 1+'s sks integration (facebookincubator/sks for hardware-
+      # backed key custody) will require cgo on AND a cross-compile
+      # toolchain (zig is the recommended path — see issue #17). Flip
+      # this back to 1 at that point and add the per-target CC overrides.
+      - CGO_ENABLED=0
     goos:
       - darwin
       - linux
