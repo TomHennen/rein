@@ -48,9 +48,9 @@ archives:
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "arm64" }}arm64
       {{- else }}{{ .Arch }}{{ end }}
-    files:
-      - README.md
-      - LICENSE
+    # files: README.md + LICENSE were here, but neither exists yet —
+    # README is CP7's deliverable in PLAN-0.5.md; LICENSE is a
+    # project-level decision still pending. Re-add when both land.
 
 checksum:
   # Wrangle pins this filename for the SLSA verify step
