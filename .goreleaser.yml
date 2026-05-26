@@ -37,7 +37,7 @@ builds:
       - -X main.date={{.Date}}
 
 archives:
-  - format: tar.gz
+  - formats: [tar.gz]
     name_template: >-
       {{ .ProjectName }}_
       {{- .Version }}_
@@ -54,7 +54,12 @@ checksum:
   name_template: 'checksums.txt'
 
 snapshot:
-  name_template: '{{ incpatch .Version }}-next'
+  # ShortCommit-based template has no semver dependency. The
+  # incpatch-based form (still documented in goreleaser examples)
+  # requires .Version to parse as semver, which it won't until the
+  # repo has a v* tag in history (#16). Also note that goreleaser v2
+  # renamed snapshot.name_template → snapshot.version_template.
+  version_template: '{{ .ShortCommit }}-snapshot'
 
 changelog:
   sort: asc
