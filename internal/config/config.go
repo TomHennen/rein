@@ -15,13 +15,25 @@ import (
 	"strings"
 
 	"github.com/TomHennen/rein/internal/githubapp"
+	"github.com/TomHennen/rein/internal/keystore"
 )
 
+// AppKeystoreRole is the entry name passed to keystore.Get for the env-var
+// PEM. Kept as a constant so mint-site callers and any future audit-App
+// callers can refer to the same string without typos.
+const AppKeystoreRole = "primary"
+
 // LoadAppConfig reads REIN_APP_CLIENT_ID, REIN_APP_PRIVATE_KEY_PATH,
-// REIN_APP_INSTALLATION_ID, and REIN_TEST_REPO_A and returns a fully
-// validated githubapp.Config. Returns a descriptive error if any of the
+// REIN_APP_INSTALLATION_ID, and REIN_TEST_REPO_A and returns a validated
+// githubapp.Config alongside a Keystore that exposes the env-var PEM
+// under AppKeystoreRole. Returns a descriptive error if any of the
 // required vars are missing or malformed.
-func LoadAppConfig() (githubapp.Config, error) {
+//
+// The PEM file is NOT stat'd here — stat-and-read happens on first
+// keystore.Get inside a mint. Callers that need an early "file present
+// and readable" check should stat REIN_APP_PRIVATE_KEY_PATH themselves
+// before threading the keystore into NewClient.
+func LoadAppConfig() (githubapp.Config, keystore.Keystore, error) {
 	required := []string{
 		"REIN_APP_CLIENT_ID",
 		"REIN_APP_PRIVATE_KEY_PATH",
@@ -30,24 +42,25 @@ func LoadAppConfig() (githubapp.Config, error) {
 	}
 	for _, k := range required {
 		if os.Getenv(k) == "" {
-			return githubapp.Config{}, fmt.Errorf("missing env var %s (did you source ./dev-env?)", k)
+			return githubapp.Config{}, nil, fmt.Errorf("missing env var %s (did you source ./dev-env?)", k)
 		}
 	}
 	installationID, err := strconv.ParseInt(os.Getenv("REIN_APP_INSTALLATION_ID"), 10, 64)
 	if err != nil {
-		return githubapp.Config{}, fmt.Errorf("REIN_APP_INSTALLATION_ID not an int64: %w", err)
+		return githubapp.Config{}, nil, fmt.Errorf("REIN_APP_INSTALLATION_ID not an int64: %w", err)
 	}
 	slug := os.Getenv("REIN_TEST_REPO_A")
 	_, repoName, ok := strings.Cut(slug, "/")
 	if !ok || repoName == "" {
-		return githubapp.Config{}, fmt.Errorf("REIN_TEST_REPO_A %q is not owner/name", slug)
+		return githubapp.Config{}, nil, fmt.Errorf("REIN_TEST_REPO_A %q is not owner/name", slug)
 	}
-	return githubapp.Config{
+	cfg := githubapp.Config{
 		ClientID:       os.Getenv("REIN_APP_CLIENT_ID"),
-		PrivateKeyPath: os.Getenv("REIN_APP_PRIVATE_KEY_PATH"),
 		InstallationID: installationID,
 		RepoName:       repoName,
-	}, nil
+	}
+	ks := keystore.NewSingleFileKeystore(AppKeystoreRole, os.Getenv("REIN_APP_PRIVATE_KEY_PATH"))
+	return cfg, ks, nil
 }
 
 // StateDir is $XDG_STATE_HOME/rein (defaulting to ~/.local/state/rein).

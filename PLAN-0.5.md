@@ -20,7 +20,7 @@ produced. Phase 0.5 builds on those rather than re-deriving them.
 | CP2 | **done** | `0a470e8` | `rein doctor` — 8 read-only checks; color/no-color/CLICOLOR_FORCE; rate-limit-aware mint hint. |
 | CP3 | **done** | `d78a097` | shell-rc alias (bash/zsh/fish) with managed BEGIN/END block, foreign-alias guard, duplicate-block self-heal, fish autoload location. Unit-tested. |
 | CP4 | **done** | (this commit) | Manifest-flow DESIGN doc at `docs/init-manifest-design.md`; companion research at `docs/rein-manifest-flow-research.md`. Reviewer pass complete (5 should-fix items applied). Ready for CP5. |
-| CP5 | **pending** | — | Implementation against CP4 design. Next checkpoint to start. |
+| CP5 | **impl done; smoke-test pending** | (branch `cp5-manifest-flow`) | Manifest flow in `internal/appsetup`; `internal/keystore` (FileKeystore + SingleFileKeystore, uid+mode checks); mint paths refactored onto Keystore (CLAUDE.md hard-constraint #6); `--owner`/`--skip-audit`/`--force` flags; env-var bridge. `cmd/spike-token` removed. Build + `go test ./...` green. **Gate before marking done: run `scripts/cp5-manifest-manual-test.sh` in a real terminal (browser + GitHub round-trip).** |
 | CP6 | **done** | (this commit) | macOS proc-tree fallback via build-tagged `proctree_{linux,darwin,other}.go`. Linux unchanged; darwin uses `ps -ax`-snapshot walk (no cgo); other platforms get a no-op stub so cross-compile stays green. **Tom needs to run macOS e2e to fully close GitHub issue #8.** |
 | CP7 | **pending** | — | README onboarding walkthrough. Should land after CP5 so the install flow being documented exists. |
 
@@ -416,6 +416,21 @@ checkpoint, but it should land before Phase 1 starts.
   long-form context (818 lines) sourced from a deep-research pass;
   the design doc references its section numbers for anything the
   design itself doesn't restate.
+
+- 2026-05-30 — CP5 added an undocumented `assertNoOrphanPEM` safety
+  guard in `internal/appsetup/flow.go`: when state.json has no record
+  for a role but a PEM exists in the keystore, refuse to create a new
+  App (otherwise we'd orphan the prior App at GitHub since there's no
+  delete API). The guard isn't in `docs/init-manifest-design.md` —
+  worth a sentence in any future revision. Initially, the guard
+  contradicted the design's PEM-write-failure recovery (which tells
+  the user to place the PEM and re-run `--resume`); fixed in second
+  CP5 reviewer pass by persisting a partial `AppRecord` to state.json
+  on `Keystore.Set` failure (init-manifest-design.md §138 assumed
+  exactly this — "the partial state in `state.json` makes it
+  discoverable"). On `--resume`, the partial record lets the flow
+  skip the role's step and adopt the user-placed PEM without tripping
+  the orphan guard.
 
 ## Tooling requests
 

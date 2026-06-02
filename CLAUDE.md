@@ -15,6 +15,7 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 3. **Fail closed.** Surface errors to the user; don't silently degrade.
 4. **License compliance on all imports.** Check before adding a dependency.
 5. **Stop and ask on security-sensitive decisions.** The whole project is about security.
+6. **All private-key reads MUST go through `internal/keystore.Keystore` (Get/Fingerprint).** Never `os.ReadFile` a PEM directly — the keystore enforces uid + mode `0o077` checks on read and is the swap point for Phase 1's daemon-backed and Phase 1/2 biometric backends.
 
 ## Libraries (don't reinvent these)
 

@@ -10,3 +10,6 @@
 .idea/
 .DS_Store
 *.swp
+
+# Local Claude Code harness state (worktrees, session scratch)
+.claude/

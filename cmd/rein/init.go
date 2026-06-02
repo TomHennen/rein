@@ -30,10 +30,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,8 +43,10 @@ import (
 	"encoding/hex"
 	"regexp"
 
+	"github.com/TomHennen/rein/internal/appsetup"
 	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/githubapp"
+	"github.com/TomHennen/rein/internal/keystore"
 	"github.com/TomHennen/rein/internal/session"
 )
 
@@ -52,10 +56,16 @@ func runInit(args []string) error {
 	var noSymlink bool
 	var noAlias bool
 	var shellOverride string
+	var skipAudit bool
+	var force bool
+	var expectedOwner string
 	fs.BoolVar(&skipMint, "skip-mint-check", false, "skip the App credentials network check (useful for repeated re-runs; GitHub's installation-token mint has secondary rate limits)")
 	fs.BoolVar(&noSymlink, "no-symlink", false, "skip creating the ~/.local/bin/rein symlink")
 	fs.BoolVar(&noAlias, "no-alias", false, "skip writing the `alias claude='rein run -- claude'` block to your shell rc")
 	fs.StringVar(&shellOverride, "shell", "", "shell to target for alias setup (bash|zsh|fish); defaults to $SHELL")
+	fs.BoolVar(&skipAudit, "skip-audit", false, "create only the primary GitHub App (skip the audit App; subsequent `rein init` will create it)")
+	fs.BoolVar(&force, "force", false, "ignore state.json and run the manifest flow from scratch (existing Apps at GitHub are NOT deleted)")
+	fs.StringVar(&expectedOwner, "owner", "", "expected GitHub owner login (user or org); if set, manifest flow refuses to persist if the App was created under a different account")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -78,16 +88,108 @@ func runInit(args []string) error {
 	}
 	fmt.Printf("  config dir: %s\n", configDir)
 
-	// Validate env vars before any expensive checks. This is the most
-	// common breakage (forgot to `source ./dev-env`), and surfacing it
-	// first saves a confusing 401 later.
-	appCfg, err := config.LoadAppConfig()
-	if err != nil {
-		return fmt.Errorf("env validation: %w", err)
+	// Bridge: decide between manifest flow and env-var (Phase 0) path
+	// before touching env vars. LoadAppConfig errors when REIN_APP_* are
+	// absent, but the new-user manifest path EXPECTS them absent — so
+	// the dispatch sits above LoadAppConfig and only the env-driven
+	// branches load it.
+	state, stateErr := appsetup.ReadState(configDir)
+	envPresent, envClientID, envInstallationID := envSnapshot()
+	action, explain := appsetup.DecideBridge(state, stateErr, envPresent, envClientID, envInstallationID, force)
+	fmt.Printf("  setup:      %s\n", explain)
+
+	// appCfgPtr is non-nil after env loading succeeds; nil if we're on
+	// the manifest-flow path (no env, installation_id not yet known).
+	// The mint check / scaffold-session / alias steps consult it.
+	// appKS is the keystore the mint check builds NewClient against.
+	var appCfgPtr *githubapp.Config
+	var appKS keystore.Keystore
+
+	switch action {
+	case appsetup.BridgeStateCorrupt, appsetup.BridgeManagedExternallyMissingEnv:
+		return errors.New(explain)
+
+	case appsetup.BridgeEnvOverrideMismatch:
+		fmt.Fprintf(os.Stderr, "  WARN:       %s\n", explain)
+		// Fall through to env-driven path.
+		cfg, ks, err := loadAppConfigForInit()
+		if err != nil {
+			return err
+		}
+		appCfgPtr = &cfg
+		appKS = ks
+
+	case appsetup.BridgeEnvOverrideMatch, appsetup.BridgeUseState:
+		cfg, ks, err := loadAppConfigForInit()
+		if err != nil {
+			// Post-manifest-flow UX: state.json records audit_done
+			// (or primary_done) but the user hasn't set
+			// REIN_APP_INSTALLATION_ID yet. LoadAppConfig fails with
+			// "missing env var ..." — instead of surfacing that as an
+			// error, print the same install-deep-link hint doctor
+			// uses and exit 0. The user is in a known intermediate
+			// state, not a broken one.
+			if action == appsetup.BridgeUseState && state.Primary != nil && state.Primary.InstallationID == 0 {
+				if hint, ok := appsetup.PostManifestInstallHint(configDir); ok {
+					fmt.Println()
+					fmt.Println(hint)
+					return nil
+				}
+			}
+			return err
+		}
+		appCfgPtr = &cfg
+		appKS = ks
+
+	case appsetup.BridgeWriteEnvMarker:
+		cfg, ks, err := loadAppConfigForInit()
+		if err != nil {
+			return err
+		}
+		appCfgPtr = &cfg
+		appKS = ks
+		if err := appsetup.WriteEnvMarker(configDir, envClientID, envInstallationID); err != nil {
+			return fmt.Errorf("write env marker state.json: %w", err)
+		}
+		fmt.Println("              wrote managed_externally marker (state.json)")
+
+	case appsetup.BridgeRunManifest, appsetup.BridgeForce, appsetup.BridgeResumeManifest:
+		ks := keystore.NewFileKeystore(configDir)
+		if expectedOwner == "" {
+			fmt.Fprintln(os.Stderr, "WARN: --owner not set; cannot detect 'wrong account' footgun (see docs/init-manifest-design.md §Security considerations)")
+		}
+		// 25min budget: 10min per browser round, plus headroom for two
+		// rounds and conversion.
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Minute)
+		defer cancel()
+		if err := appsetup.RunManifestFlow(ctx, appsetup.RunOptions{
+			ConfigDir:     configDir,
+			Keystore:      ks,
+			SkipAudit:     skipAudit,
+			Force:         force,
+			Stdout:        os.Stdout,
+			Stderr:        os.Stderr,
+			ExpectedOwner: expectedOwner,
+		}); err != nil {
+			return err
+		}
+		// Manifest flow leaves installation_id unknown; the user must
+		// install the App on a repo and supply REIN_APP_INSTALLATION_ID
+		// (or wait for Stage 2's install polling). appCfg stays nil;
+		// the mint check below skips when it sees nil.
 	}
-	fmt.Printf("  app:        client_id=%s installation_id=%d\n", appCfg.ClientID, appCfg.InstallationID)
-	if _, err := os.Stat(appCfg.PrivateKeyPath); err != nil {
-		return fmt.Errorf("private key %s: %w (REIN_APP_PRIVATE_KEY_PATH points somewhere unreadable)", appCfg.PrivateKeyPath, err)
+
+	if appCfgPtr != nil {
+		appCfg := *appCfgPtr
+		fmt.Printf("  app:        client_id=%s installation_id=%d\n", appCfg.ClientID, appCfg.InstallationID)
+		// PEM path no longer lives in githubapp.Config (the keystore is
+		// the source of truth). Pre-flight via env directly so the user
+		// gets a clear "file missing" error here rather than a deeper
+		// keystore error at first mint.
+		pemPath := os.Getenv("REIN_APP_PRIVATE_KEY_PATH")
+		if _, err := os.Stat(pemPath); err != nil {
+			return fmt.Errorf("private key %s: %w (REIN_APP_PRIVATE_KEY_PATH points somewhere unreadable)", pemPath, err)
+		}
 	}
 
 	// Resolve the running binary's real path (through any symlinks the
@@ -126,9 +228,14 @@ func runInit(args []string) error {
 		fmt.Println("  symlink:    skipped (--no-symlink)")
 	}
 
-	if !skipMint {
+	switch {
+	case appCfgPtr == nil:
+		fmt.Println("  mint check: skipped (manifest flow leaves installation_id unknown until the App is installed on a repo)")
+	case skipMint:
+		fmt.Println("  mint check: skipped (--skip-mint-check)")
+	default:
 		fmt.Println("  mint check: minting a read-only installation token to verify App credentials")
-		client, err := githubapp.NewClient(appCfg)
+		client, err := githubapp.NewClient(*appCfgPtr, appKS, config.AppKeystoreRole)
 		if err != nil {
 			return fmt.Errorf("build app client: %w", err)
 		}
@@ -139,8 +246,6 @@ func runInit(args []string) error {
 			return fmt.Errorf("mint failed (check REIN_APP_CLIENT_ID, REIN_APP_INSTALLATION_ID, REIN_APP_PRIVATE_KEY_PATH against the actual GitHub App + installation): %w", err)
 		}
 		fmt.Printf("              ok (token expires %s)\n", expiresAt.Format(time.RFC3339))
-	} else {
-		fmt.Println("  mint check: skipped (--skip-mint-check)")
 	}
 
 	sessionPath, err := session.DefaultFilePath()
@@ -151,10 +256,19 @@ func runInit(args []string) error {
 	case err == nil:
 		fmt.Printf("  session:    existing file kept at %s\n", sessionPath)
 	case os.IsNotExist(err):
-		if err := scaffoldSessionFile(sessionPath, os.Getenv("REIN_TEST_REPO_A")); err != nil {
-			return fmt.Errorf("scaffold session file: %w", err)
+		// scaffoldSessionFile needs a repo slug. In the manifest-flow
+		// path with no REIN_TEST_REPO_A, we can't scaffold meaningfully
+		// — the user will edit ~/.config/rein/dev-session.yaml when
+		// they're ready. Surface the gap as a note rather than fail.
+		repo := os.Getenv("REIN_TEST_REPO_A")
+		if repo == "" {
+			fmt.Printf("  session:    not scaffolded (REIN_TEST_REPO_A unset; create %s manually with `id`, `role`, `repos`, `issue` fields)\n", sessionPath)
+		} else {
+			if err := scaffoldSessionFile(sessionPath, repo); err != nil {
+				return fmt.Errorf("scaffold session file: %w", err)
+			}
+			fmt.Printf("  session:    scaffolded at %s (issue: 1 — edit to a real issue number)\n", sessionPath)
 		}
-		fmt.Printf("  session:    scaffolded at %s (issue: 1 — edit to a real issue number)\n", sessionPath)
 	default:
 		return fmt.Errorf("stat %s: %w", sessionPath, err)
 	}
@@ -293,6 +407,42 @@ func uniqueTempName(dir, prefix string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, prefix+hex.EncodeToString(b[:])), nil
+}
+
+// envSnapshot reads REIN_APP_CLIENT_ID and REIN_APP_INSTALLATION_ID
+// without erroring on absence. envPresent is true only when BOTH are
+// set and INSTALLATION_ID parses as int64. Partially-set or malformed
+// env fails closed to envPresent=false; the bridge will then pick the
+// fresh-install row, which is the safer default.
+//
+// Intentionally a 2-of-4 snapshot (client_id + installation_id only).
+// The other two REIN_APP_* vars (app_id, private_key_path) are
+// validated later in loadAppConfigForInit when the bridge routes to
+// an env-driven branch — that's the late-fail path for the partial-env
+// case. Don't "fix" this to a full 4-var validation here; the bridge
+// needs the partial signal to route correctly first.
+func envSnapshot() (envPresent bool, clientID string, installationID int64) {
+	clientID = os.Getenv("REIN_APP_CLIENT_ID")
+	rawIID := os.Getenv("REIN_APP_INSTALLATION_ID")
+	if clientID == "" || rawIID == "" {
+		return false, clientID, 0
+	}
+	n, err := strconv.ParseInt(rawIID, 10, 64)
+	if err != nil {
+		return false, clientID, 0
+	}
+	return true, clientID, n
+}
+
+// loadAppConfigForInit wraps config.LoadAppConfig with the init-specific
+// error prefix. Centralized so the bridge dispatch can call it from
+// multiple branches without duplicating the wording.
+func loadAppConfigForInit() (githubapp.Config, keystore.Keystore, error) {
+	cfg, ks, err := config.LoadAppConfig()
+	if err != nil {
+		return githubapp.Config{}, nil, fmt.Errorf("env validation: %w", err)
+	}
+	return cfg, ks, nil
 }
 
 // pathContainsDir reports whether dir is one of the entries in $PATH.

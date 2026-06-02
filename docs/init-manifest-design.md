@@ -223,7 +223,10 @@ short version:
   PEM.
 - TLS on loopback intentionally not used (research §3.6).
 - Owner verification on conversion-response prevents "user clicked
-  through to wrong org" footgun (research §10.4).
+  through to wrong org" footgun (research §10.4); implemented;
+  activated when `--owner` is passed (recommended). Without `--owner`
+  the manifest flow prints a one-line WARN to stderr so the operator
+  is reminded of the missing guard.
 
 ## Files written by CP5
 

@@ -111,7 +111,7 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  rein init [--skip-mint-check] [--no-symlink] [--no-alias] [--shell=bash|zsh|fish]")
+	fmt.Fprintln(os.Stderr, "  rein init [--skip-mint-check] [--no-symlink] [--no-alias] [--shell=bash|zsh|fish] [--skip-audit] [--force]")
 	fmt.Fprintln(os.Stderr, "  rein doctor")
 	fmt.Fprintln(os.Stderr, "  rein credential-helper {get|store|erase}")
 	fmt.Fprintln(os.Stderr, "  rein install-shim")
@@ -124,7 +124,7 @@ func usage() {
 // returned here are programming/config errors — credential-mint failures
 // are handled inside the broker per TM-G8.
 func runCredentialHelper(action string) error {
-	appCfg, err := config.LoadAppConfig()
+	appCfg, ks, err := config.LoadAppConfig()
 	if err != nil {
 		return err
 	}
@@ -145,7 +145,7 @@ func runCredentialHelper(action string) error {
 	appCfg.RepoName = bareRepoName(sess.Repos[0])
 	logger.Printf("session: id=%q role=%q repos=%v source=%s", sess.ID, sess.Role, sess.Repos, sessSource)
 
-	client, err := githubapp.NewClient(appCfg)
+	client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
 	if err != nil {
 		return err
 	}
@@ -422,7 +422,7 @@ func optionConsumesNextArg(a string) bool {
 // File mode 0600 in a 0700 parent. The token is never logged. POSIX-sh
 // syntax only — fish users will need to translate.
 func ghAuth() error {
-	appCfg, err := config.LoadAppConfig()
+	appCfg, ks, err := config.LoadAppConfig()
 	if err != nil {
 		return err
 	}
@@ -451,14 +451,14 @@ func ghAuth() error {
 	// read-only capability. Users who need write capability via gh
 	// should use the shim (PATH-front), which mints write tokens JIT
 	// per-call and revokes them on gh exit.
-	client, err := githubapp.NewClient(appCfg)
+	client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
 	if err != nil {
 		return err
 	}
 	token, expiresAt, err := ghsession.EnsureFresh(
 		ghsession.ReadCachePath(stateDir),
-		appCfg,
 		client.MintGhReadOnlyToken,
+		client.RevokeToken,
 		5*time.Minute,
 		mintTimeout,
 		logger,

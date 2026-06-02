@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/tokencache"
 )
 
@@ -27,19 +26,25 @@ import (
 // is done outside this package because writes are never cached.
 type MintFunc func(ctx context.Context) (token string, expiresAt time.Time, err error)
 
+// RevokeFunc revokes an installation token server-side. Used for the
+// best-effort revoke of a previously-cached token after a fresh mint.
+// Callers typically pass *githubapp.Client.RevokeToken. A nil revoke is
+// allowed — the previous token will simply expire on GitHub's ~1h floor.
+type RevokeFunc func(ctx context.Context, token string) error
+
 // EnsureFresh returns a currently-valid gh-session token from the cache
 // at cachePath. If the cached token is missing or within refreshSkew of
-// expiry, mints a fresh one via the supplied mintFn, atomically writes
-// it to cachePath, and best-effort revokes the previously-cached token
-// so its effective lifetime tracks usage rather than GitHub's ~1h floor.
+// expiry, mints a fresh one via mintFn, atomically writes it to
+// cachePath, and (if revoke is non-nil) best-effort revokes the
+// previously-cached token so its effective lifetime tracks usage rather
+// than GitHub's ~1h floor.
 //
-// For revoking the previous token we still need a Client — that's
-// constructed from appCfg internally. mintTimeout caps each network
-// call. Cache-hit short-circuits before any API call.
+// mintTimeout caps each network call. Cache-hit short-circuits before
+// any API call.
 func EnsureFresh(
 	cachePath string,
-	appCfg githubapp.Config,
 	mintFn MintFunc,
+	revoke RevokeFunc,
 	refreshSkew time.Duration,
 	mintTimeout time.Duration,
 	logger *log.Logger,
@@ -73,20 +78,18 @@ func EnsureFresh(
 
 	// Best-effort revoke of the previous token. Done after we have the
 	// new token in hand so a revoke failure can't leave the caller with
-	// neither. Needs a Client; construct it lazily.
-	if hasCur && cur.Token != "" && cur.Token != token {
-		client, err := githubapp.NewClient(appCfg)
-		if err != nil {
-			logger.Printf("revoke skipped: NewClient failed: %v", err)
+	// neither. A nil revoke is the documented opt-out (e.g. tests).
+	if revoke != nil && hasCur && cur.Token != "" && cur.Token != token {
+		revokeCtx, revokeCancel := context.WithTimeout(context.Background(), mintTimeout)
+		if revokeErr := revoke(revokeCtx, cur.Token); revokeErr != nil {
+			logger.Printf("revoke of previous token failed (best-effort): %v", revokeErr)
 		} else {
-			revokeCtx, revokeCancel := context.WithTimeout(context.Background(), mintTimeout)
-			defer revokeCancel()
-			if revokeErr := client.RevokeToken(revokeCtx, cur.Token); revokeErr != nil {
-				logger.Printf("revoke of previous token failed (best-effort): %v", revokeErr)
-			} else {
-				logger.Printf("revoked previous gh-session token")
-			}
+			logger.Printf("revoked previous gh-session token")
 		}
+		// Explicit, not defer: the mint context is still live until
+		// function return; freeing this one promptly keeps the two
+		// contexts from stacking until the outer return.
+		revokeCancel()
 	}
 
 	return token, expiresAt, nil

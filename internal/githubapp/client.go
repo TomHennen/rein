@@ -14,23 +14,20 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"time"
 
 	"github.com/jferrl/go-githubauth"
+
+	"github.com/TomHennen/rein/internal/keystore"
 )
 
-// Config holds the inputs needed to mint an installation token. All fields
-// are required.
+// Config holds the non-key inputs needed to mint an installation token.
+// The PEM is supplied separately via a Keystore — see NewClient.
 type Config struct {
 	// ClientID is the GitHub App's Client ID (e.g. "Iv23li..."). The App ID
 	// (numeric) would also work — go-githubauth accepts either — but design
 	// §4.2.4 recommends Client ID for new apps.
 	ClientID string
-
-	// PrivateKeyPath is the path to the PEM-encoded RSA private key
-	// associated with the App.
-	PrivateKeyPath string
 
 	// InstallationID is the numeric installation ID this client mints for.
 	InstallationID int64
@@ -41,20 +38,23 @@ type Config struct {
 }
 
 // Client mints installation tokens for a single repository.
+//
+// The private key is fetched from the Keystore lazily inside each Mint*
+// call so the Client never holds key material across calls. This is the
+// swap point for Phase 1's daemon-backed cache and Phase 1/2's
+// biometric-gated backend — neither requires a signature change here.
 type Client struct {
-	cfg Config
+	cfg      Config
+	ks       keystore.Keystore
+	roleName string
 }
 
-// NewClient validates cfg and constructs a Client. The private key is read
-// and parsed lazily inside MintReadOnlyToken so the constructor never holds
-// key material; this matches Phase 1's intent of moving the key into a
-// keyring/HSM-backed signer without changing this signature.
-func NewClient(cfg Config) (*Client, error) {
+// NewClient validates cfg and constructs a Client. ks is the backend the
+// PEM is read from at mint time; roleName is the entry name passed to
+// ks.Get (typically "primary"). Both are required.
+func NewClient(cfg Config, ks keystore.Keystore, roleName string) (*Client, error) {
 	if cfg.ClientID == "" {
 		return nil, errors.New("github app: ClientID is required")
-	}
-	if cfg.PrivateKeyPath == "" {
-		return nil, errors.New("github app: PrivateKeyPath is required")
 	}
 	if cfg.InstallationID == 0 {
 		return nil, errors.New("github app: InstallationID is required")
@@ -62,7 +62,13 @@ func NewClient(cfg Config) (*Client, error) {
 	if cfg.RepoName == "" {
 		return nil, errors.New("github app: RepoName is required")
 	}
-	return &Client{cfg: cfg}, nil
+	if ks == nil {
+		return nil, errors.New("github app: keystore is required")
+	}
+	if roleName == "" {
+		return nil, errors.New("github app: roleName is required")
+	}
+	return &Client{cfg: cfg, ks: ks, roleName: roleName}, nil
 }
 
 // MintReadOnlyToken returns a fresh installation access token scoped to
@@ -178,9 +184,9 @@ func (c *Client) RevokeToken(ctx context.Context, token string) error {
 }
 
 func (c *Client) mint(ctx context.Context, perms *githubauth.InstallationPermissions) (string, time.Time, error) {
-	keyPEM, err := os.ReadFile(c.cfg.PrivateKeyPath)
+	keyPEM, err := c.ks.Get(c.roleName)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("read private key: %w", err)
+		return "", time.Time{}, fmt.Errorf("read private key from keystore[%s]: %w", c.roleName, err)
 	}
 
 	appSrc, err := githubauth.NewApplicationTokenSource(c.cfg.ClientID, keyPEM)

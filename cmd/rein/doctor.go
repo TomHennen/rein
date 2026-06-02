@@ -31,9 +31,11 @@ import (
 	"github.com/jferrl/go-githubauth"
 
 	"github.com/TomHennen/rein/internal/approvals"
+	"github.com/TomHennen/rein/internal/appsetup"
 	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
+	"github.com/TomHennen/rein/internal/keystore"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/tokencache"
 )
@@ -228,14 +230,28 @@ func checkShimFreshness() checkResult {
 }
 
 // checkAppKeyReadable verifies REIN_APP_PRIVATE_KEY_PATH points at a
-// readable file with reasonable mode bits. Loose perms (group/world
-// readable) are a warn rather than a fail — the operator may have made
-// an informed choice in a sandboxed environment. Missing or unreadable
-// is red.
+// readable file with strict mode bits.
+//
+// Post-CP5 mint-path keystore refactor: rein will refuse to mint when
+// the PEM has any group/other bits set (keystore.verifyOwnership
+// hard-fails). Doctor reports loose mode as red to keep doctor's
+// verdict aligned with what mint actually does — a green doctor and a
+// refusing mint would be the worst possible UX on exactly the
+// situation the operator most needs guidance on.
+//
+// Post-CP5: if REIN_APP_PRIVATE_KEY_PATH is unset but state.json
+// records a manifest-flow phase, check the keystore-managed PEM
+// (~/.config/rein/<role>.pem) instead. Otherwise a fresh manifest
+// flow setup always tripped this check before the user got around to
+// pointing the env var at the keystored file.
 func checkAppKeyReadable() checkResult {
 	path := os.Getenv("REIN_APP_PRIVATE_KEY_PATH")
 	if path == "" {
-		return checkResult{"app key", statusFail, "REIN_APP_PRIVATE_KEY_PATH unset (source ./dev-env?)"}
+		if alt, ok := managedPEMPath(); ok {
+			path = alt
+		} else {
+			return checkResult{"app key", statusFail, "REIN_APP_PRIVATE_KEY_PATH unset (source ./dev-env?)"}
+		}
 	}
 	info, err := os.Stat(path)
 	if err != nil {
@@ -243,20 +259,54 @@ func checkAppKeyReadable() checkResult {
 	}
 	mode := info.Mode().Perm()
 	if mode&0o077 != 0 {
-		return checkResult{"app key", statusWarn, fmt.Sprintf("%s mode %#o is group/world-readable (recommend 0600 or 0400)", path, mode)}
+		return checkResult{"app key", statusFail, fmt.Sprintf("%s mode %#o has group/other bits set (rein will refuse to mint); chmod 600 %s", path, mode, path)}
 	}
 	return checkResult{"app key", statusOK, fmt.Sprintf("%s (mode %#o)", path, mode)}
+}
+
+// managedPEMPath returns the path to the keystore-managed primary PEM
+// if state.json indicates a manifest-flow setup. Returns ok=false when
+// state.json is absent, corrupt, or doesn't carry a manifest phase
+// (e.g. it's a managed_externally marker).
+func managedPEMPath() (string, bool) {
+	configDir, err := config.ConfigDir()
+	if err != nil {
+		return "", false
+	}
+	s, err := appsetup.ReadState(configDir)
+	if err != nil {
+		return "", false
+	}
+	if s.Phase != appsetup.PhasePrimaryDone && s.Phase != appsetup.PhaseAuditDone {
+		return "", false
+	}
+	// Stat-only: avoid keystore.Get so we don't pay the
+	// biometric-prompt cost a Phase 1/2 backend would impose.
+	// PathOf gives us the same file FileKeystore.Get would open.
+	ks := keystore.NewFileKeystore(configDir)
+	return ks.PathOf(config.AppKeystoreRole), true
 }
 
 // checkAppMint exercises the actual mint path: build a Client from the
 // REIN_* env, call MintReadOnlyToken with a tight timeout. Any error
 // here is red — without working credentials no agent path works.
+//
+// Post-CP5: if state.json shows a manifest-flow phase but
+// REIN_APP_INSTALLATION_ID is not yet set (because the user hasn't
+// installed the App on a repo), report warn instead of fail and point
+// at the install deep-link from state.json. This avoids a "doctor
+// always fails on fresh manifest-flow setup" surprise.
 func checkAppMint() checkResult {
-	appCfg, err := config.LoadAppConfig()
+	appCfg, ks, err := config.LoadAppConfig()
 	if err != nil {
+		if configDir, derr := config.ConfigDir(); derr == nil {
+			if hint, ok := appsetup.PostManifestInstallHint(configDir); ok {
+				return checkResult{"app credentials", statusWarn, hint}
+			}
+		}
 		return checkResult{"app credentials", statusFail, err.Error()}
 	}
-	client, err := githubapp.NewClient(appCfg)
+	client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
 	if err != nil {
 		return checkResult{"app credentials", statusFail, err.Error()}
 	}

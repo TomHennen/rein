@@ -36,6 +36,7 @@ import (
 	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
+	"github.com/TomHennen/rein/internal/keystore"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/ui/grant"
 )
@@ -132,20 +133,20 @@ func runReadAndExec(realGh string, args []string, stateDir string, logger *log.L
 // own hosts.yml-based auth and surface its own error rather than a
 // shim-level error.
 func readTierToken(stateDir string, logger *log.Logger) string {
-	appCfg, err := loadAppCfgWithSession(logger)
+	appCfg, ks, err := loadAppCfgWithSession(logger)
 	if err != nil {
 		logger.Printf("read tier: %v; execing gh without GH_TOKEN", err)
 		return ""
 	}
-	client, err := githubapp.NewClient(appCfg)
+	client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
 	if err != nil {
 		logger.Printf("read tier: NewClient failed: %v", err)
 		return ""
 	}
 	token, _, err := ghsession.EnsureFresh(
 		ghsession.ReadCachePath(stateDir),
-		appCfg,
 		client.MintGhReadOnlyToken,
+		client.RevokeToken,
 		refreshSkew,
 		mintTimeout,
 		logger,
@@ -158,20 +159,21 @@ func readTierToken(stateDir string, logger *log.Logger) string {
 }
 
 // loadAppCfgWithSession returns the App config overridden with the
-// session's repo. CP4 sessions have one repo; CP5+ multi-repo will
-// require per-call repo selection.
-func loadAppCfgWithSession(logger *log.Logger) (githubapp.Config, error) {
-	appCfg, err := config.LoadAppConfig()
+// session's repo, plus the keystore the mint path reads the PEM from.
+// CP4 sessions have one repo; CP5+ multi-repo will require per-call
+// repo selection.
+func loadAppCfgWithSession(logger *log.Logger) (githubapp.Config, keystore.Keystore, error) {
+	appCfg, ks, err := config.LoadAppConfig()
 	if err != nil {
-		return githubapp.Config{}, err
+		return githubapp.Config{}, nil, err
 	}
 	sess, src, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
 	if err != nil {
-		return githubapp.Config{}, fmt.Errorf("load session: %w", err)
+		return githubapp.Config{}, nil, fmt.Errorf("load session: %w", err)
 	}
 	appCfg.RepoName = bareRepoName(sess.Repos[0])
 	logger.Printf("session: id=%q repos=%v source=%s", sess.ID, sess.Repos, src)
-	return appCfg, nil
+	return appCfg, ks, nil
 }
 
 // execGhWithoutToken is the denial path: fork real gh with a
@@ -256,7 +258,7 @@ func bareRepoName(ownerSlashName string) string {
 // (without GH_TOKEN) so the user gets gh's "needs auth" error instead
 // of a shim error.
 func runWrite(realGh string, args []string, stateDir string, logger *log.Logger) int {
-	appCfg, cfgErr := loadAppCfgWithSession(logger)
+	appCfg, ks, cfgErr := loadAppCfgWithSession(logger)
 	var token string
 	var client *githubapp.Client
 
@@ -288,7 +290,7 @@ func runWrite(realGh string, args []string, stateDir string, logger *log.Logger)
 
 	if cfgErr != nil {
 		logger.Printf("write tier: %v; execing gh without GH_TOKEN", cfgErr)
-	} else if c, err := githubapp.NewClient(appCfg); err != nil {
+	} else if c, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole); err != nil {
 		logger.Printf("write tier: NewClient failed: %v; execing gh without GH_TOKEN", err)
 	} else {
 		client = c
