@@ -13,7 +13,7 @@ import (
 )
 
 func TestBindLoopback_AddressIsLoopback(t *testing.T) {
-	ln, port, err := bindLoopback()
+	ln, port, err := bindLoopback(0)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -55,7 +55,7 @@ func newTestManifest(t *testing.T) Manifest {
 }
 
 func TestRunCallback_HappyPath(t *testing.T) {
-	ln, port, err := bindLoopback()
+	ln, port, err := bindLoopback(0)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestRunCallback_HappyPath(t *testing.T) {
 }
 
 func TestRunCallback_StateMismatch(t *testing.T) {
-	ln, port, _ := bindLoopback()
+	ln, port, _ := bindLoopback(0)
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	errCh := make(chan error, 1)
@@ -126,7 +126,7 @@ func TestRunCallback_StateMismatch(t *testing.T) {
 }
 
 func TestRunCallback_RootServesHTML(t *testing.T) {
-	ln, port, _ := bindLoopback()
+	ln, port, _ := bindLoopback(0)
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	errCh := make(chan error, 1)
@@ -147,7 +147,7 @@ func TestRunCallback_RootServesHTML(t *testing.T) {
 }
 
 func TestRunCallback_ContextTimeout(t *testing.T) {
-	ln, _, _ := bindLoopback()
+	ln, _, _ := bindLoopback(0)
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	_, err := runCallback(ctx, ln, newTestManifest(t), "state", RolePrimary, 1, io.Discard)
@@ -160,7 +160,7 @@ func TestRunCallback_ContextTimeout(t *testing.T) {
 }
 
 func TestRunCallback_SingleShot(t *testing.T) {
-	ln, port, _ := bindLoopback()
+	ln, port, _ := bindLoopback(0)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	resCh := make(chan callbackResult, 1)
@@ -232,7 +232,7 @@ func TestBindLoopback_NonLocalhostLiteral(t *testing.T) {
 	// Ensure bindLoopback uses the IP literal, not "localhost", per
 	// RFC 8252 §7.3. We test this by checking that the listener's
 	// network is IPv4.
-	ln, _, err := bindLoopback()
+	ln, _, err := bindLoopback(0)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}

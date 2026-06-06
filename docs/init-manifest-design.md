@@ -302,10 +302,15 @@ confirmed against GitHub docs). So the options, in preference order:
 
 1. **SSH local port-forward (preferred for remote).** `ssh -L
    <port>:127.0.0.1:<port> <host>`, open the printed URL on the local
-   machine. Keeps the automated, safe PEM import end-to-end. Fragile
-   only when the callback port is unknown ahead of time (rein binds
-   `:0`) or `AllowTcpForwarding no` is set. A future `--port` flag would
-   make the tunnel predictable.
+   machine. Keeps the automated, safe PEM import end-to-end. rein
+   auto-detects a headless SSH session (`$SSH_CONNECTION` set, no
+   `$DISPLAY`/`$WAYLAND_DISPLAY`) and prints a ready-to-paste `ssh -L`
+   recipe with the host/user filled in from `$SSH_CONNECTION`, instead
+   of a useless "open this URL". `rein init --port <n>` pins the
+   callback port (rein otherwise binds `:0`) so the tunnel can be set up
+   *before* running init — no see-port-then-tunnel race. Still fragile
+   only when `AllowTcpForwarding no` blocks forwarding entirely; that's
+   what fallback (2) is for.
 
 2. **URL-parameter prefill + manual key import (last resort).** GitHub's
    [URL-parameter registration](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-using-url-parameters)

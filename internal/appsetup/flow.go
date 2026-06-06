@@ -23,6 +23,12 @@ type RunOptions struct {
 	Stdout        io.Writer
 	Stderr        io.Writer
 	ExpectedOwner string // empty unless --owner passed at the CLI
+	// Port pins the loopback callback port (0 = kernel-assigned
+	// ephemeral). A fixed port lets a headless/remote user set up
+	// `ssh -L <port>:127.0.0.1:<port>` before running init. Both manifest
+	// rounds reuse it (each round's listener is closed before the next
+	// binds; SO_REUSEADDR handles the immediate rebind).
+	Port int
 	// APIBase overrides the GitHub API base URL for tests. Empty in
 	// production (uses DefaultGitHubAPIBase).
 	APIBase string
@@ -200,7 +206,7 @@ func NeedsManifestFlow(state State, stateErr error, opts RunOptions, envPresent 
 // callback, exchange code, verify owner, persist PEM via keystore,
 // return the AppRecord to merge into State.
 func runOneStep(ctx context.Context, opts RunOptions, role Role, step int) (*AppRecord, error) {
-	ln, port, err := bindLoopback()
+	ln, port, err := bindLoopback(opts.Port)
 	if err != nil {
 		return nil, err
 	}
@@ -216,11 +222,16 @@ func runOneStep(ctx context.Context, opts RunOptions, role Role, step int) (*App
 		return nil, err
 	}
 
-	fmt.Fprintf(opts.Stdout, "  open this URL in your browser if it doesn't open automatically:\n    %s\n", localURL(port))
-	if err := openBrowser(localURL(port), opts.Stdout); err != nil {
-		// openBrowser is best-effort; an error here is logged but not
-		// fatal. The URL is already on stdout.
-		fmt.Fprintf(opts.Stderr, "  (browser launch error: %v; please open the URL above manually)\n", err)
+	hi := detectHeadless()
+	printBrowserInstructions(opts.Stdout, port, opts.Port != 0, hi)
+	if !hi.headless {
+		// Only auto-open when a local browser could plausibly reach the
+		// loopback; on a headless box the ssh -L hint is the real path.
+		if err := openBrowser(localURL(port), opts.Stdout); err != nil {
+			// openBrowser is best-effort; an error here is logged but not
+			// fatal. The URL is already on stdout.
+			fmt.Fprintf(opts.Stderr, "  (browser launch error: %v; please open the URL above manually)\n", err)
+		}
 	}
 
 	cbCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)

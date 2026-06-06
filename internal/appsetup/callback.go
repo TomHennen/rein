@@ -18,17 +18,19 @@ type callbackResult struct {
 	Code string
 }
 
-// bindLoopback returns a listener bound to 127.0.0.1 on a kernel-
-// assigned ephemeral port. The 127.0.0.1 literal is mandated by
-// RFC 8252 §7.3 — never use "localhost" (it could resolve to IPv6
+// bindLoopback returns a listener bound to 127.0.0.1. A port of 0 asks
+// the kernel for an ephemeral port (the default); a non-zero port pins
+// it, which lets a headless/remote user set up `ssh -L <port>:...`
+// before running init (see --port). The 127.0.0.1 literal is mandated
+// by RFC 8252 §7.3 — never use "localhost" (it could resolve to IPv6
 // ::1, or be hijacked via /etc/hosts).
-func bindLoopback() (net.Listener, int, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+func bindLoopback(port int) (net.Listener, int, error) {
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		return nil, 0, fmt.Errorf("bind loopback: %w", err)
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	return ln, port, nil
+	bound := ln.Addr().(*net.TCPAddr).Port
+	return ln, bound, nil
 }
 
 // newStateNonce returns 32 bytes from crypto/rand, base64-url-encoded

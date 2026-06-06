@@ -59,6 +59,7 @@ func runInit(args []string) error {
 	var skipAudit bool
 	var force bool
 	var expectedOwner string
+	var manifestPort int
 	fs.BoolVar(&skipMint, "skip-mint-check", false, "skip the App credentials network check (useful for repeated re-runs; GitHub's installation-token mint has secondary rate limits)")
 	fs.BoolVar(&noSymlink, "no-symlink", false, "skip creating the ~/.local/bin/rein symlink")
 	fs.BoolVar(&noAlias, "no-alias", false, "skip writing the `alias claude='rein run -- claude'` block to your shell rc")
@@ -66,6 +67,7 @@ func runInit(args []string) error {
 	fs.BoolVar(&skipAudit, "skip-audit", false, "create only the primary GitHub App (skip the audit App; subsequent `rein init` will create it)")
 	fs.BoolVar(&force, "force", false, "ignore state.json and run the manifest flow from scratch (existing Apps at GitHub are NOT deleted)")
 	fs.StringVar(&expectedOwner, "owner", "", "expected GitHub owner login (user or org); if set, manifest flow refuses to persist if the App was created under a different account")
+	fs.IntVar(&manifestPort, "port", 0, "pin the manifest-flow callback port (default: random ephemeral); set this on headless/remote machines so you can `ssh -L <port>:127.0.0.1:<port>` before running init")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -170,6 +172,7 @@ func runInit(args []string) error {
 			Stdout:        os.Stdout,
 			Stderr:        os.Stderr,
 			ExpectedOwner: expectedOwner,
+			Port:          manifestPort,
 		}); err != nil {
 			return err
 		}
