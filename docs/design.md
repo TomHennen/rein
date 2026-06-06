@@ -1,7 +1,7 @@
 # Design Doc: `rein` — An Agent Credential Broker for GitHub Development Workflows
 
-**Status:** Pre-Phase-0 design (v3). Phase 0 is built; design corrections from implementation are tracked in `phase0_findings.md` and summarized in §13 below. Read §13 alongside this doc — several mechanisms here (Shape A proxy assumptions, 5-min write TTL, helper-sees-/git-receive-pack) turned out not to hold; the corrections are non-trivial.
-**Date:** May 23, 2026 (Phase 0 close: May 25, 2026 — see `phase0_findings.md`)
+**Status:** Authoritative reference, swept for Phase 0 + Phase 0.5 implementation reality (2026-06-06). Phase 0 and Phase 0.5 are built. The §12 validation findings and the Phase 0/0.5 implementation corrections are now folded into the relevant body sections; §13 is retained as a navigation table mapping each correction to the section it amends. `phase0_findings.md` and `PLAN-0.5.md` are the primary build records; this doc is the design of record. Where the body describes a Shape A (sandbox-composed) mechanism that Phase 0/0.5 implements differently in Shape B (credential-helper, no sandbox), both are now stated and cross-referenced.
+**Date:** May 23, 2026 (original v3 design); Phase 0 close: May 25, 2026; Phase 0.5 close + design sweep: 2026-06-06 — see `phase0_findings.md` and `PLAN-0.5.md`.
 **Version:** v3 (incorporates §12 validation findings + comparative analysis vs. Agent Vault, Claude Code Cloud, cloud workload identity, current IETF/Sigstore landscape)
 **Companion to:** `wrangle` (supply-chain scanner running on GitHub Actions; provides the release pipeline for `rein` itself)
 
@@ -173,12 +173,14 @@ Welcome to rein.
 This setup will:
   1. Create two GitHub Apps owned by you (one for normal work, one for audit posts)
   2. Generate a signing key for the broker's identity
-  3. Configure your sandbox runtime to use rein for GitHub credentials
+  3. Configure your shell + git to route GitHub credentials through rein
 
-Step 1/3: GitHub authentication
-Open https://github.com/login/device and enter code: WXYZ-1234
-✓ Authenticated as @tomh
-✓ Created GitHub App 'rein-tomh' (you'll install it on repos you want covered)
+Step 1/3: GitHub App creation (manifest flow)
+Opening your browser to create App 'rein-tomh'…
+  (a one-page GitHub form, pre-filled with the right permissions —
+   you click "Create GitHub App", GitHub redirects back to rein)
+✓ Created GitHub App 'rein-tomh'  (private key saved 0600, fingerprint a1b2…)
+Opening your browser to create App 'rein-tomh-audit'…
 ✓ Created GitHub App 'rein-tomh-audit' (used only for audit comments)
 ✓ Uploaded fixed audit-bot avatar for the audit App
 
@@ -190,9 +192,9 @@ Step 2/3: Signing key
     `rein init --hardware` after installing the codesigned distribution.
     See README.)
 
-Step 3/3: Sandbox runtime integration
-✓ Detected sandbox-runtime at /opt/homebrew/bin/srt
-✓ Configured srt to use rein for credential injection
+Step 3/3: Shell + git integration
+✓ Wrote `alias claude='rein run -- claude'` to your shell rc
+✓ Installed credential shims; rein symlinked onto your PATH
 
 Setup complete. Next step:
   Install the apps on a repo you want to use this with:
@@ -200,7 +202,13 @@ Setup complete. Next step:
     https://github.com/apps/rein-tomh-audit/installations/new
 ```
 
-The user installs the two Apps on their repos via GitHub's normal App installation flow. This happens once per repo (or once per org, for org-level installation).
+**App creation uses GitHub's App manifest flow, not Device Flow.** `rein init` generates a manifest describing each App's permissions (the primary App's permissions are the union the five roles need; the audit App's are `issues: write` only — §4.2.4), binds a short-lived loopback callback server on `127.0.0.1:<port>`, and opens the browser to GitHub's "create from manifest" page with a per-init random `state` nonce for CSRF protection. The user clicks "Create GitHub App"; GitHub redirects to the loopback callback with a one-time `code`; `rein` exchanges it via `POST /app-manifests/{code}/conversions` for the App's id, client id, and private key. The private key is written to `~/.config/rein-credentials/app-<role>.pem` at mode `0600` (all PEM reads thereafter go through `internal/keystore` — §4.2.4); the App id, client id, and (once installed) installation id are recorded in `state.json`. The two Apps are created sequentially in one `rein init` (two browser-open events, with "step 1/2 / step 2/2" copy). Implementation in `internal/appsetup`; design rationale in `docs/init-manifest-design.md`.
+
+**Sandbox-runtime integration is Phase 1, not Phase 0.5.** The original three-step mockup configured `srt` at init time; Phase 0/0.5 ship the Shape B (credential-helper) path without a sandbox, so init's third step is shell + git wiring (alias, shims, PATH) rather than `srt` configuration. The `srt` step returns in Phase 1 when sandbox composition (Shape A) lands.
+
+**Headless / remote machines.** The loopback callback needs a browser that can reach `127.0.0.1:<port>` on the rein host. On an SSH-only box there is none, and the manifest flow cannot be made callback-free (GitHub delivers the `code` only via redirect, never on a page). `rein init` detects a headless session (SSH with no display) and prints a ready-to-paste `ssh -L <port>:127.0.0.1:<port> <target>` port-forward recipe; `rein init --port <N>` pins the callback port so the user can set up the forward before running init. A URL-prefill + manual key-import last resort (for networks that block port-forwarding) is documented but deferred (issue #19). The PATH-shim safe-handling rules for any manually-placed PEM are in `docs/init-manifest-design.md`.
+
+The user installs the two Apps on their repos via GitHub's normal App installation flow. This happens once per repo (or once per org, for org-level installation). After installation, `rein run` fetches and caches the installation id automatically (§4.2.4) — the user does not have to copy it anywhere.
 
 The audit App ships with a fixed avatar (a small wrench/robot/shield SVG distributed with `rein`) so the comments it posts are visually distinguishable from the user's own comments in the GitHub UI. Without this, GitHub would fall back to showing the user's own avatar on audit comments, which validation §12.8 found undermines the visual-distinguishability claim. Composite-avatar-with-user-overlay is a polish item for future work.
 
@@ -209,11 +217,13 @@ The audit App ships with a fixed avatar (a small wrench/robot/shield SVG distrib
 The intended ergonomic model is **ambient**: the broker runs continuously, the agent runs inside the sandbox, scope is negotiated as the agent works, sessions clean themselves up. The human's role is to approve scope changes as they come up, not to configure sessions upfront.
 
 ```
-$ rein run claude
-# (or for Cursor, Codex, Aider — same wrapper)
+$ claude               # rein init aliases this to `rein run -- claude`
+# (or for Cursor, Codex, Aider — same wrapper; \claude bypasses for one run)
 ```
 
 That's it. From here, what the user sees is happening inside the agent's UI.
+
+**Zero-config after `rein init` (turnkey runtime).** A user who has run `rein init` needs no `REIN_APP_*` environment variables at all. The config resolver (`config.ResolveApp`) reads App config in precedence order: `REIN_APP_*` env vars if present (the Phase 0 dev path), else `state.json` + the keystore PEM (the manifest-flow path), else it fails closed with an actionable message. `rein run` eagerly resolves and caches the installation id for the session's repo before launching the child — it calls `GET /repos/{owner}/{repo}/installation` with an App JWT, so an App that isn't installed on the repo fails loudly at launch instead of silently degrading to a TM-G8 placeholder inside the agent's first git op. The cached id then serves every later credential-helper and `rein-gh` invocation. The net effect: clone the repo, run `rein init`, install the App, type `claude`.
 
 The agent starts in an **uninitialized session** — it can talk to the user, read local files in the working directory, but cannot reach GitHub yet. When the agent needs to do something on GitHub, a prompt appears in a separate window (terminal, OS notification, or an `rein` status app):
 
@@ -269,6 +279,10 @@ To approve, type the proposed title's first word: ___
 ```
 
 The pattern: the user always confirms with non-replayable input (issue number, first word of title, etc.) so that a prompt-injected agent can't construct a "yes" the user didn't mean.
+
+**Confirmation is approve-once-per-session, not per-write** (correction C4). An early reading of the plan treated the write confirmation as per-push, which is UX-hostile for a productive session. The right ergonomic — and the one §2.2 always described — is a single confirmation that grants the session a write window for a configurable TTL (Phase 0 default 4h, matching §4.2.2's `default_read_ttl`). Implemented in `internal/approvals` (approve-once, file-backed cache) and `rein approval grant/status/clear`.
+
+**Prompt channel under Shape B is layered** (correction C5). The ideal channel is an out-of-band status app or OS notification, but Phase 0/0.5 run without a sandbox or daemon, and agent TUIs detach `/dev/tty` from their tool subprocesses (Claude does this for its Bash tool, though it preserves the tty for the `!` shell escape). So `rein` tries channels in order: an existing valid approval in the cache → `/dev/tty` if reachable → a tmux popup if `$TMUX` is set → a helpful stderr message instructing the user to run `rein approval grant` from another terminal. The tty-detachment is a useful accident here: an agent calling `rein approval grant` from its own Bash tool hits `ErrNoTTY` (no trivial self-grant), while a human using the `!` escape gets a real tty and can approve. The architectural fix for the prompt channel is Shape A sandbox composition (Phase 1); see §5.3 TM-G5.
 
 ### 2.3 What the user does NOT have to do
 
@@ -439,6 +453,14 @@ The composition is novel; each piece is borrowed or adapted.
                                           └──────────────────────┘
 ```
 
+**The diagram above is Shape A (sandbox-composed), the v1 target.** Phase 0 and Phase 0.5 ship **Shape B (credential-helper, no sandbox)**, which has a different shape and is honestly weaker (§5.1, §5.3 TM-G8, §13). In Shape B there is no `srt` sandbox and no proxy; `rein run` instead wraps the agent process with a PATH-prepended shim directory and a per-process git config (`GIT_CONFIG_GLOBAL`) so that:
+
+- `git` authenticates via `rein`'s credential helper. Write intent is signaled by the `rein-git` PATH-shim setting `REIN_GIT_OP=read|write` in the environment (correction C1: the helper cannot see the smart-protocol endpoint, so it can't tell fetch from push on its own; a `/proc` ancestor-walk is the fallback when the shim isn't first on PATH).
+- `gh` does **not** use the git credential helper at all — it reads `GH_TOKEN` or `~/.config/gh/hosts.yml` (correction C7). The `rein-gh` PATH-shim covers this gap: it gates `gh` writes through the same approval flow as the git helper, mints two-tier (read-cached / write-JIT) tokens, revokes on exit, and on denial sets `GH_TOKEN=rein-placeholder-denied` to prevent fallback to the user's stored login.
+- `rein run` scrubs ambient `GH_TOKEN`/`GITHUB_TOKEN` (and the enterprise variants) from the wrapped child's environment so the agent uses only rein-brokered credentials (§5.3 TM-G8).
+
+Shape B is the fallback the §5.1 table characterizes as "without sandbox." Production use should always go through Shape A once it lands; the corrections that made Shape B work in practice are catalogued in §13.
+
 ### 4.2 Component breakdown
 
 **4.2.1 Broker daemon (`rein`).** A long-running local process. Listens on a Unix domain socket owned by the user's UID. Holds: GitHub App client config; signing key for delegation certs; session table (in-memory + WAL on disk); hash-chained audit log; a separate audit identity (the audit GitHub App from §2.1) so compromised agent tokens cannot prune audit comments; a human-approval dispatcher that surfaces confirmation prompts via terminal or OS notification.
@@ -515,6 +537,8 @@ roles:
 
 Effective scope ceiling is `intersect(role.permissions, github_app_installation.permissions, union(issues' repos))`.
 
+**Strict per-repo scope checking in Shape B requires `credential.useHttpPath=true`** (correction C3). Without it, the credential helper sees `path=""` and cannot tell which repo the request is for, so it can only fall back to server-side scope enforcement (the token's own scope). `rein install-shim` prints the recommended config; `rein run` sets it per-process via the wrapped child's git config so the global config isn't polluted.
+
 **4.2.3 Session lifecycle (ambient model).**
 
 Sessions are formed and modified during agent operation, not configured up front. Lifecycle:
@@ -530,12 +554,21 @@ Sessions are formed and modified during agent operation, not configured up front
 
 Multi-issue sessions are first-class: a single session can be bound to issues 73, 74, 75 (scope ceiling = union of their repos), and audit comments are cross-posted to all three with mutual cross-references.
 
-The session's identity for cryptographic purposes is a SPIFFE-shaped string like `spiffe://laptop.local/role/implement/issues/wrangle#73+74/session/01HXYZ...`. Pattern-matchable for policy purposes (see §4.2.8). The human-readable form is what users see in audit comments and policy. Internal IDs (used for integrity anchors per §5.3 TM-G6) are invisible plumbing.
+The session's identity for cryptographic purposes is a SPIFFE-shaped string like `spiffe://laptop.local/role/implement/issues/wrangle#73+74/session/01HXYZ...`. Pattern-matchable for policy purposes (see §4.2.8). The human-readable form is what users see in audit comments and policy. The integrity anchor for "has this issue moved repos?" is the canonical REST URL 301-redirect chain, not an internal ID (validation §12.7 found internal IDs don't survive transfers; see §5.3 TM-G6) — that check is invisible plumbing.
 
 **4.2.4 GitHub App integration — two Apps, two token types.**
 
-- **Primary App** (`rein-<user>`): the working App, Device Flow enabled, all role permissions, webhook disabled.
-- **Audit App** (`rein-<user>-audit`): minimal permissions (`issues: write` only). Used only for posting audit comments and for filing agent-requested new issues. Broker holds installation tokens for this App separately; never exposed to the sandbox proxy.
+- **Primary App** (`rein-<user>`): the working App, all role permissions, webhook disabled.
+- **Audit App** (`rein-<user>-audit`): minimal permissions (`issues: write` only). Used only for posting audit comments and for filing agent-requested new issues. Broker holds installation tokens for this App separately; never exposed to the sandbox proxy. Created during `rein init` but unused until Phase 1.
+
+**App creation: manifest flow, not Device Flow** (Phase 0.5). Both Apps are created via GitHub's App **manifest flow** during `rein init` (§2.1): a loopback callback on `127.0.0.1`, a per-init `state` nonce, and a code-for-App exchange via `POST /app-manifests/{code}/conversions`. This is distinct from the user-auth Device Flow described below for obtaining a user-to-server token. Implementation in `internal/appsetup`.
+
+**Private-key custody — the keystore abstraction** (Phase 0.5). Each App's private key is written to disk (`~/.config/rein-credentials/app-<role>.pem`) at mode `0600`. This makes the earlier "no private key on disk" framing (§5.3 TM-G1, now corrected) false: the App PEM *is* on disk. To contain the resulting exposure, **all private-key reads go through `internal/keystore.Keystore`** (CLAUDE.md hard constraint #6). Two backends ship in Phase 0.5:
+
+- **`FileKeystore`** — rein-owned `0600` PEMs under `~/.config/rein/`, the manifest-flow output.
+- **`SingleFileKeystore`** — a read-only wrapper around an operator-managed PEM at a configured path, used to bridge the Phase 0 `REIN_APP_PRIVATE_KEY_PATH` env var into the interface.
+
+Both enforce a strict ownership + mode check on every read: the PEM must be owned by the current uid and have no group/other permission bits (`mode & 0o077 == 0`), refused with a clear error otherwise (O_NOFOLLOW + single-fd stat-then-read closes the symlink/chown race). The interface exists so Phase 1's daemon-backed (memory-cached) and Phase 1/2's biometric backends can swap in without churning the token-mint code. **Note:** this keystore protects the *GitHub App private key*. It is a separate concern from the broker's *signing key* custody (§4.2.1.1, §6.3), which is handled by `99designs/keyring` (+ `sks` for hardware backing) — don't conflate the two.
 
 **Token types in the broker's possession.** Validation §12.4 confirmed the two-step flow:
 
@@ -545,12 +578,24 @@ The session's identity for cryptographic purposes is a SPIFFE-shaped string like
 
 Validation §12.3 confirmed that installation tokens can be scoped to a repository subset and a permission subset, with the API enforcing both. The two-tier read/write design (§4.2.5) is built on this.
 
+**Installation-id caching (turnkey runtime, Phase 0.5).** A user who has run `rein init` supplies no installation id by hand. On the first `rein run` for a repo, the broker fetches the id with an App JWT via `GET /repos/{owner}/{repo}/installation` and caches it in `state.json`; subsequent invocations read the cache (§2.2). A 404 here means the App isn't installed on that repo, surfaced as a loud launch-time error rather than a TM-G8 placeholder inside the agent.
+
+**Implementation note — Phase 0/0.5 mint via the App JWT directly**, not the Device-Flow → `ghu_` → installation-token chain described above. The broker signs an App JWT from the App's private key (via the keystore) and calls the installation-token API directly. The user-to-server `ghu_` token (validation §12.4) is the design's intended evidence-of-blessing mechanism and remains the model for the daemon; the as-built Phase 0/0.5 path is the simpler App-JWT route because the manifest flow already establishes user blessing at App-creation time. This divergence is noted here rather than rewriting the token model; reconcile in Phase 1's daemon work.
+
 **4.2.5 Two-tier token issuance.**
 
-- **Session read token** covers read APIs (cloning, reading issue/PR, listing files). Held in the broker; served by the sandbox proxy on demand for the session TTL.
-- **Write token** is minted just-in-time at push time. When `git push` traverses the proxy, the proxy notifies the broker, which (1) inspects the commits being pushed; (2) verifies they're on a branch matching the session's pattern; (3) mints a fresh installation token with minimum push permissions; (4) returns it via proxy injection; (5) marks the token single-use and sets a 5-minute revocation timer.
+- **Session read token** covers read APIs (cloning, reading issue/PR, listing files). Held in the broker; served by the sandbox proxy (Shape A) or the credential helper (Shape B) on demand for the session TTL.
+- **Write token** is minted just-in-time at push time.
 
-This addresses TOCTOU concerns (TM-G6) by binding the token to a specific HEAD and limiting it to a single use. The effective write window is "5 minutes or one push, whichever first."
+**Shape A (sandbox-composed, v1 target).** When `git push` traverses the proxy, the proxy notifies the broker, which (1) inspects the commits being pushed; (2) verifies they're on a branch matching the session's pattern; (3) mints a fresh installation token with minimum push permissions; (4) returns it via proxy injection; (5) marks the token single-use and sets a revocation timer. This addresses TOCTOU concerns (TM-G6) by binding the token to a specific HEAD and limiting it to a single use.
+
+**Shape B (credential-helper, as built in Phase 0/0.5).** Several mechanisms in the Shape A description do not exist at the credential-helper layer; the corrections:
+
+- **The helper cannot see the smart-protocol endpoint** (correction C1). Git invokes the credential helper at the repo-URL level (`owner/repo.git` with `useHttpPath=true`), before deciding fetch vs. push — never with `/git-upload-pack` or `/git-receive-pack` in the `path`. Write intent therefore comes from the `rein-git` PATH-shim setting `REIN_GIT_OP=read|write`, with a `/proc` ancestor-walk fallback when the shim isn't first on PATH.
+- **A pre-push hook cannot serve as the write-intent signal** (correction C2). The hook fires only after git has retrieved remote refs, which already requires a write-capable token; the read-only token 403s on `GET /info/refs?service=git-receive-pack` and aborts the transport before any hook runs.
+- **GitHub's installation-token mint TTL is fixed at ~1h** (correction C6). `POST /app/installations/{id}/access_tokens` does not accept a custom expiration, so the design's "5-minute write TTL" is not achievable at mint time. The short effective write window is instead achieved broker-side: the broker calls `DELETE /installation/token` on the credential helper's store/erase action (and `rein-gh` revokes on exit). The effective write window becomes roughly "operation duration + revoke round-trip," which is tighter than a fixed 5 minutes for a single push, not looser.
+
+The Shape B effective write window is therefore "one operation, revoked immediately after," not "5 minutes or one push." The single-use + HEAD-pinning TOCTOU mitigation (TM-G6) is a Shape A property that depends on the proxy inspecting commits; Shape B has the narrower revoke-on-store discipline but not commit inspection.
 
 **4.2.6 Commit signing — broker as CA (v1 default).**
 
@@ -681,7 +726,7 @@ The agent goes from "indistinguishable from human, broad scope, no defined bound
 
 ### 5.3 GitHub-/composition-specific threats
 
-**TM-G1 GitHub App private key custody.** Device Flow path; no private key on disk for the user's installation. The broker holds its own App signing key (separate from the user's auth) per §4.2.1.1.
+**TM-G1 GitHub App private key custody.** The original design assumed a Device Flow path with no App private key on disk. Phase 0.5's manifest flow changed this: each App's private key **is** written to disk at `~/.config/rein-credentials/app-<role>.pem`, mode `0600` (§4.2.4). The mitigation is the `internal/keystore` abstraction — all reads go through `Keystore.Get`, which enforces uid + mode `0o077` ownership checks (and O_NOFOLLOW against symlink swaps) on every read, failing closed on a loose-perm or wrong-owner PEM. This is a meaningful exposure to be honest about: a same-UID attacker who can defeat those checks (or who is the same uid) can read the App key, which is broad. Phase 1's daemon-backed and biometric keystore backends raise this bar; the file backend is the floor. Distinct from the broker's own signing key (§4.2.1.1), which has its own custody story.
 
 **TM-G2 Repo-scope leakage via cross-repo submodules.** SLSA Source Track issue; out of scope.
 
@@ -701,6 +746,8 @@ macOS is meaningfully better here: System Integrity Protection blocks `ptrace` b
 - Mandatory: all session starts, scope expansions, and issue creations require human confirmation with non-replayable input (type the issue number, type the first word of the title, etc.).
 - Optional: per-repo per-day rate-limit on session starts.
 
+**Confirmation-channel reality in Shape B** (correction C5). Without a sandbox or out-of-band status app, the confirmation must reach the human through whatever channel the agent's TUI leaves open. `rein` tries them in order: existing valid approval → `/dev/tty` → tmux popup (`$TMUX` set) → helpful stderr telling the user to run `rein approval grant` from another terminal. Agent TUIs detaching `/dev/tty` from their tool subprocesses is a useful accident: an agent calling `rein approval grant` from its own Bash tool hits `ErrNoTTY`, while a human using the `!` shell escape gets a real tty and can approve. **Honest limit:** an agent with shell access that can read the session file already knows the issue number and could run `rein approval grant` itself; the tty asymmetry only marginally hardens this. The architectural fix is Shape A sandbox composition. See §13 "Shape B limits observed empirically."
+
 **TM-G6 TOCTOU between resolution and use.** Two sub-cases.
 - *Between mint and use:* attacker amends commits or changes branches between the JIT mint and the push. Mitigations: single-use tokens, branch HEAD pinned at mint time.
 - *Between session start and later use:* issue is transferred to another repo, changing the implied scope ceiling. **Validation §12.7 found that GitHub does not preserve the internal issue ID across transfers** (both `id` and `databaseId` change). The integrity anchor in this design is therefore **the REST URL 301-redirect chain**, not the internal ID. At session start, the broker captures the issue's canonical REST URL. On every token mint, the broker fetches the URL; a 301 redirect indicates the issue has moved, triggering a session re-prompt. Users still see `tomh/wrangle#73`; the redirect-chain check is invisible plumbing.
@@ -715,7 +762,9 @@ macOS is meaningfully better here: System Integrity Protection blocks `ptrace` b
 **TM-G8 Agent self-remediation displacing controls.** Validation §12.1 found that when the broker's credential helper returned no credentials, Claude Code reflexively ran `gh auth setup-git`, which silently rewrote `~/.gitconfig` and displaced the broker. The agent was not malicious; it was trying to "fix what looked like a config problem." This is a generic class of failure: when the controls we want to enforce look to the agent like a broken environment, the agent's self-remediation behavior will undo them.
 
 Mitigations:
-- **Mandatory: the credential helper must always return a credential.** Never empty, never error. The broker mints a deliberately-narrow credential (read-only, expired, or minimal-scope) if no session is active, rather than letting the agent see a failure.
+- **Mandatory: the credential helper must always return a credential.** Never empty, never error. The broker returns a deliberately-narrow placeholder credential (e.g. `x-access-token` / `rein-placeholder-out-of-scope`) if no session is active or the request is out of scope, rather than letting the agent see a failure. This invariant held across every refusal path tested in Phase 0 (mint failure, scope refusal, confirm denial, prompt cancellation, prompter error, panic recovery).
+- **Phase 0.5: the placeholder path also emits an actionable diagnostic on stderr.** Git passes a credential helper's stderr through to the user/agent, so when a github.com get falls back to the placeholder (App not installed, rein not set up), the broker writes a short "run `rein doctor`" diagnostic to stderr (`Broker.Diag`, never stdout — stdout is the credential protocol). A cooperative agent learns *why* the request will fail and what to do, instead of reflexively running `gh auth setup-git`.
+- **Phase 0.5: `rein run` scrubs `GH_TOKEN`/`GITHUB_TOKEN`** (and the enterprise variants) from the wrapped child's environment so the agent can't fall back to a long-lived ambient token the developer happens to have in their shell. `gh` writes go through the `rein-gh` shim (correction C7), which mints its own scoped token; on denial it sets `GH_TOKEN=rein-placeholder-denied` to block fallback to the user's stored `hosts.yml` login. **Honest limit:** scrubbing closes the *easiest* Shape B bypass (reading the ambient env token) but does **not** remove `gh`'s keyring-stored login — a determined same-UID agent can still reach that (issue #7). Closing that is the Phase 1 sandbox's job, not Shape B's.
 - **Mandatory under sandbox composition:** the agent's view of `~/.gitconfig` is sandbox-local; rewrites don't escape to the host. The proxy mediates all traffic regardless of what sandboxed git thinks it's doing. This makes the rewrite issue moot for Shape A (sandbox-composed) deployments.
 - **Acknowledged limitation for Shape B (credential-helper without sandbox):** a sufficiently determined or compromised agent can run `git config --global` to remove or substitute the helper. This is the same threat surface that exists today with PATs (a compromised agent can do anything the user can do). Shape B is meaningfully worse than Shape A here; production use should always go through Shape A.
 
@@ -1032,19 +1081,21 @@ Net result: design is buildable. Failures are fail-soft. The §12.6 finding (Sig
 
 ---
 
-## 13. Phase 0 implementation corrections (added May 25, 2026)
+## 13. Phase 0 implementation corrections (navigation table)
 
-Phase 0 of `rein` is built. The implementation produced seven concrete corrections to the design above; this section lists each correction with a one-line summary and a pointer to the section it amends. The authoritative record is `phase0_findings.md` at the repo root; this section is a navigation aid so a reader of §1-§12 knows which assumptions to update.
+Phase 0 of `rein` produced seven concrete corrections to the original v3 design. **As of the 2026-06-06 sweep, each correction is folded into the body section it amends**; this table is retained as a navigation aid (and as a record of what changed) so a reader who knows the original design can find where each assumption was updated. The authoritative build record is `phase0_findings.md`; the operator-UX work that builds on these is `PLAN-0.5.md`.
 
-| Correction | Affects | Summary |
+| Correction | Now folded into | Summary |
 |---|---|---|
-| **C1: Helper can't see smart-protocol endpoint** | §4.2.5 ("Two-tier token issuance") | The credential helper's `path` attribute is the repo URL path (`owner/repo.git` with `useHttpPath=true`), never `/git-upload-pack` or `/git-receive-pack`. Git asks for credentials at the repo level, before deciding fetch vs push. Phase 0's Shape B substitute is a PATH-shim (`cmd/rein-git`) that sets `REIN_GIT_OP=read|write` in env, with a `/proc` ancestor-walk fallback. |
-| **C2: Pre-push hook fires too late** | §4.2.5 (intent signal pattern) | The pre-push hook runs AFTER git successfully retrieves remote refs, which already requires a write-capable token. A hook can't be used as the write-intent signal in Shape B. |
-| **C3: `credential.useHttpPath=true` is required for strict scope** | §4.2.2 (scope ceilings) | Without it, the helper sees `path=""` and can only fall back to server-side scope enforcement. Phase 0's `rein install-shim` prints the config recommendation; `rein run` sets it per-process. |
-| **C4: Per-write prompting is UX-hostile; design §2.2 was always right** | §2.2 (session start ceremony) | PLAN.md CP5's literal "single prompt presented to human for the push" was misread as per-write. Approve-once-per-session with a configurable TTL (Phase 0 default 4h, matching §4.2.2's `default_read_ttl`) is the right pattern and aligns with §2.2. |
-| **C5: `/dev/tty` is unavailable inside agent TUIs' subprocesses** | §2.2 (prompt channel), §5.3 TM-G5 | Claude detaches `/dev/tty` from its Bash-tool subprocess (but preserves it for `!` shell escape). Phase 0 builds a layered grant flow: try `/dev/tty` → try tmux popup (if `$TMUX` set) → emit helpful stderr with grant-from-another-terminal instructions. Sandbox composition (Shape A) is the architectural fix; out-of-band status app channel (per §2.2) closes the remaining gap. |
-| **C6: GitHub's installation-token mint TTL is fixed at ~1h** | §4.2.5 ("5-minute write TTL") | `POST /app/installations/{id}/access_tokens` does not accept a custom expiration. The 5-minute effective write window is achieved broker-side via `DELETE /installation/token` on the credential-helper's store/erase action (effective TTL = "operation duration + revoke RTT"). |
-| **C7: `gh` writes bypass the git credential helper entirely** | §4 (architecture) | `gh` reads `GH_TOKEN` env or `~/.config/gh/hosts.yml`. Without coverage, an agent could TM-G8-displace at the API layer. Phase 0 adds `cmd/rein-gh` (PATH-shim, same pattern as rein-git) which gates `gh` writes through the same `ConfirmWrite` approval flow, with two-tier read-cached / write-JIT minting and revoke-on-gh-exit. On denial, sets `GH_TOKEN=rein-placeholder-denied` to prevent fallback to the user's `hosts.yml`. |
+| **C1: Helper can't see smart-protocol endpoint** | §4.2.5 ("Shape B") | The credential helper's `path` attribute is the repo URL path (`owner/repo.git` with `useHttpPath=true`), never `/git-upload-pack` or `/git-receive-pack`. Git asks for credentials at the repo level, before deciding fetch vs push. The Shape B substitute is a PATH-shim (`cmd/rein-git`) that sets `REIN_GIT_OP=read|write` in env, with a `/proc` ancestor-walk fallback. |
+| **C2: Pre-push hook fires too late** | §4.2.5 ("Shape B") | The pre-push hook runs AFTER git successfully retrieves remote refs, which already requires a write-capable token. A hook can't be used as the write-intent signal in Shape B. |
+| **C3: `credential.useHttpPath=true` is required for strict scope** | §4.2.2 (scope ceilings) | Without it, the helper sees `path=""` and can only fall back to server-side scope enforcement. `rein install-shim` prints the config recommendation; `rein run` sets it per-process. |
+| **C4: Per-write prompting is UX-hostile; §2.2 was always right** | §2.2 (session start ceremony) | A literal "single prompt presented to human for the push" was misread as per-write. Approve-once-per-session with a configurable TTL (Phase 0 default 4h, matching §4.2.2's `default_read_ttl`) is the right pattern and aligns with §2.2. |
+| **C5: `/dev/tty` is unavailable inside agent TUIs' subprocesses** | §2.2 (prompt channel), §5.3 TM-G5 | Claude detaches `/dev/tty` from its Bash-tool subprocess (but preserves it for `!` shell escape). Layered grant flow: `/dev/tty` → tmux popup (if `$TMUX` set) → helpful stderr with grant-from-another-terminal instructions. Sandbox composition (Shape A) is the architectural fix. |
+| **C6: GitHub's installation-token mint TTL is fixed at ~1h** | §4.2.5 ("Shape B") | `POST /app/installations/{id}/access_tokens` does not accept a custom expiration. The short effective write window is achieved broker-side via `DELETE /installation/token` on the credential-helper's store/erase action (effective TTL = "operation duration + revoke RTT"). |
+| **C7: `gh` writes bypass the git credential helper entirely** | §4 (architecture), §4.2.5, §5.3 TM-G8 | `gh` reads `GH_TOKEN` env or `~/.config/gh/hosts.yml`. Without coverage, an agent could TM-G8-displace at the API layer. `cmd/rein-gh` (PATH-shim, same pattern as rein-git) gates `gh` writes through the same `ConfirmWrite` approval flow, with two-tier read-cached / write-JIT minting and revoke-on-gh-exit. On denial, sets `GH_TOKEN=rein-placeholder-denied`. |
+
+Phase 0.5 additions (keystore abstraction, manifest flow, turnkey runtime, headless support, Shape B bypass hardening) are folded directly into §2.1, §2.2, §4.2.4, and §5.3 (TM-G1, TM-G5, TM-G8); they have no separate correction IDs. See `PLAN-0.5.md` for the checkpoint record.
 
 ### Shape B limits observed empirically
 
