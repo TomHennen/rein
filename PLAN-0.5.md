@@ -432,6 +432,23 @@ checkpoint, but it should land before Phase 1 starts.
   skip the role's step and adopt the user-placed PEM without tripping
   the orphan guard.
 
+- 2026-06-06 — Headless/remote gap in the manifest flow surfaced while
+  smoke-testing CP5 in the (headless) dev VM. The loopback callback
+  needs a browser that can reach `127.0.0.1:<port>` on the rein host;
+  on an SSH-only box there is none. Researched against GitHub docs: the
+  manifest flow cannot be made callback-free (the `code` is delivered
+  only via redirect, never shown on a GitHub page). Resolution: (1)
+  SSH `-L` port-forward is the preferred remote path and keeps the
+  automated, safe PEM import; (2) a URL-parameter-prefill + manual
+  key-import fallback is the last resort, with the same-UID-boundary
+  security analysis + safe-handling rules now written into
+  `docs/init-manifest-design.md` (new "Safe handling of the App private
+  key" + "Headless / remote fallback" sections). The fallback is NOT
+  built in CP5 (overlaps the Stage 2 `rein import-pem` deferral);
+  tracked as a followup issue. The "copy the code from a failed-load
+  address bar" trick was evaluated and rejected (undefined behavior).
+  CP7 onboarding must surface the safe-PEM-handling rules verbatim.
+
 ## Tooling requests
 
 (If you find this VM is missing something for Phase 0.5 specifically,

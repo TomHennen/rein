@@ -228,6 +228,103 @@ short version:
   the manifest flow prints a one-line WARN to stderr so the operator
   is reminded of the missing guard.
 
+## Safe handling of the App private key
+
+The App PEM is the **root secret of the whole system**: with it plus the
+App ID and an installation ID, anyone can mint installation tokens for
+everything the App is installed on. Protecting it is the point of rein,
+so how it reaches the keystore matters as much as how it is stored.
+
+**The automated manifest flow is the safe path.** The conversion
+response hands the PEM to rein in memory; rein writes it straight to the
+keystore via the atomic 0600 sequence (`Key storage timing` above). It
+never lands on disk loosely, never passes through `~/Downloads`, never
+enters shell history. Prefer this path wherever a browser can reach the
+loopback callback — directly (desktop) or via an SSH tunnel (remote);
+see the headless fallback below.
+
+**Calibrating the risk of manual handling.** rein's threat model
+already concedes (Security considerations above; issue #7) that any
+*same-UID* process can read the broker's PEM directly. So the only thing
+manual handling adds worth worrying about is exposure that **crosses the
+same-UID boundary**, of which there are exactly two:
+
+1. **Off-machine.** A PEM downloaded to `~/Downloads` can be swept into
+   iCloud / Dropbox / Time Machine / corporate backup — the root key
+   replicated to a third party. This is qualitatively worse than
+   anything in rein's in-machine model.
+2. **Other local UID.** A browser download lands at the umask default
+   (typically `0644`), readable by other local users; the keystore's
+   `0600` destination never was.
+
+The within-UID exposure (a loose file readable by your own processes) is
+**not a new worry** — it is already in the conceded model.
+
+**The keystore's uid + mode checks do not mitigate this.** They protect
+the *destination*. The exposure is entirely in the *journey* —
+download → transit → cleanup — which happens before rein ever sees the
+file. The journey is what documentation and any future import command
+must cover.
+
+**Why manual handling is acceptable as a *fallback*.** The relevant
+comparison is not "manual PEM vs. PAT sprawl" (true, but it only argues
+the path should *exist*). It is "manual PEM vs. SSH `-L`," because SSH
+`-L` keeps the *automated* import and so never incurs the journey risk.
+Manual handling is therefore the **last resort**, reached only when
+neither a local browser nor port-forwarding is possible. Layered that
+way, the off-machine/other-UID exposure is rarely incurred at all.
+
+**Required handling rules when the manual path is used** (to be
+surfaced verbatim in the CP7 onboarding doc):
+
+- Get the key into rein's keystore immediately and delete the
+  download (`shred -u` / secure-delete), so no loose copy lingers.
+- Do not download into a cloud-synced or backed-up directory; prefer a
+  scratch path you control, then remove it.
+- For a remote box, stream the key in rather than copying a loose file:
+  e.g. `cat app.pem | ssh <host> 'rein import-pem --app primary -'`
+  (Stage 2 command) so the PEM never lands loosely on the remote disk.
+  Until that command ships, `scp` (encrypted transit) into a `0600`
+  path and `shred -u` the source.
+- Never paste the key into a chat, an issue, a config file, or any
+  command that records to shell history.
+- After import, the keystore enforces `0600` + owner-only; a key that
+  has been re-permed loose or chown'd is refused on read (fail closed).
+
+## Headless / remote fallback (no localhost-reachable browser)
+
+The loopback callback (the CP5 primary path) needs a browser that can
+reach `127.0.0.1:<port>` on the machine running rein. On a headless or
+SSH-only box that fails. The manifest flow **cannot** be made
+callback-free: GitHub delivers the temporary `code` *only* via the
+redirect and never displays it on a GitHub-hosted page (researched and
+confirmed against GitHub docs). So the options, in preference order:
+
+1. **SSH local port-forward (preferred for remote).** `ssh -L
+   <port>:127.0.0.1:<port> <host>`, open the printed URL on the local
+   machine. Keeps the automated, safe PEM import end-to-end. Fragile
+   only when the callback port is unknown ahead of time (rein binds
+   `:0`) or `AllowTcpForwarding no` is set. A future `--port` flag would
+   make the tunnel predictable.
+
+2. **URL-parameter prefill + manual key import (last resort).** GitHub's
+   [URL-parameter registration](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-using-url-parameters)
+   is a plain GET link to `settings/apps/new?contents=write&...` that
+   pre-fills the New-App form with rein's exact permission set. The user
+   reviews, clicks Create, downloads the private key, and imports it
+   under the handling rules above. No callback, no `code`, no localhost
+   — but rein does not receive the PEM automatically, so the journey
+   risk above applies. This realizes the "advanced setup" fallback the
+   project always intended; the import side overlaps the Stage 2
+   `rein import-pem` command (Out of scope, below). **Not built in CP5.**
+
+Anti-pattern (rejected after research): pointing `redirect_url` at an
+unreachable loopback and having the user copy the `code` out of the
+failed-load address bar. It relies on undefined browser behavior and an
+unconfirmed assumption that GitHub does not restrict `redirect_url` to
+reachable hosts; no shipping tool does this for App *creation*. Do not
+ship it.
+
 ## Files written by CP5
 
 | Path | Mode | Content |
