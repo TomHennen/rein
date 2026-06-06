@@ -139,6 +139,23 @@ func runWrapped(argv []string) (int, error) {
 	env = setEnv(env, "GIT_CONFIG_GLOBAL", gitConfigPath)
 	env = setEnv(env, "GIT_CONFIG_SYSTEM", "/dev/null")
 
+	// Scrub ambient GitHub tokens from the wrapped child. The agent must
+	// use only rein-brokered credentials, never a long-lived token the
+	// developer happens to have in their shell. Safe: git ignores these
+	// (it authenticates via the credential helper), and gh ops go through
+	// the rein-gh shim, which mints + sets its OWN GH_TOKEN, overriding
+	// any inherited value. This closes the easiest Shape B bypass — an
+	// agent reading the ambient token. It does NOT remove gh's stored
+	// login (keyring); a determined same-UID agent can still reach that,
+	// which is what the Phase 1 sandbox is for (issue #7).
+	var scrubbed []string
+	for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"} {
+		if os.Getenv(name) != "" {
+			scrubbed = append(scrubbed, name)
+		}
+		env = unsetEnv(env, name)
+	}
+
 	cmd := exec.Command(cmdline[0], cmdline[1:]...)
 	cmd.Env = env
 	cmd.Stdin = os.Stdin
@@ -153,6 +170,9 @@ func runWrapped(argv []string) (int, error) {
 	fmt.Fprintf(os.Stderr, "  PATH-front shim dir: %s\n", shimDir)
 	fmt.Fprintf(os.Stderr, "  per-process git config: %s\n", gitConfigPath)
 	fmt.Fprintln(os.Stderr, "  (your real ~/.gitconfig is layered in via include.path)")
+	if len(scrubbed) > 0 {
+		fmt.Fprintf(os.Stderr, "  scrubbed from child env: %s (agent uses rein-brokered creds only)\n", strings.Join(scrubbed, ", "))
+	}
 	fmt.Fprintln(os.Stderr)
 	if sess.Issue == 0 && isWriteCapableRole(sess.Role) {
 		fmt.Fprintln(os.Stderr, "  WARN: session has no `issue:` field — write ops will mint WITHOUT human confirmation.")
@@ -348,4 +368,17 @@ func setEnv(env []string, name, value string) []string {
 		}
 	}
 	return append(env, prefix+value)
+}
+
+// unsetEnv removes every entry for name from env, returning a new slice.
+func unsetEnv(env []string, name string) []string {
+	prefix := name + "="
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }

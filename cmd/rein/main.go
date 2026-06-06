@@ -132,16 +132,39 @@ func runCredentialHelper(action string) error {
 	// that is NOT an error here. The only error case is "no config at all"
 	// (no env AND no state), which is a genuine config error with no
 	// github.com host yet known — same shape as today's LoadAppConfig error.
-	appCfg, ks, _, err := config.ResolveApp()
-	if err != nil {
-		return err
-	}
-
 	logger, closeLog, err := openLog()
 	if err != nil {
 		return err
 	}
 	defer closeLog()
+
+	stateDir, err := config.StateDir()
+	if err != nil {
+		return err
+	}
+
+	appCfg, ks, _, rerr := config.ResolveApp()
+	if rerr != nil {
+		// No config at all (no env AND no state.json). TM-G8: do NOT exit
+		// with empty stdout — an empty credential invites git/tooling to
+		// run `gh auth setup-git` and silently displace the broker
+		// (validated finding §12.1). Route through the broker with a
+		// failing minter so a github.com get yields the placeholder plus
+		// an actionable stderr diagnostic; non-github hosts still get an
+		// empty block (correct). ReadCachePath is intentionally empty so
+		// an unconfigured rein never serves a stale cached token.
+		logger.Printf("ResolveApp failed: %v; serving TM-G8 placeholder for github.com get", rerr)
+		failMint := broker.MintFunc(func(ctx context.Context) (string, time.Time, error) {
+			return "", time.Time{}, rerr
+		})
+		return broker.RunCredentialHelper(action, os.Stdin, os.Stdout, broker.Config{
+			MintRead:    failMint,
+			MintWrite:   failMint,
+			MintTimeout: mintTimeout,
+			Logger:      logger,
+			Diag:        os.Stderr,
+		})
+	}
 
 	sess, sessSource, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
 	if err != nil {
@@ -153,12 +176,7 @@ func runCredentialHelper(action string) error {
 	appCfg.RepoName = bareRepoName(sess.Repos[0])
 	logger.Printf("session: id=%q role=%q repos=%v source=%s", sess.ID, sess.Role, sess.Repos, sessSource)
 
-	stateDir, err := config.StateDir()
-	if err != nil {
-		return err
-	}
-
-	return runCredentialHelperWithConfig(action, os.Stdin, os.Stdout, appCfg, ks, sess, stateDir, logger)
+	return runCredentialHelperWithConfig(action, os.Stdin, os.Stdout, os.Stderr, appCfg, ks, sess, stateDir, logger)
 }
 
 // runCredentialHelperWithConfig is the testable core of the credential
@@ -173,7 +191,7 @@ func runCredentialHelper(action string) error {
 // rein-placeholder-mint-failed credential — never an early return, never an
 // empty credential. There must be NO error return between ResolveApp and this
 // call on the github.com path.
-func runCredentialHelperWithConfig(action string, in io.Reader, out io.Writer, appCfg githubapp.Config, ks keystore.Keystore, sess session.Session, stateDir string, logger *log.Logger) error {
+func runCredentialHelperWithConfig(action string, in io.Reader, out, diag io.Writer, appCfg githubapp.Config, ks keystore.Keystore, sess session.Session, stateDir string, logger *log.Logger) error {
 	mintRead := broker.MintFunc(func(ctx context.Context) (string, time.Time, error) {
 		client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
 		if err != nil {
@@ -204,6 +222,7 @@ func runCredentialHelperWithConfig(action string, in io.Reader, out io.Writer, a
 		MintWrite:     mintWrite,
 		MintTimeout:   mintTimeout,
 		Logger:        logger,
+		Diag:          diag,
 		ReadCachePath: filepath.Join(stateDir, "cache", "read-token.json"),
 		DetectWrite:   func() bool { return detectWriteIntent(logger) },
 		Revoke:        revoke,

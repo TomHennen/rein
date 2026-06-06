@@ -33,14 +33,24 @@ func TestCredentialHelper_TMG8_OnMissingInstallID(t *testing.T) {
 	ks := keystore.NewFileKeystore(t.TempDir())
 
 	in := strings.NewReader("protocol=https\nhost=github.com\n\n")
-	var out strings.Builder
+	var out, diag strings.Builder
 
-	err := runCredentialHelperWithConfig("get", in, &out, appCfg, ks, sess, stateDir, logger)
+	err := runCredentialHelperWithConfig("get", in, &out, &diag, appCfg, ks, sess, stateDir, logger)
 	if err != nil {
 		t.Fatalf("helper must never error on github.com get (TM-G8): %v", err)
 	}
 	got := out.String()
 	if !strings.Contains(got, "password=rein-placeholder-mint-failed") {
 		t.Errorf("expected TM-G8 placeholder credential, got:\n%s", got)
+	}
+	// stdout must carry ONLY the credential protocol — the diagnostic goes
+	// to the separate diag (stderr) sink, never stdout.
+	if strings.Contains(got, "rein doctor") {
+		t.Errorf("diagnostic leaked onto stdout (corrupts credential protocol):\n%s", got)
+	}
+	// The agent-facing diagnostic must explain the failure and point at
+	// `rein doctor` so a cooperative agent does the right thing.
+	if d := diag.String(); !strings.Contains(d, "rein doctor") {
+		t.Errorf("expected actionable `rein doctor` diagnostic on diag/stderr, got:\n%s", d)
 	}
 }

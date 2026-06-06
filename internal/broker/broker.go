@@ -82,6 +82,17 @@ type Config struct {
 	// token values — only metadata (expiry, length, scope).
 	Logger *log.Logger
 
+	// Diag receives a short, actionable, user-facing diagnostic when a
+	// github.com get falls back to the mint-failed TM-G8 placeholder
+	// (e.g. App not installed, rein not set up). git passes a credential
+	// helper's stderr through to the user/agent, so this is how a
+	// cooperative agent learns WHY the request will fail and what to do
+	// (run `rein doctor`) instead of guessing or reflexively running
+	// `gh auth setup-git`. MUST be a stderr-like sink, NEVER stdout
+	// (stdout is the credential protocol). Nil discards (the placeholder
+	// is still written to stdout — TM-G8 is unaffected).
+	Diag io.Writer
+
 	// ReadCachePath is the file path where the most recent read token is
 	// cached as JSON. Empty disables the cache (every read mints fresh).
 	// Phase 0 uses a file because each helper invocation is a separate
@@ -401,6 +412,21 @@ func isWriteIntent(cfg Config) (write bool) {
 	return write
 }
 
+// writeDiag emits a short, actionable, user-facing line to cfg.Diag when
+// a mint-failed placeholder is about to be served. git surfaces a
+// credential helper's stderr to the agent/user, so this is the only
+// channel (stdout is the rigid credential protocol) by which a
+// cooperative agent learns WHY the request will fail and what to do —
+// rather than guessing or reflexively running `gh auth setup-git`. Nil
+// Diag discards; the placeholder is still written either way (TM-G8).
+func writeDiag(cfg Config) {
+	if cfg.Diag == nil {
+		return
+	}
+	fmt.Fprintln(cfg.Diag, "rein: no usable GitHub token (mint failed) — this git operation will fail.")
+	fmt.Fprintln(cfg.Diag, "      Run `rein doctor` to diagnose (e.g. the App isn't installed on this repo, or rein isn't set up).")
+}
+
 // serveWrite mints a fresh write token and writes it to stdout. On mint
 // failure it returns the TM-G8 placeholder.
 func serveWrite(stdout io.Writer, cfg Config) error {
@@ -409,6 +435,7 @@ func serveWrite(stdout io.Writer, cfg Config) error {
 	token, expiresAt, err := cfg.MintWrite(ctx)
 	if err != nil {
 		cfg.Logger.Printf("write mint failed: %v; returning TM-G8 placeholder credential", err)
+		writeDiag(cfg)
 		return writeCredential(stdout, "x-access-token", "rein-placeholder-mint-failed")
 	}
 	cfg.Logger.Printf("write mint succeeded: tier=write expires_at=%s ttl=%s token_len=%d",
@@ -434,6 +461,7 @@ func serveRead(stdout io.Writer, cfg Config) error {
 	token, expiresAt, err := cfg.MintRead(ctx)
 	if err != nil {
 		cfg.Logger.Printf("read mint failed: %v; returning TM-G8 placeholder credential", err)
+		writeDiag(cfg)
 		return writeCredential(stdout, "x-access-token", "rein-placeholder-mint-failed")
 	}
 	cfg.Logger.Printf("read mint succeeded: tier=read expires_at=%s ttl=%s token_len=%d",

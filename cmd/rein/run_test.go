@@ -301,3 +301,21 @@ func TestResolveAndCacheInstallID_EnvPathSkips(t *testing.T) {
 		t.Error("lookup must not be called on the env path")
 	}
 }
+
+func TestUnsetEnv(t *testing.T) {
+	env := []string{"PATH=/bin", "GH_TOKEN=secret", "HOME=/home/x", "GH_TOKEN=dup"}
+	got := unsetEnv(env, "GH_TOKEN")
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "GH_TOKEN=") {
+			t.Fatalf("GH_TOKEN not fully removed: %v", got)
+		}
+	}
+	// Unrelated vars survive; all GH_TOKEN entries (incl. duplicates) gone.
+	if len(got) != 2 {
+		t.Fatalf("expected 2 surviving vars, got %d: %v", len(got), got)
+	}
+	// Unsetting an absent var is a no-op.
+	if out := unsetEnv([]string{"A=1"}, "NOPE"); len(out) != 1 {
+		t.Fatalf("unsetEnv of absent var should be a no-op, got %v", out)
+	}
+}
