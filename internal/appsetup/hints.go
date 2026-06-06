@@ -25,7 +25,7 @@ func PostManifestInstallHint(configDir string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	if s.Phase != PhasePrimaryDone && s.Phase != PhaseAuditDone {
+	if !IsManifestPhase(s) {
 		return "", false
 	}
 	if s.Primary == nil || s.Primary.InstallationID != 0 {
@@ -35,5 +35,5 @@ func PostManifestInstallHint(configDir string) (string, bool) {
 	if url == "" {
 		url = "https://github.com/apps/" + s.Primary.Slug
 	}
-	return fmt.Sprintf("App registered (%s) but not yet installed on a repo; visit %s/installations/new and then set REIN_APP_INSTALLATION_ID before re-running doctor", s.Primary.Slug, url), true
+	return fmt.Sprintf("App registered (%s) but not yet installed on a repo; visit %s/installations/new, then run `rein run` (it fetches the installation id automatically)", s.Primary.Slug, url), true
 }

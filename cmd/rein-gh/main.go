@@ -163,7 +163,7 @@ func readTierToken(stateDir string, logger *log.Logger) string {
 // CP4 sessions have one repo; CP5+ multi-repo will require per-call
 // repo selection.
 func loadAppCfgWithSession(logger *log.Logger) (githubapp.Config, keystore.Keystore, error) {
-	appCfg, ks, err := config.LoadAppConfig()
+	appCfg, ks, _, err := config.ResolveApp()
 	if err != nil {
 		return githubapp.Config{}, nil, err
 	}

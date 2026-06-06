@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -33,6 +34,7 @@ import (
 	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
+	"github.com/TomHennen/rein/internal/keystore"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/ui/grant"
 )
@@ -124,7 +126,13 @@ func usage() {
 // returned here are programming/config errors — credential-mint failures
 // are handled inside the broker per TM-G8.
 func runCredentialHelper(action string) error {
-	appCfg, ks, err := config.LoadAppConfig()
+	// ResolveApp is the read-only resolver: env -> state.json+keystore ->
+	// fail. It NEVER touches the network — rein run's eager step owns the
+	// install-id fetch. On the state path InstallationID may be 0 (uncached);
+	// that is NOT an error here. The only error case is "no config at all"
+	// (no env AND no state), which is a genuine config error with no
+	// github.com host yet known — same shape as today's LoadAppConfig error.
+	appCfg, ks, _, err := config.ResolveApp()
 	if err != nil {
 		return err
 	}
@@ -145,31 +153,60 @@ func runCredentialHelper(action string) error {
 	appCfg.RepoName = bareRepoName(sess.Repos[0])
 	logger.Printf("session: id=%q role=%q repos=%v source=%s", sess.ID, sess.Role, sess.Repos, sessSource)
 
-	client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
-	if err != nil {
-		return err
-	}
-
-	mintRead := broker.MintFunc(func(ctx context.Context) (string, time.Time, error) {
-		return client.MintReadOnlyToken(ctx)
-	})
-	mintWrite := broker.MintFunc(func(ctx context.Context) (string, time.Time, error) {
-		return client.MintWriteToken(ctx)
-	})
-
 	stateDir, err := config.StateDir()
 	if err != nil {
 		return err
 	}
 
-	return broker.RunCredentialHelper(action, os.Stdin, os.Stdout, broker.Config{
+	return runCredentialHelperWithConfig(action, os.Stdin, os.Stdout, appCfg, ks, sess, stateDir, logger)
+}
+
+// runCredentialHelperWithConfig is the testable core of the credential
+// helper. It is the seam that lets a test feed an InstallationID==0 config
+// + a github.com `get` request and assert the broker writes the TM-G8
+// placeholder.
+//
+// TM-G8 preservation: githubapp.Client is constructed LAZILY inside each
+// MintFunc/Revoke closure. A missing install-id (NewClient rejects 0), a
+// keystore failure, or any other construction error therefore surfaces as a
+// MintFunc error, which broker.serveRead/serveWrite turn into the
+// rein-placeholder-mint-failed credential — never an early return, never an
+// empty credential. There must be NO error return between ResolveApp and this
+// call on the github.com path.
+func runCredentialHelperWithConfig(action string, in io.Reader, out io.Writer, appCfg githubapp.Config, ks keystore.Keystore, sess session.Session, stateDir string, logger *log.Logger) error {
+	mintRead := broker.MintFunc(func(ctx context.Context) (string, time.Time, error) {
+		client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
+		if err != nil {
+			return "", time.Time{}, err
+		}
+		return client.MintReadOnlyToken(ctx)
+	})
+	mintWrite := broker.MintFunc(func(ctx context.Context) (string, time.Time, error) {
+		client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
+		if err != nil {
+			return "", time.Time{}, err
+		}
+		return client.MintWriteToken(ctx)
+	})
+	// Revoke is best-effort (broker logs+ignores the error). If the client
+	// can't be built, swallow it — a token we couldn't mint can't need
+	// revoking, and erroring here serves no one.
+	revoke := func(ctx context.Context, token string) error {
+		client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
+		if err != nil {
+			return nil
+		}
+		return client.RevokeToken(ctx, token)
+	}
+
+	return broker.RunCredentialHelper(action, in, out, broker.Config{
 		MintRead:      mintRead,
 		MintWrite:     mintWrite,
 		MintTimeout:   mintTimeout,
 		Logger:        logger,
 		ReadCachePath: filepath.Join(stateDir, "cache", "read-token.json"),
 		DetectWrite:   func() bool { return detectWriteIntent(logger) },
-		Revoke:        client.RevokeToken,
+		Revoke:        revoke,
 		InScope:       sess.Contains,
 		// EmptyPathScope stays "" (= allow): existing test setups
 		// without useHttpPath=true continue to work. install-shim's
@@ -422,7 +459,7 @@ func optionConsumesNextArg(a string) bool {
 // File mode 0600 in a 0700 parent. The token is never logged. POSIX-sh
 // syntax only — fish users will need to translate.
 func ghAuth() error {
-	appCfg, ks, err := config.LoadAppConfig()
+	appCfg, ks, _, err := config.ResolveApp()
 	if err != nil {
 		return err
 	}

@@ -277,7 +277,7 @@ func managedPEMPath() (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	if s.Phase != appsetup.PhasePrimaryDone && s.Phase != appsetup.PhaseAuditDone {
+	if !appsetup.IsManifestPhase(s) {
 		return "", false
 	}
 	// Stat-only: avoid keystore.Get so we don't pay the
@@ -297,7 +297,7 @@ func managedPEMPath() (string, bool) {
 // at the install deep-link from state.json. This avoids a "doctor
 // always fails on fresh manifest-flow setup" surprise.
 func checkAppMint() checkResult {
-	appCfg, ks, err := config.LoadAppConfig()
+	appCfg, ks, _, err := config.ResolveApp()
 	if err != nil {
 		if configDir, derr := config.ConfigDir(); derr == nil {
 			if hint, ok := appsetup.PostManifestInstallHint(configDir); ok {
@@ -305,6 +305,20 @@ func checkAppMint() checkResult {
 			}
 		}
 		return checkResult{"app credentials", statusFail, err.Error()}
+	}
+	// State-path-uncached: installation id not yet fetched. Doctor stays
+	// read-only — it REPORTS that rein run will fetch it on next launch and
+	// does NOT mint (which would require an id) or touch the network/state.
+	if appCfg.InstallationID == 0 {
+		return checkResult{"app credentials", statusWarn,
+			"install-id not cached; `rein run` will fetch it on next launch (App not yet installed, or first run)"}
+	}
+	// On the state path ResolveApp leaves RepoName empty; MintReadOnlyToken
+	// needs it. Set it from the session, matching the helper / rein-gh.
+	if appCfg.RepoName == "" {
+		if sess, _, serr := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A")); serr == nil && len(sess.Repos) > 0 {
+			appCfg.RepoName = bareRepoName(sess.Repos[0])
+		}
 	}
 	client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
 	if err != nil {

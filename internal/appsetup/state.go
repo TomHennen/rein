@@ -36,7 +36,9 @@ type State struct {
 
 // AppRecord captures everything `rein doctor` and friends need to
 // reconstruct the App without re-talking to GitHub. InstallationID is
-// empty in CP5 (no install-poll yet — Stage 2 followup).
+// populated lazily by `rein run`'s eager install-id fetch
+// (resolveAndCacheInstallID, cmd/rein/run.go) on the state path; 0 means
+// not-yet-cached.
 type AppRecord struct {
 	Slug           string    `json:"slug,omitempty"`
 	AppID          int64     `json:"app_id,omitempty"`
@@ -45,6 +47,15 @@ type AppRecord struct {
 	KeyFingerprint string    `json:"key_fingerprint,omitempty"`
 	HTMLURL        string    `json:"html_url,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
+}
+
+// IsManifestPhase reports whether s came from a completed manifest flow
+// (primary App registered, optionally audit App too). Centralized so the
+// resolver (internal/config), the install hint (hints.go), and doctor's
+// managed-PEM path all agree on what "manifest-flow setup" means and can't
+// drift apart.
+func IsManifestPhase(s State) bool {
+	return s.Phase == PhasePrimaryDone || s.Phase == PhaseAuditDone
 }
 
 // StatePath returns the canonical state.json path

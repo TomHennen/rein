@@ -45,6 +45,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -53,10 +54,19 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/TomHennen/rein/internal/appsetup"
 	"github.com/TomHennen/rein/internal/config"
+	"github.com/TomHennen/rein/internal/githubapp"
+	"github.com/TomHennen/rein/internal/keystore"
 	"github.com/TomHennen/rein/internal/session"
 )
+
+// installIDTimeout caps the pre-launch installation-id lookup. One cheap
+// App-JWT GET per `rein run` launch (not per git op), so keep it modest but
+// generous enough for a cold JWT mint + round-trip.
+const installIDTimeout = 10 * time.Second
 
 // runWrapped is the entry point for the `run` subcommand. argv is the
 // args AFTER "run" — so for `rein run -- claude foo`, argv is
@@ -89,6 +99,19 @@ func runWrapped(argv []string) (int, error) {
 	sess, sessSource, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
 	if err != nil {
 		return 1, fmt.Errorf("load session: %w (see README for dev-session.yaml format)", err)
+	}
+
+	// Eagerly resolve + cache the installation id for the session repo on the
+	// manifest-flow (state.json) path, BEFORE the child starts, so a 404
+	// (App not installed) fails loud here instead of degrading to a TM-G8
+	// placeholder inside the child's first git op. No-op on the env path.
+	// This single cache write covers every later helper / rein-gh invocation
+	// (shims only run inside the PATH this wrapper sets up — single writer).
+	ctx, cancel := context.WithTimeout(context.Background(), installIDTimeout)
+	err = resolveAndCacheInstallID(ctx, sess, fetchRepoInstallationID)
+	cancel()
+	if err != nil {
+		return 1, err
 	}
 
 	// Allocate tempdir for the per-process git config.
@@ -178,6 +201,96 @@ func runWrapped(argv []string) (int, error) {
 		return ee.ExitCode(), nil
 	}
 	return 1, fmt.Errorf("wait child: %w", waitErr)
+}
+
+// installIDLookup fetches the installation id for owner/repo using an
+// App-JWT GET. Injected so tests can stub the network call with an
+// httptest server; production wires fetchRepoInstallationID.
+type installIDLookup func(ctx context.Context, clientID string, ks keystore.Keystore, roleName, owner, repo string) (int64, error)
+
+// fetchRepoInstallationID is the production installIDLookup: build an App-JWT
+// client (no installation id required) and GET /repos/{owner}/{repo}/installation.
+// REIN_GITHUB_API_BASE overrides the API root (empty -> api.github.com), the
+// same escape hatch the appsetup conversion path exposes for testing.
+func fetchRepoInstallationID(ctx context.Context, clientID string, ks keystore.Keystore, roleName, owner, repo string) (int64, error) {
+	c, err := githubapp.NewAppClient(clientID, ks, roleName, os.Getenv("REIN_GITHUB_API_BASE"))
+	if err != nil {
+		return 0, err
+	}
+	return c.RepoInstallationID(ctx, owner, repo)
+}
+
+// resolveAndCacheInstallID ensures state.json carries a fresh installation id
+// for the session repo when running off the manifest-flow state path.
+//
+// No-op on the env path (id already present in the env config). On the state
+// path it ALWAYS performs the App-JWT GET and rewrites state.json only when
+// the id changed — this one rule covers both first-fetch and stale-id refresh
+// (uninstall/reinstall rotates the id). 404 -> fail loud with the install
+// deep-link and DO NOT launch; other errors -> fail loud.
+func resolveAndCacheInstallID(ctx context.Context, sess session.Session, lookup installIDLookup) error {
+	appCfg, ks, source, err := config.ResolveApp()
+	if err != nil {
+		// No env AND no state -> genuine config error; don't launch.
+		return fmt.Errorf("resolve App config: %w", err)
+	}
+	if source == config.SourceEnv {
+		// Env path: installation id is already present and authoritative;
+		// there is no state.json to own. Skip the GET entirely.
+		return nil
+	}
+
+	owner, _, ok := strings.Cut(sess.Repos[0], "/")
+	repo := bareRepoName(sess.Repos[0])
+	if !ok || owner == "" || repo == "" {
+		return fmt.Errorf("session repo %q is not owner/name", sess.Repos[0])
+	}
+
+	configDir, err := config.ConfigDir()
+	if err != nil {
+		return err
+	}
+	s, err := appsetup.ReadState(configDir)
+	if err != nil {
+		return fmt.Errorf("read state.json: %w", err)
+	}
+	if s.Primary == nil {
+		return fmt.Errorf("state.json has no primary App record; run `rein init`")
+	}
+
+	id, err := lookup(ctx, appCfg.ClientID, ks, config.AppKeystoreRole, owner, repo)
+	if err != nil {
+		if errors.Is(err, githubapp.ErrAppNotInstalled) {
+			// 404 is definitive: the App is not installed on this repo (or
+			// not granted to it). Fail loud with the deep-link; don't launch.
+			htmlURL := s.Primary.HTMLURL
+			if htmlURL == "" {
+				htmlURL = "https://github.com/apps/" + s.Primary.Slug
+			}
+			return fmt.Errorf("App %s is not installed on %s/%s; install it at %s/installations/new, then re-run",
+				s.Primary.Slug, owner, repo, htmlURL)
+		}
+		// Transient (non-404) error. If we already have a cached id, the
+		// session can run from it — degrade to a warning and proceed rather
+		// than blocking launch on a hiccup. Only when we have NO id to fall
+		// back to (first fetch) do we fail closed. This bends the literal
+		// "other errors -> fail loud" so a GitHub blip doesn't ground a
+		// session that a cached id + working token would have served.
+		if s.Primary.InstallationID != 0 {
+			fmt.Fprintf(os.Stderr, "rein: warning: could not refresh installation id (%v); proceeding with cached id %d\n",
+				err, s.Primary.InstallationID)
+			return nil
+		}
+		return fmt.Errorf("fetch installation id for %s/%s: %w", owner, repo, err)
+	}
+
+	if id != s.Primary.InstallationID {
+		s.Primary.InstallationID = id
+		if err := appsetup.WriteState(configDir, s); err != nil {
+			return fmt.Errorf("cache installation id: %w", err)
+		}
+	}
+	return nil
 }
 
 // parseRunArgs validates "rein run -- <cmd> [args...]" form. The "--"
