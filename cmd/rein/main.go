@@ -113,7 +113,7 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  rein init [--skip-mint-check] [--no-symlink] [--no-alias] [--shell=bash|zsh|fish] [--skip-audit] [--force]")
+	fmt.Fprintln(os.Stderr, "  rein init [--owner=<login>] [--port=<n>] [--skip-audit] [--force] [--skip-mint-check] [--no-symlink] [--no-alias] [--shell=bash|zsh|fish]")
 	fmt.Fprintln(os.Stderr, "  rein doctor")
 	fmt.Fprintln(os.Stderr, "  rein credential-helper {get|store|erase}")
 	fmt.Fprintln(os.Stderr, "  rein install-shim")
