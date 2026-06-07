@@ -12,7 +12,7 @@ bypasses from skipped or podged setup steps.
 corrections, Shape B limits, and open Phase 1 questions that Phase 0
 produced. Phase 0.5 builds on those rather than re-deriving them.
 
-## Status (last updated 2026-06-06)
+## Status (last updated 2026-06-07)
 
 | CP | Status | Commit | Notes |
 |---|---|---|---|
@@ -24,6 +24,15 @@ produced. Phase 0.5 builds on those rather than re-deriving them.
 | CP6 | **done** | (this commit) | macOS proc-tree fallback via build-tagged `proctree_{linux,darwin,other}.go`. Linux unchanged; darwin uses `ps -ax`-snapshot walk (no cgo); other platforms get a no-op stub so cross-compile stays green. **Tom needs to run macOS e2e to fully close GitHub issue #8.** |
 | Turnkey | **done** | `6c31f7b` | Post-CP5 follow-on (pulled the Stage-2 install-poll forward at owner's direction — it's core to the value prop). `config.ResolveApp` read-only resolver (env → state.json+keystore → fail closed); `rein run` eagerly fetches + caches the installation id (`GET /repos/{owner}/{repo}/installation`, App-JWT) so a new user needs ZERO `REIN_APP_*` env vars. **Gate passed (2026-06-06):** with all `REIN_APP_*` unset, `rein run -- git ls-remote <repo>` succeeded purely from `state.json` + keystore + auto-fetched install-id (138434780 cached). Plus Shape B hardening: GH_TOKEN/GITHUB_TOKEN scrubbed from the wrapped child env; TM-G8 no-config path returns the placeholder + `rein doctor` diag (#7). |
 | CP7 | **done** | `fead9f1` | `README.md` — clone-to-first-push onboarding for the zero-env-var turnkey flow: install, browser App creation, App install, required session binding, daily `claude` use, headless `ssh -L`, troubleshooting (`rein doctor` + log paths), honest Shape B limits, cleanup. Reviewer pass applied (session required; fish `command claude` bypass; HTTPS-remotes-only footgun; PATH-not-set; full cleanup). 150 lines. |
+
+### Post-Phase-0.5 hardening (2026-06-07, all on `main`)
+
+| Item | Commit | Notes |
+|---|---|---|
+| git-push write-token fix | `5bdd8dd` | Pre-existing Phase 0 bug: the helper revoked the write token on git's `store` (which fires mid-push) → every HTTPS `git push` 401'd. Now revoke on `erase` only; a pushed token lives to its native ~1h TTL. Tighter bounding via run-exit revoke → #20. |
+| Run-scoped write approvals | `0a02043` | Approvals scoped to a `rein run` invocation (per-run nonce + files, run→session lookup for the popup / other-terminal grant, clear-on-exit, orphan sweep, fail-closed without `REIN_RUN_ID`). Concurrent sessions isolated. Gate met: live concurrent run + live exit-isolation + isolation unit tests. |
+| `REIN_SESSION_FILE` fix | `0ffda7a` | An explicitly-set-but-missing session file now hard-errors instead of silently falling back to the env session. |
+| design.md sweep | `a525f6d` | Phase 0/0.5 corrections folded into the design of record; approval/revoke text corrected to run-scoped + revoke-on-erase; Claude-Code-hooks consideration noted (#21). |
 
 **Working repos:** Throwaway repos only (same as Phase 0). The init
 flow will help the user point at their own throwaways during setup;
@@ -349,21 +358,35 @@ fresh; here's the time-to-first-push."
 
 ---
 
-## After Phase 0.5
+## After Phase 0.5 — CLOSED (2026-06-07)  ←— RESUME HERE
 
-Phase 0.5 is complete. Decision point for the human:
+Phase 0.5 is complete and validated. The install flow Just Works
+(turnkey, zero `REIN_APP_*` env vars; CP5 + Turnkey gates passed live).
+The design sweep into `docs/design.md` landed (`a525f6d`). Plus the
+post-0.5 hardening above (revoke-on-erase, run-scoped approvals).
 
-- Did the install flow Just Work? If yes, Phase 0.5 closes; Phase 1
-  starts (sandbox composition + daemon + audit App + proxy).
-- Did anything surprise you? Update phase0_findings.md (or open a
-  phase0.5_findings.md) before Phase 1.
-- Are there design corrections needed (things the design got wrong
-  about init / manifest / cross-platform)? Surface clearly with
-  proposed fixes.
+**Next session picks up at Phase 1:** sandbox composition via `srt` +
+daemon/proxy split + audit App writeback + commit signing (broker-as-CA).
+See `docs/design.md` §7.2.
 
-Phase 0.5 is also when to sweep Phase 0 design corrections into
-`docs/design.md`. That's a separate housekeeping pass, not a
-checkpoint, but it should land before Phase 1 starts.
+**Open followups (do alongside / before the relevant Phase 1 work):**
+
+- **#20** — revoke write tokens on `rein run` child-exit (tightens the
+  ~1h write-token window back toward operation-duration). Natural Phase 1
+  daemon work; the cleanest "do first."
+- **#19** — headless GitHub App creation fallback (URL-param prefill +
+  `rein import-pem`) for boxes where `ssh -L` isn't possible.
+- **#12** — nonce-via-tty so an agent can't self-answer the approval
+  prompt (Shape B TM-G5 hardening; the sandbox is the real fix).
+- **#7** — Shape B token reachability (env/files/proc); closed by the
+  Phase 1 sandbox, tracked there.
+- **#21** — Claude Code hooks as a complementary guard/audit layer.
+- **#8** — macOS proc-tree e2e (needs a real Mac).
+
+**Environmental (not code, but it bit us):** this dev VM's clock is
+erratic (drifted >60s ahead → App-JWT mints 401 "Bad credentials"; later
+~13min behind → JWT expired). Ensure NTP is solid before any GitHub App
+work, or mints intermittently fail in ways that look like auth bugs.
 
 ## Notes / blockers / design corrections needed
 
@@ -449,6 +472,34 @@ checkpoint, but it should land before Phase 1 starts.
   tracked as a followup issue. The "copy the code from a failed-load
   address bar" trick was evaluated and rejected (undefined behavior).
   CP7 onboarding must surface the safe-PEM-handling rules verbatim.
+
+- 2026-06-07 — Pre-existing **revoke-on-store** bug found via the first
+  real HTTPS `git push` e2e through the broker: git calls the helper's
+  `store` mid-push (after info/refs, before receive-pack), so revoking
+  there killed the write token and every push 401'd. Phase 0 had only
+  ever validated writes via `rein-gh`, never a raw `git push`, so it was
+  never caught. Fixed to revoke-on-`erase` (`5bdd8dd`); residual: a
+  pushed token now lives to ~1h native TTL until #20 (run-exit revoke).
+
+- 2026-06-07 — **Approval model** changed global-4h → run-scoped
+  (`0a02043`). The single global approval.json let a second concurrent
+  run reuse/clobber the first's approval and lingered after exit. Now
+  per-run files keyed by `REIN_RUN_ID`, cleared on exit, swept if
+  orphaned. Driving the live test myself was blocked by the `/dev/tty`
+  approval gate (TM-G5 working as intended — an agent can't self-answer);
+  human did the interactive part, automated tests + a pty-driven
+  exit-isolation run covered the rest.
+
+- 2026-06-07 — **Clock-skew failure mode** (environmental, not rein): a
+  VM clock >~60s ahead of GitHub makes App-JWT mints 401 "Bad
+  credentials" (iat in GitHub's future); far behind expires the JWT.
+  Presents as an auth/App-deleted failure; it's the clock. This VM
+  drifts erratically — keep NTP solid. A `rein doctor` clock-skew check
+  was considered and dropped as gold-plating.
+
+- 2026-06-07 — `REIN_SESSION_FILE` pointing at a missing file silently
+  fell back to the env session (looked like the chosen session was
+  active when it wasn't); now a hard error (`0ffda7a`).
 
 ## Tooling requests
 
