@@ -10,7 +10,9 @@
 //   - gh-auth: mints a read-tier token for the `gh` CLI and writes a
 //     sourceable env file (CP3.5).
 //   - approval {status|clear|grant}: inspect, revoke, or interactively
-//     grant the cached human approval (CP5/CP5.5).
+//     grant per-run human approvals (keyed by REIN_RUN_ID). status lists
+//     all runs; clear takes --run-id <id> (or clears all); grant takes
+//     --run-id <id> (CP5/CP5.5).
 //   - run -- <cmd> [args...]: launch the wrapped command with rein's
 //     git credential helper, gh shim, and session scope ceiling
 //     in effect — without polluting the user's global git config (CP6).
@@ -18,7 +20,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -26,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,10 +46,11 @@ const (
 	// latency directly when the helper is invoked, so keep it tight.
 	mintTimeout = 5 * time.Second
 
-	// approvalTTL is how long an approval covers writes for a session
-	// before the human must re-confirm. 4h matches design §4.2.2's
-	// default_read_ttl for the implement role — same span of human
-	// attention.
+	// approvalTTL is stamped into Record.ExpiresAt as a sweep/status
+	// heuristic ONLY — it is NOT a re-prompt trigger. The RUN LIFETIME is
+	// the bound now (per-run approvals keyed by REIN_RUN_ID; a stale file
+	// is never reusable by a future run). 4h is retained as the orphan
+	// sweep backstop value and for `status` display.
 	approvalTTL = 4 * time.Hour
 )
 
@@ -91,7 +94,7 @@ func main() {
 			usage()
 			os.Exit(2)
 		}
-		if err := runApproval(os.Args[2]); err != nil {
+		if err := runApproval(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "rein approval: %v\n", err)
 			os.Exit(1)
 		}
@@ -118,7 +121,9 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  rein credential-helper {get|store|erase}")
 	fmt.Fprintln(os.Stderr, "  rein install-shim")
 	fmt.Fprintln(os.Stderr, "  rein gh-auth")
-	fmt.Fprintln(os.Stderr, "  rein approval {status|clear|grant}")
+	fmt.Fprintln(os.Stderr, "  rein approval status")
+	fmt.Fprintln(os.Stderr, "  rein approval clear [--run-id <id>]")
+	fmt.Fprintln(os.Stderr, "  rein approval grant --run-id <id>")
 	fmt.Fprintln(os.Stderr, "  rein run -- <cmd> [args...]")
 }
 
@@ -253,6 +258,8 @@ func buildConfirmWrite(sess session.Session, stateDir string, logger *log.Logger
 	}
 	cfg := grant.Config{
 		StateDir:      stateDir,
+		RunID:         os.Getenv("REIN_RUN_ID"),
+		RunPID:        envInt("REIN_RUN_PID"),
 		TTL:           approvalTTL,
 		PromptTimeout: 60 * time.Second,
 		Logger:        logger,
@@ -268,78 +275,136 @@ func buildConfirmWrite(sess session.Session, stateDir string, logger *log.Logger
 	}
 }
 
-// runApproval handles `rein approval {status|clear|grant}`:
-//   - status: show the cached approval (or "none")
-//   - clear:  remove the approval; next write re-prompts
-//   - grant:  interactively approve write access for the current
-//     session. Reads /dev/tty only (no CLI flag) — see
-//     package internal/ui/grant for why.
-func runApproval(sub string) error {
+// runApproval handles `rein approval {status|clear|grant}` with per-run
+// scoping:
+//   - status: list ALL active runs (run-id, session, approved/expiry).
+//   - clear [--run-id X]: clear one run's files, or ALL with no flag
+//     (plus any legacy global approval.json).
+//   - grant --run-id X: interactively approve write access for run X. The
+//     session is read from runs/X.json (written by the helper) — NOT the
+//     default session — so approving from another terminal targets the
+//     right concurrent run. Reads the issue-number answer via /dev/tty
+//     only (--run-id is routing, not the secret) — see package
+//     internal/ui/grant for why.
+func runApproval(args []string) error {
 	stateDir, err := config.StateDir()
 	if err != nil {
 		return err
 	}
-	path := approvals.Path(stateDir)
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "rein approval: want status|clear|grant")
+		os.Exit(2)
+	}
+	sub := args[0]
+	runID := parseRunIDFlag(args[1:])
 
 	switch sub {
 	case "status":
-		rec, err := approvals.Read(path)
-		if errors.Is(err, os.ErrNotExist) {
-			fmt.Println("no approval record (next write will prompt)")
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		now := time.Now()
-		fmt.Printf("approval record: %s\n", path)
-		fmt.Printf("  session_id:  %s\n", rec.SessionID)
-		fmt.Printf("  signature:   %s\n", rec.Signature[:12]+"...")
-		fmt.Printf("  approved_at: %s\n", rec.ApprovedAt.Format(time.RFC3339))
-		fmt.Printf("  expires_at:  %s (%s remaining)\n",
-			rec.ExpiresAt.Format(time.RFC3339),
-			time.Until(rec.ExpiresAt).Round(time.Second))
-		if now.After(rec.ExpiresAt) {
-			fmt.Println("  status:      EXPIRED (next write will prompt)")
-		} else {
-			fmt.Println("  status:      VALID (writes for this session skip the prompt)")
-		}
-		return nil
+		return approvalStatus(stateDir)
 	case "clear":
-		if err := approvals.Clear(path); err != nil {
-			return err
-		}
-		fmt.Println("approval cleared; next write will prompt")
-		return nil
+		return approvalClear(stateDir, runID)
 	case "grant":
-		sess, src, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
-		if err != nil {
-			return err
-		}
-		if sess.Issue == 0 {
-			return fmt.Errorf("session %q (source=%s) has no `issue:` field; nothing to grant", sess.ID, src)
+		if runID == "" {
+			return fmt.Errorf("grant requires --run-id <id> (see the `rein: write blocked` message for the id)")
 		}
 		logger, closeLog, err := openLog()
 		if err != nil {
 			return err
 		}
 		defer closeLog()
-		logger.Printf("approval grant: session=%q source=%s", sess.ID, src)
+		logger.Printf("approval grant: run-id=%s", runID)
 		cfg := grant.Config{
 			StateDir:      stateDir,
+			RunID:         runID,
+			RunPID:        envInt("REIN_RUN_PID"),
 			TTL:           approvalTTL,
 			PromptTimeout: 60 * time.Second,
 			Logger:        logger,
 		}
-		if grant.Grant(context.Background(), sess, cfg) {
-			fmt.Printf("approval recorded (valid for %s)\n", approvalTTL)
-			return nil
+		if err := grant.Grant(context.Background(), cfg); err != nil {
+			return err
 		}
-		return fmt.Errorf("approval denied or cancelled")
+		fmt.Printf("approval recorded for run %s\n", runID)
+		return nil
 	default:
 		fmt.Fprintf(os.Stderr, "rein approval: unknown subcommand %q (want status|clear|grant)\n", sub)
 		os.Exit(2)
 	}
+	return nil
+}
+
+// parseRunIDFlag extracts `--run-id X` or `--run-id=X` from args. Returns
+// "" if absent. The issue number is NEVER a flag (it arrives via
+// /dev/tty); only --run-id (routing) is accepted here.
+func parseRunIDFlag(args []string) string {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--run-id" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if v, ok := strings.CutPrefix(a, "--run-id="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// approvalStatus lists all known runs.
+func approvalStatus(stateDir string) error {
+	list, err := approvals.List(stateDir)
+	if err != nil {
+		return err
+	}
+	if len(list) == 0 {
+		fmt.Println("no active runs")
+		return nil
+	}
+	for _, st := range list {
+		liveness := "dead"
+		if st.Live {
+			liveness = "live"
+		}
+		fmt.Printf("run-id: %s   pid: %d (%s)\n", st.RunID, st.Context.RunPID, liveness)
+		if st.HasContext {
+			s := st.Context.Session
+			fmt.Printf("  session:    %s role=%s repos=%v issue=#%d\n", s.ID, s.Role, s.Repos, s.Issue)
+		} else {
+			fmt.Println("  session:    <no run context on disk>")
+		}
+		if st.HasApproval {
+			fmt.Printf("  approval:   VALID (approved %s)\n", st.Approval.ApprovedAt.Format(time.RFC3339))
+		} else {
+			fmt.Println("  approval:   none (will prompt)")
+		}
+	}
+	return nil
+}
+
+// approvalClear clears one run (runID != "") or ALL runs (runID == ""),
+// including any legacy global approval.json.
+func approvalClear(stateDir, runID string) error {
+	if runID != "" {
+		if err := approvals.ClearRun(stateDir, runID); err != nil {
+			return err
+		}
+		fmt.Printf("cleared run %s\n", runID)
+		return nil
+	}
+	list, err := approvals.List(stateDir)
+	if err != nil {
+		return err
+	}
+	for _, st := range list {
+		if err := approvals.ClearRun(stateDir, st.RunID); err != nil {
+			return err
+		}
+	}
+	// Best-effort removal of the pre-upgrade global approval file.
+	_ = os.Remove(filepath.Join(stateDir, "approval.json"))
+	fmt.Printf("cleared %d run(s)\n", len(list))
 	return nil
 }
 
@@ -354,6 +419,21 @@ func isWriteCapableRole(role string) bool {
 		return true
 	}
 	return false
+}
+
+// envInt parses a non-negative integer env var, returning 0 on unset or
+// parse error (e.g. REIN_RUN_PID). 0 means "unknown" to the approval
+// snapshot's Sweep liveness probe.
+func envInt(name string) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // bareRepoName extracts "name" from "owner/name". The App installation

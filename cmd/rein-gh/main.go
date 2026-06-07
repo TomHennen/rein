@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -51,7 +52,9 @@ const (
 	// directly on cache-miss; keep tight.
 	mintTimeout = 5 * time.Second
 
-	// approvalTTL mirrors cmd/rein's value. Kept in sync manually for
+	// approvalTTL mirrors cmd/rein's value. It is stamped into
+	// Record.ExpiresAt as a sweep/status heuristic ONLY — NOT a re-prompt
+	// trigger (the run lifetime is the bound). Kept in sync manually for
 	// Phase 0; CP6+ should centralize.
 	approvalTTL = 4 * time.Hour
 
@@ -133,7 +136,7 @@ func runReadAndExec(realGh string, args []string, stateDir string, logger *log.L
 // own hosts.yml-based auth and surface its own error rather than a
 // shim-level error.
 func readTierToken(stateDir string, logger *log.Logger) string {
-	appCfg, ks, err := loadAppCfgWithSession(logger)
+	appCfg, ks, _, err := loadAppCfgWithSession(logger)
 	if err != nil {
 		logger.Printf("read tier: %v; execing gh without GH_TOKEN", err)
 		return ""
@@ -159,21 +162,25 @@ func readTierToken(stateDir string, logger *log.Logger) string {
 }
 
 // loadAppCfgWithSession returns the App config overridden with the
-// session's repo, plus the keystore the mint path reads the PEM from.
+// session's repo, plus the keystore the mint path reads the PEM from
+// and the resolved session itself. Returning the session lets callers
+// reuse the exact session this loaded for downstream decisions (e.g.
+// the write-approval gate) rather than reloading and risking divergence
+// across two reads of dev-session.yaml.
 // CP4 sessions have one repo; CP5+ multi-repo will require per-call
 // repo selection.
-func loadAppCfgWithSession(logger *log.Logger) (githubapp.Config, keystore.Keystore, error) {
+func loadAppCfgWithSession(logger *log.Logger) (githubapp.Config, keystore.Keystore, session.Session, error) {
 	appCfg, ks, _, err := config.ResolveApp()
 	if err != nil {
-		return githubapp.Config{}, nil, err
+		return githubapp.Config{}, nil, session.Session{}, err
 	}
 	sess, src, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
 	if err != nil {
-		return githubapp.Config{}, nil, fmt.Errorf("load session: %w", err)
+		return githubapp.Config{}, nil, session.Session{}, fmt.Errorf("load session: %w", err)
 	}
 	appCfg.RepoName = bareRepoName(sess.Repos[0])
 	logger.Printf("session: id=%q repos=%v source=%s", sess.ID, sess.Repos, src)
-	return appCfg, ks, nil
+	return appCfg, ks, sess, nil
 }
 
 // execGhWithoutToken is the denial path: fork real gh with a
@@ -241,6 +248,21 @@ func isWriteCapableRole(role string) bool {
 	return false
 }
 
+// envInt parses a non-negative integer env var, returning 0 on unset or
+// parse error (e.g. REIN_RUN_PID). 0 means "unknown" to the approval
+// snapshot's Sweep liveness probe.
+func envInt(name string) int {
+	v := os.Getenv(name)
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
 // bareRepoName extracts the "name" half of "owner/name". The App
 // installation already pins the owner, so the mint API only accepts the
 // bare name.
@@ -258,18 +280,24 @@ func bareRepoName(ownerSlashName string) string {
 // (without GH_TOKEN) so the user gets gh's "needs auth" error instead
 // of a shim error.
 func runWrite(realGh string, args []string, stateDir string, logger *log.Logger) int {
-	appCfg, ks, cfgErr := loadAppCfgWithSession(logger)
+	appCfg, ks, sess, cfgErr := loadAppCfgWithSession(logger)
 	var token string
 	var client *githubapp.Client
 
 	// Gate write mints behind the human-in-the-loop approval flow, the
 	// same gate the credential helper uses for git writes. Closes the
 	// CP5 hole where gh writes minted without prompting.
+	//
+	// Reuse the session loadAppCfgWithSession already resolved — exactly
+	// one session per invocation — so there is no second read of
+	// dev-session.yaml that could fail or diverge and let a write token
+	// mint without prompting (fail-closed on the approval gate).
 	if cfgErr == nil {
-		sess, _, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
-		if err == nil && sess.Issue != 0 {
+		if sess.Issue != 0 {
 			cfg := grant.Config{
 				StateDir:      stateDir,
+				RunID:         os.Getenv("REIN_RUN_ID"),
+				RunPID:        envInt("REIN_RUN_PID"),
 				TTL:           approvalTTL,
 				PromptTimeout: 60 * time.Second,
 				Logger:        logger,
@@ -283,7 +311,7 @@ func runWrite(realGh string, args []string, stateDir string, logger *log.Logger)
 				logger.Printf("write tier: human approval denied; execing gh without GH_TOKEN")
 				return execGhWithoutToken(realGh, args)
 			}
-		} else if err == nil && sess.Issue == 0 && isWriteCapableRole(sess.Role) {
+		} else if isWriteCapableRole(sess.Role) {
 			logger.Printf("WARN: write tier proceeding without confirmation (session %q has no `issue:` field)", sess.ID)
 		}
 	}

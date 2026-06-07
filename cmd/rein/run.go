@@ -32,10 +32,12 @@
 //   - System config (/etc/gitconfig) is invisible to the child. Phase 0
 //     scope decision — adding it back is a one-line change if it matters.
 //
-//   - With CP5.5's approve-once + 4h TTL, the human prompt fires on the
-//     FIRST write of the session and stays silent for subsequent ones.
-//     PLAN.md's "single prompt presented" describes the first write,
-//     not every write.
+//   - Approvals are per-run (keyed by REIN_RUN_ID, generated here): the
+//     human prompt fires on the FIRST write of THIS run and stays silent
+//     for subsequent writes for the run's lifetime (no clock TTL). Each
+//     `rein run` is isolated — approving one does not approve another.
+//     This run's approval files are cleared on exit; orphans from killed
+//     runs are swept on the next launch.
 //
 //   - /dev/tty inside the wrapped agent: empirical question. Three
 //     outcomes depending on what the agent does with the controlling
@@ -46,16 +48,20 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/TomHennen/rein/internal/approvals"
 	"github.com/TomHennen/rein/internal/appsetup"
 	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/githubapp"
@@ -93,6 +99,18 @@ func runWrapped(argv []string) (int, error) {
 			return 127, fmt.Errorf("shim binary %s/%s not found — run 'rein install-shim' first", shimDir, name)
 		}
 	}
+
+	// Best-effort sweep of orphaned per-run approval/run-context files
+	// from runs whose owning `rein run` is gone (dead pid, or unknown pid
+	// older than the backstop). This is the SIGKILL backstop — deferred
+	// clear-on-exit handles the catchable-exit paths. Non-fatal: a sweep
+	// hiccup must never block a launch.
+	if err := approvals.Sweep(stateDir, 24*time.Hour, time.Now()); err != nil {
+		fmt.Fprintf(os.Stderr, "rein: warning: orphan approval sweep: %v\n", err)
+	}
+	// Migration: silently remove any pre-upgrade global approval.json.
+	// Nothing reads it anymore (approvals are per-run now).
+	_ = os.Remove(filepath.Join(stateDir, "approval.json"))
 
 	// Validate session — same loader used elsewhere, so the same
 	// REIN_SESSION_FILE override and env-fallback rules apply.
@@ -138,11 +156,37 @@ func runWrapped(argv []string) (int, error) {
 		return 1, fmt.Errorf("write git config: %w", err)
 	}
 
+	// Generate this run's nonce and clear its per-run approval/run-context
+	// files on exit. Fail-closed: a crypto/rand error aborts the launch
+	// rather than running with an empty/guessable run id (which would make
+	// approvals globally reusable again). ClearRun is idempotent and
+	// mirrors the tempdir cleanup above: deferred-only is sufficient for
+	// SIGTERM-to-rein and normal exit (cmd.Wait returns, defers fire). The
+	// signal goroutine below only FORWARDS SIGTERM — adding a competing
+	// clear there would race this defer. Terminal SIGINT (Ctrl-C) is NOT
+	// trapped (see package doc): it reaches rein via the shared process
+	// group and kills it under the default disposition, so THIS defer does
+	// not fire on that path — nor does SIGKILL. Both are covered by the
+	// launch Sweep above (the dead owning pid is detected and its files
+	// swept). That is the intended division: catchable normal/ SIGTERM exit
+	// -> this defer; uncatchable/untrapped (SIGINT, SIGKILL) -> launch Sweep.
+	runID, err := newRunID()
+	if err != nil {
+		return 1, fmt.Errorf("generate run id: %w", err)
+	}
+	defer func() { _ = approvals.ClearRun(stateDir, runID) }()
+
 	// Build the wrapped child's env.
 	env := os.Environ()
 	env = setEnv(env, "PATH", shimDir+":"+os.Getenv("PATH"))
 	env = setEnv(env, "GIT_CONFIG_GLOBAL", gitConfigPath)
 	env = setEnv(env, "GIT_CONFIG_SYSTEM", "/dev/null")
+	// Per-run approval scoping: the child's credential helper and rein-gh
+	// shim inherit these and key their approval lookup/record to this run.
+	// No REIN_RUN_ID in a child means it was invoked outside `rein run`,
+	// where the helper fails closed (re-prompts every write).
+	env = setEnv(env, "REIN_RUN_ID", runID)
+	env = setEnv(env, "REIN_RUN_PID", strconv.Itoa(os.Getpid()))
 
 	// Scrub ambient GitHub tokens from the wrapped child. The agent must
 	// use only rein-brokered credentials, never a long-lived token the
@@ -316,6 +360,18 @@ func resolveAndCacheInstallID(ctx context.Context, sess session.Session, lookup 
 		}
 	}
 	return nil
+}
+
+// newRunID returns a per-run nonce: 16 bytes from crypto/rand encoded as
+// 22 chars of base64url (no padding, no slashes — filename-safe). The
+// randomness is what makes a stale approval file from a crashed run
+// unreusable: no future run shares the id.
+func newRunID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b[:]), nil
 }
 
 // parseRunArgs validates "rein run -- <cmd> [args...]" form. The "--"

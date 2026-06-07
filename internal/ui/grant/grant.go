@@ -66,12 +66,25 @@ type Request struct {
 // Config controls ObtainApproval's behavior. Exposed so cmd/rein and
 // cmd/rein-gh can tune timeouts / disable layers for tests.
 type Config struct {
-	// StateDir is rein's state directory. The approval record lives at
-	// approvals.Path(StateDir).
+	// StateDir is rein's state directory. Per-run approval and run-context
+	// files live under approvals/<run-id>.json and runs/<run-id>.json.
 	StateDir string
 
-	// TTL is how long an approval covers writes for this session
-	// before re-prompting. 4h is the cmd/rein default.
+	// RunID is the per-run nonce (REIN_RUN_ID, set by `rein run`). It
+	// keys this run's approval + run-context files. An empty RunID means
+	// the helper was invoked OUTSIDE `rein run` — ObtainApproval then
+	// fails closed (interactive-only, persists nothing). The caller
+	// populates this from the env; ObtainApproval does NOT read the env
+	// itself (keeps tests env-free).
+	RunID string
+
+	// RunPID is the pid of the owning `rein run` (REIN_RUN_PID), recorded
+	// into the run-context snapshot for Sweep's liveness probe. 0 if
+	// unknown.
+	RunPID int
+
+	// TTL is stamped into Record.ExpiresAt as a sweep/status heuristic
+	// ONLY — it is NOT a re-prompt trigger. The run lifetime is the bound.
 	TTL time.Duration
 
 	// PromptTimeout caps the wait inside the /dev/tty prompt.
@@ -134,17 +147,56 @@ func ObtainApproval(ctx context.Context, req Request, cfg Config) bool {
 		cfg.TmuxRunner = DefaultTmuxRunner
 	}
 
-	// Layer 1: existing approval record.
+	// No REIN_RUN_ID => the helper was invoked OUTSIDE `rein run` (e.g.
+	// the user ran git directly with rein as the GLOBAL credential
+	// helper). We cannot key an approval to a run, and reusing any other
+	// run's approval would be cross-run leakage. DELIBERATE BEHAVIOR
+	// CHANGE from the old global-reuse model: fail closed. Run the
+	// interactive layers (so a human at a terminal can still approve THIS
+	// op) but PERSIST NOTHING — every run-id-less op re-prompts. TM-G8 is
+	// preserved: a denial still returns false (caller serves the
+	// placeholder), never an error.
+	if cfg.RunID == "" {
+		cfg.Logger.Printf("grant: no REIN_RUN_ID; fail-closed (interactive-only, no record persisted)")
+		return obtainInteractiveNoPersist(ctx, req, cfg)
+	}
+
+	// Layer 1: existing per-run approval record. The validity check is
+	// LIVE session signature vs the recorded signature — this catches a
+	// mid-run dev-session.yaml scope edit (the recorded sig was computed
+	// from the snapshot at approval time, so live-vs-record IS live-vs-
+	// snapshot, persisted). We deliberately do NOT re-read runs/<id>.json
+	// here: the snapshot is transport for the out-of-process grant, not
+	// part of this check (snapshot-sig vs record-sig is always equal).
 	sig := approvals.SignatureOf(req.Session)
-	path := approvals.Path(cfg.StateDir)
-	if rec, err := approvals.Read(path); err == nil {
-		if approvals.Valid(rec, sig, time.Now()) {
-			cfg.Logger.Printf("grant: covered by existing approval (granted at %s, valid until %s)",
-				rec.ApprovedAt.Format(time.RFC3339),
-				rec.ExpiresAt.Format(time.RFC3339))
+	if rec, err := approvals.ReadApproval(cfg.StateDir, cfg.RunID); err == nil {
+		if approvals.Valid(rec, sig) {
+			cfg.Logger.Printf("grant: covered by run %s approval (granted at %s)",
+				cfg.RunID, rec.ApprovedAt.Format(time.RFC3339))
 			return true
 		}
-		cfg.Logger.Printf("grant: existing approval mismatched or expired; trying interactive layers")
+		cfg.Logger.Printf("grant: run %s approval mismatched (mid-run scope edit?); re-prompting", cfg.RunID)
+	}
+
+	// Persist the session snapshot NOW, before any prompt. Two reasons:
+	//  1. An OUT-OF-PROCESS grant (tmux popup, or the layer-4
+	//     other-terminal command) has neither REIN_RUN_ID nor
+	//     REIN_SESSION_FILE — runs/<id>.json is the only way it can learn
+	//     WHICH session it is approving.
+	//  2. The snapshot carries RunPID, which Sweep uses for its liveness
+	//     probe. Writing it here (not just before the popup) means even a
+	//     run that approves via the inline /dev/tty path gets a
+	//     PID-carrying snapshot — so a long (>maxAge) tty-approved run is
+	//     never swept mid-run (constraint: never a re-prompt within a run).
+	// The helper is the sole writer: it alone holds both the run id and the
+	// resolved session with the real REIN_RUN_PID. (Grant's out-of-process
+	// recordApproval must NOT write this — it would clobber RunPID with 0.)
+	snap := approvals.RunContext{Session: req.Session, RunPID: cfg.RunPID, WrittenAt: time.Now()}
+	if err := approvals.WriteRunContext(cfg.StateDir, cfg.RunID, snap); err != nil {
+		cfg.Logger.Printf("grant: snapshot write failed (out-of-process grant may not resolve; sweep may treat run as orphan): %v", err)
+		// Continue: the in-process tty prompt still works; layer 4 still
+		// prints a command (the grant subcommand errors helpfully if the
+		// snapshot is absent).
 	}
 
 	// Layer 2: inline /dev/tty prompt. Works for users at a regular
@@ -179,7 +231,8 @@ func ObtainApproval(ctx context.Context, req Request, cfg Config) bool {
 		cfg.Logger.Printf("grant: /dev/tty unavailable (%v); trying tmux popup", err)
 	}
 
-	// Layer 3: tmux popup if we're inside tmux.
+	// Layer 3: tmux popup if we're inside tmux. (Snapshot already written
+	// above, so the popup's out-of-process grant can resolve the session.)
 	if os.Getenv("TMUX") != "" {
 		// Pass an absolute path to rein so the popup's shell doesn't
 		// need a configured PATH. Same sibling-of-shim trick as the
@@ -190,13 +243,13 @@ func ObtainApproval(ctx context.Context, req Request, cfg Config) bool {
 				reinCmd = rp
 			}
 		}
-		cfg.Logger.Printf("grant: launching tmux popup (%s approval grant)", reinCmd)
+		cfg.Logger.Printf("grant: launching tmux popup (%s approval grant --run-id %s)", reinCmd, cfg.RunID)
 		ctxPopup, cancel := context.WithTimeout(ctx, 90*time.Second)
 		defer cancel()
-		if err := cfg.TmuxRunner(ctxPopup, []string{reinCmd, "approval", "grant"}); err != nil {
+		if err := cfg.TmuxRunner(ctxPopup, []string{reinCmd, "approval", "grant", "--run-id", cfg.RunID}); err != nil {
 			cfg.Logger.Printf("grant: tmux popup failed: %v; falling through", err)
 		}
-		if rec, err := approvals.Read(path); err == nil && approvals.Valid(rec, sig, time.Now()) {
+		if rec, err := approvals.ReadApproval(cfg.StateDir, cfg.RunID); err == nil && approvals.Valid(rec, sig) {
 			cfg.Logger.Printf("grant: APPROVED via tmux popup")
 			return true
 		}
@@ -219,9 +272,9 @@ func ObtainApproval(ctx context.Context, req Request, cfg Config) bool {
 	}
 	fmt.Fprintln(cfg.Stderr)
 	fmt.Fprintf(cfg.Stderr, "rein: write blocked for %s on %s\n", req.Action, req.Repo)
-	fmt.Fprintln(cfg.Stderr, "  To grant write access for this session, in ANOTHER terminal run:")
-	fmt.Fprintf(cfg.Stderr, "    %s approval grant\n", reinCmd)
-	fmt.Fprintln(cfg.Stderr, "  (or just `rein approval grant` if you've added the shim dir to your PATH)")
+	fmt.Fprintln(cfg.Stderr, "  To grant write access for this run, in ANOTHER terminal run:")
+	fmt.Fprintf(cfg.Stderr, "    %s approval grant --run-id %s\n", reinCmd, cfg.RunID)
+	fmt.Fprintf(cfg.Stderr, "  (or just `rein approval grant --run-id %s` if the shim dir is on your PATH)\n", cfg.RunID)
 	fmt.Fprintln(cfg.Stderr, "  Then retry your operation here.")
 	fmt.Fprintln(cfg.Stderr)
 	fmt.Fprintln(cfg.Stderr, "  Note: invoking grant from this same terminal (e.g. claude's `!` shell")
@@ -242,30 +295,78 @@ func recordApproval(cfg Config, sig, sessionID string) {
 		ApprovedAt: now,
 		ExpiresAt:  now.Add(cfg.TTL),
 	}
-	if err := approvals.Write(approvals.Path(cfg.StateDir), rec); err != nil {
+	if err := approvals.WriteApproval(cfg.StateDir, cfg.RunID, rec); err != nil {
 		cfg.Logger.Printf("grant: approval write failed (continuing): %v", err)
 		return
 	}
-	cfg.Logger.Printf("grant: approval recorded (valid until %s)", rec.ExpiresAt.Format(time.RFC3339))
+	cfg.Logger.Printf("grant: approval recorded for run %s", cfg.RunID)
 }
 
-// Grant is the entry point for the `rein approval grant` subcommand.
-// It tries /dev/tty first (no CLI flag accepts the issue number —
-// design §5.3 TM-G5 wants the answer to arrive via /dev/tty so a
-// confused or malicious agent can't supply it via a CLI arg). If
-// /dev/tty isn't available AND $TMUX is set, it falls back to
-// spawning a tmux popup that runs `rein approval grant` itself —
-// the popup's pty IS a /dev/tty, so the inner invocation completes
-// via layer 1 and writes the approval record. The outer call then
-// sees the record and returns true.
+// obtainInteractiveNoPersist runs the interactive layers (2-4) WITHOUT
+// persisting any record or run-context. It is the fail-closed path taken
+// when there is no REIN_RUN_ID: with no run id to name the files, we
+// cannot key an approval, and the out-of-process layers (popup,
+// other-terminal grant) cannot resolve a session either — so they are
+// disabled and only the in-process /dev/tty prompt can approve THIS op.
+// Every such op re-prompts. TM-G8 preserved: a denial returns false, the
+// caller serves the placeholder.
+func obtainInteractiveNoPersist(ctx context.Context, req Request, cfg Config) bool {
+	pr := prompt.Request{
+		SessionID: req.Session.ID,
+		Role:      req.Session.Role,
+		Repo:      req.Repo,
+		Action:    fmt.Sprintf("%s (no rein run context: approves THIS op only)", req.Action),
+		Issue:     req.Session.Issue,
+		Timeout:   cfg.PromptTimeout,
+	}
+	approved, err := cfg.Prompter.Confirm(ctx, pr)
+	switch {
+	case err == nil && approved:
+		cfg.Logger.Printf("grant: APPROVED via /dev/tty (no-persist, outside rein run)")
+		return true
+	case err == nil:
+		cfg.Logger.Printf("grant: DENIED via /dev/tty (no-persist)")
+		return false
+	case errors.Is(err, prompt.ErrCancelled):
+		cfg.Logger.Printf("grant: CANCELLED via /dev/tty (no-persist)")
+		return false
+	default:
+		cfg.Logger.Printf("grant: /dev/tty unavailable (%v); no rein run context, cannot use popup/other-terminal grant", err)
+	}
+
+	// No tty AND no run id: emit a helpful message and deny. We cannot
+	// route an out-of-process grant without a run id.
+	fmt.Fprintln(cfg.Stderr)
+	fmt.Fprintf(cfg.Stderr, "rein: write blocked for %s on %s\n", req.Action, req.Repo)
+	fmt.Fprintln(cfg.Stderr, "  This operation ran OUTSIDE `rein run` (no REIN_RUN_ID), so rein cannot")
+	fmt.Fprintln(cfg.Stderr, "  route an approval to it. Launch your agent via `rein run -- <cmd>` so")
+	fmt.Fprintln(cfg.Stderr, "  writes can be approved per-run.")
+	fmt.Fprintln(cfg.Stderr)
+	cfg.Logger.Printf("grant: DENIED — no /dev/tty and no REIN_RUN_ID")
+	return false
+}
+
+// Grant is the entry point for the `rein approval grant --run-id X`
+// subcommand. It loads the session ONLY from the on-disk snapshot the
+// helper wrote (runs/<run-id>.json) — it MUST NOT call
+// session.LoadOrFallback: the popup / other-terminal process has no
+// REIN_SESSION_FILE, and resolving the DEFAULT session would silently
+// approve the WRONG session when multiple `rein run`s on different
+// sessions run concurrently (the linchpin failure mode this whole change
+// exists to prevent).
 //
-// Recursion is bounded: the popup's grant invocation has a tty, so
-// it never hits the popup branch itself.
+// It tries /dev/tty first (no CLI flag accepts the issue number — design
+// §5.3 TM-G5 wants the answer to arrive via /dev/tty so a confused or
+// malicious agent can't supply it via a CLI arg; --run-id is routing,
+// not the secret). If /dev/tty isn't available AND $TMUX is set, it
+// falls back to spawning a tmux popup that runs the same subcommand
+// (with --run-id) — the popup's pty IS a /dev/tty, so the inner
+// invocation completes via the tty branch and writes the approval
+// record. Recursion is bounded: the popup's invocation has a tty.
 //
-// If neither path resolves (no tty, no tmux), Grant returns false
-// with a helpful error logged. The subcommand surfaces this to the
-// user.
-func Grant(ctx context.Context, sess session.Session, cfg Config) bool {
+// Returns nil on approval, a helpful error otherwise (missing run id,
+// missing/stale snapshot, denial, or no resolvable prompt path).
+func Grant(ctx context.Context, cfg Config) error {
 	if cfg.Logger == nil {
 		cfg.Logger = log.New(io.Discard, "", 0)
 	}
@@ -275,12 +376,24 @@ func Grant(ctx context.Context, sess session.Session, cfg Config) bool {
 	if cfg.TmuxRunner == nil {
 		cfg.TmuxRunner = DefaultTmuxRunner
 	}
+	if cfg.RunID == "" {
+		return errors.New("grant requires --run-id")
+	}
+
+	rc, err := approvals.ReadRunContext(cfg.StateDir, cfg.RunID)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("no run context for run-id %s (the run may have exited, or this is a stale id); have the wrapped agent retry the operation so rein re-writes the context", cfg.RunID)
+		}
+		return fmt.Errorf("read run context for run-id %s: %w", cfg.RunID, err)
+	}
+	sess := rc.Session
 	sig := approvals.SignatureOf(sess)
 	pr := prompt.Request{
 		SessionID: sess.ID,
 		Role:      sess.Role,
 		Repo:      joinRepos(sess.Repos),
-		Action:    fmt.Sprintf("grant write access (covers writes until +%s)", cfg.TTL),
+		Action:    "grant write access (covers writes for this run)",
 		Issue:     sess.Issue,
 		Timeout:   cfg.PromptTimeout,
 	}
@@ -288,13 +401,13 @@ func Grant(ctx context.Context, sess session.Session, cfg Config) bool {
 	switch {
 	case err == nil && approved:
 		recordApproval(cfg, sig, sess.ID)
-		return true
+		return nil
 	case err == nil:
 		cfg.Logger.Printf("grant subcommand: denied (wrong answer)")
-		return false
+		return errors.New("approval denied (issue number did not match)")
 	case errors.Is(err, prompt.ErrCancelled):
 		cfg.Logger.Printf("grant subcommand: cancelled")
-		return false
+		return errors.New("approval cancelled")
 	}
 
 	// No /dev/tty. Try tmux popup if available — common case is the
@@ -310,16 +423,16 @@ func Grant(ctx context.Context, sess session.Session, cfg Config) bool {
 		}
 		ctxPopup, cancel := context.WithTimeout(ctx, 90*time.Second)
 		defer cancel()
-		_ = cfg.TmuxRunner(ctxPopup, []string{reinCmd, "approval", "grant"})
-		if rec, err := approvals.Read(approvals.Path(cfg.StateDir)); err == nil {
-			if approvals.Valid(rec, sig, time.Now()) {
+		_ = cfg.TmuxRunner(ctxPopup, []string{reinCmd, "approval", "grant", "--run-id", cfg.RunID})
+		if rec, err := approvals.ReadApproval(cfg.StateDir, cfg.RunID); err == nil {
+			if approvals.Valid(rec, sig) {
 				cfg.Logger.Printf("grant subcommand: APPROVED via tmux popup")
-				return true
+				return nil
 			}
 		}
 	}
 	cfg.Logger.Printf("grant subcommand: DENIED — no /dev/tty, no tmux popup")
-	return false
+	return errors.New("could not obtain approval: no /dev/tty and no tmux popup available")
 }
 
 // fileExists reports whether path resolves to a regular file/symlink

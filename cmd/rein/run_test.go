@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -317,5 +318,61 @@ func TestUnsetEnv(t *testing.T) {
 	// Unsetting an absent var is a no-op.
 	if out := unsetEnv([]string{"A=1"}, "NOPE"); len(out) != 1 {
 		t.Fatalf("unsetEnv of absent var should be a no-op, got %v", out)
+	}
+}
+
+// runIDCharset is the load-bearing invariant: a run id becomes a filename
+// (approvals/<id>.json, runs/<id>.json), so it must be filename-safe. This
+// is exactly the base64.RawURLEncoding alphabet plus its no-padding rule.
+var runIDCharset = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+func TestNewRunID(t *testing.T) {
+	a, err := newRunID()
+	if err != nil {
+		t.Fatalf("newRunID: %v", err)
+	}
+	if a == "" {
+		t.Fatal("newRunID returned empty string")
+	}
+	if !runIDCharset.MatchString(a) {
+		t.Errorf("run id %q is not filename-safe (want %s)", a, runIDCharset)
+	}
+	// 16 random bytes -> 22 chars of base64url (no padding).
+	if len(a) != 22 {
+		t.Errorf("run id %q has length %d, want 22", a, len(a))
+	}
+
+	b, err := newRunID()
+	if err != nil {
+		t.Fatalf("newRunID (second): %v", err)
+	}
+	if a == b {
+		t.Errorf("two newRunID calls returned the same value %q; run ids must be unique", a)
+	}
+}
+
+func TestParseRunIDFlag(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"space form", []string{"--run-id", "abc123"}, "abc123"},
+		{"equals form", []string{"--run-id=abc123"}, "abc123"},
+		{"absent", []string{"--other", "x"}, ""},
+		{"empty args", nil, ""},
+		{"space form among others", []string{"foo", "--run-id", "xyz", "bar"}, "xyz"},
+		{"equals form among others", []string{"foo", "--run-id=xyz", "bar"}, "xyz"},
+		// --run-id as the final token with no following value -> empty.
+		{"dangling flag no value", []string{"--run-id"}, ""},
+		// Equals form with an empty value -> empty.
+		{"equals empty value", []string{"--run-id="}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseRunIDFlag(tc.args); got != tc.want {
+				t.Errorf("parseRunIDFlag(%v) = %q, want %q", tc.args, got, tc.want)
+			}
+		})
 	}
 }

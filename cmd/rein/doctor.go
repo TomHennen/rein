@@ -384,44 +384,33 @@ func checkTmuxEnv() checkResult {
 	return checkResult{"$TMUX", statusOK, "set; tmux-popup grant layer available"}
 }
 
-// checkApprovalCache reads the approval record and reports whether it
-// covers the current session and hasn't expired. Absent is yellow (an
-// expected state at the start of a session, not an error). Expired or
-// signature-mismatched is yellow (next write re-prompts). Valid is
-// green.
+// checkApprovalCache reports on the per-run approval files. Approvals are
+// now keyed by REIN_RUN_ID (one per `rein run` invocation), so there is
+// no single global record to inspect — doctor summarizes how many runs
+// have files on disk and how many are still live. No runs is yellow (an
+// expected state outside `rein run`, not an error).
 func checkApprovalCache() checkResult {
 	stateDir, err := config.StateDir()
 	if err != nil {
 		return checkResult{"approval cache", statusFail, err.Error()}
 	}
-	path := approvals.Path(stateDir)
-	rec, err := approvals.Read(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return checkResult{"approval cache", statusWarn, "absent (first write will prompt)"}
-	}
+	list, err := approvals.List(stateDir)
 	if err != nil {
-		return checkResult{"approval cache", statusFail, fmt.Sprintf("%s: %v", path, err)}
+		return checkResult{"approval cache", statusFail, fmt.Sprintf("list runs: %v", err)}
 	}
-	sess, _, serr := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
-	if serr != nil {
-		// The session check above already flagged this; here, degrade
-		// to a warn that surfaces just the on-disk record so the
-		// operator can still see what was previously approved.
-		return checkResult{"approval cache", statusWarn, fmt.Sprintf("record present at %s (expires %s) but session unavailable for signature check (see session row above)", path, rec.ExpiresAt.Format(time.RFC3339))}
+	if len(list) == 0 {
+		return checkResult{"approval cache", statusWarn, "no active runs (per-run approvals; first write inside `rein run` will prompt)"}
 	}
-	expected := approvals.SignatureOf(sess)
-	now := time.Now()
-	if !approvals.Valid(rec, expected, now) {
-		switch {
-		case rec.Signature != expected:
-			return checkResult{"approval cache", statusWarn, fmt.Sprintf("signature mismatch (session id/role/repos/issue changed since approval); next write will re-prompt")}
-		case now.After(rec.ExpiresAt):
-			return checkResult{"approval cache", statusWarn, fmt.Sprintf("expired at %s; next write will re-prompt", rec.ExpiresAt.Format(time.RFC3339))}
-		default:
-			return checkResult{"approval cache", statusWarn, "invalid; next write will re-prompt"}
+	live, approved := 0, 0
+	for _, st := range list {
+		if st.Live {
+			live++
+		}
+		if st.HasApproval {
+			approved++
 		}
 	}
-	return checkResult{"approval cache", statusOK, fmt.Sprintf("valid for current session (expires %s)", rec.ExpiresAt.Format(time.RFC3339))}
+	return checkResult{"approval cache", statusOK, fmt.Sprintf("%d run(s) on disk (%d live, %d approved); see `rein approval status`", len(list), live, approved)}
 }
 
 // checkGhShimCache reports on the gh read-token cache, which the rein-gh
