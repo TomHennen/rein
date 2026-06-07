@@ -886,6 +886,7 @@ Real v0:
 - Audit Identity App; audit writeback as issue comments.
 - **Broker-as-CA for commit signing** (§4.2.6 v1 default). Bootstrap a local CA at `rein init`; mint delegation certs per session; gitsign signs commits with them.
 - **Sandbox composition against `srt`** via the library API confirmed by §12.2. The broker registers as a MITM upstream for github.com / api.github.com.
+- **Evaluate Claude Code hooks as a complementary guard/audit layer** (issue #21): PreToolUse to deny the Shape B self-bypass patterns (`gh auth setup-git`, `git config credential.helper`, self-`rein approval grant`), PostToolUse for git/gh audit. Honest scope: harness-enforced but agent-overridable (`.claude/settings.local.json`), no `/dev/tty` so it can't host the approval prompt, and Claude-Code-only — so it's policy surface above the broker, never the boundary (the `srt` sandbox / daemon is). Decided here because it's a defense layer, not the broker itself.
 - Ambient session model with human confirmation prompts.
 - Single-use write tokens; HEAD pinning; REST URL 301-redirect chain as TM-G6 anchor.
 - Automatic session expiry (idle, hard TTL, agent process exit).
