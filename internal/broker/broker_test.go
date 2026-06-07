@@ -538,10 +538,11 @@ func TestConfirmWrite(t *testing.T) {
 	})
 }
 
-// TestRevokeOnStoreErase covers the CP3.6 hardening: write tokens get
-// revoked when git signals it's done with them, tightening the effective
-// TTL well below GitHub's 1h floor. Cached read tokens must NOT be
-// revoked (they stay reusable for the session).
+// TestRevokeOnStoreErase covers write-token revocation. git calls `store`
+// MID-operation (after info/refs, before receive-pack on a push), so a
+// write token must be revoked ONLY on `erase` (git rejected/discarded the
+// cred — the op is over), never on `store` (would 401 the in-flight push).
+// Cached read tokens must NOT be revoked on either action.
 func TestRevokeOnStoreErase(t *testing.T) {
 	helperStdin := func(token string) string {
 		return "protocol=https\nhost=github.com\nusername=x-access-token\npassword=" + token + "\n\n"
@@ -567,7 +568,7 @@ func TestRevokeOnStoreErase(t *testing.T) {
 	}
 
 	for _, action := range []string{"store", "erase"} {
-		t.Run(action+": non-cached token (write) gets revoked", func(t *testing.T) {
+		t.Run(action+": non-cached (write) token — revoked on erase, alive on store", func(t *testing.T) {
 			dir := t.TempDir()
 			cache := filepath.Join(dir, "cache.json")
 			writeCacheFile(t, cache, "ghs_the_cached_read", time.Now().Add(45*time.Minute))
@@ -584,10 +585,16 @@ func TestRevokeOnStoreErase(t *testing.T) {
 			if err != nil {
 				t.Fatalf("RunCredentialHelper: %v", err)
 			}
-			if calls.Load() != 1 {
-				t.Fatalf("revoke calls = %d, want 1", calls.Load())
+			// store fires mid-push (after info/refs, before receive-pack), so
+			// it must NOT revoke; erase means git discarded the cred, so it must.
+			wantCalls := int64(0)
+			if action == "erase" {
+				wantCalls = 1
 			}
-			if seen.tokens[0] != "ghs_fresh_write_token" {
+			if calls.Load() != wantCalls {
+				t.Fatalf("%s: revoke calls = %d, want %d", action, calls.Load(), wantCalls)
+			}
+			if wantCalls == 1 && seen.tokens[0] != "ghs_fresh_write_token" {
 				t.Errorf("revoked token = %q, want %q", seen.tokens[0], "ghs_fresh_write_token")
 			}
 		})

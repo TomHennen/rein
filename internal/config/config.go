@@ -10,6 +10,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -114,12 +115,11 @@ func ResolveApp() (githubapp.Config, keystore.Keystore, AppSource, error) {
 		return cfg, ks, SourceEnv, nil
 	}
 
-	// Falling through to the state path. LoadAppConfig is all-or-nothing, so
-	// a partial env (e.g. 3 of 4 vars, or a typo) lands here and would
-	// silently use state.json. Warn (to stderr only — stdout is the
-	// credential-helper protocol channel) so the operator sees their env was
-	// ignored. Fires only on SOME-but-not-all; clean none / full-env don't.
-	warnPartialAppEnv()
+	// Falling through to the state path. (A partial env — some but not all
+	// REIN_APP_* identity vars set — is surfaced once at `rein run` launch
+	// via WarnPartialAppEnv, NOT here: ResolveApp is on the per-git-op
+	// credential-helper hot path and warning here spams stderr on every
+	// invocation.)
 
 	// 2. State path.
 	configDir, err := ConfigDir()
@@ -155,19 +155,25 @@ func ResolveApp() (githubapp.Config, keystore.Keystore, AppSource, error) {
 		fmt.Errorf("no App config: set REIN_APP_* (source ./dev-env) or run `rein init`")
 }
 
-// warnPartialAppEnv prints a one-line stderr note when SOME but not all of
-// the four REIN_APP_* vars LoadAppConfig requires are set. That state means
-// the operator intended the env path but a missing var (or typo) made
-// LoadAppConfig treat env as absent, so ResolveApp silently uses state.json.
-// Silent on none-set (clean state path) and all-set (env path is taken
-// before this is reached). Writes to os.Stderr ONLY — stdout carries the
-// credential-helper protocol and a stray line there corrupts it.
-func warnPartialAppEnv() {
+// WarnPartialAppEnv writes a one-line note to w when SOME but not all of the
+// REIN_APP_* App-IDENTITY vars are set — a state that means the operator
+// likely intended the env App path but a missing var (or typo) made
+// LoadAppConfig treat env as absent, so the resolver fell back to state.json.
+// Silent on none-set (clean turnkey/state path) and all-set (env path).
+//
+// Only the three identity vars count; REIN_TEST_REPO_A is the test-repo
+// selector, not App identity, and the turnkey path supplies the repo via the
+// session file — counting it here would mis-fire for a normal turnkey user
+// who happens to have REIN_TEST_REPO_A exported.
+//
+// Call this ONCE from a user-facing entry point (e.g. `rein run` launch),
+// never from the credential-helper hot path. Write to stderr only — stdout
+// is the credential protocol channel.
+func WarnPartialAppEnv(w io.Writer) {
 	vars := []string{
 		"REIN_APP_CLIENT_ID",
 		"REIN_APP_PRIVATE_KEY_PATH",
 		"REIN_APP_INSTALLATION_ID",
-		"REIN_TEST_REPO_A",
 	}
 	set := 0
 	for _, v := range vars {
@@ -176,7 +182,7 @@ func warnPartialAppEnv() {
 		}
 	}
 	if set > 0 && set < len(vars) {
-		fmt.Fprintln(os.Stderr, "note: partial REIN_APP_* env detected (some set, some missing); ignoring env and using state.json — set all four or none")
+		fmt.Fprintln(w, "note: partial REIN_APP_* env (some App identity vars set, some missing); ignoring env and using state.json — set all three or none")
 	}
 }
 

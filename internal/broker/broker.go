@@ -210,7 +210,7 @@ func RunCredentialHelper(action string, stdin io.Reader, stdout io.Writer, cfg C
 
 	switch action {
 	case "store", "erase":
-		return handleStoreErase(attrs, cfg)
+		return handleStoreErase(action, attrs, cfg)
 	case "get":
 		return handleGet(attrs, stdout, cfg)
 	default:
@@ -219,22 +219,30 @@ func RunCredentialHelper(action string, stdin io.Reader, stdout io.Writer, cfg C
 	}
 }
 
-// handleStoreErase opportunistically revokes a write token whose useful
-// life is over. Git invokes the helper with store on a successful auth
-// and with erase on rejected auth; both fire AFTER the operation, with
-// the just-used credential on stdin. The helper compares the presented
-// token to the cached read token (if any) — a match means git is
-// re-presenting our cached read, which we want to keep alive for the
-// session, so we leave it. A non-match means it's a fresh write mint
-// whose usefulness is over, and we revoke it to tighten its TTL from
-// GitHub's ~1h down to "operation duration + revoke latency".
+// handleStoreErase revokes a write token once git is done with it.
 //
-// All work here is best-effort: no Revoke configured, host wrong,
-// missing token attribute, or revoke API failure — all silently
-// degrade to "leave token alive until its native TTL." The helper
-// always returns nil (exit 0); a failed revoke is never a credential
-// failure.
-func handleStoreErase(attrs map[string]string, cfg Config) error {
+// CRITICAL TIMING: git calls `store` after the FIRST successfully-
+// authenticated request, which for a multi-request operation is
+// MID-operation, not after it. `git push` is GET /info/refs (auth ok ->
+// git calls store) THEN POST /git-receive-pack (the actual upload). So
+// revoking on `store` kills a valid write token before the push payload
+// is sent, and receive-pack 401s. We therefore revoke ONLY on `erase`
+// (git rejected the credential and is discarding it — the operation is
+// genuinely over). On `store` we leave the token alive; it expires on
+// GitHub's native ~1h TTL.
+//
+// This corrects the earlier "revoke on store to tighten the effective
+// TTL" design, which silently broke every `git push` over HTTPS (reads
+// were unaffected because the read token is cached and matched below).
+// Tightening a successful write token's TTL needs a real
+// operation-complete signal — `rein run`'s child-exit — tracked as a
+// follow-up; it is NOT git's `store`.
+//
+// All work here is best-effort: nil Revoke, wrong host, missing token,
+// or a revoke API failure all degrade to "leave the token to its native
+// TTL." The helper always returns nil (exit 0); a failed revoke is never
+// a credential failure.
+func handleStoreErase(action string, attrs map[string]string, cfg Config) error {
 	if cfg.Revoke == nil {
 		return nil
 	}
@@ -247,12 +255,8 @@ func handleStoreErase(attrs map[string]string, cfg Config) error {
 	}
 
 	// If the presented token is the cached read token, git is just
-	// re-presenting what we already gave it for a fetch — keep the
-	// cache warm and don't revoke. If the cache file is missing
-	// (rare: tmpfs eviction, cache dir manually wiped), we treat the
-	// presented token as a write and revoke. The cost of a false
-	// positive is a wasted read mint on the next get — TTL annoyance,
-	// not a security or correctness issue.
+	// re-presenting what we already gave it for a fetch — keep the cache
+	// warm and don't revoke (on either action).
 	if cfg.ReadCachePath != "" {
 		if cached, err := tokencache.Read(cfg.ReadCachePath); err == nil && cached.Token == token {
 			cfg.Logger.Printf("store/erase: token matches cached read; leaving alive")
@@ -260,13 +264,20 @@ func handleStoreErase(attrs map[string]string, cfg Config) error {
 		}
 	}
 
+	// store fires mid-operation (see above) — never revoke here, or we
+	// kill the write token before `git push` finishes uploading.
+	if action != "erase" {
+		cfg.Logger.Printf("store: leaving write token alive (git calls store mid-operation; native ~1h TTL applies)")
+		return nil
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.MintTimeout)
 	defer cancel()
 	if err := cfg.Revoke(ctx, token); err != nil {
-		cfg.Logger.Printf("store/erase: revoke failed (best-effort): %v", err)
+		cfg.Logger.Printf("erase: revoke failed (best-effort): %v", err)
 		return nil
 	}
-	cfg.Logger.Printf("store/erase: revoked token (len=%d) — effective TTL ended at operation completion", len(token))
+	cfg.Logger.Printf("erase: revoked rejected write token (len=%d)", len(token))
 	return nil
 }
 

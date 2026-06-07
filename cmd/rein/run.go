@@ -101,6 +101,11 @@ func runWrapped(argv []string) (int, error) {
 		return 1, fmt.Errorf("load session: %w (see README for dev-session.yaml format)", err)
 	}
 
+	// One-time, user-facing note if the env App identity is half-configured
+	// (some REIN_APP_* set, some missing) — surfaced here at launch rather
+	// than from the per-git-op credential helper, which would spam stderr.
+	config.WarnPartialAppEnv(os.Stderr)
+
 	// Eagerly resolve + cache the installation id for the session repo on the
 	// manifest-flow (state.json) path, BEFORE the child starts, so a 404
 	// (App not installed) fails loud here instead of degrading to a TM-G8
