@@ -261,6 +261,16 @@ func runWrapped(argv []string) (int, error) {
 	waitErr := cmd.Wait()
 	close(doneCh)
 
+	// The child is gone — the reliable operation-complete signal (issue
+	// #20). Best-effort revoke any write tokens minted during this run,
+	// tightening a successful push's effective write-token lifetime from
+	// GitHub's native ~1h down to the run duration. The deferred
+	// approvals.ClearRun (registered above) removes the ledger file
+	// afterward. SIGINT/SIGKILL skip this path; those tokens live to
+	// their native TTL (the accepted floor) and the orphaned ledger is
+	// reaped by the next launch's Sweep.
+	revokeRunWriteTokens(stateDir, runID, productionRevoke(sess), time.Now())
+
 	if waitErr == nil {
 		return 0, nil
 	}
@@ -360,6 +370,71 @@ func resolveAndCacheInstallID(ctx context.Context, sess session.Session, lookup 
 		}
 	}
 	return nil
+}
+
+// revokeWriteTokenTimeout caps each best-effort exit-time revoke. Tight:
+// the user is waiting for `rein run` to return.
+const revokeWriteTokenTimeout = 5 * time.Second
+
+// revokeTokenFunc revokes a single installation token server-side.
+// Injected so tests can stub the network call (mirrors installIDLookup).
+type revokeTokenFunc func(ctx context.Context, token string) error
+
+// productionRevoke builds the real revokeTokenFunc: resolve the App config,
+// set RepoName from the session (ResolveApp leaves it empty on the
+// state.json path, and NewClient requires it even though RevokeToken — a
+// self-authenticating DELETE /installation/token — ignores it), construct a
+// client, and revoke. Any failure is returned for the caller to log; it is
+// never fatal (the token expires on its own ~1h TTL). Mirrors the broker's
+// revoke closure in main.go.
+func productionRevoke(sess session.Session) revokeTokenFunc {
+	return func(ctx context.Context, token string) error {
+		appCfg, ks, _, err := config.ResolveApp()
+		if err != nil {
+			return err
+		}
+		appCfg.RepoName = bareRepoName(sess.Repos[0])
+		client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
+		if err != nil {
+			return err
+		}
+		return client.RevokeToken(ctx, token)
+	}
+}
+
+// revokeRunWriteTokens drains this run's write-token ledger and best-effort
+// revokes every still-valid token (issue #20). Already-expired entries are
+// skipped (revoke is pointless). The ledger FILE is left for the caller's
+// deferred approvals.ClearRun to remove — the single per-run-file lifecycle
+// owner. Best-effort throughout: a missing/empty ledger, a client-build or
+// network failure, or a non-204 revoke all degrade to "token lives to its
+// native TTL," never a user-facing error.
+func revokeRunWriteTokens(stateDir, runID string, revoke revokeTokenFunc, now time.Time) {
+	entries, err := approvals.ReadWriteTokens(stateDir, runID)
+	if err != nil || len(entries) == 0 {
+		return
+	}
+	var revoked, total int
+	for _, e := range entries {
+		if e.Token == "" {
+			continue
+		}
+		total++
+		if !e.ExpiresAt.IsZero() && !now.Before(e.ExpiresAt) {
+			continue // already expired; nothing to revoke
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), revokeWriteTokenTimeout)
+		rerr := revoke(ctx, e.Token)
+		cancel()
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "rein: warning: exit-revoke of a write token failed (best-effort; it expires on its own): %v\n", rerr)
+			continue
+		}
+		revoked++
+	}
+	if total > 0 {
+		fmt.Fprintf(os.Stderr, "rein: revoked %d of %d write token(s) on exit (issue #20)\n", revoked, total)
+	}
 }
 
 // newRunID returns a per-run nonce: 16 bytes from crypto/rand encoded as

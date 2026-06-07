@@ -38,6 +38,7 @@ import (
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
 	"github.com/TomHennen/rein/internal/session"
+	"github.com/TomHennen/rein/internal/tokencache"
 	"github.com/TomHennen/rein/internal/ui/grant"
 )
 
@@ -222,7 +223,7 @@ func runCredentialHelperWithConfig(action string, in io.Reader, out, diag io.Wri
 		return client.RevokeToken(ctx, token)
 	}
 
-	return broker.RunCredentialHelper(action, in, out, broker.Config{
+	cfg := broker.Config{
 		MintRead:      mintRead,
 		MintWrite:     mintWrite,
 		MintTimeout:   mintTimeout,
@@ -237,7 +238,24 @@ func runCredentialHelperWithConfig(action string, in io.Reader, out, diag io.Wri
 		// instructions recommend setting useHttpPath for strict
 		// enforcement.
 		ConfirmWrite: buildConfirmWrite(sess, stateDir, logger),
-	})
+	}
+
+	// Ledger minted write tokens for exit-time revocation (issue #20), but
+	// ONLY when invoked inside a `rein run` (REIN_RUN_ID set) — that's the
+	// process that drains the ledger on child exit. A helper invoked outside
+	// `rein run` has no such parent, so recording would only leak a token
+	// value to disk that nothing ever revokes; skip it (the token still
+	// expires on GitHub's native ~1h TTL). Best-effort: an append failure is
+	// logged and ignored (broker recovers panics; TM-G8 is unaffected).
+	if runID := os.Getenv("REIN_RUN_ID"); runID != "" {
+		cfg.RecordWrite = func(token string, expiresAt time.Time) {
+			if err := approvals.AppendWriteToken(stateDir, runID, tokencache.Entry{Token: token, ExpiresAt: expiresAt}); err != nil {
+				logger.Printf("write-token ledger append failed (best-effort): %v", err)
+			}
+		}
+	}
+
+	return broker.RunCredentialHelper(action, in, out, cfg)
 }
 
 // buildConfirmWrite returns a ConfirmWrite predicate that delegates to

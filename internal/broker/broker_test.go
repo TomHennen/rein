@@ -20,9 +20,10 @@ import (
 
 // stubMinter exposes a configurable token+err MintFunc and a call counter.
 type stubMinter struct {
-	token string
-	err   error
-	calls atomic.Int64
+	token     string
+	err       error
+	expiresAt time.Time // zero -> now+1h
+	calls     atomic.Int64
 }
 
 func (s *stubMinter) Mint(ctx context.Context) (string, time.Time, error) {
@@ -30,7 +31,11 @@ func (s *stubMinter) Mint(ctx context.Context) (string, time.Time, error) {
 	if s.err != nil {
 		return "", time.Time{}, s.err
 	}
-	return s.token, time.Now().Add(time.Hour), nil
+	exp := s.expiresAt
+	if exp.IsZero() {
+		exp = time.Now().Add(time.Hour)
+	}
+	return s.token, exp, nil
 }
 
 func (s *stubMinter) Calls() int64 { return s.calls.Load() }
@@ -273,6 +278,98 @@ func TestDetectWrite(t *testing.T) {
 		}
 		if !strings.Contains(stdout.String(), "password=rein-placeholder-mint-failed") {
 			t.Fatalf("expected TM-G8 placeholder, got %q", stdout.String())
+		}
+	})
+}
+
+// TestRecordWrite confirms the RecordWrite hook (issue #20) fires once per
+// successful write mint with the token + expiry, never fires on the read
+// path or on a failed mint, and that a panicking hook can't break TM-G8.
+func TestRecordWrite(t *testing.T) {
+	helperStdin := "protocol=https\nhost=github.com\n\n"
+
+	t.Run("fires on write success with token+expiry", func(t *testing.T) {
+		exp := time.Now().Add(40 * time.Minute).Round(time.Second)
+		write := &stubMinter{token: "ghs_write_token", expiresAt: exp}
+		var gotToken string
+		var gotExp time.Time
+		var calls int
+		cfg := Config{
+			MintRead:    (&stubMinter{token: "unused"}).Mint,
+			MintWrite:   write.Mint,
+			Logger:      discardLogger(),
+			DetectWrite: alwaysWrite,
+			RecordWrite: func(token string, expiresAt time.Time) {
+				calls++
+				gotToken = token
+				gotExp = expiresAt
+			},
+		}
+		var stdout bytes.Buffer
+		if err := RunCredentialHelper("get", strings.NewReader(helperStdin), &stdout, cfg); err != nil {
+			t.Fatalf("RunCredentialHelper: %v", err)
+		}
+		if calls != 1 {
+			t.Fatalf("RecordWrite calls = %d, want 1", calls)
+		}
+		if gotToken != "ghs_write_token" {
+			t.Errorf("recorded token = %q, want ghs_write_token", gotToken)
+		}
+		if !gotExp.Equal(exp) {
+			t.Errorf("recorded expiry = %v, want %v", gotExp, exp)
+		}
+	})
+
+	t.Run("does not fire on the read path", func(t *testing.T) {
+		var calls int
+		cfg := Config{
+			MintRead:    (&stubMinter{token: "ghs_read"}).Mint,
+			MintWrite:   (&stubMinter{token: "unused"}).Mint,
+			Logger:      discardLogger(),
+			DetectWrite: alwaysRead,
+			RecordWrite: func(string, time.Time) { calls++ },
+		}
+		var stdout bytes.Buffer
+		if err := RunCredentialHelper("get", strings.NewReader(helperStdin), &stdout, cfg); err != nil {
+			t.Fatalf("RunCredentialHelper: %v", err)
+		}
+		if calls != 0 {
+			t.Errorf("RecordWrite calls = %d, want 0 on read path", calls)
+		}
+	})
+
+	t.Run("does not fire on write mint failure", func(t *testing.T) {
+		var calls int
+		cfg := Config{
+			MintRead:    (&stubMinter{token: "unused"}).Mint,
+			MintWrite:   (&stubMinter{err: errors.New("mint boom")}).Mint,
+			Logger:      discardLogger(),
+			DetectWrite: alwaysWrite,
+			RecordWrite: func(string, time.Time) { calls++ },
+		}
+		var stdout bytes.Buffer
+		if err := RunCredentialHelper("get", strings.NewReader(helperStdin), &stdout, cfg); err != nil {
+			t.Fatalf("RunCredentialHelper: %v", err)
+		}
+		if calls != 0 {
+			t.Errorf("RecordWrite calls = %d, want 0 on mint failure", calls)
+		}
+	})
+
+	t.Run("panic in hook is recovered; token still served (TM-G8)", func(t *testing.T) {
+		cfg := Config{
+			MintRead:    (&stubMinter{token: "unused"}).Mint,
+			MintWrite:   (&stubMinter{token: "ghs_write_token"}).Mint,
+			Logger:      discardLogger(),
+			DetectWrite: alwaysWrite,
+			RecordWrite: func(string, time.Time) { panic("simulated ledger failure") },
+		}
+		var stdout bytes.Buffer
+		if err := RunCredentialHelper("get", strings.NewReader(helperStdin), &stdout, cfg); err != nil {
+			t.Fatalf("RunCredentialHelper: %v", err)
+		}
+		if !strings.Contains(stdout.String(), "password=ghs_write_token") {
+			t.Fatalf("expected write token despite hook panic, got %q", stdout.String())
 		}
 	})
 }

@@ -371,9 +371,21 @@ See `docs/design.md` §7.2.
 
 **Open followups (do alongside / before the relevant Phase 1 work):**
 
-- **#20** — revoke write tokens on `rein run` child-exit (tightens the
-  ~1h write-token window back toward operation-duration). Natural Phase 1
-  daemon work; the cleanest "do first."
+- **#20** — **DONE (gate passed 2026-06-07).** Revoke write tokens on
+  `rein run` child-exit. Per-run append-only ledger `writes/<run-id>.jsonl`
+  (helper appends each minted write token via a new
+  `broker.Config.RecordWrite` hook, guarded on `REIN_RUN_ID`); `rein run`
+  best-effort revokes still-valid entries on child-exit, clears the ledger;
+  `approvals.List`/`ClearRun`/`Sweep` extended to cover the ledger (orphan
+  reap uses the ledger mtime so a live no-bound-issue run isn't clobbered).
+  Unit + race + concurrency tests pass; design.md C6 swept. **Gate met:**
+  `/tmp/issue20-manual-test.sh` on a throwaway repo showed the minted write
+  token live mid-run (200) and revoked-dead after `rein run` exit (401);
+  ledger cleared on exit. Residual (accepted): SIGINT/SIGKILL of `rein run`
+  skips the exit-revoke → those tokens live to native ~1h TTL. Keychain-
+  backed token storage was considered and declined (the OS keyring is
+  reachable by any same-uid process, so it doesn't address #7; at-rest
+  protection is the Phase 1 in-memory daemon's job, not this 0.5 bridge).
 - **#19** — headless GitHub App creation fallback (URL-param prefill +
   `rein import-pem`) for boxes where `ssh -L` isn't possible.
 - **#12** — nonce-via-tty so an agent can't self-answer the approval
@@ -500,6 +512,24 @@ work, or mints intermittently fail in ways that look like auth bugs.
 - 2026-06-07 — `REIN_SESSION_FILE` pointing at a missing file silently
   fell back to the env session (looked like the chosen session was
   active when it wasn't); now a hard error (`0ffda7a`).
+
+- 2026-06-07 — **#20 exit-revoke implemented** (first Phase 1 followup;
+  uncommitted, pending human manual e2e). Design notes: (1) persisting the
+  write-token VALUE to disk is unavoidable — GitHub's revoke is
+  `DELETE /installation/token` authenticated BY the token, no revoke-by-id,
+  so the revoking process (`rein run`, a different process from the
+  short-lived helper) must hold the value. Bounded: 0600, deleted on exit,
+  adds nothing a same-uid process couldn't already reach during the run
+  (#7). (2) The ledger is a THIRD per-run artifact alongside the approval
+  files; an append-only `.jsonl` with `O_APPEND` so concurrent in-run
+  pushes don't corrupt it. (3) Reviewer-surfaced + fixed: a "writes-only"
+  run (write-capable role with `issue: 0` → `ConfirmWrite` nil → no
+  run-context written) has no pid/timestamp for the orphan sweep, so a
+  concurrent launch's `Sweep` would insta-reap its live ledger and skip the
+  exit-revoke (degrading to the ~1h floor — not a leak, not a TM-G8 break).
+  Fixed by judging such runs against the ledger mtime + the 24h backstop.
+  Residual (accepted): SIGINT/SIGKILL of `rein run` skips the exit-revoke;
+  those tokens live to native ~1h TTL — the same floor as before #20.
 
 ## Tooling requests
 

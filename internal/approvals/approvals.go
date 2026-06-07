@@ -55,6 +55,30 @@
 //   - `rein approval clear --run-id <X>` (one run) or `rein approval
 //     clear` (all runs)
 //   - Edit dev-session.yaml (changes the signature)
+//
+// # Write-token ledger (issue #20)
+//
+// A run owns a THIRD per-run artifact: writes/<run-id>.jsonl — an
+// append-only ledger of the write tokens minted during the run (one
+// tokencache.Entry per line). The credential HELPER appends a line on
+// each successful write mint (AppendWriteToken); `rein run` reads the
+// ledger on child exit (ReadWriteTokens), best-effort revokes each
+// still-valid token, then clears the file (ClearRun removes it along
+// with the other two). This tightens a successful push's effective
+// write-token lifetime from GitHub's native ~1h down to the run
+// duration. SIGKILL of `rein run` skips the exit-revoke; those tokens
+// then live to their native TTL (the accepted floor) and the orphaned
+// ledger is reaped by the launch Sweep.
+//
+// SECURITY: this is the one place rein persists a WRITE-tier token
+// value to disk. It is unavoidable for cross-process revoke — GitHub's
+// revoke API (DELETE /installation/token) is authenticated BY the token
+// itself; there is no revoke-by-id, so the revoking process must hold
+// the token value. The exposure is bounded: mode 0600 in a 0700 parent,
+// deleted as soon as the run exits, and the token is already reachable
+// to any same-uid process during the run (issue #7 — the Shape B
+// limitation the Phase 1 sandbox closes). The read-token cache
+// (internal/tokencache) already persists a read token the same way.
 package approvals
 
 import (
@@ -71,6 +95,7 @@ import (
 	"time"
 
 	"github.com/TomHennen/rein/internal/session"
+	"github.com/TomHennen/rein/internal/tokencache"
 )
 
 // Record is the on-disk shape of an approval.
@@ -116,7 +141,8 @@ type RunStatus struct {
 	Approval    Record     // zero-value if approvals/<id>.json missing
 	HasContext  bool
 	HasApproval bool
-	Live        bool // RunPID liveness probe result
+	Live        bool      // RunPID liveness probe result
+	LedgerMod   time.Time // mtime of writes/<id>.jsonl, zero if absent
 }
 
 // SignatureOf computes the deterministic signature for a session. Any
@@ -154,6 +180,68 @@ func RunApprovalPath(stateDir, runID string) string {
 // snapshot the helper writes).
 func RunContextPath(stateDir, runID string) string {
 	return filepath.Join(stateDir, "runs", safeRunID(runID)+".json")
+}
+
+// WriteTokenLedgerPath returns writes/<run-id>.jsonl under stateDir (the
+// append-only write-token ledger the helper writes and `rein run` drains
+// on exit). See the package doc's "Write-token ledger" section.
+func WriteTokenLedgerPath(stateDir, runID string) string {
+	return filepath.Join(stateDir, "writes", safeRunID(runID)+".jsonl")
+}
+
+// AppendWriteToken appends one write-token entry to writes/<run-id>.jsonl,
+// creating the file (mode 0600) and its parent (0700) on first write.
+//
+// Append-only with O_APPEND so concurrent helper invocations within one
+// run (e.g. parallel pushes) don't clobber each other: a single
+// marshalled entry is far below PIPE_BUF, so the append is atomic on
+// local filesystems. Best-effort by contract — the caller (the credential
+// helper) must log+ignore any error and NEVER let it break the TM-G8
+// always-return-a-credential invariant.
+func AppendWriteToken(stateDir, runID string, e tokencache.Entry) error {
+	path := WriteTokenLedgerPath(stateDir, runID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("mkdir writes: %w", err)
+	}
+	line, err := json.Marshal(e)
+	if err != nil {
+		return fmt.Errorf("marshal write-token entry: %w", err)
+	}
+	line = append(line, '\n')
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("open write-token ledger: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.Write(line); err != nil {
+		return fmt.Errorf("append write-token entry: %w", err)
+	}
+	return nil
+}
+
+// ReadWriteTokens parses writes/<run-id>.jsonl into entries. A missing
+// file is reported as os.ErrNotExist (errors.Is-distinguishable) so the
+// caller can treat "no writes this run" as a no-op. A torn or corrupt
+// final line (possible if the run was killed mid-append) is skipped, not
+// fatal — every well-formed line still yields its token to revoke.
+func ReadWriteTokens(stateDir, runID string) ([]tokencache.Entry, error) {
+	body, err := os.ReadFile(WriteTokenLedgerPath(stateDir, runID))
+	if err != nil {
+		return nil, err
+	}
+	var out []tokencache.Entry
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var e tokencache.Entry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out, nil
 }
 
 // safeRunID defends against a malformed/path-traversing --run-id. The
@@ -216,11 +304,12 @@ func WriteRunContext(stateDir, runID string, rc RunContext) error {
 	return writeAtomic(RunContextPath(stateDir, runID), body)
 }
 
-// ClearRun removes BOTH runs/<id>.json and approvals/<id>.json. Missing
-// files are not an error; idempotent (safe to call twice).
+// ClearRun removes a run's three per-run files: runs/<id>.json,
+// approvals/<id>.json, and writes/<id>.jsonl. Missing files are not an
+// error; idempotent (safe to call twice).
 func ClearRun(stateDir, runID string) error {
 	var firstErr error
-	for _, p := range []string{RunContextPath(stateDir, runID), RunApprovalPath(stateDir, runID)} {
+	for _, p := range []string{RunContextPath(stateDir, runID), RunApprovalPath(stateDir, runID), WriteTokenLedgerPath(stateDir, runID)} {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
 			firstErr = err
 		}
@@ -233,7 +322,12 @@ func ClearRun(stateDir, runID string) error {
 // the corresponding Has* false), so `status` surfaces partial state.
 func List(stateDir string) ([]RunStatus, error) {
 	ids := map[string]bool{}
-	for _, sub := range []string{"runs", "approvals"} {
+	// "writes" is included so a run whose ONLY artifact is a write-token
+	// ledger (the write-capable-role-with-no-bound-issue path: ConfirmWrite
+	// is nil, so no runs/ or approvals/ file is ever written, yet a token
+	// is minted and recorded) is still enumerated and thus swept when
+	// orphaned. Its files use a .jsonl suffix; the others use .json.
+	for _, sub := range []string{"runs", "approvals", "writes"} {
 		entries, err := os.ReadDir(filepath.Join(stateDir, sub))
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -245,11 +339,14 @@ func List(stateDir string) ([]RunStatus, error) {
 			if e.IsDir() {
 				continue
 			}
-			name := e.Name()
-			if !strings.HasSuffix(name, ".json") {
+			id, ok := strings.CutSuffix(e.Name(), ".json")
+			if !ok {
+				id, ok = strings.CutSuffix(e.Name(), ".jsonl")
+			}
+			if !ok {
 				continue
 			}
-			ids[strings.TrimSuffix(name, ".json")] = true
+			ids[id] = true
 		}
 	}
 	out := make([]RunStatus, 0, len(ids))
@@ -263,6 +360,9 @@ func List(stateDir string) ([]RunStatus, error) {
 		if rec, err := ReadApproval(stateDir, id); err == nil {
 			st.Approval = rec
 			st.HasApproval = true
+		}
+		if fi, err := os.Stat(WriteTokenLedgerPath(stateDir, id)); err == nil {
+			st.LedgerMod = fi.ModTime()
 		}
 		out = append(out, st)
 	}
@@ -307,6 +407,16 @@ func shouldSweep(st RunStatus, maxAge time.Duration, now time.Time) bool {
 	ts := st.Context.WrittenAt
 	if !st.HasContext {
 		ts = st.Approval.ApprovedAt
+	}
+	if ts.IsZero() {
+		// A "writes-only" run (write-capable role, no bound issue: ConfirmWrite
+		// is nil so no run-context is ever written, yet a token is minted and
+		// ledgered) has no pid to probe and no context/approval timestamp. Use
+		// the ledger's mtime so the age backstop still protects a STILL-LIVE
+		// such run from being reaped mid-flight by a concurrent launch's Sweep
+		// — without it, ts.IsZero() would treat every writes-only run as an
+		// instant orphan and clobber its not-yet-revoked tokens.
+		ts = st.LedgerMod
 	}
 	if ts.IsZero() {
 		// No timestamp to judge by and no live process: treat as orphan.

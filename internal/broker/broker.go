@@ -125,6 +125,17 @@ type Config struct {
 	// logged and ignored.
 	Revoke func(ctx context.Context, token string) error
 
+	// RecordWrite, when non-nil, is called once for each write token
+	// successfully minted by serveWrite, with the token value and its
+	// expiry. The caller (cmd/rein) appends it to a per-run ledger so
+	// `rein run` can revoke the token on child exit (issue #20),
+	// tightening a successful push's effective write-token lifetime from
+	// GitHub's native ~1h to the run duration — the operation-complete
+	// signal git's `store`/`erase` actions could not safely provide (see
+	// handleStoreErase). Best-effort: a panic is recovered and ignored;
+	// it MUST NEVER break the TM-G8 always-return-a-credential invariant.
+	RecordWrite func(token string, expiresAt time.Time)
+
 	// InScope returns true when the requested github.com repo (as
 	// "owner/name") is within the session's scope ceiling. Called
 	// for every github.com get with a non-empty repo derived from the
@@ -453,7 +464,24 @@ func serveWrite(stdout io.Writer, cfg Config) error {
 		expiresAt.Format(time.RFC3339),
 		time.Until(expiresAt).Round(time.Second),
 		len(token))
+	recordWrite(cfg, token, expiresAt)
 	return writeCredential(stdout, "x-access-token", token)
+}
+
+// recordWrite invokes the RecordWrite hook (if configured) so the caller
+// can ledger the freshly-minted write token for exit-time revocation
+// (issue #20). A panic in the hook is recovered and logged — a buggy or
+// unwritable ledger MUST NOT prevent the token from reaching git (TM-G8).
+func recordWrite(cfg Config, token string, expiresAt time.Time) {
+	if cfg.RecordWrite == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			cfg.Logger.Printf("RecordWrite panicked: %v; ignoring (token still served)", r)
+		}
+	}()
+	cfg.RecordWrite(token, expiresAt)
 }
 
 // serveRead returns a valid cached read token if present, or mints a fresh
