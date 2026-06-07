@@ -157,18 +157,23 @@ func DefaultFilePath() (string, error) {
 // LoadOrFallback returns the active session for the current invocation.
 // Lookup order (each step short-circuits on success):
 //
-//  1. REIN_SESSION_FILE env override (test/explicit override path).
+//  1. REIN_SESSION_FILE env override (test/explicit override path). If set
+//     but the file is MISSING, that's a hard error — not a fallback. The
+//     operator named a specific file; silently using a different scope is a
+//     footgun.
 //  2. DefaultFilePath() (~/.config/rein/dev-session.yaml).
 //  3. Phase 0 dev fallback: a single-repo session scoped to fallbackRepo
 //     (typically the value of REIN_TEST_REPO_A). Allows the env-only
 //     setup that's been working since CP1-CP3.7 to keep working without
-//     forcing every developer to author a session file.
+//     forcing every developer to author a session file. Reached ONLY when
+//     REIN_SESSION_FILE is unset and the default file is absent.
 //
 // Returns the session and a short tag describing the source for log
-// clarity. A malformed/invalid file at step 2 is a hard error — better
-// to surface than silently fall back.
+// clarity. A malformed/invalid file is a hard error — better to surface
+// than silently fall back.
 func LoadOrFallback(fallbackRepo string) (Session, string, error) {
-	path := os.Getenv("REIN_SESSION_FILE")
+	explicit := os.Getenv("REIN_SESSION_FILE")
+	path := explicit
 	if path == "" {
 		p, err := DefaultFilePath()
 		if err != nil {
@@ -183,6 +188,15 @@ func LoadOrFallback(fallbackRepo string) (Session, string, error) {
 	if !os.IsNotExist(err) {
 		return Session{}, "", err
 	}
+	// An explicitly-requested REIN_SESSION_FILE that doesn't exist is a hard
+	// error, NOT a silent env-fallback: the operator named a specific file,
+	// and quietly running with a different (env-derived) scope is a footgun
+	// — it looks like the chosen session is active when it isn't.
+	if explicit != "" {
+		return Session{}, "", fmt.Errorf("REIN_SESSION_FILE=%s does not exist", explicit)
+	}
+	// Only the DEFAULT file being absent falls through to the Phase 0
+	// env-fallback (the env-only setup that's worked since CP1-CP3.7).
 	if normalizeRepo(fallbackRepo) == "" {
 		return Session{}, "", fmt.Errorf("no session file at %s and no usable fallback repo", path)
 	}

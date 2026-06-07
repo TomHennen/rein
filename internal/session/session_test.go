@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -167,4 +168,35 @@ func TestDefaultFilePath(t *testing.T) {
 			t.Errorf("got %q, want %q", got, want)
 		}
 	})
+}
+
+func TestLoadOrFallback_ExplicitMissingFileHardErrors(t *testing.T) {
+	// REIN_SESSION_FILE set to a path that doesn't exist must be a hard
+	// error, NOT a silent env-fallback (the footgun that masked a missing
+	// session file as a wrong-scope run).
+	t.Setenv("REIN_SESSION_FILE", filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+	_, _, err := LoadOrFallback("owner/repo")
+	if err == nil {
+		t.Fatal("expected hard error for missing REIN_SESSION_FILE, got nil (silent fallback)")
+	}
+	if !strings.Contains(err.Error(), "REIN_SESSION_FILE") {
+		t.Errorf("error should name REIN_SESSION_FILE, got: %v", err)
+	}
+}
+
+func TestLoadOrFallback_DefaultMissingFallsBackToEnv(t *testing.T) {
+	// With REIN_SESSION_FILE UNSET and the default file absent, the Phase 0
+	// env-fallback still applies (unchanged behavior).
+	t.Setenv("REIN_SESSION_FILE", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // default dev-session.yaml won't exist here
+	s, source, err := LoadOrFallback("owner/repo")
+	if err != nil {
+		t.Fatalf("expected env-fallback, got error: %v", err)
+	}
+	if source != "env-fallback" {
+		t.Errorf("source = %q, want env-fallback", source)
+	}
+	if len(s.Repos) != 1 || s.Repos[0] != "owner/repo" {
+		t.Errorf("fallback repos = %v, want [owner/repo]", s.Repos)
+	}
 }
