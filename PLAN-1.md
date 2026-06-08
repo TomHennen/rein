@@ -1,4 +1,4 @@
-# PLAN-1.md — Phase 1 (Shape A: sandbox composition)
+# PLAN-1.md — Phase 1 (sandboxed mode)
 
 **Goal:** Close issue #7. Run the agent inside the `srt` sandbox with a
 resident `rein` daemon injecting short-lived, scoped GitHub tokens at the
@@ -6,7 +6,7 @@ network proxy, so the agent never holds a credential in env/files/proc.
 Tom dogfoods it on a throwaway, then on `wrangle`, for two weeks without
 reverting to a PAT (design §7.2 hypothesis).
 
-**Design of record:** `docs/phase1-shapeA-design.md` (spine) +
+**Design of record:** `docs/phase1-design.md` (spine) +
 `docs/phase1-srt-spike-findings.md` (what the spike proved). Read both
 before starting. Don't re-derive the srt integration — it's verified.
 
@@ -64,13 +64,13 @@ repo; no hangs/truncation on the body upload.
 - Proxy arm: the CP1 MITM, productized into the daemon — per-request it
   asks the broker core for a token, host-aware inject, audit each request
   to a hash-chained log.
-- **Per-run socket = session identity** (design §8.2): each `rein run` gets
+- **Per-run socket = session identity** (design §5.2): each `rein run` gets
   its own mitm socket path; the daemon maps socket → session for scope +
   approval. 0700 perms, run-lifetime teardown — the socket is a capability
-  (design §7.1), bound this way.
-- **Tier classifier** (design §8.1), NOT "method = tier": git keys on the
+  (design §5.3), bound this way.
+- **Tier classifier** (design §5.1), NOT "method = tier": git keys on the
   `git-receive-pack` service; API REST on method; GraphQL needs body peek
-  (`mutation` vs `query`) — this is where the Shape B `rein-gh` classifier
+  (`mutation` vs `query`) — this is where the direct-mode `rein-gh` classifier
   (#9) moves. Fail closed (unclassifiable → prompt).
 - CA: generate at first run; key via `internal/keystore`; leaves per host.
 
@@ -82,7 +82,7 @@ all fire from the proxy. Unit-tested.
 
 **Estimate:** 2-3 days.
 
-- `rein run` (Shape A path): ensure daemon up; emit a per-run srt settings
+- `rein run` (sandboxed-mode path): ensure daemon up; emit a per-run srt settings
   file (mitmProxy.socketPath, allowed/denied domains, **fs deny-read of
   credential stores**, stub `GH_TOKEN`, CA-trust env); `exec srt -s … --
   <agent>`.
@@ -97,7 +97,7 @@ inside srt works end-to-end via proxy injection; the token is absent from
 the sandbox env/proc AND the agent cannot read the host's gh login
 (deny-read verified).
 
-### CP4 — Session & approval integration in Shape A
+### CP4 — Session & approval integration (sandboxed mode)
 
 **Estimate:** 2 days.
 
@@ -122,7 +122,7 @@ tokens revoked promptly on agent exit (in-memory, no ~1h floor).
 
 ### CP6 — Dogfood
 
-- Tom runs Shape A on a throwaway for a few sessions, then on `wrangle`.
+- Tom runs sandboxed mode on a throwaway for a few sessions, then on `wrangle`.
 - **GATE — explicit human approval required:** `wrangle` is the FIRST use
   on a real repo. The throwaway-only constraint has held since Phase 0
   (CLAUDE.md hard-constraint #1). Crossing it is Tom's conscious decision,
