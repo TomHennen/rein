@@ -1,0 +1,31 @@
+# Dependabot config for rein. See wrangle v0.2.0's recommended baseline:
+# https://github.com/TomHennen/wrangle/blob/v0.2.0/gh_workflow_examples/dependabot.yml
+#
+# The github-actions entry raises update PRs for the action pins in our
+# workflows -- including the `uses: TomHennen/wrangle/...@vX.Y.Z` tag pin in
+# build-and-publish.yml, which is how we pick up new wrangle releases (it
+# bumps the tag forward to the next published release).
+#
+# The gomod entry tracks rein's Go module dependencies.
+#
+# Do NOT enable auto-merge: review updates after the 7-day `cooldown`, so the
+# community has a window to surface supply-chain attacks before we adopt.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/**"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: "gomod"
+    directories:
+      - "/**"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
