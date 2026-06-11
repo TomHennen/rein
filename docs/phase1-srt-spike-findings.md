@@ -1,6 +1,10 @@
 # Phase 1 srt-integration spike — findings
 
-**Status:** in progress (de-risking the Go-broker ↔ srt boundary before
+> **Naming legend:** this is a dated record and keeps the old labels:
+> **Shape A = sandboxed mode**, **Shape B = direct mode** (the
+> credential-helper path). The repo-wide rename is tracked in #25.
+
+**Status:** complete (2026-06-08); dated record (de-risked the Go-broker ↔ srt boundary before
 the Shape A design + PLAN-1). Throwaway spike per Tom's direction
 (2026-06-07). Closes the central unknown behind issue #7 (Shape B: tokens
 reachable from any same-uid process) — the fix is Shape A: agent inside
@@ -73,7 +77,8 @@ srt HTTP proxy  (mitmProxy.domains match)
         ▼
 rein Go MITM (the broker / its proxy arm)
         │  - terminate TLS with rein's CA (leaf per host)
-        │  - inject Authorization: Bearer <minted scoped token>
+        │  - inject Authorization (host-aware, finding 2: Bearer for
+        │    api.github.com, Basic x-access-token for github.com git)
         │  - re-encrypt to the real upstream (system roots)
         ▼
 github.com / api.github.com

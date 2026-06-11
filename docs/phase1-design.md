@@ -1,247 +1,330 @@
 # Phase 1 design — credentials the agent can't read
 
-**Status:** DRAFT for review (2026-06-08). Opens Phase 1.
+**Status:** DRAFT for review (2026-06-08; revised 2026-06-11 after
+multi-lens review). Opens Phase 1.
 
-This document is self-contained: it states the problem and requirements
-first, then the design. It references the integration spike
-(`docs/phase1-srt-spike-findings.md`) for evidence but does not assume you
-have read it.
+Self-contained: problem and requirements first, then the design. The
+integration spike (`docs/phase1-srt-spike-findings.md`) is referenced as
+evidence but not assumed read.
 
 ## 1. The problem
 
 Today rein hands the agent a real GitHub token for each operation — as a
 git credential helper, and via a `gh` wrapper. The token is short-lived
-and scoped to one repo, but it is a **real, usable token that the agent's
-own process can read**: from its environment, from rein's on-disk token
-cache, or from its own memory.
+and scoped to one repo, but it is a **real, usable token the agent's own
+process can read**: from its environment, rein's on-disk token cache, or
+its own memory.
 
-The per-issue scoping and the human-approval-for-writes that Phase 0/0.5
-built limit what a leaked token can do. They do not stop an agent that
-simply reads the token and uses it directly, or copies it somewhere we
-never see. We assume a prompt-injected agent may be adversarial, so "the
-agent can read its own credential" is the gap that matters. (This is
-issue #7.)
+Per-issue scoping and human-approval-for-writes (Phase 0/0.5) limit what
+a leaked token can do. They do not stop an adversarial (prompt-injected)
+agent from reading the token and using or exfiltrating it directly. "The
+agent can read its own credential" is the gap that matters (issue #7).
 
 ## 2. Requirements
 
-What must be true, stated independently of how we build it.
+Stated independently of mechanism.
 
 **Functional**
-- The agent can clone, fetch, and push to repos in its session's scope,
-  and use `gh`, with no token handling by the developer.
-- Access is scoped per issue/session (as today).
-- Write operations require human confirmation (as today).
+- The agent can clone, fetch, push, and use `gh` within its session's
+  scope, with no token handling by the developer.
+- Access scoped per issue/session; writes require human confirmation
+  (both as today).
 
 **Security**
 - **The agent's process can never read a usable GitHub credential** — not
-  in its environment, not in a file, not in its own memory. This is the
-  headline requirement (the #7 gap). Note it is a property of the agent's
-  reach, not a particular mechanism.
-- The agent also cannot reach the developer's **ambient** credentials —
-  the developer's own `gh` login, SSH keys, `~/.netrc`, stored git
-  credentials. Hiding rein's token is pointless if the agent can grab the
-  human's instead.
-- Write authorization stays human-confirmed and non-replayable (a
-  prompt-injected agent can't pre-answer the prompt).
+  in its environment, a file, or its own memory. This is the headline
+  requirement (the #7 gap), a property of the agent's reach, not of any
+  particular mechanism.
+- The agent also cannot reach the developer's **ambient** credentials
+  (their own `gh` login, SSH keys, `~/.netrc`, stored git credentials,
+  keyrings, agent sockets). Hiding rein's token is pointless if the agent
+  can grab the human's instead.
+- Write authorization stays human-confirmed and non-replayable (the agent
+  can't pre-answer or self-answer the prompt).
 - **Fail closed:** if we cannot satisfy the above, refuse the operation —
   never silently fall back to handing the agent a token.
 
 **Operational**
-- Latency on the git path stays tolerable; the agent hits it constantly.
+- Tolerable latency on the git path (the agent hits it constantly).
 - Linux and macOS.
 - If the protection mechanism is unavailable, degrade **loudly and
-  safely** — warn, and never silently give the agent a token on a real
-  repo.
+  safely** — never silently hand the agent a token on a real repo.
 
-**Non-goals for this design** (separate later tracks, §8): commit signing,
-posting audit comments back to issues, the full five-role permission
-catalog, single-use / HEAD-pinned write tokens.
+**Non-goals** (later tracks, §8): commit signing, audit-comment
+writeback, the five-role catalog, single-use / HEAD-pinned write tokens.
 
 ## 3. Approach
 
-Run the agent inside a **sandbox with no direct network access**. Every
-request it makes to GitHub goes through a **local proxy that rein
-controls**. The agent sends ordinary git/`gh` requests carrying *no*
-credentials; rein's proxy adds the credential on the wire, at the last hop,
-just before the request leaves for GitHub. The agent only ever sees its own
-un-authenticated requests — the token exists only inside rein.
+Run the agent inside a **sandbox with no direct network access**. All its
+GitHub traffic goes through a **local proxy rein controls**. The agent
+sends ordinary git/`gh` requests carrying *no* credentials; the proxy adds
+the credential on the wire, at the last hop. The credential is added
+inside rein's process, *outside* the sandbox, so nothing the agent can
+read ever contains it.
 
-This satisfies the headline requirement directly: the credential is added
-inside rein's process, *outside* the sandbox, so nothing the agent can read
-ever contains it. The sandbox is the *mechanism*; the property we are after
-is "the agent never holds a readable credential."
+We call this **sandboxed mode**. The Phase 0/0.5 credential-helper path
+becomes **direct mode** — retained as a clearly-marked fallback for
+environments without a sandbox, never the default once sandboxed mode
+works.
 
-We will call this the **sandboxed mode**. The credential-helper path that
-Phase 0/0.5 already ship becomes the **direct mode** — retained as a
-clearly-marked fallback (for environments without a sandbox), never the
-default once sandboxed mode works.
+> Naming: earlier docs call these "Shape A" (sandboxed) and "Shape B"
+> (direct). The repo-wide rename is tracked in **#25**.
 
-> Naming: earlier design docs call these "Shape A" (sandboxed) and "Shape
-> B" (direct). That labeling tested poorly in review; this doc uses the
-> plain terms. A repo-wide rename (design.md, code comments) is tracked
-> separately so it doesn't bloat this design — see the follow-up issue.
-
-The sandbox itself is Anthropic's `sandbox-runtime` (`srt`) — the same
-sandbox Claude Code already ships with — so we compose with an existing,
-maintained tool rather than building one.
+The sandbox is Anthropic's `sandbox-runtime` (`srt`) — the sandbox Claude
+Code itself ships with — composing with a maintained tool rather than
+building one. The srt-specific surface is deliberately thin (§4.4): the
+daemon, proxy, and classifier are sandbox-agnostic, so srt can be swapped
+for another no-egress sandbox without redesign.
 
 ## 4. How it works
 
-Three pieces: a resident broker, an injecting proxy, and the sandbox.
+Three pieces:
 
-**The broker daemon.** A long-running local rein process owned by your user
-account. It holds the GitHub App credentials, the session table, the
-token-minting + scope-ceiling + approval logic (all carried over from
-today's code), and an audit log. Tokens live in its memory and are never
-written to disk.
+**The broker daemon.** A long-running local rein process owned by your
+user account. Holds the GitHub App credentials, session table, the
+token-minting + scope-ceiling + approval logic (carried over from today's
+code), and an audit log. Tokens live only in its memory.
 
 **The injecting proxy** (part of the daemon). The sandbox routes the
-agent's GitHub-bound traffic to it. For each request the proxy decides
-which token applies (read vs. write tier, in-scope or not, approved or
-needs a prompt), adds the credential, and forwards the request to GitHub.
-The agent's side of the connection never carries a credential.
+agent's GitHub-bound traffic to it over a per-run unix socket. Per
+request, the proxy classifies read vs. write (§5.1), checks scope and
+approval, injects the credential, and forwards to GitHub. Because the
+proxy sees the actual `git push`, it is also where the stronger write
+protections (§8: single-use, branch-pinned tokens) attach later — which
+direct mode never could.
 
-**The sandbox.** `srt` runs the agent with its network namespace removed,
-so the agent's only route out is the proxy. `rein run` launches it with a
-generated, per-run configuration: where to send traffic, which files to
-hide (below), and a certificate to trust (so the proxy can read and re-sign
-the agent's HTTPS in order to add the credential).
+**The sandbox.** `srt` runs the agent with no direct network egress, so
+the agent's only route out is the proxy. `rein run` generates a per-run
+configuration: traffic routing, filesystem denials (§4.2), a scrubbed
+environment (§4.2), and the proxy's CA certificate to trust (§5.4).
 
-When `git push` traverses the proxy, the proxy is also the natural place to
-add the stronger write protections in §8 (single-use, branch-pinned
-tokens) later — it sees the actual push, which the direct mode never could.
+### 4.1 Injection invariants
 
-### 4.1 Hiding the developer's own credentials (filesystem)
+The proxy's safety rests on these; they are requirements, not
+implementation details.
 
-Sandboxing the *network* is not enough. By default the sandbox can still
-**read** the developer's home directory — so the agent could read the
-developer's own `gh` login or SSH keys and use (or copy) those instead of
-rein's brokered token. The spike confirmed this concretely: `gh` running
-inside the sandbox silently picked up the host's stored login and
-authenticated with it.
+- **One identity source.** The agent controls both the TLS SNI and the
+  plaintext `Host:` header. The proxy derives *both* the upstream
+  connection *and* the injection decision from the SNI, and rejects any
+  request whose `Host` does not match it — otherwise the agent could open
+  a connection "to github.com" and steer an injected token to an
+  attacker-chosen host.
+- **Exact-match injection allowlist, per host class** (§4.3). Inject only
+  on hosts that take credentials; never on CDN/asset hosts.
+- **No credential on the response path.** Nothing the proxy sends toward
+  the sandbox — error bodies, reflected headers, redirect locations, debug
+  output — may contain the token. Audit-log entries redact tokens, and the
+  log file is in the sandbox deny-read set.
+- **HTTP/1.1 only.** The proxy pins ALPN to `http/1.1`
+  (`tls.Config.NextProtos`); git/curl/gh all fall back. Go's
+  `http.ReadRequest` relay loop cannot parse h2, and the spike only worked
+  because Go's `tls.Server` happens not to offer h2 by default — pin it
+  explicitly so a refactor doesn't reintroduce it.
 
-So the sandbox configuration must **deny read** to the ambient credential
-stores: `~/.config/gh`, `~/.netrc`, `~/.git-credentials`, `~/.ssh`, and
-rein's own key material. The safe default is to deny the home directory
-broadly and re-allow only what the agent genuinely needs (its working
-tree), so a credential store we didn't think of doesn't leak by default.
+### 4.2 Hiding the developer's own credentials
 
-### 4.2 `srt` specifics (implementation detail; evidence in the spike)
+Sandboxing the network is not enough; ambient credentials leak through
+three channels, and all three must be closed:
 
-You don't need this subsection to follow the design; it records *why* the
-mechanism looks the way it does. All of it was validated empirically in
-`docs/phase1-srt-spike-findings.md`.
+- **Filesystem.** By default the sandbox can read the home directory. The
+  spike confirmed the failure concretely: `gh` in-sandbox silently picked
+  up the host's stored login from `~/.config/gh` and authenticated with
+  it. Default-deny `$HOME` reads and re-allow only the working tree, with
+  explicit denials for `~/.config/gh`, `~/.netrc`, `~/.git-credentials`,
+  `~/.ssh`, and rein's own key material — so a store we didn't think of
+  doesn't leak by default.
+- **Environment.** The sandbox environment is a **strict allowlist** (CA
+  trust vars, stub `GH_TOKEN`, PATH/locale), not host passthrough.
+  Passthrough would hand the agent every env-resident secret on the host
+  (`GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, `AWS_*`, …) — exactly the class
+  the filesystem denials exist to block.
+- **Sockets outside `$HOME`.** The Secret Service keyring (D-Bus,
+  `/run/user/<uid>`), `ssh-agent`, and `gpg-agent` grant credential *use*
+  without any file read. Scrub `DBUS_SESSION_BUS_ADDRESS`,
+  `SSH_AUTH_SOCK`, `GPG_AGENT_INFO` etc. and do not mount
+  `/run/user/<uid>` into the sandbox. (On Linux, rein's own keyring
+  backend may be the Secret Service — reachable via that bus if left
+  mounted.)
 
-- `srt` exposes exactly one way to let an external process modify the
-  agent's requests: it forwards matched-domain traffic to a unix socket
-  that rein owns. rein terminates TLS at that socket with its own
-  certificate, adds the credential to the decrypted request, and
-  re-encrypts to GitHub. (`srt`'s other hooks can only allow/deny a
-  request, not modify it.)
-- rein's certificate must be trusted *inside* the sandbox, delivered via
-  environment variables (e.g. `GIT_SSL_CAINFO`, `SSL_CERT_FILE`); `srt`
-  does not do this automatically on this path.
-- `gh` will not send a request unless it believes it is logged in, so the
-  sandbox sets a harmless stub `GH_TOKEN`; the proxy overwrites it with the
-  real credential.
-- On Ubuntu 24.04+, `srt` needs an AppArmor profile granting user
-  namespaces to `bwrap`, or it won't start. rein's setup must detect this
-  and guide the fix (or sandboxed mode silently fails to launch).
+### 4.3 GitHub host classes
+
+GitHub operations span more hosts than `github.com`/`api.github.com`,
+and they need different treatment:
+
+| Host | Treatment |
+|---|---|
+| `api.github.com` | intercept + inject `Bearer` |
+| `github.com` (git smart-HTTP) | intercept + inject `Basic x-access-token:` |
+| `uploads.github.com` (release assets up) | intercept + inject `Bearer` |
+| `objects.githubusercontent.com` | allow egress, **never inject** (pre-signed S3-style URLs — injecting leaks the token and can break the request) |
+| `codeload.github.com`, `raw.githubusercontent.com` | allow egress, **never inject** (reached via tokenized redirects; fail-closed choice — direct authenticated raw fetches of private content will fail) |
+| everything else GitHub-bound | deny (fail closed) |
+
+Auth scheme is **host-aware** (spike-verified: Bearer → 401 on the git
+transport; Basic → 200). Redirects from github.com to the CDN hosts
+arrive at the proxy as fresh connections and must classify into the
+never-inject class.
+
+### 4.4 `srt` specifics (implementation detail; evidence in the spike)
+
+Skippable; records why the mechanism looks this way. Validated
+empirically in the spike doc.
+
+- `srt` exposes exactly one hook that lets an external process *modify*
+  requests: it forwards matched-domain traffic as an opaque tunnel to a
+  unix socket rein owns. rein terminates TLS there with its own CA,
+  injects, and re-encrypts upstream. srt's other hooks are allow/deny
+  only.
+- CA trust is delivered via env vars (`GIT_SSL_CAINFO`, `SSL_CERT_FILE`,
+  `NODE_EXTRA_CA_CERTS`); srt does not do this automatically. **The
+  bundle must contain system roots + rein's CA** — `SSL_CERT_FILE`
+  *replaces* the default roots, so a rein-only file breaks every allowed
+  non-GitHub HTTPS destination in-sandbox (including the agent's own API
+  endpoint). macOS is different — see §5.4.
+- `gh` won't send requests unless it believes it is logged in: the
+  sandbox sets a stub `GH_TOKEN`; the proxy overwrites it.
+- Ubuntu 24.04+ restricts unprivileged user namespaces; `srt` needs an
+  AppArmor profile for `bwrap` or it won't start. `rein doctor`/`run`
+  must preflight this (and clock skew, #22) and guide the fix
+  (loud-degrade, §2).
 
 ## 5. Key design decisions & open questions
 
-The items most worth review before implementation.
+### 5.1 Read/write classification: scope is the boundary, the classifier is defense-in-depth
 
-### 5.1 Telling reads from writes is a real classifier, not a free signal
+The proxy must decide read (cached read token) vs. write (mint + require
+approval). The **hard boundary is token scope, not classification: read-
+tier tokens are minted with zero write permissions**, so a misclassified
+write fails at GitHub rather than executing silently. The classifier sits
+above that backstop and is real work, not "POST = write":
 
-The proxy must know whether a request is a read (serve a cached read token)
-or a write (mint a write token and require approval). This is better than
-the direct mode's process-tree guessing, but it is **not** simply "POST =
-write":
-- **git:** the write signal is the `git-receive-pack` service, not the HTTP
-  method — `git fetch` also POSTs (to `git-upload-pack`). Key on the
-  service/path.
-- **GitHub REST API:** the method works (GET/HEAD read; POST/PATCH/PUT/
-  DELETE write).
-- **GitHub GraphQL API:** always `POST /graphql`; query-vs-mutation lives
-  only in the request body, and `gh` uses GraphQL heavily. The proxy can
-  inspect the body (it has the plaintext), but that is a classifier to
-  build and test. This is also where the direct mode's `gh`-classifier
-  (issue #9) must move, now that the `gh` PATH-shim is gone.
-- **Fail closed:** anything unclassifiable is treated as a write (prompt),
-  not silently served.
+- **git:** the write signal is the `git-receive-pack` *service* — and it
+  appears first on the advertisement request
+  (`GET /info/refs?service=git-receive-pack`), which GitHub 403s without
+  push permission. Classify that GET as write tier; note the approval
+  prompt therefore fires before any pack body exists (constrains the
+  later commit-inspecting tracks in §8 to the second request). `git
+  fetch` also POSTs (to `git-upload-pack`) — method is not the signal.
+- **REST:** method works (GET/HEAD read; POST/PATCH/PUT/DELETE write).
+- **GraphQL:** always `POST /graphql`; mutation-ness lives in the body,
+  which the proxy can read (it has plaintext). The check must resolve the
+  *selected* operation (shorthand `{...}` queries, multi-operation
+  documents + `operationName`, batched arrays) — not substring-match
+  `mutation`. This is where direct mode's `gh` classifier (#9) moves.
+- **Fail closed:** unclassifiable ⇒ treated as write ⇒ prompt.
 
 ### 5.2 One proxy socket per run = the session's identity
 
-A connection arriving at the proxy carries no run/session id of its own.
-Phase 0.5 supports concurrent `rein run`s with independent scope and
-approval, so the daemon must know which session an incoming request belongs
-to. Resolution: **each `rein run` gets its own proxy socket path**, baked
-into that run's sandbox configuration; the daemon maps socket → session.
+Connections carry no session id, and Phase 0.5 supports concurrent
+`rein run`s with independent scope/approval. Resolution: each run gets
+its own proxy socket path, baked into its sandbox config; the daemon maps
+socket → session.
 
 ### 5.3 The proxy socket is itself a capability
 
-Because the socket *is* the identity, anything that can connect to it gets
-authenticated GitHub access at that session's scope — **even without ever
-seeing the token value**. The token is hidden (good — requirement met), but
-the *capability* to use it is reachable to whatever can open the socket.
-This is bounded, not eliminated, by: the per-run socket (§5.2), `0700`
-permissions, and run-lifetime teardown. The sandbox is what keeps non-agent
-processes off it. On a shared-user machine, a process *outside* the sandbox
-running as the same user could still reach it — the residual of #7 that the
-sandbox, not the broker, addresses. Worth stating plainly rather than
-implying the token-hiding closes #7 completely.
+Anything that can connect to the socket gets authenticated GitHub access
+at that session's scope, **without ever seeing a token**. Bounded by: the
+per-run socket (§5.2), run-lifetime teardown, and permissions — a
+**filesystem** unix socket (Linux abstract-namespace sockets bypass file
+permissions and are forbidden), dir `0700`, socket `0600`.
+
+Be precise about who that stops: it gates **other-uid** processes. A
+same-uid process *on the host* can still connect — the socket lives
+outside the sandbox, so the sandbox does nothing to protect it. This is
+the same-uid residual of #7 (design.md TM-G4 class), mitigated only by
+host hygiene (`ptrace_scope`, separate UIDs), not by this design. Note
+TM-G4's bearer-rotation mitigations don't apply here: the proxy is
+in-daemon, and the socket's only auth *is* filesystem permissions.
 
 ### 5.4 The proxy's certificate authority
 
-To read and re-sign the agent's HTTPS, rein needs a certificate authority
-the sandbox trusts. rein generates one locally; its **private key is key
-material and is stored/read through `internal/keystore`** (the same
-uid+mode-checked path as App keys — CLAUDE.md hard-constraint #6), never on
-the direct mode's plaintext path. Scope the risk: the proxy only intercepts
-`github.com` / `api.github.com`, and the certificate is trusted only inside
-the sandbox process, not the host trust store. So a compromise of this key
-means "can intercept the agent's GitHub traffic," not "can intercept the
-host's."
+rein generates a local CA; the **private key is stored/read through
+`internal/keystore`** (CLAUDE.md hard-constraint #6). Compromise scope:
+the CA is trusted only for the agent's traffic, and the proxy intercepts
+only the §4.3 hosts — "can intercept the agent's GitHub traffic," not the
+host's.
+
+**macOS caveat (affects gh):** Go's `crypto/x509` on darwin uses the
+platform verifier and ignores `SSL_CERT_FILE` (and env-delivered trust
+generally) on every macOS version (open Go proposal golang/go#77865; not
+landed). So env-delivered trust covers git/curl but **not Go clients
+like `gh`**. The
+expected path is adding rein's CA to the user keychain with trust
+settings — weaker than "sandbox-only trust" and recorded as such; the
+exposure still requires the CA *private key*, which never leaves the
+keystore. Validated when a Mac is available (PLAN-1 CP5).
+
+### 5.5 Approvals: the channel must be outside the sandbox
+
+Non-replayability is a property of the **channel**, not a free
+consequence of sandboxing. Two invariants:
+
+- **The daemon's control socket (where approvals are granted) is never
+  reachable from inside the sandbox.** Only the per-run proxy socket is
+  mounted. Otherwise the agent self-grants over the same path it uses for
+  traffic — issue #12 relocated, not fixed.
+- The prompt itself needs a human-reachable surface: the daemon has no
+  tty, and the host terminal is occupied by the agent TUI (open question
+  from phase0_findings, Phase 0 CP5).
+  Decision: the daemon relays the prompt to the foreground `rein run`
+  process, which reuses the Phase 0 layered flow (tty → tmux popup →
+  stderr instructions). The richer status-app/OS-notification channel
+  stays a later track (§8). #12's nonce-via-tty remains open for *direct*
+  mode only.
 
 ## 6. What we reuse vs. build new
 
-The security win is entirely in *how the credential is delivered and
-stored*. The minting, scoping, and approval logic already exist and carry
-over unchanged.
+The security win is entirely in credential *delivery and storage*;
+minting, scoping, and approval logic carry over.
 
 | Concern | Today (direct mode) | Phase 1 (sandboxed mode) |
 |---|---|---|
 | Mint read/write tokens | `githubapp.Client` | **reused** in the daemon |
 | Read vs. write signal | git PATH-shim + proc-tree guess | request inspected at the proxy (§5.1) |
 | Scope ceiling | `sess.Contains` | **reused** |
-| Human approval | run-scoped approval flow | **reused**, daemon-dispatched |
+| Human approval | run-scoped approval flow | **reused**, daemon-dispatched (§5.5) |
 | Token delivery | handed to git/`gh` (agent can read it) | **added at the proxy** (agent never sees it) |
 | Token storage | on-disk cache + write-token ledger | **in daemon memory** (no disk) |
-| Audit | `helper.log` | hash-chained audit log |
+| Audit | `helper.log` | hash-chained audit log (redacted, deny-read) |
+
+Direct mode keeps working throughout: its broker core becomes a client of
+the same daemon logic, and its tests stay green (PLAN-1 CP2).
 
 ## 7. Risks & limits
 
-- **The sandbox is defense-in-depth, not a hard boundary.** `srt` had two
-  sandbox-escape fixes in the last six months. A sandbox escape re-exposes
-  the direct mode's surface. We treat it as one layer, not a guarantee.
-- **`git push` through the proxy is unproven.** Everything tested so far is
-  the read path; a push streams a request body, which the proxy's
-  read-modify-forward loop has not yet handled. The plan validates this
-  first (PLAN-1 CP1) before building the daemon around it.
-- **`srt` API churn:** the request-routing hooks this relies on are not in
-  `srt`'s public docs (typed but unexampled). Pin the version; re-verify on
-  upgrade.
-- **macOS parity:** `srt` uses a different backend there (`sandbox-exec`);
-  to be validated separately.
-- **Latency:** terminating and re-encrypting TLS per request adds overhead
-  on the git hot path; measure it.
+- **The sandbox is defense-in-depth, not a hard boundary.** Two `srt`
+  sandbox-escape fixes in the last six months. An escape re-exposes
+  direct mode's surface. One layer, not a guarantee.
+- **`git push` through the proxy is unproven** — the one untested path
+  (request-body upload through the relay loop). PLAN-1 CP1 validates it
+  before the daemon is built around it.
+- **`srt` API churn — concrete, not hypothetical.** The
+  `mitmProxy.socketPath` hook is typed but undocumented in 0.0.54 (latest
+  as of 2026-06-11; spike-verified), and upstream's README describes a
+  **new configuration format in which custom-proxy support "is not yet
+  supported … will be added in a future release"** — so the hook will
+  move, though upstream clearly intends bring-your-own-proxy as a real
+  feature. Mitigations (pin, track, file upstream) in PLAN-1
+  prerequisites.
+- **Revocation residual moves, it doesn't vanish.** Direct mode's #20
+  disk ledger could sweep orphaned write tokens after a killed run;
+  in-memory daemon tokens can't be revoked if the *daemon* dies (revoke
+  is authenticated by the token itself). Daemon-crash orphans live to
+  native TTL (~1h). Accepted, stated.
+- **macOS parity:** different sandbox backend (`sandbox-exec`) *and* a
+  different CA-trust path (§5.4). Validated separately; not on the
+  dogfood critical path.
+- **Latency:** TLS terminate + re-encrypt is per *connection* (keep-alive
+  amortizes), but three known footguns are design choices, not
+  measurements: cache per-host leaf certs (ECDSA P-256) rather than
+  minting per connection; one shared upstream transport for connection
+  pooling; `DisableCompression` on the relay so Go doesn't silently
+  gunzip and break framing. Then measure (CP3).
 
 ## 8. Out of scope for this design (later tracks)
 
-These layer on the sandboxed-mode spine once it holds, each tracked
-separately: single-use + branch-pinned write tokens (now reachable because
-the proxy sees the push); broker-as-CA commit signing; audit-comment
-writeback via the audit App; the five-role permission catalog; a status-app
-/ OS-notification approval channel; Claude Code hooks as a complementary
-guard (#21).
+Layer on the spine once it holds, each tracked separately: single-use +
+branch-pinned write tokens (reachable now the proxy sees the push);
+broker-as-CA commit signing; audit-comment writeback via the audit App;
+the five-role permission catalog; a status-app / OS-notification approval
+channel; Claude Code hooks as a complementary guard (#21).
