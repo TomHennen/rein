@@ -794,7 +794,7 @@ Mitigations:
 - **AgentWrit:** PolyForm Internal Use license blocks OSS distribution; Python-only SDK doesn't fit a Go supply-chain ecosystem.
 - **ghtkn:** User-to-server token model is the wrong shape; would require rewriting the core.
 - **`source-tool`:** *Should* receive the policy-schema proposal. That's the natural contribution path, separate from the broker itself.
-- **`sandbox-runtime`:** Validation §12.2 confirmed `srt` exposes a usable library API. We use it as a library; no fork needed. Upstream contribution of first-class `injectHeaders` config in `srt`'s upstream config schema is plausible but not required.
+- **`sandbox-runtime`:** Validation §12.2 confirmed integration needs no fork — but the Phase 1 spike corrected the *shape*: srt is driven via its CLI + a generated JSON settings file, with rein as an **external Go process** at `mitmProxy.socketPath` (no in-process TS, not a library embedding). Upstream contribution of first-class custom-proxy config is plausible — upstream's README already describes "bring your own proxy" as a planned feature of its new config format — but not required.
 
 ### 6.3 Implementation building blocks (libraries to lean on)
 
@@ -878,6 +878,14 @@ Validation §12.1 confirmed Claude Code uses git credential helpers as designed 
 
 ### 7.2 Phase 1 — Personal dogfooding (2–3 weeks)
 
+> **Scope correction (2026-06-11, PLAN-1):** Phase 1's *spine* is the
+> sandbox composition only — daemon + injecting proxy + srt + dogfood
+> (PLAN-1 CP1–CP6, design of record `docs/phase1-design.md`). The other
+> items below (five roles, audit writeback, broker-as-CA signing,
+> single-use/HEAD-pinned tokens, hooks) are **later tracks** that layer on
+> the spine once it holds; they remain Phase 1 goals but do not gate
+> dogfooding.
+
 Real v0:
 
 - Split daemon/proxy/UI.
@@ -885,7 +893,7 @@ Real v0:
 - Five roles.
 - Audit Identity App; audit writeback as issue comments.
 - **Broker-as-CA for commit signing** (§4.2.6 v1 default). Bootstrap a local CA at `rein init`; mint delegation certs per session; gitsign signs commits with them.
-- **Sandbox composition against `srt`** via the library API confirmed by §12.2. The broker registers as a MITM upstream for github.com / api.github.com.
+- **Sandbox composition against `srt`** — spike-corrected mechanism: `rein run` emits a per-run srt settings file and launches the srt CLI; the broker is an external Go MITM at `mitmProxy.socketPath` for the GitHub host classes (see `docs/phase1-design.md` §4.3).
 - **Evaluate Claude Code hooks as a complementary guard/audit layer** (issue #21): PreToolUse to deny the Shape B self-bypass patterns (`gh auth setup-git`, `git config credential.helper`, self-`rein approval grant`), PostToolUse for git/gh audit. Honest scope: harness-enforced but agent-overridable (`.claude/settings.local.json`), no `/dev/tty` so it can't host the approval prompt, and Claude-Code-only — so it's policy surface above the broker, never the boundary (the `srt` sandbox / daemon is). Decided here because it's a defense layer, not the broker itself.
 - Ambient session model with human confirmation prompts.
 - Single-use write tokens; HEAD pinning; REST URL 301-redirect chain as TM-G6 anchor.
@@ -949,7 +957,7 @@ Real v0:
 
 2. **Build the Phase 0 PoC this weekend, throwaway repos only.** Success criterion as in §7.1. With validation done, the failure modes are characterized; this should work or fail informatively.
 
-3. **Commit 2–3 weeks to Phase 1 if Phase 0 succeeds.** Sandbox composition via `srt`'s library API, broker-as-CA commit signing, keychain key custody, ambient session model. Threshold to continue: Tom uses `rein` on `wrangle` for two weeks without reverting to a PAT.
+3. **Commit 2–3 weeks to Phase 1 if Phase 0 succeeds.** Sandbox composition via `srt` (CLI + settings file, external Go MITM), broker-as-CA commit signing, keychain key custody, ambient session model. Threshold to continue: Tom uses `rein` on `wrangle` for two weeks without reverting to a PAT.
 
 4. **Open an upstream discussion thread (not a PR) on `slsa-framework/source-policies`** about how agent identity should work in Source Track. Conceptually new policy primitive; needs SLSA community meeting discussion before any concrete proposal.
 
@@ -1070,7 +1078,7 @@ This section preserved as a record of pre-build validation. Findings have been w
 | Check  | Status            | Confidence | Key finding |
 |--------|-------------------|------------|-------------|
 | §12.1  | pass              | high       | Claude Code uses credential helpers. **Important secondary:** when the helper returns no credential, claude reflexively runs `gh auth setup-git`, silently displacing the broker. Drove the always-return-a-credential rule (TM-G8). |
-| §12.2  | pass              | high       | `srt` exposes a usable library API (`SandboxManager`, `FilterRequestCallback`, `network.mitmProxy.socketPath`). No fork or upstream PR required. |
+| §12.2  | pass              | high       | `srt` integration confirmed, no fork or upstream PR required. Spike correction: driven via CLI + settings file; only `network.mitmProxy.socketPath` can inject (external process at the socket) — `FilterRequestCallback`/`parentProxy` cannot. |
 | §12.3  | pass              | high       | GitHub installation tokens can be scoped to a repo subset and a permission subset via the API. 1-hour TTL. |
 | §12.4  | pass              | high       | Device Flow returns `ghu_` (user-to-server) with 8h TTL + 6-month refresh. The broker uses installation-token API for per-mint scope shaping. |
 | §12.5  | pass with caveat  | high       | Secure Enclave signs JWTs (ES256) end-to-end. Caveat: unsigned Go binaries can't persist SE keys (errSecMissingEntitlement -34018). Codesigning needed for production distribution. |

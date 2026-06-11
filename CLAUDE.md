@@ -5,7 +5,8 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 ## Read first
 
 - `docs/design.md` — full design. §0 TL;DR is enough for routine work; read specific sections as needed.
-- `PLAN-0.5.md` — current phase plan (CP1-CP7). Replaces `PLAN.md` (Phase 0 record, historical).
+- `PLAN-1.md` — current phase plan (Phase 1: sandboxed mode, CP1-CP6). Design of record: `docs/phase1-design.md` + `docs/phase1-srt-spike-findings.md`.
+- `PLAN-0.5.md` and `PLAN.md` — Phase 0.5 / Phase 0 records, historical.
 - `phase0_findings.md` — what Phase 0 actually built + the 7 design corrections to the original PLAN.md + the 4 Shape B limits observed empirically. Read before doing Phase 0.5 design work; don't re-derive.
 
 ## Hard constraints
