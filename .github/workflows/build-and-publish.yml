@@ -1,11 +1,11 @@
 # Build and publish rein via wrangle's Go build type.
 #
-# Calls TomHennen/wrangle's reusable Go workflow (v0.2.0) for:
+# Calls TomHennen/wrangle's reusable Go workflow (v0.2.1) for:
 #   - Source-stage checks (gofmt, go vet, go test -race, govulncheck) on
 #     every push/PR
-#   - Source scan (osv + zizmor block publish on findings; scorecard
-#     informational) — see scan-tools below for why dependency-review is
-#     omitted
+#   - Source scan (osv + zizmor + wrangle-lint block publish on findings;
+#     scorecard informational) — see scan-tools below for why
+#     dependency-review is omitted
 #   - Release: goreleaser publish + SPDX SBOM + SLSA L3 provenance on tag
 #     push
 #   - Attest + verify: GitHub-issued provenance and a signed SLSA VSA per
@@ -15,21 +15,22 @@
 # from commit one. See https://github.com/TomHennen/wrangle for the design.
 #
 # Pin discipline: the `uses:` ref below pins wrangle's *release tag*
-# (`@vX.Y.Z`), NOT a commit SHA. This is the inverse of the usual "SHA-pin
-# third-party actions" rule, and it is deliberate — wrangle recommends it for
-# its own reusable workflows (see wrangle's docs/FAQ.md):
-#   - Wrangle signs each artifact VSA keylessly, and the Sigstore cert records
-#     the ref we invoked wrangle at. The documented `cosign` verify command
-#     anchors signer identity on `@refs/tags/v…`, so a tag pin lets rein's
-#     downstream consumers run that command unedited. A SHA pin would force
-#     them to adjust the identity regexp.
-#   - A tag version-locks the whole tested release: the reusable workflow
-#     resolves its internal action refs at the ref we call it with.
-# Tag mutability is bounded by VSA verification (binds signer identity + origin
-# repo) and by Dependabot, which bumps this tag forward only to published
-# releases, on a cooldown, with no auto-merge (.github/dependabot.yml). Never
-# use a branch ref (`@main`). If we ever want the strongest possible pin, SHA-
-# pin here and adjust the downstream verify identity per wrangle's FAQ.
+# (`@vX.Y.Z`) with an inline zizmor exception. This is wrangle's recommended
+# form for its own reusable workflows (see wrangle's docs/FAQ.md):
+#   - wrangle's release tags are immutable — a published vX.Y.Z is locked to
+#     its commit and can't be moved or deleted — so a tag pin carries the same
+#     integrity as a SHA, but stays legible (you see the version).
+#   - The tag's keyless-VSA verify identity (`@refs/tags/vX.Y.Z`) is the one
+#     wrangle's documented `cosign` command expects by default, so rein's
+#     downstream consumers verify unedited.
+#   - The `# zizmor: ignore[unpinned-uses]` is required only because wrangle's
+#     bundled zizmor scan flags any tag-pinned `uses:` and can't tell the tag
+#     is immutable. It scopes the exception to this one line; every OTHER
+#     action rein uses still pins by SHA.
+# Dependabot bumps this tag forward only to published releases, on a cooldown,
+# with no auto-merge (.github/dependabot.yml). Never use a branch ref (`@main`).
+# A SHA pin (`@<sha> # vX.Y.Z`, no ignore needed) is equally valid per the FAQ;
+# we pick the tag for legibility and the out-of-the-box verify identity.
 
 name: build-and-publish
 
@@ -51,18 +52,19 @@ jobs:
       attestations: write     # attest job writes GitHub-issued SLSA provenance
       actions: read           # source scan: Scorecard reads the Actions API; SLSA generator inspects the run
       security-events: write  # source-scan SARIF -> Security tab (uploads are best-effort; no-op without Advanced Security)
-    uses: TomHennen/wrangle/.github/workflows/build_and_publish_go.yml@v0.2.0
+    uses: TomHennen/wrangle/.github/workflows/build_and_publish_go.yml@v0.2.1 # zizmor: ignore[unpinned-uses] - immutable
     with:
       # Path to the Go module (default '.' is fine; rein lives at repo root)
       path: '.'
-      # Source-scan tools. Dropped from wrangle's default ("osv zizmor
-      # scorecard:info dependency-review") because dependency-review calls
-      # GitHub's dependency-graph compare API, which 403s on private repos
-      # without Advanced Security. rein is private with no GHAS, so a
-      # blocking dependency-review would turn every PR-to-main scan check
-      # red. Re-add "dependency-review" here once rein enables GHAS or goes
-      # public, to restore the PR-time vulnerable-dependency gate.
-      scan-tools: "osv zizmor scorecard:info"
+      # Source-scan tools. wrangle's default is
+      # "osv zizmor scorecard:info dependency-review wrangle-lint"; we drop
+      # only dependency-review, which calls GitHub's dependency-graph compare
+      # API and 403s on private repos without Advanced Security. rein is
+      # private with no GHAS, so a blocking dependency-review would turn every
+      # PR-to-main scan check red. Re-add "dependency-review" here once rein
+      # enables GHAS or goes public, to restore the PR-time vulnerable-
+      # dependency gate. wrangle-lint (Dependabot config-correctness) is kept.
+      scan-tools: "osv zizmor scorecard:info wrangle-lint"
       # release-events defaults to tag-only — the cheapest setting and the
       # one that matches rein's "publish only on v* tags" model.
       #
