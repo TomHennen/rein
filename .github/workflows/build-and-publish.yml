@@ -3,9 +3,9 @@
 # Calls TomHennen/wrangle's reusable Go workflow (v0.2.1) for:
 #   - Source-stage checks (gofmt, go vet, go test -race, govulncheck) on
 #     every push/PR
-#   - Source scan (osv + zizmor + wrangle-lint block publish on findings;
-#     scorecard informational) — see scan-tools below for why
-#     dependency-review is omitted
+#   - Source scan (osv + wrangle-lint block publish on findings; zizmor and
+#     scorecard informational) — see scan-tools below for the private-repo
+#     adjustments (zizmor :info, dependency-review omitted)
 #   - Release: goreleaser publish + SPDX SBOM + SLSA L3 provenance on tag
 #     push
 #   - Attest + verify: GitHub-issued provenance and a signed SLSA VSA per
@@ -57,14 +57,22 @@ jobs:
       # Path to the Go module (default '.' is fine; rein lives at repo root)
       path: '.'
       # Source-scan tools. wrangle's default is
-      # "osv zizmor scorecard:info dependency-review wrangle-lint"; we drop
-      # only dependency-review, which calls GitHub's dependency-graph compare
-      # API and 403s on private repos without Advanced Security. rein is
-      # private with no GHAS, so a blocking dependency-review would turn every
-      # PR-to-main scan check red. Re-add "dependency-review" here once rein
-      # enables GHAS or goes public, to restore the PR-time vulnerable-
-      # dependency gate. wrangle-lint (Dependabot config-correctness) is kept.
-      scan-tools: "osv zizmor scorecard:info wrangle-lint"
+      # "osv zizmor scorecard:info dependency-review wrangle-lint". Two
+      # adjustments, both forced by rein being a PRIVATE repo without GitHub
+      # Advanced Security (no code scanning):
+      #   - dependency-review DROPPED: it calls GitHub's dependency-graph
+      #     compare API, which 403s without GHAS — a blocking run would redden
+      #     every PR-to-main.
+      #   - zizmor set to :info (non-blocking): the zizmor audit itself runs
+      #     clean, but wrangle's zizmor tool hardcodes advanced-security: true,
+      #     which uploads SARIF to code scanning. That upload hard-fails
+      #     ("Code scanning is not enabled for this repository") and wrangle
+      #     fails closed on it, so a :fail zizmor can never go green here.
+      #     :info keeps zizmor auditing every run (findings surface in the step
+      #     summary) without gating on the impossible upload.
+      # Promote zizmor back to blocking (and re-add dependency-review) once
+      # rein enables GHAS / code scanning or goes public.
+      scan-tools: "osv zizmor:info scorecard:info wrangle-lint"
       # release-events defaults to tag-only — the cheapest setting and the
       # one that matches rein's "publish only on v* tags" model.
       #
