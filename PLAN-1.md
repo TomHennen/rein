@@ -252,6 +252,30 @@ path.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-06-14 — **CP2 foundation landed** on `cp2-daemon-core`
+  (`d452925..0c5f600`), all built + tested + pushed:
+  - **`internal/brokercore`** — the decision core extracted from
+    `broker.handleGet`: `Serve(ctx, Request) → Credential`, always non-empty
+    (TM-G8); scope → approval → mint/cache; `ReadCache` interface. Direct
+    mode + every existing test green (public broker API unchanged). Reviewed;
+    hardened to fail-closed on nil mint.
+  - **`internal/classify`** — tier classifier (design §5.1), fail-closed to
+    Write: github.com keys on git service (receive-pack=write), REST on
+    method, GraphQL peeks the body (literals/comments stripped). Where #9
+    moves.
+  - **`internal/daemon`** — `MemReadCache` + same-uid control-socket skeleton
+    (0700 dir / 0600 socket / SO_PEERCRED; single-instance; ping stub).
+    Reviewed; `-race` green. NOT yet wired into `cmd/`.
+  - **NEXT (resume here):** the **proxy arm** — port the CP1 relay (6-point
+    recipe, spike-findings "CP1 results") + call `classify` then
+    `brokercore.Core.Serve`, host-aware inject; **per-run socket** (= session
+    identity) + the **placement-outside-bind-mounts** check (§5.3). Then: CA
+    management (keystore-backed, per-host leaves); daemon control methods for
+    token/approval requests over the socket; `rein run` → daemon + srt
+    composition (CP3); #10 (multi-repo mint scope) still open. The CP1 spike
+    MITM (`/tmp`, ephemeral) is the relay reference; it is also captured as
+    prose in spike-findings.
+
 - 2026-06-14 — **CP1 done.** `git push` through a Go MITM proven (small +
   2 MiB chunked); the load-bearing fix was copying `ContentLength` +
   `TransferEncoding` onto the upstream request (`http.NewRequest` with an

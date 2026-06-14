@@ -130,7 +130,14 @@ If that works, your machine is fully set up.
 ## 4. Where CP2 stands — resume here
 
 CP1 is DONE (`git push` through a MITM proven; recipe recorded). CP2 (the
-daemon + proxy arm) is in progress on **`cp2-daemon-core`**. Read, in order:
+daemon + proxy arm) is in progress on **`cp2-daemon-core`** — its
+**foundation packages are landed + tested + pushed**: `internal/brokercore`
+(the shared decision core), `internal/classify` (the read/write tier
+classifier), and `internal/daemon` (the control-socket + in-memory-cache
+skeleton). The NEXT piece is the **proxy arm** (port the CP1 relay, wire it
+to classify + brokercore.Core, per-run socket). The precise live status +
+what's-next is the **CP2 entry in `PLAN-1.md`'s "Notes" section** — read it
+first. Then, in order:
 
 1. `PLAN-1.md` — CP2 section + the "Notes" tail (live status: what's done,
    what's next).
