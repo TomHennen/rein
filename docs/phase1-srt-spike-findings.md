@@ -239,3 +239,63 @@ covering `curl`, `git ls-remote`, and `gh api` (gh needs a dummy in-sandbox
   srt README** (typed but no public examples). Integration leans on the
   shipped `.d.ts` + source, so it is exposed to churn across srt versions
   — pin the version and re-verify on bump.
+
+## CP1 results (2026-06-14): `git push` through the MITM proven
+
+PLAN-1 CP1 — validated, no sandbox/daemon. The spike MITM (TCP listener so
+`git -c http.proxy` fronts it directly) relayed all of these to github.com
+with a write-tier token injected on the wire; commits landed on the
+throwaway repo:
+
+| Case | Framing | Result |
+|---|---|---|
+| small push | Content-Length (506 B) | receive-pack POST → 200, branch landed |
+| 2 MiB push | `Transfer-Encoding: chunked` | 200, landed |
+| force-chunked (`http.postBuffer=1024`) | chunked | 200, landed |
+| `git ls-remote` (read) | — | refs listed |
+| `curl` via proxy | — | 200, **HTTP/1.1** (ALPN pin worked) |
+| `gh` via proxy | — | 200 — works via `SSL_CERT_FILE` on Linux (validates §5.4) |
+
+`inbound-auth=""` throughout (git/curl sent no credential; the MITM added
+it). Write token minted with **no new code** via the existing credential
+helper: `REIN_GIT_OP=write rein credential-helper get` against a no-issue
+session (no approval prompt). Isolation check first: `GET /info/refs?
+service=git-receive-pack` returned 200 with that token, proving push
+permission before testing the relay.
+
+### Relay-hygiene recipe (CP2 must reimplement all of these in the daemon proxy)
+
+The proxy reads the inbound HTTPS request (`http.ReadRequest`), forwards
+upstream, and writes the response back, keep-alive looped. The non-obvious
+correctness requirements, each verified or reviewer-caught:
+
+1. **Body framing — the load-bearing fix.** After `http.NewRequest(method,
+   url, req.Body)`, explicitly copy `out.ContentLength = req.ContentLength`
+   and `out.TransferEncoding = req.TransferEncoding`. An opaque `io.Reader`
+   body leaves `ContentLength=0`, which truncates/mis-frames the
+   receive-pack POST. This is the "GET works, POST silently breaks" trap CP1
+   existed to catch.
+2. **Do NOT follow redirects** (reviewer rank-1, would block CP2): set
+   `CheckRedirect: func(...) error { return http.ErrUseLastResponse }`. A
+   transparent relay must pass 3xx to the client. Following them swallows
+   redirects git expects to handle, 502s a redirected POST (`NewRequest`
+   leaves `GetBody` nil so the body can't replay), and Go strips
+   `Authorization` on cross-host redirects so per-host injection never
+   reapplies. The design relies on GitHub's 301 chain (TM-G6), so this WILL
+   hit.
+3. **Pin HTTP/1.1.** TLS server `NextProtos = ["http/1.1"]` (Go's
+   `http.ReadRequest` can't parse h2); upstream transport `ForceAttemptHTTP2
+   = false` + empty `TLSNextProto` + `DisableCompression = true` (so Go
+   doesn't transparently gunzip and break framing).
+4. **`Expect: 100-continue`:** reply `100 Continue` to the client before its
+   body is read, strip `Expect` upstream. (git didn't send it to github in
+   the test, but a raw relay deadlocks if it appears.)
+5. **Hop-by-hop header stripping** (RFC 7230 §6.1): drop `Connection`,
+   `Proxy-Connection`, `Keep-Alive`, `TE`, `Trailer`, `Upgrade`, `Expect`,
+   plus any token named in the inbound `Connection` header.
+6. **Check the `resp.Write(conn)` error** and drop the connection on failure
+   (a mid-body write error leaves the keep-alive stream desynced).
+
+Auth injection stays host-aware (§4.3): `Bearer` for api.github.com, `Basic
+x-access-token:` for github.com git transport — overwrite, don't add (so a
+dummy `GH_TOKEN` from gh is replaced).

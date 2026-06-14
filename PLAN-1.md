@@ -39,6 +39,12 @@ be healthy before any GitHub App work (#23) or mints 401 intermittently.
 
 ### CP1 — Validate `git push` through a MITM (de-risk the #1 unknown)
 
+**Status: DONE (2026-06-14).** `git push` (small + 2 MiB chunked + force-
+chunked), `git ls-remote`, `curl`, and `gh` all relay correctly through the
+spike MITM to github.com with write-token injection; commits land. The
+relay-hygiene recipe + the reviewer-caught redirect bug are recorded in
+`docs/phase1-srt-spike-findings.md` ("CP1 results") for CP2 to productize.
+
 **Estimate:** 0.5 day. **No sandbox, no daemon yet** — just the question
 the spike left open.
 
@@ -245,6 +251,17 @@ path.
 ## Notes / blockers / design corrections needed
 
 (Append as you work. Format: date — issue — resolution.)
+
+- 2026-06-14 — **CP1 done.** `git push` through a Go MITM proven (small +
+  2 MiB chunked); the load-bearing fix was copying `ContentLength` +
+  `TransferEncoding` onto the upstream request (`http.NewRequest` with an
+  opaque body zeroes them — the GET-works/POST-breaks trap). Reviewer caught
+  a CP2-blocker: the upstream client followed redirects, which swallows
+  3xx, 502s redirected POSTs, and drops injected auth cross-host (TM-G6's
+  301 chain would hit this) — fixed with `http.ErrUseLastResponse`. Full
+  relay recipe in spike-findings "CP1 results". gh works via `SSL_CERT_FILE`
+  on Linux (validates design §5.4). Spike code is in `/tmp` (ephemeral);
+  CP2 reimplements the relay in the daemon from the recipe.
 
 - 2026-06-08 — Spike verified the srt boundary; see
   `docs/phase1-srt-spike-findings.md`. Key correction to design.md §12.2:
