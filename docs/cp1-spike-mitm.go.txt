@@ -1,0 +1,321 @@
+// CP1 spike MITM — REFERENCE ONLY (.txt so it's not built). The working,
+// tested relay that pushed small + 2 MiB chunked through to github.com
+// (PLAN-1 CP1). CP2 productizes this into the daemon proxy arm; the
+// 6-point hardening recipe is in docs/phase1-srt-spike-findings.md.
+// Includes the reviewer fixes (CheckRedirect=ErrUseLastResponse, hop-by-hop
+// header stripping, resp.Write error check).
+//
+// Throwaway spike: external MITM at srt's mitmProxy.socketPath.
+//
+// srt forwards a matched-domain CONNECT to this unix socket as an opaque
+// byte tunnel. We terminate TLS with our own CA (a per-host leaf signed by
+// it), OVERWRITE the Authorization header with a real token, and forward to
+// the real upstream over system-root TLS. Proves the Shape A injection
+// boundary for issue #7: the token is added OUTSIDE the sandbox, so the
+// in-sandbox agent never sees it.
+//
+// Injection is SET (overwrite), so it covers both git (sends no auth -> we
+// add) and gh (sends a dummy GH_TOKEN -> we replace).
+package main
+
+import (
+	"bufio"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"crypto/tls"
+	"encoding/base64"
+	"encoding/pem"
+	"flag"
+	"io"
+	"log"
+	"math/big"
+	"net"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
+)
+
+var (
+	caCert *x509.Certificate
+	caKey  *ecdsa.PrivateKey
+	caDER  []byte
+
+	leafMu sync.Mutex
+	leaves = map[string]*tls.Certificate{}
+
+	inject bool
+	token  string
+)
+
+func main() {
+	socket := flag.String("socket", "/tmp/rein-mitm.sock", "unix socket srt connects to")
+	tcp := flag.String("tcp", "", "if set (e.g. 127.0.0.1:8888), listen on TCP as an HTTP CONNECT proxy instead of the unix socket (CP1: git http.proxy front)")
+	caOut := flag.String("ca-out", "/tmp/rein-srt-spike/rein-ca.pem", "CA cert PEM to trust in-sandbox")
+	flag.BoolVar(&inject, "inject", true, "overwrite Authorization with the real token (false = negative control)")
+	flag.Parse()
+
+	token = os.Getenv("REIN_SPIKE_TOKEN")
+	if inject && token == "" {
+		log.Fatal("REIN_SPIKE_TOKEN is empty but -inject=true")
+	}
+	genCA(*caOut)
+
+	var ln net.Listener
+	var err error
+	if *tcp != "" {
+		ln, err = net.Listen("tcp", *tcp)
+		if err != nil {
+			log.Fatalf("listen tcp %s: %v", *tcp, err)
+		}
+		log.Printf("MITM up: tcp=%s inject=%v ca=%s", *tcp, inject, *caOut)
+	} else {
+		_ = os.Remove(*socket) // stale socket file -> bind fails on re-run
+		ln, err = net.Listen("unix", *socket)
+		if err != nil {
+			log.Fatalf("listen %s: %v", *socket, err)
+		}
+		_ = os.Chmod(*socket, 0o600)
+		log.Printf("MITM up: socket=%s inject=%v ca=%s", *socket, inject, *caOut)
+	}
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			log.Printf("accept: %v", err)
+			continue
+		}
+		go handle(c)
+	}
+}
+
+func genCA(caOut string) {
+	var err error
+	caKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		log.Fatalf("ca key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "rein-spike-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+	caDER, err = x509.CreateCertificate(rand.Reader, tmpl, tmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		log.Fatalf("ca cert: %v", err)
+	}
+	caCert, _ = x509.ParseCertificate(caDER)
+	f, err := os.Create(caOut)
+	if err != nil {
+		log.Fatalf("ca out: %v", err)
+	}
+	defer f.Close()
+	pem.Encode(f, &pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+}
+
+func getLeaf(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	host := hello.ServerName
+	if host == "" {
+		host = "unknown"
+	}
+	leafMu.Lock()
+	defer leafMu.Unlock()
+	if c, ok := leaves[host]; ok {
+		return c, nil
+	}
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: host},
+		DNSNames:     []string{host},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &key.PublicKey, caKey)
+	if err != nil {
+		return nil, err
+	}
+	cert := &tls.Certificate{Certificate: [][]byte{der, caDER}, PrivateKey: key}
+	leaves[host] = cert
+	return cert, nil
+}
+
+// bufConn lets TLS read the bytes the framing-sniff already buffered.
+type bufConn struct {
+	r io.Reader
+	net.Conn
+}
+
+func (b *bufConn) Read(p []byte) (int, error) { return b.r.Read(p) }
+
+func handle(c net.Conn) {
+	defer c.Close()
+	br := bufio.NewReader(c)
+
+	peek, _ := br.Peek(8)
+	log.Printf(">> first bytes from srt: %q (hex %x)", string(peek), peek)
+
+	host := ""
+	if len(peek) >= 8 && string(peek[:8]) == "CONNECT " {
+		line, _ := br.ReadString('\n')
+		if f := strings.Fields(line); len(f) >= 2 {
+			host = strings.Split(f[1], ":")[0]
+		}
+		for { // consume remaining preamble headers until blank line
+			h, err := br.ReadString('\n')
+			if err != nil || h == "\r\n" || h == "\n" {
+				break
+			}
+		}
+		io.WriteString(c, "HTTP/1.1 200 Connection Established\r\n\r\n")
+		log.Printf(">> CONNECT preamble: host=%s; replied 200", host)
+	} else {
+		log.Printf(">> no CONNECT preamble; relying on TLS SNI for host")
+	}
+
+	tlsConn := tls.Server(&bufConn{r: br, Conn: c}, &tls.Config{
+		GetCertificate: getLeaf,
+		NextProtos:     []string{"http/1.1"}, // pin: http.ReadRequest can't parse h2
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		log.Printf(">> TLS handshake failed (host=%s): %v", host, err)
+		return
+	}
+	if host == "" {
+		host = tlsConn.ConnectionState().ServerName
+	}
+	serveRequests(tlsConn, host)
+}
+
+// upstreamClient forwards to GitHub over real TLS. Forced HTTP/1.1 (so the
+// relay framing matches what we parse with http.ReadRequest) and compression
+// disabled (so Go doesn't transparently gunzip and mangle Content-Length).
+var upstreamClient = &http.Client{
+	Timeout: 60 * time.Second,
+	// Relay 3xx verbatim to the client instead of following it ourselves:
+	// a transparent relay must not swallow redirects (git follows them and
+	// rewrites its remote), a redirected POST would 502 (NewRequest leaves
+	// GetBody nil), and Go strips Authorization on cross-host redirects so
+	// our per-host injection wouldn't reapply. (CP1 reviewer, rank 1.)
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	Transport: &http.Transport{
+		DisableCompression: true,
+		ForceAttemptHTTP2:  false,
+		TLSNextProto:       map[string]func(string, *tls.Conn) http.RoundTripper{}, // disable h2 upstream
+	},
+}
+
+func serveRequests(conn net.Conn, host string) {
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+	for {
+		req, err := http.ReadRequest(r)
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("read request (host=%s): %v", host, err)
+			}
+			return
+		}
+		// Expect: 100-continue — git/libcurl sends it for the receive-pack
+		// POST. Reply 100 to the client BEFORE its body is read (Do reads it
+		// below), or the push deadlocks; strip it upstream so Go doesn't
+		// double-handle.
+		if strings.EqualFold(strings.TrimSpace(req.Header.Get("Expect")), "100-continue") {
+			io.WriteString(conn, "HTTP/1.1 100 Continue\r\n\r\n")
+			req.Header.Del("Expect")
+			log.Printf(">> sent 100 Continue to client (%s%s)", host, req.URL.Path)
+		}
+		inboundAuth := req.Header.Get("Authorization")
+		out, err := http.NewRequest(req.Method, "https://"+host+req.URL.RequestURI(), req.Body)
+		if err != nil {
+			log.Printf("build upstream req: %v", err)
+			return
+		}
+		// CRITICAL: http.NewRequest with an opaque io.Reader leaves
+		// ContentLength=0 / no TransferEncoding, which truncates or mis-frames
+		// the receive-pack POST body. Carry the inbound framing explicitly —
+		// this is the GET-works/POST-silently-breaks trap CP1 exists to catch.
+		out.ContentLength = req.ContentLength
+		out.TransferEncoding = req.TransferEncoding
+		// Drop hop-by-hop headers (RFC 7230 §6.1): the fixed set plus any
+		// token named in the inbound Connection header. (CP1 reviewer, rank 2.)
+		hop := map[string]bool{
+			"connection": true, "proxy-connection": true, "expect": true,
+			"keep-alive": true, "te": true, "trailer": true, "upgrade": true,
+		}
+		for _, tok := range strings.Split(req.Header.Get("Connection"), ",") {
+			if t := strings.ToLower(strings.TrimSpace(tok)); t != "" {
+				hop[t] = true
+			}
+		}
+		for k, vs := range req.Header {
+			if hop[strings.ToLower(k)] {
+				continue
+			}
+			for _, v := range vs {
+				out.Header.Add(k, v)
+			}
+		}
+		out.Host = host
+		if inject {
+			// Host-aware scheme: github.com git smart-HTTP transport wants
+			// Basic x-access-token:<token>; api.github.com accepts Bearer.
+			// (Spike finding — a Bearer to github.com git endpoints 401s.)
+			if host == "api.github.com" {
+				out.Header.Set("Authorization", "Bearer "+token)
+			} else {
+				basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + token))
+				out.Header.Set("Authorization", "Basic "+basic)
+			}
+		}
+		resp, err := upstreamClient.Do(out)
+		if err != nil {
+			log.Printf("%s %s%s -> upstream error: %v", req.Method, host, req.URL.Path, err)
+			io.WriteString(conn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+			return
+		}
+		log.Printf("%s %s%s | clen=%d te=%v inbound-auth=%q outbound-auth=%q inject=%v -> upstream %s",
+			req.Method, host, req.URL.Path, req.ContentLength, req.TransferEncoding,
+			redact(inboundAuth), redact(out.Header.Get("Authorization")), inject, resp.Status)
+		werr := resp.Write(conn)
+		resp.Body.Close()
+		if werr != nil {
+			return // client-side write failed; conn may be desynced — drop it (CP1 reviewer, rank 3)
+		}
+		if req.Close || resp.Close {
+			return
+		}
+	}
+}
+
+func redact(a string) string {
+	if a == "" {
+		return ""
+	}
+	f := strings.Fields(a)
+	if len(f) == 2 {
+		return f[0] + " <redacted len=" + itoa(len(f[1])) + ">"
+	}
+	return "<redacted>"
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b []byte
+	for n > 0 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+		n /= 10
+	}
+	return string(b)
+}
