@@ -96,7 +96,9 @@ daemon design hardens.
   its own mitm socket path; the daemon maps socket → session for scope +
   approval. Filesystem socket only (no abstract namespace), dir 0700,
   socket 0600, run-lifetime teardown — the socket is a capability
-  (design §5.3), bound this way.
+  (design §5.3), bound this way. **Placement check:** the socket must sit
+  outside every srt bind-mount (srt mounts the working dir), or in-sandbox
+  processes get direct, unmediated access — verify at launch, fail closed.
 - **Tier classifier** (design §5.1), NOT "method = tier": git keys on the
   `git-receive-pack` service **including the advertisement**
   (`GET /info/refs?service=git-receive-pack` ⇒ write tier); REST on

@@ -129,10 +129,17 @@ three channels, and all three must be closed:
 - **Filesystem.** By default the sandbox can read the home directory. The
   spike confirmed the failure concretely: `gh` in-sandbox silently picked
   up the host's stored login from `~/.config/gh` and authenticated with
-  it. Default-deny `$HOME` reads and re-allow only the working tree, with
-  explicit denials for `~/.config/gh`, `~/.netrc`, `~/.git-credentials`,
-  `~/.ssh`, and rein's own key material — so a store we didn't think of
-  doesn't leak by default.
+  it. Default-deny `$HOME` reads and re-allow a **configurable read-
+  allowlist** — default the working tree, but the user can widen it (e.g.
+  a sibling-projects dir like `~/dev`, so the agent can see other projects)
+  when they legitimately want that. Independent of the allowlist, always
+  deny `~/.config/gh`, `~/.netrc`, `~/.git-credentials`, `~/.ssh`, and
+  rein's own key material. These live at `~/.*`, not under a projects dir,
+  so widening project access never re-exposes them, and the default stays
+  safe. rein keeps these denials **authoritative**: because srt's read
+  rule is allow-over-deny, rein refuses (or carves out) an allowlist that
+  would otherwise swallow a credential store — a broad `~` allow can't
+  silently un-hide `~/.config/gh`.
 - **Environment.** The sandbox environment is a **strict allowlist** (CA
   trust vars, stub `GH_TOKEN`, PATH/locale), not host passthrough.
   Passthrough would hand the agent every env-resident secret on the host
@@ -188,6 +195,20 @@ empirically in the spike doc.
   must preflight this (and clock skew, #22) and guide the fix
   (loud-degrade, §2).
 
+### 4.5 Installation & onboarding
+
+Sandboxed mode adds prerequisites the user must have: `srt` (an npm
+package), its system dependencies (`bwrap`, `ripgrep`, `socat` on Linux),
+the Ubuntu-24.04 AppArmor profile (§4.4), and healthy NTP (#23). We do
+**not** assume they are present, and we do **not** silently install them —
+rein can't safely `apt`/`npm install` on a user's behalf. Instead, extend
+the Phase 0.5 onboarding machinery: `rein doctor` detects what's missing
+and prints the exact fix; `rein init` walks the user through setup (and
+may offer to run a step with explicit consent). If a prerequisite is
+missing at `rein run` time, **fail closed** and point at `rein doctor` —
+never silently drop to direct mode on a real repo (§2). Detailed
+checkpoint work is the CP3 preflight (PLAN-1).
+
 ## 5. Key design decisions & open questions
 
 ### 5.1 Read/write classification: scope is the boundary, the classifier is defense-in-depth
@@ -236,23 +257,61 @@ host hygiene (`ptrace_scope`, separate UIDs), not by this design. Note
 TM-G4's bearer-rotation mitigations don't apply here: the proxy is
 in-daemon, and the socket's only auth *is* filesystem permissions.
 
+Crucially, this residual is **not reachable by the agent** — even though
+the agent can spawn processes. A process the agent forks stays inside the
+sandbox (same namespaces, no direct egress), and the proxy socket is
+**never bind-mounted into the sandbox**. So the agent and all its
+descendants can only reach the capability through srt's mediated proxy,
+where the classifier and write-approval run; they cannot open the socket
+directly and bypass them. This is a *hard invariant that nothing enforces
+for free*: srt bind-mounts the working directory, so rein must place the
+socket outside every srt bind-mount (in the spike it held only because the
+socket sat in `/tmp`, outside the bound working dir). Make it a launch-time
+check (PLAN-1 CP2/CP3) — if the socket ever lands under a bound path, the
+agent gets direct, unmediated access, silently.
+
+Unmediated access otherwise requires being *outside* the sandbox: a
+sandbox escape (the defense-in-depth caveat, §7) or separate, pre-existing
+same-uid malware. Versus direct mode, that malware is **better on net but
+not strictly dominant.** Better: there is no token value to steal, the
+capability can't leave the machine, and the first write of a run is still
+approval-gated. Not strictly: because approvals are **run-scoped, not
+per-request** (Phase 0.5), malware that reaches the socket *during an
+already-approved run* rides that approval and can push without a fresh
+prompt for the rest of the run's lifetime — which can outlast a
+direct-mode write token's ~1h TTL. So: direct mode leaks a short-lived
+token replayable anywhere; sandboxed mode leaks a machine-bound,
+run-lifetime capability you can't exfiltrate. A real improvement, not a
+clean dominance — worth stating honestly.
+
 ### 5.4 The proxy's certificate authority
 
 rein generates a local CA; the **private key is stored/read through
-`internal/keystore`** (CLAUDE.md hard-constraint #6). Compromise scope:
-the CA is trusted only for the agent's traffic, and the proxy intercepts
-only the §4.3 hosts — "can intercept the agent's GitHub traffic," not the
-host's.
+`internal/keystore`** (CLAUDE.md hard-constraint #6). Trust is delivered
+**only inside the sandbox**, via env vars (`GIT_SSL_CAINFO`,
+`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`) — never the host trust store. So
+the CA vouches only for the agent's traffic, and only for the §4.3 hosts:
+"can intercept the agent's GitHub traffic," not the host's. The private
+key never leaves the keystore.
 
-**macOS caveat (affects gh):** Go's `crypto/x509` on darwin uses the
-platform verifier and ignores `SSL_CERT_FILE` (and env-delivered trust
-generally) on every macOS version (open Go proposal golang/go#77865; not
-landed). So env-delivered trust covers git/curl but **not Go clients
-like `gh`**. The
-expected path is adding rein's CA to the user keychain with trust
-settings — weaker than "sandbox-only trust" and recorded as such; the
-exposure still requires the CA *private key*, which never leaves the
-keystore. Validated when a Mac is available (PLAN-1 CP5).
+**v1 is Linux-only, on purpose.** On Linux this env-delivered trust covers
+git, curl, AND `gh`: Go honors `SSL_CERT_FILE`/`SSL_CERT_DIR` on Linux, so
+no host-level trust is needed anywhere.
+
+**macOS is deferred — not solved with a keychain CA.** Go's `crypto/x509`
+on darwin uses the platform verifier and ignores `SSL_CERT_FILE` (every
+macOS version; open Go issue golang/go#77865), so env trust would cover
+git/curl but not `gh`. The obvious workaround — adding rein's CA to the
+user keychain — is **rejected for v1**: a keychain-trusted CA is trusted
+host-wide, the browser included, which is more trust than a security tool
+should ask a user to install (even name-constrained, it's the wrong
+default). This is almost entirely a Go-on-darwin quirk, not a rein
+problem; even `srt` delivers its own CA via the same env vars and hits the
+same wall. macOS support is therefore **off the dogfood spine** (PLAN-1
+CP5; Linux-only dogfood satisfies the CP6 gate). When macOS is revisited,
+the preferred route avoids a CA entirely — point `gh` (and other Go tools)
+at a **plaintext local rein endpoint** so there is nothing to trust; rein
+does the real TLS to GitHub. To be designed then.
 
 ### 5.5 Approvals: the channel must be outside the sandbox
 
