@@ -161,7 +161,15 @@ func (c Core) confirmWrite(repo string) (approved bool) {
 }
 
 func (c Core) serveWrite(ctx context.Context) Credential {
-	ctx, cancel := context.WithTimeout(ctx, c.MintTimeout)
+	if c.MintWrite == nil {
+		// Misconfigured Core. The broker adapter guards this, but a direct
+		// daemon/proxy caller might not — fail closed to the placeholder, not
+		// a panic, so the always-return-a-credential promise (TM-G8) holds.
+		c.logf("write mint not configured; returning placeholder")
+		c.diag()
+		return Credential{CredentialUsername, PlaceholderMintFailed}
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.mintTimeout())
 	defer cancel()
 	token, expiresAt, err := c.MintWrite(ctx)
 	if err != nil {
@@ -182,7 +190,12 @@ func (c Core) serveRead(ctx context.Context) Credential {
 			return Credential{CredentialUsername, tok}
 		}
 	}
-	ctx, cancel := context.WithTimeout(ctx, c.MintTimeout)
+	if c.MintRead == nil {
+		c.logf("read mint not configured; returning placeholder")
+		c.diag()
+		return Credential{CredentialUsername, PlaceholderMintFailed}
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.mintTimeout())
 	defer cancel()
 	token, expiresAt, err := c.MintRead(ctx)
 	if err != nil {
@@ -218,6 +231,18 @@ func (c Core) diag() {
 	}
 	fmt.Fprintln(c.Diag, "rein: no usable GitHub token (mint failed) — this git operation will fail.")
 	fmt.Fprintln(c.Diag, "      Run `rein doctor` to diagnose (e.g. the App isn't installed on this repo, or rein isn't set up).")
+}
+
+// defaultMintTimeout caps a mint when the caller left MintTimeout zero. The
+// broker adapter always sets one; a direct daemon/proxy caller might not, and
+// a zero timeout yields an already-expired context (mint silently skipped).
+const defaultMintTimeout = 5 * time.Second
+
+func (c Core) mintTimeout() time.Duration {
+	if c.MintTimeout <= 0 {
+		return defaultMintTimeout
+	}
+	return c.MintTimeout
 }
 
 func (c Core) logf(format string, args ...any) {

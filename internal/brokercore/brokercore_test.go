@@ -184,6 +184,25 @@ func TestServe_RecordWritePanicStillServesToken(t *testing.T) {
 	}
 }
 
+// A daemon/proxy caller might build a Core with a nil mint. The core must
+// fail closed to the placeholder (TM-G8), never panic.
+func TestServe_NilMintReturnsPlaceholderNotPanic(t *testing.T) {
+	t.Run("read", func(t *testing.T) {
+		c := Core{Logger: discardLogger()} // MintRead nil
+		got := c.Serve(context.Background(), Request{Repo: "o/r"})
+		if got.Password != PlaceholderMintFailed {
+			t.Fatalf("nil read mint = %+v, want mint-failed placeholder", got)
+		}
+	})
+	t.Run("write", func(t *testing.T) {
+		c := Core{Logger: discardLogger(), ConfirmWrite: func(string) bool { return true }} // MintWrite nil
+		got := c.Serve(context.Background(), Request{Repo: "o/r", WriteIntent: true})
+		if got.Password != PlaceholderMintFailed {
+			t.Fatalf("nil write mint = %+v, want mint-failed placeholder", got)
+		}
+	})
+}
+
 func TestRepoFromPath(t *testing.T) {
 	cases := map[string]string{
 		"owner/repo.git":   "owner/repo",
