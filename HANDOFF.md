@@ -93,8 +93,14 @@ date -u; curl -sI https://api.github.com | grep -i '^date:'   # should be within
 
 ### 1d. Go + build
 
-Go 1.26+ (`go.mod`). Build everything: `go build ./...` and
-`go test ./...` (all should pass on a clean clone before you start).
+Go 1.26+ (`go.mod`). Build the binaries — **use `-o bin/`**; a bare
+`go build ./...` compiles to cache and produces NO `./bin/rein`, so every
+command below would fail:
+
+```
+go build -o bin/ ./...
+go test ./...            # all green on a clean clone before you start
+```
 
 ## 2. Create your own GitHub App + first mint
 
@@ -107,8 +113,10 @@ installs them on a throwaway repo), then `rein doctor`. Summary:
 ./bin/rein doctor     # all checks green; 'app credentials' must be [ok]
 ```
 
-- Use a **throwaway repo** (hard-constraint #1 still holds for CP2). Set
-  `REIN_TEST_REPO_A` to it (the init flow / `dev-env` covers this).
+- Use a **throwaway repo you own** (hard-constraint #1 still holds for CP2).
+  **Export `REIN_TEST_REPO_A=<owner>/<your-throwaway-repo>` yourself** before
+  `rein init` — init *reads* it to scaffold a session but does not set it, and
+  `dev-env`'s hardcoded value is the origin author's repo, not yours.
 - If `doctor` shows `app credentials: 401`, it's almost always the clock
   (§1c), not the App.
 - A minimal session file (no bound issue) is handy for non-interactive
@@ -119,10 +127,20 @@ installs them on a throwaway repo), then `rein doctor`. Summary:
 Before continuing CP2, confirm the machine can mint + push, reproducing the
 CP1 result (`docs/phase1-srt-spike-findings.md` → "CP1 results"):
 
-- Mint a write token with no new code:
-  `printf 'protocol=https\nhost=github.com\npath=<owner>/<repo>.git\n\n' | REIN_SESSION_FILE=<no-issue-session.yaml> REIN_GIT_OP=write ./bin/rein credential-helper get`
-  → the `password=` line is a write token. (No-issue session = no approval
-  prompt.)
+- Write a minimal **no-issue** session to `/tmp/cp1-session.yaml` (omitting
+  `issue:` is what disables the write-approval prompt — a session WITH an
+  `issue:` would prompt on `/dev/tty` and the mint below would hang):
+
+  ```yaml
+  id: cp1-check
+  role: implement
+  repos:
+    - <owner>/<your-throwaway-repo>
+  ```
+- Mint a write token with no new code (the helper honors `REIN_GIT_OP=write`
+  + `REIN_SESSION_FILE`):
+  `printf 'protocol=https\nhost=github.com\npath=<owner>/<repo>.git\n\n' | REIN_SESSION_FILE=/tmp/cp1-session.yaml REIN_GIT_OP=write ./bin/rein credential-helper get`
+  → the `password=` line is the write token.
 - Isolation check: `curl -u "x-access-token:<tok>" 'https://github.com/<owner>/<repo>/info/refs?service=git-receive-pack'` → **200** means push perm.
 
 If that works, your machine is fully set up.
