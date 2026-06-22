@@ -1,5 +1,5 @@
-# Dependabot config for rein. See wrangle v0.2.1's recommended baseline:
-# https://github.com/TomHennen/wrangle/blob/v0.2.1/gh_workflow_examples/dependabot.yml
+# Dependabot config for rein. See wrangle v0.3.0's recommended baseline:
+# https://github.com/TomHennen/wrangle/blob/v0.3.0/gh_workflow_examples/dependabot.yml
 #
 # The github-actions entry raises update PRs for the action pins in our
 # workflows -- including the `uses: TomHennen/wrangle/...@vX.Y.Z` tag pin in

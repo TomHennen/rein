@@ -1,6 +1,6 @@
 # Build and publish rein via wrangle's Go build type.
 #
-# Calls TomHennen/wrangle's reusable Go workflow (v0.2.1) for:
+# Calls TomHennen/wrangle's reusable Go workflow (v0.3.0) for:
 #   - Source-stage checks (gofmt, go vet, go test -race, govulncheck) on
 #     every push/PR
 #   - Source scan (osv + wrangle-lint block publish on findings; zizmor and
@@ -9,10 +9,31 @@
 #   - Release: goreleaser publish + SPDX SBOM + SLSA L3 provenance on tag
 #     push
 #   - Attest + verify: GitHub-issued provenance and a signed SLSA VSA per
-#     artifact, verified fail-closed before the VSA is attached
+#     artifact, verified fail-closed (against the `policy:` below) before the
+#     VSA is attached
 #
 # Adopting wrangle's reusable workflow means rein gets supply-chain hygiene
 # from commit one. See https://github.com/TomHennen/wrangle for the design.
+#
+# !!! KNOWN BLOCKER — the release path cannot complete on this repo today !!!
+# rein is a USER-OWNED PRIVATE repo. wrangle's `attest` job calls GitHub's
+# actions/attest-build-provenance, which persists to GitHub's attestation
+# store — a feature NOT available for user-owned private repos. A tag push
+# therefore fails at `attest` with:
+#   "Failed to persist attestation: Feature not available for user-owned
+#    private repositories."
+# and `verify` (the policy gate) is skipped. There is NO wrangle input to
+# disable attestation persistence (checked all v0.3.0 inputs). The only fixes
+# are: move rein under an org (with a plan that allows private attestations),
+# or make it public. Until then, on-tag release/attest/verify is non-functional;
+# PR-time checks + scan still work, which is what CI exercises today.
+# Observed 2026-06-22 on tag v0.0.0-frictiontest (run 27946267499, since deleted).
+#
+# v0.3.0 upgrade note: v0.3.0 added the `policy:` input (see below) and
+# defaults it to wrangle-default-go-v1, which is STRICTER than v0.2.x's
+# hard-wired provenance-only verification — it additionally requires an SBOM
+# and clean osv/zizmor/wrangle-lint scan attestations. We keep the default;
+# see the scan-tools note for the zizmor:info interaction.
 #
 # Pin discipline: the `uses:` ref below pins wrangle's *release tag*
 # (`@vX.Y.Z`) with an inline zizmor exception. This is wrangle's recommended
@@ -62,17 +83,37 @@ jobs:
       # Advanced Security (no code scanning):
       #   - dependency-review DROPPED: it calls GitHub's dependency-graph
       #     compare API, which 403s without GHAS — a blocking run would redden
-      #     every PR-to-main.
-      #   - zizmor set to :info (non-blocking): the zizmor audit itself runs
-      #     clean, but wrangle's zizmor tool hardcodes advanced-security: true,
-      #     which uploads SARIF to code scanning. That upload hard-fails
-      #     ("Code scanning is not enabled for this repository") and wrangle
-      #     fails closed on it, so a :fail zizmor can never go green here.
-      #     :info keeps zizmor auditing every run (findings surface in the step
-      #     summary) without gating on the impossible upload.
-      # Promote zizmor back to blocking (and re-add dependency-review) once
-      # rein enables GHAS / code scanning or goes public.
+      #     every PR-to-main. It is NOT required by the default policy below, so
+      #     dropping it needs no policy change.
+      #   - zizmor set to :info (non-blocking): wrangle's zizmor tool hardcodes
+      #     advanced-security: true, which uploads SARIF to code scanning. That
+      #     upload hard-fails here ("Code scanning is not enabled for this
+      #     repository") — still observed under v0.3.0.
+      #     HISTORICAL REASON, NOW OBSOLETE: under v0.2.x wrangle treated that
+      #     failed upload as a tool error (collect_sarif.sh tested src_count
+      #     <= 0), so a :fail zizmor could never go green. v0.3.0 changed the
+      #     test to src_count < 0 — a clean SARIF whose upload fails is no
+      #     longer a tool error — and the scan job now passes with the upload
+      #     failing (observed: PR #27 run 27945693540, scan job green).
+      #   TODO: zizmor:info is now likely promotable to :fail on this repo even
+      #   without GHAS. Left at :info conservatively because the verify/policy
+      #   path can't be exercised yet (attest blocker above), so the :fail
+      #   behavior at verify time is unconfirmed. Promote + confirm once the
+      #   repo can release (org-owned or public).
+      #
+      # Policy interaction (v0.3.0): the default policy wrangle-default-go-v1
+      # requires a CLEAN osv/zizmor/wrangle-lint scan ATTESTATION. The scan
+      # attestation is written from the SARIF regardless of :info/:fail (the
+      # suffix only governs the build-time gate), so a clean zizmor audit
+      # satisfies the policy even at :info. :info only fails to protect the
+      # release if zizmor genuinely ERRORS — then the build stays green but
+      # verify would fail closed on the missing/findings attestation.
       scan-tools: "osv zizmor:info scorecard:info wrangle-lint"
+      # policy: left at the default (wrangle-default-go-v1). v0.2.x hard-wired
+      # provenance-only; v0.3.0's default additionally requires SBOM + clean
+      # osv/zizmor/wrangle-lint attestations. rein runs all three, so the
+      # default is satisfiable on the happy path; see the scan-tools note for
+      # the zizmor:info caveat.
       # release-events defaults to tag-only — the cheapest setting and the
       # one that matches rein's "publish only on v* tags" model.
       #
