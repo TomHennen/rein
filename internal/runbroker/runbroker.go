@@ -57,9 +57,17 @@ type Config struct {
 	// path. "" / "allow" (default) or "refuse".
 	EmptyPathScope string
 
-	// Approve is the write-approval hook (design §5.5). The proxy memoizes it
-	// per repo for the run. Nil = auto-approve (tests / pre-approval).
+	// Approve is the write-approval hook (design §5.5) — the human write
+	// control. The proxy memoizes its result per repo for the run. A nil
+	// Approve means "no human gate," which is FAIL-OPEN: Start rejects it
+	// unless allowAutoApprove is explicitly set. cmd/rein run must always
+	// wire a real Approve.
 	Approve func(repo string) bool
+
+	// allowAutoApprove opts in to nil-Approve auto-approval. Unexported on
+	// purpose: only in-package tests can set it, so a production caller can
+	// never silently get an ungated write path by leaving Approve nil.
+	allowAutoApprove bool
 
 	// RecordWrite, if set, receives each minted write token (issue #20 ledger).
 	RecordWrite func(token string, expiresAt time.Time)
@@ -109,6 +117,12 @@ func Start(cfg Config) (*Host, error) {
 	case "", "allow", "refuse":
 	default:
 		return nil, errors.New(`runbroker: EmptyPathScope must be "", "allow", or "refuse"`)
+	}
+	// The write-approval hook is the human control (design §5.5); a nil hook
+	// fails open. Refuse to start a real run without it. Tests opt in via the
+	// unexported allowAutoApprove.
+	if cfg.Approve == nil && !cfg.allowAutoApprove {
+		return nil, errors.New("runbroker: Approve is required (a nil write-approval hook would auto-approve every write; wire the approval channel)")
 	}
 
 	ca, err := proxy.LoadOrCreateCA(cfg.CAKeystore)

@@ -82,6 +82,9 @@ func startHost(t *testing.T, opts Config) (*Host, *fakeUpstream) {
 			return "WRITE-TOK", time.Now().Add(time.Hour), nil
 		}
 	}
+	if opts.Approve == nil {
+		opts.allowAutoApprove = true // test opt-in; production must wire Approve
+	}
 
 	h, err := Start(opts)
 	if err != nil {
@@ -226,14 +229,35 @@ func TestHostCloseTerminatesInflightConn(t *testing.T) {
 func TestHostPlacementFailsClosed(t *testing.T) {
 	bind := t.TempDir()
 	_, err := Start(Config{
-		SessionID:     "s",
-		SocketPath:    filepath.Join(bind, "proxy.sock"),
-		ForbiddenDirs: []string{bind},
-		Logger:        log.New(io.Discard, "", 0),
-		CAKeystore:    keystore.NewFileKeystore(t.TempDir()),
+		SessionID:        "s",
+		SocketPath:       filepath.Join(bind, "proxy.sock"),
+		ForbiddenDirs:    []string{bind},
+		Logger:           log.New(io.Discard, "", 0),
+		CAKeystore:       keystore.NewFileKeystore(t.TempDir()),
+		allowAutoApprove: true, // reach the placement check, not the Approve gate
 	})
 	if err == nil {
 		t.Fatal("Start allowed a socket inside a forbidden bind-mount")
+	}
+	if !strings.Contains(err.Error(), "forbidden") {
+		t.Errorf("placement error = %v, want a forbidden-directory error", err)
+	}
+}
+
+func TestHostFailsClosedWithoutApprove(t *testing.T) {
+	// A real run (no allowAutoApprove) must refuse to start without an Approve
+	// hook — a nil hook would auto-approve every write (F9).
+	_, err := Start(Config{
+		SessionID:  "s",
+		SocketPath: filepath.Join(t.TempDir(), "p.sock"),
+		Logger:     log.New(io.Discard, "", 0),
+		CAKeystore: keystore.NewFileKeystore(t.TempDir()),
+	})
+	if err == nil {
+		t.Fatal("Start succeeded with a nil Approve and no opt-in; want fail-closed")
+	}
+	if !strings.Contains(err.Error(), "Approve is required") {
+		t.Errorf("err = %v, want an Approve-required error", err)
 	}
 }
 

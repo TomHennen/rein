@@ -294,7 +294,10 @@ func runWrite(realGh string, args []string, stateDir string, logger *log.Logger)
 			req := grant.Request{
 				Session: sess,
 				Action:  fmt.Sprintf("gh %s (write)", argSummary(args)),
-				Repo:    sess.Repos[0],
+				// Name the FULL session scope: after #10 the minted write token
+				// covers every repo in the session, so the human's consent must
+				// reflect that, not just the first repo (issue #30 / F8).
+				Repo: strings.Join(sess.Repos, ", "),
 			}
 			if !grant.ObtainApproval(context.Background(), req, cfg) {
 				logger.Printf("write tier: human approval denied; execing gh without GH_TOKEN")
