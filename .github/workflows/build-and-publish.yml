@@ -52,7 +52,7 @@ jobs:
       attestations: write     # attest job writes GitHub-issued SLSA provenance
       actions: read           # source scan: Scorecard reads the Actions API; SLSA generator inspects the run
       security-events: write  # source-scan SARIF -> Security tab (uploads are best-effort; no-op without Advanced Security)
-    uses: TomHennen/wrangle/.github/workflows/build_and_publish_go.yml@v0.2.1 # zizmor: ignore[unpinned-uses] - immutable
+    uses: TomHennen/wrangle/.github/workflows/build_and_publish_go.yml@v0.3.0 # zizmor: ignore[unpinned-uses] - immutable
     with:
       # Path to the Go module (default '.' is fine; rein lives at repo root)
       path: '.'
