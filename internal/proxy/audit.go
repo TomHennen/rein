@@ -64,17 +64,18 @@ func fieldOrDash(s string) string {
 	return s
 }
 
-// redactField keeps audit fields on a single line (no injected newlines that
-// could forge a second log entry). It does NOT need to redact secrets — no
-// secret is ever passed to Record — but a hostile path/host from the wire
-// shouldn't be able to smuggle control characters into the log.
+// redactField sanitizes an audit field so an agent-controlled value (SNI, the
+// decoded URL path) can't forge a second log line or corrupt an operator's
+// terminal. It does NOT redact secrets — no secret is ever passed to Record —
+// but it replaces ALL C0 control characters (incl. CR/LF, ESC, NUL, backspace)
+// and DEL with a space, keeping every entry on one clean line.
 func redactField(s string) string {
 	if s == "" {
 		return "-"
 	}
 	out := make([]rune, 0, len(s))
 	for _, r := range s {
-		if r == '\n' || r == '\r' {
+		if r < 0x20 || r == 0x7f {
 			r = ' '
 		}
 		out = append(out, r)

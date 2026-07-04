@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TomHennen/rein/internal/brokercore"
@@ -107,6 +108,12 @@ func defaultTransport() *http.Transport {
 // an already-granted write approval and can keep minting — are force-closed,
 // not merely drained. The caller's Close relies on this to know the socket and
 // all token traffic are truly gone on return.
+//
+// Contract: the caller MUST cancel ctx to fully shut down. The ctx-watcher
+// goroutine below blocks on ctx.Done; if a caller closes ln WITHOUT cancelling
+// ctx, Serve returns but that goroutine lingers until ctx is eventually
+// cancelled. runbroker.Host.Close always does both (cancel then close), so this
+// is a documented contract, not a leak in practice.
 func (p *Proxy) Serve(ctx context.Context, ln net.Listener) error {
 	var (
 		mu      sync.Mutex
@@ -209,7 +216,7 @@ func (p *Proxy) serveRequests(conn net.Conn, sni string) {
 		req, err := http.ReadRequest(r)
 		if err != nil {
 			if err != io.EOF && !errors.Is(err, net.ErrClosed) {
-				p.logger.Printf("read request (sni=%s): %v", sni, err)
+				p.logger.Printf("read request (sni=%q): %v", sni, err)
 			}
 			return
 		}
@@ -236,7 +243,7 @@ func (p *Proxy) serveOne(conn net.Conn, req *http.Request, sni string) (keepAliv
 
 	class := classifyHost(sni)
 	if class == classRefuse {
-		p.logger.Printf("host %q not in the allowed GitHub set; refusing (sni=%s)", sni, sni)
+		p.logger.Printf("host %q not in the allowed GitHub set; refusing", sni)
 		p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Decision: "refused-host"})
 		p.writeLocalError(conn, http.StatusForbidden, "rein: host not allowed for this session")
 		return false
@@ -306,13 +313,13 @@ func (p *Proxy) serveInject(conn net.Conn, req *http.Request, sni string, class 
 	case brokercore.PlaceholderRefused:
 		// Out of scope, or write approval denied. Answer locally — do NOT
 		// forward upstream (fail closed), and never with a token.
-		p.logger.Printf("refused: sni=%s repo=%q tier=%s reason=%q", sni, repo, tier, reason)
+		p.logger.Printf("refused: sni=%q repo=%q tier=%s reason=%q", sni, repo, tier, reason)
 		p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Tier: tier.String(), Decision: "refused-scope"})
 		p.writeLocalError(conn, http.StatusForbidden,
 			"rein: this repository is out of the session's scope, or a write was not approved. Run `rein doctor`.")
 		return false
 	case brokercore.PlaceholderMintFailed:
-		p.logger.Printf("mint failed: sni=%s repo=%q tier=%s", sni, repo, tier)
+		p.logger.Printf("mint failed: sni=%q repo=%q tier=%s", sni, repo, tier)
 		p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Tier: tier.String(), Decision: "mint-failed"})
 		p.writeLocalError(conn, http.StatusBadGateway,
 			"rein: could not mint a GitHub token for this request. Run `rein doctor`.")
@@ -337,7 +344,23 @@ func (p *Proxy) relay(conn net.Conn, req *http.Request, sni, authValue, decision
 	// Expect: 100-continue was already answered in serveOne, BEFORE any body
 	// read (including serveInject's GraphQL buffering). Upstream still gets
 	// Expect stripped via the hop-by-hop set below.
-	out, err := http.NewRequest(req.Method, "https://"+sni+req.URL.RequestURI(), req.Body)
+	//
+	// Wrap the inbound body to track whether it reached EOF. If upstream
+	// responds WITHOUT reading the whole request body — GitHub 401/403'ing an
+	// unauthorized push is exactly this — the leftover bytes are still sitting
+	// in the shared bufio.Reader that the NEXT http.ReadRequest would read, and
+	// net/http may drain them from a background goroutine: a data race plus a
+	// desynced keep-alive stream. So if the body wasn't fully consumed by the
+	// time client.Do returns, we close the connection instead of reusing it.
+	var body *eofBody
+	if req.Body != nil {
+		body = &eofBody{rc: req.Body}
+	}
+	var reqBody io.Reader
+	if body != nil {
+		reqBody = body
+	}
+	out, err := http.NewRequest(req.Method, "https://"+sni+req.URL.RequestURI(), reqBody)
 	if err != nil {
 		p.writeLocalError(conn, http.StatusBadGateway, "rein: could not build upstream request")
 		return false
@@ -356,19 +379,28 @@ func (p *Proxy) relay(conn net.Conn, req *http.Request, sni, authValue, decision
 
 	resp, err := p.client.Do(out)
 	if err != nil {
-		p.logger.Printf("%s %s%s -> upstream error: %v", req.Method, sni, req.URL.Path, err)
+		p.logger.Printf("%s %q %q -> upstream error: %v", req.Method, sni, req.URL.Path, err)
 		p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Tier: tier, Decision: decision, Status: http.StatusBadGateway})
 		p.writeLocalError(conn, http.StatusBadGateway, "rein: upstream request failed")
 		return false
 	}
 	p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Tier: tier, Decision: decision, Status: resp.StatusCode})
 
+	stripHopByHopHeaders(resp.Header) // symmetric with the request direction (F4)
 	werr := resp.Write(conn)
 	resp.Body.Close()
 	if werr != nil {
 		return false // client-side write failed; conn may be desynced — drop it (CP1 recipe point 6)
 	}
 	if req.Close || resp.Close {
+		return false
+	}
+	// If upstream didn't consume the whole request body, leftover bytes remain
+	// in the shared reader (and net/http may still be draining them) — reusing
+	// the connection would race the next ReadRequest and desync the stream.
+	// Fail safe: close. (F1)
+	if body != nil && !body.reachedEOF() {
+		p.logger.Printf("request body not fully consumed by upstream (status %d); closing connection to avoid keep-alive desync", resp.StatusCode)
 		return false
 	}
 	return true
@@ -415,22 +447,27 @@ func hostMatchesSNI(host, sni string) bool {
 	return strings.EqualFold(host, sni)
 }
 
-// copyHeadersStripHopByHop copies src into dst minus the RFC 7230 §6.1
-// hop-by-hop headers plus any token named in the inbound Connection header
-// (CP1 recipe point 5).
-func copyHeadersStripHopByHop(src, dst http.Header) {
+// hopByHopSet returns the RFC 7230 §6.1 hop-by-hop header set, plus any token
+// named in the given Connection header value (which is itself hop-by-hop).
+func hopByHopSet(connectionHeader string) map[string]bool {
 	hop := map[string]bool{
 		"connection": true, "proxy-connection": true, "expect": true,
 		"keep-alive": true, "te": true, "trailer": true, "upgrade": true,
-		// RFC 7230 §6.1 also lists the proxy-auth pair as hop-by-hop; a client
-		// Proxy-Authorization must not be relayed to GitHub.
+		// RFC 7230 §6.1 also lists the proxy-auth pair as hop-by-hop.
 		"proxy-authorization": true, "proxy-authenticate": true,
 	}
-	for _, tok := range strings.Split(src.Get("Connection"), ",") {
+	for _, tok := range strings.Split(connectionHeader, ",") {
 		if t := strings.ToLower(strings.TrimSpace(tok)); t != "" {
 			hop[t] = true
 		}
 	}
+	return hop
+}
+
+// copyHeadersStripHopByHop copies src into dst minus the hop-by-hop headers
+// (CP1 recipe point 5), used on the REQUEST direction (client → upstream).
+func copyHeadersStripHopByHop(src, dst http.Header) {
+	hop := hopByHopSet(src.Get("Connection"))
 	for k, vs := range src {
 		if hop[strings.ToLower(k)] {
 			continue
@@ -440,6 +477,35 @@ func copyHeadersStripHopByHop(src, dst http.Header) {
 		}
 	}
 }
+
+// stripHopByHopHeaders deletes hop-by-hop headers from h in place, used on the
+// RESPONSE direction (upstream → client) so upstream's Connection/Keep-Alive/
+// TE/etc. aren't forwarded verbatim to the sandbox client (F4).
+func stripHopByHopHeaders(h http.Header) {
+	for k := range hopByHopSet(h.Get("Connection")) {
+		// Delete uses canonical form; range keys are lower-cased set entries.
+		h.Del(k)
+	}
+}
+
+// eofBody wraps the inbound request body to record whether it was read to EOF
+// (i.e. fully consumed by the upstream client). Access to the flag is atomic
+// because net/http may read the body from a background goroutine (F1).
+type eofBody struct {
+	rc  io.ReadCloser
+	eof atomic.Bool
+}
+
+func (b *eofBody) Read(p []byte) (int, error) {
+	n, err := b.rc.Read(p)
+	if err == io.EOF {
+		b.eof.Store(true)
+	}
+	return n, err
+}
+
+func (b *eofBody) Close() error     { return b.rc.Close() }
+func (b *eofBody) reachedEOF() bool { return b.eof.Load() }
 
 // prefixConn lets tls.Server read bytes the CONNECT-preamble sniff already
 // buffered into br, then continue reading from the underlying conn.

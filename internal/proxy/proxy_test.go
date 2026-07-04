@@ -93,7 +93,31 @@ type harnessOpts struct {
 	repos    []string          // session scope ceiling; nil ⇒ InScope allows all
 	approve  func(string) bool // write approval hook; nil ⇒ auto-approve
 	respond  func(http.ResponseWriter, *http.Request)
-	mintWErr error // if set, MintWrite returns this error
+	mintWErr error     // if set, MintWrite returns this error
+	auditW   io.Writer // if set, the proxy writes its audit log here
+}
+
+// syncBuffer is a goroutine-safe bytes.Buffer for capturing the audit log,
+// which the proxy writes from connection-handler goroutines.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func newHarnessWithAudit(t *testing.T, opts harnessOpts, w io.Writer) *harness {
+	opts.auditW = w
+	return newHarness(t, opts)
 }
 
 func newHarness(t *testing.T, opts harnessOpts) *harness {
@@ -180,10 +204,15 @@ func newHarness(t *testing.T, opts harnessOpts) *harness {
 		Logger:         testLogger(t),
 	})
 
+	var audit *AuditLog
+	if opts.auditW != nil {
+		audit = NewAuditLog(opts.auditW)
+	}
 	p, err := New(Config{
 		SessionID: "sess_test",
 		Core:      core,
 		CA:        ca,
+		Audit:     audit,
 		Logger:    testLogger(t),
 		Upstream:  upstream,
 	})
@@ -600,6 +629,162 @@ func TestGraphQLMutationIsWrite(t *testing.T) {
 	// The buffered body must still reach upstream intact.
 	if h.gh.last().BodyN != len(q) {
 		t.Errorf("graphql body bytes = %d, want %d", h.gh.last().BodyN, len(q))
+	}
+}
+
+// rawTLS opens a raw keep-alive TLS conn to the proxy (bypassing http.Client's
+// connection pooling) so tests can drive multiple requests on ONE connection.
+func (h *harness) rawTLS(t *testing.T, sni string) *tls.Conn {
+	t.Helper()
+	raw, err := net.Dial("unix", h.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc := tls.Client(raw, &tls.Config{ServerName: sni, RootCAs: h.caPool, NextProtos: []string{"http/1.1"}})
+	if err := tc.Handshake(); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	return tc
+}
+
+// TestSequentialKeepAlive drives several requests over one raw TLS connection
+// and asserts each response parses (the keep-alive loop stays in sync).
+func TestSequentialKeepAlive(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	tc := h.rawTLS(t, "api.github.com")
+	defer tc.Close()
+	br := bufio.NewReader(tc)
+	for i := 0; i < 4; i++ {
+		if _, err := io.WriteString(tc, "GET /repos/o/r HTTP/1.1\r\nHost: api.github.com\r\n\r\n"); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			t.Fatalf("response %d: %v", i, err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("response %d status = %d", i, resp.StatusCode)
+		}
+	}
+	if h.gh.count() != 4 {
+		t.Errorf("upstream saw %d requests, want 4", h.gh.count())
+	}
+}
+
+// TestUpstreamRejectsBodyClosesConn is the F1 guard: upstream responds to a
+// large POST WITHOUT reading its body (GitHub 403'ing an unauthorized push).
+// The proxy must NOT reuse the connection with undrained body bytes still in
+// the shared reader — that both data-races net/http's background body drain
+// and desyncs the next request. Assert: no race (via -race), a first response
+// arrives (no hang), and the connection is then closed (the F1 close-on-
+// unconsumed-body path fired). The upstream hijacks + closes without reading so
+// the proxy's inbound body is deterministically left unconsumed.
+func TestUpstreamRejectsBodyClosesConn(t *testing.T) {
+	h := newHarness(t, harnessOpts{
+		respond: func(w http.ResponseWriter, r *http.Request) {
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			c, buf, err := hj.Hijack()
+			if err != nil {
+				return
+			}
+			// Respond WITHOUT reading r.Body, then close the upstream conn.
+			buf.WriteString("HTTP/1.1 403 Forbidden\r\nContent-Length: 6\r\nConnection: close\r\n\r\ndenied")
+			buf.Flush()
+			c.Close()
+		},
+	})
+	tc := h.rawTLS(t, "github.com")
+	defer tc.Close()
+	br := bufio.NewReader(tc)
+
+	payload := bytes.Repeat([]byte("z"), 1500*1024) // >1MiB, won't all flush before upstream closes
+	fmt.Fprintf(tc, "POST /o/r.git/git-receive-pack HTTP/1.1\r\nHost: github.com\r\nContent-Length: %d\r\n\r\n", len(payload))
+	go tc.Write(payload) // may block/err as upstream closes early; don't gate the test on it
+
+	tc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("no first response (proxy hung or desynced): %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("first status = %d, want 403 (relayed) or 502 (upstream error)", resp.StatusCode)
+	}
+	// The connection must be closed now (F1): a further read hits EOF/err.
+	tc.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := br.ReadByte(); err == nil {
+		t.Errorf("connection still readable after an unconsumed-body upstream reject; F1 close path did not fire")
+	}
+}
+
+func TestGraphQLBodyTooLarge413(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	c := h.httpClient(false)
+	big := `{"query":"` + strings.Repeat("a", (1<<20)+100) + `"}`
+	req, _ := http.NewRequest("POST", "https://api.github.com/graphql", strings.NewReader(big))
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", resp.StatusCode)
+	}
+	if h.gh.count() != 0 {
+		t.Errorf("oversized graphql reached upstream")
+	}
+}
+
+func TestConnectionCloseNotReused(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	tc := h.rawTLS(t, "api.github.com")
+	defer tc.Close()
+	br := bufio.NewReader(tc)
+	// Client asks to close after this request; the proxy must honor it and not
+	// keep the connection alive.
+	io.WriteString(tc, "GET /repos/o/r HTTP/1.1\r\nHost: api.github.com\r\nConnection: close\r\n\r\n")
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("response: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	// Connection header must NOT have been forwarded upstream (hop-by-hop).
+	// A follow-up read should hit EOF promptly (server closed).
+	tc.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := br.ReadByte(); err == nil {
+		t.Errorf("connection still open after Connection: close")
+	}
+}
+
+func TestAuditLogContentNoToken(t *testing.T) {
+	var buf syncBuffer
+	h := newHarnessWithAudit(t, harnessOpts{repos: []string{"allowed/repo"}}, &buf)
+	c := h.httpClient(false)
+
+	// Inject path (in scope).
+	doGET(t, c, "https://api.github.com/repos/allowed/repo/pulls")
+	// Refused path (out of scope).
+	resp, _ := doGET(t, c, "https://github.com/other/repo.git/info/refs?service=git-upload-pack")
+	resp.Body.Close()
+
+	log := buf.String()
+	if !strings.Contains(log, "decision=inject") {
+		t.Errorf("audit log missing inject decision line:\n%s", log)
+	}
+	if !strings.Contains(log, "decision=refused-scope") {
+		t.Errorf("audit log missing refused-scope decision line:\n%s", log)
+	}
+	if strings.Contains(log, h.readTok) || strings.Contains(log, h.writeTok) {
+		t.Errorf("audit log leaked a token:\n%s", log)
 	}
 }
 

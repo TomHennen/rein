@@ -95,6 +95,14 @@ func cleanAbs(p string) string {
 // filesystem unix socket (never abstract namespace), a 0700 parent dir, and a
 // 0600 socket. A stale socket file from a crashed run is removed first.
 func Listen(socketPath string, forbidden []string) (*net.UnixListener, error) {
+	// Reject abstract-namespace sockets explicitly (design §5.3: filesystem
+	// socket only). On Linux a leading "@" or NUL means the abstract namespace,
+	// which has no path on disk and bypasses filesystem permissions entirely,
+	// so the 0700-dir / 0600-socket capability gating wouldn't apply. Fail
+	// closed here rather than relying on a downstream chmod error.
+	if socketPath == "" || socketPath[0] == '@' || strings.ContainsRune(socketPath, '\x00') {
+		return nil, fmt.Errorf("proxy: socket path %q is not a filesystem path (abstract-namespace sockets are forbidden; design §5.3)", socketPath)
+	}
 	if err := CheckPlacement(socketPath, forbidden); err != nil {
 		return nil, err
 	}
