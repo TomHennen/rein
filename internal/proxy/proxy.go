@@ -198,13 +198,24 @@ func (p *Proxy) serveOne(conn net.Conn, req *http.Request, sni string) (keepAliv
 	}
 
 	class := classifyHost(sni)
-	switch class {
-	case classRefuse:
+	if class == classRefuse {
 		p.logger.Printf("host %q not in the allowed GitHub set; refusing (sni=%s)", sni, sni)
 		p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Decision: "refused-host"})
 		p.writeLocalError(conn, http.StatusForbidden, "rein: host not allowed for this session")
 		return false
+	}
 
+	// From here the request WILL have its body read/relayed. Honor
+	// Expect: 100-continue BEFORE any body read (CP1 recipe point 4) — this
+	// must precede serveInject's GraphQL buffering, or a graphql POST that
+	// waits for 100 before sending its body deadlocks. We only send 100 for a
+	// host we're going to serve (never for the refuse/mismatch cases above,
+	// where the client should see the error and abort, not upload a body).
+	if !p.handleExpectContinue(conn, req) {
+		return false
+	}
+
+	switch class {
 	case classPassthrough:
 		// CDN / asset hosts: relay verbatim, NEVER inject. The client's own
 		// Authorization (if any) passes through untouched — we neither add ours
@@ -226,11 +237,20 @@ func (p *Proxy) serveInject(conn net.Conn, req *http.Request, sni string, class 
 	// never buffer a git pack just to classify.
 	var body []byte
 	if sni == "api.github.com" && isGraphQLPath(req.URL.Path) {
+		// Read one byte past the cap to DETECT an oversized body and reject it
+		// (413), rather than silently truncating and relaying a corrupted
+		// request. GraphQL documents are small in practice. Expect:100-continue
+		// was already answered in serveOne, so this read can't deadlock.
+		const maxGraphQL = 1 << 20
 		var err error
-		body, err = io.ReadAll(io.LimitReader(req.Body, 1<<20))
+		body, err = io.ReadAll(io.LimitReader(req.Body, maxGraphQL+1))
 		req.Body.Close()
 		if err != nil {
 			p.writeLocalError(conn, http.StatusBadGateway, "rein: could not read request body")
+			return false
+		}
+		if len(body) > maxGraphQL {
+			p.writeLocalError(conn, http.StatusRequestEntityTooLarge, "rein: graphql request body too large to classify")
 			return false
 		}
 		req.Body = io.NopCloser(bytes.NewReader(body))
@@ -277,15 +297,9 @@ func (p *Proxy) serveInject(conn net.Conn, req *http.Request, sni string, class 
 // (host-aware injection). decision/tier feed the audit line. Returns whether
 // the connection may be reused.
 func (p *Proxy) relay(conn net.Conn, req *http.Request, sni, authValue, decision, tier string) (keepAlive bool) {
-	// Expect: 100-continue — reply 100 to the client BEFORE its body is read
-	// (client.Do reads it below) or a raw relay deadlocks; strip it upstream.
-	if strings.EqualFold(strings.TrimSpace(req.Header.Get("Expect")), "100-continue") {
-		if _, err := io.WriteString(conn, "HTTP/1.1 100 Continue\r\n\r\n"); err != nil {
-			return false
-		}
-		req.Header.Del("Expect")
-	}
-
+	// Expect: 100-continue was already answered in serveOne, BEFORE any body
+	// read (including serveInject's GraphQL buffering). Upstream still gets
+	// Expect stripped via the hop-by-hop set below.
 	out, err := http.NewRequest(req.Method, "https://"+sni+req.URL.RequestURI(), req.Body)
 	if err != nil {
 		p.writeLocalError(conn, http.StatusBadGateway, "rein: could not build upstream request")
@@ -323,6 +337,21 @@ func (p *Proxy) relay(conn net.Conn, req *http.Request, sni, authValue, decision
 	return true
 }
 
+// handleExpectContinue answers an Expect: 100-continue request by writing
+// "100 Continue" and dropping the header, so the client sends its body. It MUST
+// be called before any body read on the connection (CP1 recipe point 4).
+// Returns false only on a socket write error (the caller drops the connection).
+func (p *Proxy) handleExpectContinue(conn net.Conn, req *http.Request) bool {
+	if !strings.EqualFold(strings.TrimSpace(req.Header.Get("Expect")), "100-continue") {
+		return true
+	}
+	if _, err := io.WriteString(conn, "HTTP/1.1 100 Continue\r\n\r\n"); err != nil {
+		return false
+	}
+	req.Header.Del("Expect")
+	return true
+}
+
 // writeLocalError writes a short plaintext HTTP error toward the client and
 // closes the connection (Connection: close). The body is a fixed "rein: …"
 // string — it NEVER contains a token (design §4.1 response-path hygiene).
@@ -356,6 +385,9 @@ func copyHeadersStripHopByHop(src, dst http.Header) {
 	hop := map[string]bool{
 		"connection": true, "proxy-connection": true, "expect": true,
 		"keep-alive": true, "te": true, "trailer": true, "upgrade": true,
+		// RFC 7230 §6.1 also lists the proxy-auth pair as hop-by-hop; a client
+		// Proxy-Authorization must not be relayed to GitHub.
+		"proxy-authorization": true, "proxy-authenticate": true,
 	}
 	for _, tok := range strings.Split(src.Get("Connection"), ",") {
 		if t := strings.ToLower(strings.TrimSpace(tok)); t != "" {

@@ -147,9 +147,24 @@ func (s *Session) Validate() error {
 	if len(s.Repos) == 0 {
 		return errors.New("session.repos must have at least one entry")
 	}
+	// All repos must share ONE owner. The App installation is single-owner and
+	// the minted token scopes by bare repo NAME against that installation
+	// (BareRepoNames drops the owner), so a mixed-owner session would mint a
+	// token whose scope is ambiguous — worse, "alice/y" in the list against
+	// alice's installation could silently grant "alice/y" even if the operator
+	// meant "bob/y" (issue #10 hardening: keep token scope == the stated
+	// ceiling). Fail closed on mixed owners.
+	var owner string
 	for i, r := range s.Repos {
-		if normalizeRepo(r) == "" {
+		n := normalizeRepo(r)
+		if n == "" {
 			return fmt.Errorf("session.repos[%d] = %q is not owner/name", i, r)
+		}
+		o, _, _ := strings.Cut(n, "/")
+		if owner == "" {
+			owner = o
+		} else if o != owner {
+			return fmt.Errorf("session.repos mixes owners (%q and %q); a session must be scoped to a single owner (the App installation is single-owner)", owner, o)
 		}
 	}
 	return nil

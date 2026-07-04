@@ -84,6 +84,10 @@ func TestIsRateLimited(t *testing.T) {
 		"429 too many requests":             true,
 		"mint installation token: 500":      false,
 		"connection refused":                false,
+		// A plain 403 (not a rate limit) must NOT trigger backoff, or every
+		// write 502s for 30s on a permission error.
+		"403 forbidden: resource not accessible by integration": false,
+		"repo403 not found": false,
 	}
 	for msg, want := range cases {
 		if got := isRateLimited(fmt.Errorf("%s", msg)); got != want {

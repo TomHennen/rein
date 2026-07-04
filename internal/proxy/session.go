@@ -97,6 +97,10 @@ func NewSessionCore(cfg SessionConfig) *brokercore.Core {
 	if skew <= 0 {
 		skew = 30 * time.Second
 	}
+	readSkew := cfg.ReadCacheSkew
+	if readSkew <= 0 {
+		readSkew = 30 * time.Second // match direct mode (broker.applyDefaults)
+	}
 
 	// Always install the memo wrapper: even with a nil Approve (auto-approve)
 	// we keep the run-scoped "prompt once per repo" bookkeeping so a push's
@@ -145,7 +149,7 @@ func NewSessionCore(cfg SessionConfig) *brokercore.Core {
 		MintRead:       cfg.MintRead,
 		MintWrite:      mintWrite,
 		ReadCache:      cfg.ReadCache,
-		ReadCacheSkew:  cfg.ReadCacheSkew,
+		ReadCacheSkew:  readSkew,
 		InScope:        cfg.InScope,
 		EmptyPathScope: cfg.EmptyPathScope,
 		ConfirmWrite:   confirm,
@@ -175,10 +179,13 @@ func isRateLimited(err error) bool {
 	if err == nil {
 		return false
 	}
+	// Match on the phrases GitHub uses, NOT bare status numbers: a plain 403
+	// (App not installed, permission denied) is a hard failure that should
+	// surface immediately, not open a backoff window that 502s every write.
+	// "too many requests" is the standard 429 body text.
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "rate limit") ||
 		strings.Contains(s, "secondary rate") ||
 		strings.Contains(s, "abuse") ||
-		strings.Contains(s, "429") ||
-		strings.Contains(s, "403")
+		strings.Contains(s, "too many requests")
 }

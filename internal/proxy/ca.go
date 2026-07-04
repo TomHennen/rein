@@ -208,8 +208,22 @@ func (c *CA) getLeaf(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		return nil, err
 	}
 	cert := &tls.Certificate{Certificate: [][]byte{der, c.certDER}, PrivateKey: key}
-	c.leaves[host] = cert
+	// Only CACHE leaves for hosts we actually serve. An in-sandbox client can
+	// open connections with arbitrary SNI strings; caching each would let it
+	// grow the daemon's memory unbounded. Unknown-host connections still get a
+	// leaf (so the handshake completes and the HTTP layer can return a clean
+	// 403), it just isn't retained. The known set is tiny (design §4.3).
+	if cacheableLeafHost(host) {
+		c.leaves[host] = cert
+	}
 	return cert, nil
+}
+
+// cacheableLeafHost reports whether a leaf for host should be retained. True
+// only for the GitHub host set the proxy serves (inject + never-inject
+// classes), so the leaf cache stays bounded regardless of client SNI.
+func cacheableLeafHost(host string) bool {
+	return classifyHost(host) != classRefuse
 }
 
 // leafCached reports whether a leaf for host is already in the in-memory cache.

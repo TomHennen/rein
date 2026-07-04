@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // CheckPlacement fails closed unless socketPath sits OUTSIDE every directory in
@@ -106,9 +107,16 @@ func Listen(socketPath string, forbidden []string) (*net.UnixListener, error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("proxy: tighten socket dir to 0700: %w", err)
 	}
-	// A leftover socket file from a crashed run blocks the bind; remove it. We
-	// only remove a path we're about to own under our own 0700 dir.
+	// A leftover socket file from a crashed run blocks the bind; remove it —
+	// but ONLY if it's stale. Probe first: if something is still listening
+	// there, another run owns this path, and unlinking it would silently hijack
+	// that session's socket (design §5.2 socket = session identity). Fail
+	// closed instead.
 	if _, err := os.Lstat(socketPath); err == nil {
+		if conn, derr := net.DialTimeout("unix", socketPath, 500*time.Millisecond); derr == nil {
+			conn.Close()
+			return nil, fmt.Errorf("proxy: %s is already in use by a live listener; refusing to take it over", socketPath)
+		}
 		if err := os.Remove(socketPath); err != nil {
 			return nil, fmt.Errorf("proxy: remove stale socket: %w", err)
 		}

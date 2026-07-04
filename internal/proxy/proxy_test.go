@@ -175,7 +175,7 @@ func newHarness(t *testing.T, opts harnessOpts) *harness {
 		MintWrite:      mintWrite,
 		InScope:        inScope,
 		Approve:        wrappedApprove,
-		ReadCache:      newTestCache(),
+		ReadCache:      NewMemCache(),
 		EmptyPathScope: "allow",
 		Logger:         testLogger(t),
 	})
@@ -200,29 +200,6 @@ func newHarness(t *testing.T, opts harnessOpts) *harness {
 	t.Cleanup(cancel)
 	go p.Serve(ctx, ln)
 	return h
-}
-
-// testCache is a minimal in-memory brokercore.ReadCache for tests.
-type testCache struct {
-	mu   sync.Mutex
-	tok  string
-	exp  time.Time
-	have bool
-}
-
-func newTestCache() *testCache { return &testCache{} }
-func (c *testCache) Get(skew time.Duration) (string, bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.have || time.Until(c.exp) <= skew {
-		return "", false
-	}
-	return c.tok, true
-}
-func (c *testCache) Put(tok string, exp time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.tok, c.exp, c.have = tok, exp, true
 }
 
 func testLogger(t *testing.T) *log.Logger {
@@ -280,6 +257,10 @@ func (h *harness) httpClient(useConnect bool) *http.Client {
 		Transport: &http.Transport{
 			ForceAttemptHTTP2: false,
 			TLSNextProto:      map[string]func(string, *tls.Conn) http.RoundTripper{},
+			// Make Expect:100-continue load-bearing: with a non-zero timeout the
+			// client WAITS for the proxy's 100 before sending the body (Go's
+			// zero-value sends immediately, which would mask a missing 100).
+			ExpectContinueTimeout: 10 * time.Second,
 			DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				host, _, err := net.SplitHostPort(addr)
 				if err != nil {
@@ -378,6 +359,38 @@ func TestNeverInjectCDNPassthrough(t *testing.T) {
 	resp.Body.Close()
 	if got := h.gh.last().Auth; got != "Bearer client-supplied" {
 		t.Errorf("CDN auth = %q, want the client's own untouched", got)
+	}
+}
+
+func TestHopByHopHeadersStripped(t *testing.T) {
+	// Capture the full upstream header set for this case.
+	var gotHeaders http.Header
+	h := newHarness(t, harnessOpts{
+		respond: func(w http.ResponseWriter, r *http.Request) {
+			gotHeaders = r.Header.Clone()
+			io.WriteString(w, "ok")
+		},
+	})
+	c := h.httpClient(false)
+	req, _ := http.NewRequest("GET", "https://api.github.com/repos/o/r", nil)
+	// A connection-token'd custom header plus a proxy-auth header must not reach
+	// upstream (RFC 7230 §6.1 hop-by-hop, CP1 recipe point 5).
+	req.Header.Set("Connection", "X-Custom-Hop")
+	req.Header.Set("X-Custom-Hop", "secret")
+	req.Header.Set("Proxy-Authorization", "Basic sniff")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if gotHeaders.Get("X-Custom-Hop") != "" {
+		t.Errorf("Connection-listed header X-Custom-Hop reached upstream")
+	}
+	if gotHeaders.Get("Proxy-Authorization") != "" {
+		t.Errorf("Proxy-Authorization reached upstream")
+	}
+	if gotHeaders.Get("Connection") != "" {
+		t.Errorf("Connection header reached upstream")
 	}
 }
 
@@ -587,5 +600,37 @@ func TestGraphQLMutationIsWrite(t *testing.T) {
 	// The buffered body must still reach upstream intact.
 	if h.gh.last().BodyN != len(q) {
 		t.Errorf("graphql body bytes = %d, want %d", h.gh.last().BodyN, len(q))
+	}
+}
+
+// TestGraphQLExpect100Continue guards the deadlock: a graphql POST that waits
+// for 100 Continue before sending its body must NOT hang in the classifier's
+// body buffering — 100 must be answered before any body read.
+func TestGraphQLExpect100Continue(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	c := h.httpClient(false)
+	q := `{"query":"mutation { addStar(input:{starrableId:\"x\"}) { clientMutationId } }"}`
+	req, _ := http.NewRequest("POST", "https://api.github.com/graphql", strings.NewReader(q))
+	req.Header.Set("Expect", "100-continue")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Errorf("graphql expect-continue: %v", err)
+			return
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Errorf("status = %d", resp.StatusCode)
+		}
+		if h.gh.last().BodyN != len(q) {
+			t.Errorf("graphql body bytes = %d, want %d", h.gh.last().BodyN, len(q))
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("graphql Expect:100-continue deadlocked (body read before 100 reply)")
 	}
 }
