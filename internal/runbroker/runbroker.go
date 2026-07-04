@@ -102,6 +102,14 @@ func Start(cfg Config) (*Host, error) {
 	if cfg.CAKeystore == nil {
 		return nil, errors.New("runbroker: CAKeystore is required")
 	}
+	// Fail closed on a misspelled scope knob: anything but the two known values
+	// would otherwise silently mean "allow" (brokercore treats non-"refuse" as
+	// allow), fail-open on a typo.
+	switch cfg.EmptyPathScope {
+	case "", "allow", "refuse":
+	default:
+		return nil, errors.New(`runbroker: EmptyPathScope must be "", "allow", or "refuse"`)
+	}
 
 	ca, err := proxy.LoadOrCreateCA(cfg.CAKeystore)
 	if err != nil {

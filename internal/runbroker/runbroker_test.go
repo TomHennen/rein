@@ -1,6 +1,7 @@
 package runbroker
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -177,6 +178,48 @@ func TestHostCloseRemovesSocket(t *testing.T) {
 	// Second Close is a no-op.
 	if err := h.Close(); err != nil {
 		t.Errorf("second Close: %v", err)
+	}
+}
+
+func TestHostCloseTerminatesInflightConn(t *testing.T) {
+	h, _ := startHost(t, Config{SessionID: "s", EmptyPathScope: "allow"})
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(h.CACertPEM())
+
+	// Open a raw keep-alive TLS conn and complete one request so the handler is
+	// live and looping for the next request.
+	raw, err := net.Dial("unix", h.SocketPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc := tls.Client(raw, &tls.Config{ServerName: "api.github.com", RootCAs: pool, NextProtos: []string{"http/1.1"}})
+	if err := tc.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	defer tc.Close()
+	io.WriteString(tc, "GET /repos/o/r HTTP/1.1\r\nHost: api.github.com\r\n\r\n")
+	br := bufio.NewReader(tc)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read first response: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body) // drain the body so br holds no leftover bytes
+	resp.Body.Close()
+
+	// Close must terminate the in-flight connection (capability must not
+	// outlive the run) and must not hang.
+	done := make(chan struct{})
+	go func() { h.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Host.Close hung with an in-flight connection")
+	}
+
+	// The server side must be closed now: a read returns EOF/err promptly.
+	tc.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := br.ReadByte(); err == nil {
+		t.Errorf("in-flight connection still readable after Close; capability outlived the run")
 	}
 }
 

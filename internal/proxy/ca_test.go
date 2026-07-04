@@ -54,6 +54,29 @@ func TestCACertPEMIsCAOnly(t *testing.T) {
 	}
 }
 
+func TestLeafCacheCaseInsensitive(t *testing.T) {
+	ks := keystore.NewFileKeystore(t.TempDir())
+	ca, err := LoadOrCreateCA(ks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Case variants of an allowed host must collapse to ONE cache entry — else
+	// an in-sandbox client enumerates variants to grow memory unbounded.
+	a, _ := ca.getLeaf(&tls.ClientHelloInfo{ServerName: "GitHub.com"})
+	b, _ := ca.getLeaf(&tls.ClientHelloInfo{ServerName: "github.com"})
+	if a != b {
+		t.Errorf("case-variant SNI produced distinct cached leaves")
+	}
+	if len(ca.leaves) != 1 {
+		t.Errorf("leaf cache size = %d, want 1", len(ca.leaves))
+	}
+	// An unknown host is served a leaf but NOT cached (bounded).
+	ca.getLeaf(&tls.ClientHelloInfo{ServerName: "evil.example.com"})
+	if len(ca.leaves) != 1 {
+		t.Errorf("unknown host was cached; leaf cache size = %d, want 1", len(ca.leaves))
+	}
+}
+
 func TestLeafSignedByCA(t *testing.T) {
 	ks := keystore.NewFileKeystore(t.TempDir())
 	ca, err := LoadOrCreateCA(ks)

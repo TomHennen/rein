@@ -23,6 +23,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
@@ -176,7 +177,12 @@ func (c *CA) CertPEM() []byte {
 // SNI (host == "") is served a leaf CN'd "unknown"; the request is rejected
 // later by the SNI==Host check, so this only needs to complete the handshake.
 func (c *CA) getLeaf(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	host := hello.ServerName
+	// Lowercase the SNI so case variants collapse to one cache entry. TLS does
+	// NOT normalize SNI case, so without this an in-sandbox client could
+	// enumerate case variants of an allowed host to grow the cache unbounded —
+	// defeating cacheableLeafHost's bound. DNS name matching is case-insensitive,
+	// so a lowercase leaf still validates against a mixed-case SNI.
+	host := strings.ToLower(hello.ServerName)
 	if host == "" {
 		host = "unknown"
 	}
@@ -231,7 +237,7 @@ func cacheableLeafHost(host string) bool {
 func (c *CA) leafCached(host string) bool {
 	c.leafMu.Lock()
 	defer c.leafMu.Unlock()
-	_, ok := c.leaves[host]
+	_, ok := c.leaves[strings.ToLower(host)]
 	return ok
 }
 

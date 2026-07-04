@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/TomHennen/rein/internal/brokercore"
@@ -99,16 +100,35 @@ func defaultTransport() *http.Transport {
 	}
 }
 
-// Serve accepts connections on ln until ctx is cancelled or ln is closed.
+// Serve accepts connections on ln until ctx is cancelled or ln is closed, then
+// returns nil ONLY after every in-flight connection has been closed and its
+// handler has returned. Cancelling the context is a hard stop: the capability
+// (design §5.3) must not outlive the run, so accepted connections — which hold
+// an already-granted write approval and can keep minting — are force-closed,
+// not merely drained. The caller's Close relies on this to know the socket and
+// all token traffic are truly gone on return.
 func (p *Proxy) Serve(ctx context.Context, ln net.Listener) error {
+	var (
+		mu      sync.Mutex
+		conns   = map[net.Conn]struct{}{}
+		closing bool
+		wg      sync.WaitGroup
+	)
 	go func() {
 		<-ctx.Done()
+		mu.Lock()
+		closing = true
 		ln.Close()
+		for c := range conns {
+			c.Close() // kills the TLS read loop → handleConn returns
+		}
+		mu.Unlock()
 	}()
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
+				wg.Wait() // block until every in-flight handler has finished
 				return nil
 			}
 			// Transient accept error — back off so a persistent one doesn't
@@ -116,7 +136,24 @@ func (p *Proxy) Serve(ctx context.Context, ln net.Listener) error {
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
-		go p.handleConn(conn)
+		mu.Lock()
+		if closing {
+			mu.Unlock()
+			conn.Close()
+			continue
+		}
+		conns[conn] = struct{}{}
+		wg.Add(1)
+		mu.Unlock()
+		go func() {
+			defer wg.Done()
+			defer func() {
+				mu.Lock()
+				delete(conns, conn)
+				mu.Unlock()
+			}()
+			p.handleConn(conn)
+		}()
 	}
 }
 
