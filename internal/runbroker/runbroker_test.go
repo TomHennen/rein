@@ -1,0 +1,207 @@
+package runbroker
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/TomHennen/rein/internal/keystore"
+)
+
+// fakeUpstream records the Authorization header the proxy forwarded upstream.
+type fakeUpstream struct {
+	mu   sync.Mutex
+	auth string
+	host string
+}
+
+func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	io.Copy(io.Discard, r.Body)
+	f.mu.Lock()
+	f.auth = r.Header.Get("Authorization")
+	f.host = r.Host
+	f.mu.Unlock()
+	io.WriteString(w, "ok")
+}
+
+func (f *fakeUpstream) lastAuth() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.auth
+}
+
+func startHost(t *testing.T, opts Config) (*Host, *fakeUpstream) {
+	t.Helper()
+
+	up := &fakeUpstream{}
+	srv := httptest.NewUnstartedServer(up)
+	srv.EnableHTTP2 = false
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	ghURL, _ := url.Parse(srv.URL)
+
+	opts.Upstream = &http.Transport{
+		DisableCompression: true,
+		ForceAttemptHTTP2:  false,
+		TLSNextProto:       map[string]func(string, *tls.Conn) http.RoundTripper{},
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "tcp", ghURL.Host)
+		},
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	if opts.Logger == nil {
+		opts.Logger = log.New(io.Discard, "", 0)
+	}
+	if opts.CAKeystore == nil {
+		opts.CAKeystore = keystore.NewFileKeystore(t.TempDir())
+	}
+	if opts.SocketPath == "" {
+		opts.SocketPath = filepath.Join(t.TempDir(), "run", "proxy.sock")
+	}
+	if opts.MintRead == nil {
+		opts.MintRead = func(context.Context) (string, time.Time, error) {
+			return "READ-TOK", time.Now().Add(time.Hour), nil
+		}
+	}
+	if opts.MintWrite == nil {
+		opts.MintWrite = func(context.Context) (string, time.Time, error) {
+			return "WRITE-TOK", time.Now().Add(time.Hour), nil
+		}
+	}
+
+	h, err := Start(opts)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { h.Close() })
+	return h, up
+}
+
+// clientThrough builds an http.Client that reaches the host's proxy socket via
+// TLS, trusting the host's CA.
+func clientThrough(t *testing.T, h *Host) *http.Client {
+	t.Helper()
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(h.CACertPEM()) {
+		t.Fatal("append CA")
+	}
+	return &http.Client{
+		Transport: &http.Transport{
+			ForceAttemptHTTP2: false,
+			TLSNextProto:      map[string]func(string, *tls.Conn) http.RoundTripper{},
+			DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				host, _, err := net.SplitHostPort(addr)
+				if err != nil {
+					host = addr
+				}
+				raw, err := net.Dial("unix", h.SocketPath())
+				if err != nil {
+					return nil, err
+				}
+				tc := tls.Client(raw, &tls.Config{ServerName: host, RootCAs: pool, NextProtos: []string{"http/1.1"}})
+				if err := tc.Handshake(); err != nil {
+					raw.Close()
+					return nil, err
+				}
+				return tc, nil
+			},
+		},
+	}
+}
+
+func TestHostInjectsEndToEnd(t *testing.T) {
+	h, up := startHost(t, Config{SessionID: "s", EmptyPathScope: "allow"})
+	c := clientThrough(t, h)
+
+	resp, err := c.Get("https://api.github.com/repos/o/r")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if up.lastAuth() != "Bearer READ-TOK" {
+		t.Errorf("upstream auth = %q, want Bearer READ-TOK", up.lastAuth())
+	}
+	if strings.Contains(string(body), "READ-TOK") {
+		t.Errorf("response leaked token")
+	}
+}
+
+func TestHostScopeRefusal(t *testing.T) {
+	h, up := startHost(t, Config{
+		SessionID: "s",
+		InScope:   func(repo string) bool { return strings.HasPrefix(strings.ToLower(repo), "allowed/") },
+	})
+	c := clientThrough(t, h)
+	resp, err := c.Get("https://github.com/other/repo.git/info/refs?service=git-upload-pack")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	if up.lastAuth() != "" {
+		t.Errorf("out-of-scope request reached upstream (auth=%q)", up.lastAuth())
+	}
+}
+
+func TestHostCloseRemovesSocket(t *testing.T) {
+	h, _ := startHost(t, Config{SessionID: "s", EmptyPathScope: "allow"})
+	sock := h.SocketPath()
+	if _, err := os.Stat(sock); err != nil {
+		t.Fatalf("socket not created: %v", err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(sock); !os.IsNotExist(err) {
+		t.Errorf("socket still present after Close: stat err = %v", err)
+	}
+	// Second Close is a no-op.
+	if err := h.Close(); err != nil {
+		t.Errorf("second Close: %v", err)
+	}
+}
+
+func TestHostPlacementFailsClosed(t *testing.T) {
+	bind := t.TempDir()
+	_, err := Start(Config{
+		SessionID:     "s",
+		SocketPath:    filepath.Join(bind, "proxy.sock"),
+		ForbiddenDirs: []string{bind},
+		Logger:        log.New(io.Discard, "", 0),
+		CAKeystore:    keystore.NewFileKeystore(t.TempDir()),
+	})
+	if err == nil {
+		t.Fatal("Start allowed a socket inside a forbidden bind-mount")
+	}
+}
+
+func TestHostCACertReusedAcrossRestart(t *testing.T) {
+	ks := keystore.NewFileKeystore(t.TempDir())
+	h1, _ := startHost(t, Config{SessionID: "s", CAKeystore: ks, EmptyPathScope: "allow"})
+	pem1 := append([]byte(nil), h1.CACertPEM()...)
+	h1.Close()
+
+	h2, _ := startHost(t, Config{SessionID: "s", CAKeystore: ks, EmptyPathScope: "allow"})
+	if !bytes.Equal(pem1, h2.CACertPEM()) {
+		t.Errorf("CA cert changed across host restart; not persisted/reused")
+	}
+}
