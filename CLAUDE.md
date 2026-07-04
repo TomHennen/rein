@@ -21,7 +21,14 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 
 ## Libraries (don't reinvent these)
 
-- Proxy: `github.com/elazarl/goproxy` (BSD)
+- Proxy: **hand-rolled** in `internal/proxy` (the CP1 relay recipe), NOT
+  goproxy. Do not "helpfully" swap goproxy back in: srt hands rein an
+  opaque byte tunnel to a unix socket (`mitmProxy.socketPath`) that rein
+  must TLS-terminate, inject into, and relay itself, and the injection
+  invariants (SNI==Host, per-host-class inject, no token on the response
+  path, HTTP/1.1-only relay, ContentLength/TransferEncoding copy,
+  no-redirect-follow) need direct control of the request/response loop —
+  goproxy's shape doesn't fit either the socket hook or those invariants.
 - GitHub App tokens: `github.com/jferrl/go-githubauth` (MIT)
 - Key storage: `github.com/99designs/keyring` (MIT) — uses Secret Service backend (libsecret/D-Bus) on Linux when available, file backend otherwise
 - Hardware keys (Phase 1+): `github.com/facebookincubator/sks` (Apache 2.0). Not used in Phase 0.
