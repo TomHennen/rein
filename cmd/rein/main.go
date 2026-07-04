@@ -176,10 +176,9 @@ func runCredentialHelper(action string) error {
 	if err != nil {
 		return err
 	}
-	// Override the App config's repo with the session's first repo. CP4
-	// has single-repo sessions; multi-repo sessions in CP5+ will need
-	// per-mint repo selection.
-	appCfg.RepoName = bareRepoName(sess.Repos[0])
+	// Scope the App config to the session's FULL repo set so the minted token
+	// covers every repo the scope check accepts (issue #10).
+	appCfg.RepoNames = sess.BareRepoNames()
 	logger.Printf("session: id=%q role=%q repos=%v source=%s", sess.ID, sess.Role, sess.Repos, sessSource)
 
 	return runCredentialHelperWithConfig(action, os.Stdin, os.Stdout, os.Stderr, appCfg, ks, sess, stateDir, logger)
@@ -591,7 +590,7 @@ func ghAuth() error {
 	if err != nil {
 		return err
 	}
-	appCfg.RepoName = bareRepoName(sess.Repos[0])
+	appCfg.RepoNames = sess.BareRepoNames()
 	logger.Printf("gh-auth session: id=%q repos=%v source=%s", sess.ID, sess.Repos, sessSource)
 
 	stateDir, err := config.StateDir()

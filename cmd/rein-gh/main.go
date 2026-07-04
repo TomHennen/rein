@@ -178,7 +178,7 @@ func loadAppCfgWithSession(logger *log.Logger) (githubapp.Config, keystore.Keyst
 	if err != nil {
 		return githubapp.Config{}, nil, session.Session{}, fmt.Errorf("load session: %w", err)
 	}
-	appCfg.RepoName = bareRepoName(sess.Repos[0])
+	appCfg.RepoNames = sess.BareRepoNames()
 	logger.Printf("session: id=%q repos=%v source=%s", sess.ID, sess.Repos, src)
 	return appCfg, ks, sess, nil
 }
@@ -261,17 +261,6 @@ func envInt(name string) int {
 		return 0
 	}
 	return n
-}
-
-// bareRepoName extracts the "name" half of "owner/name". The App
-// installation already pins the owner, so the mint API only accepts the
-// bare name.
-func bareRepoName(ownerSlashName string) string {
-	_, name, ok := strings.Cut(ownerSlashName, "/")
-	if !ok {
-		return ownerSlashName
-	}
-	return name
 }
 
 // runWrite mints a fresh write-tier token (no cache), forks the real gh

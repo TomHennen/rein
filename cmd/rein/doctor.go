@@ -313,11 +313,12 @@ func checkAppMint() checkResult {
 		return checkResult{"app credentials", statusWarn,
 			"install-id not cached; `rein run` will fetch it on next launch (App not yet installed, or first run)"}
 	}
-	// On the state path ResolveApp leaves RepoName empty; MintReadOnlyToken
-	// needs it. Set it from the session, matching the helper / rein-gh.
-	if appCfg.RepoName == "" {
+	// On the state path ResolveApp leaves RepoNames empty; MintReadOnlyToken
+	// needs at least one. Set them from the session, matching the helper /
+	// rein-gh.
+	if len(appCfg.RepoNames) == 0 {
 		if sess, _, serr := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A")); serr == nil && len(sess.Repos) > 0 {
-			appCfg.RepoName = bareRepoName(sess.Repos[0])
+			appCfg.RepoNames = sess.BareRepoNames()
 		}
 	}
 	client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)

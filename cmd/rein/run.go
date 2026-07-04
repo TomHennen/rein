@@ -393,7 +393,7 @@ func productionRevoke(sess session.Session) revokeTokenFunc {
 		if err != nil {
 			return err
 		}
-		appCfg.RepoName = bareRepoName(sess.Repos[0])
+		appCfg.RepoNames = sess.BareRepoNames()
 		client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
 		if err != nil {
 			return err

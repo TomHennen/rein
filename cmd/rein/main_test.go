@@ -26,7 +26,7 @@ func TestCredentialHelper_TMG8_OnMissingInstallID(t *testing.T) {
 	appCfg := githubapp.Config{
 		ClientID:       "Iv23li-test",
 		InstallationID: 0, // uncached -> NewClient will reject inside the closure
-		RepoName:       "name",
+		RepoNames:      []string{"name"},
 	}
 	// A FileKeystore on an empty dir; never actually reached because the
 	// id==0 check in NewClient fails first, but it satisfies the signature.

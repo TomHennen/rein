@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TomHennen/rein/internal/brokercore"
 	"gopkg.in/yaml.v3"
 )
 
@@ -65,6 +66,23 @@ type Session struct {
 	Issue int `yaml:"issue,omitempty"`
 }
 
+// BareRepoNames returns the "name" halves of the session's "owner/name"
+// repos. The App installation pins the owner, so the installation-token mint
+// API only accepts bare names; the minted token is scoped to this full set
+// (issue #10: token scope == the Contains scope ceiling). An entry without an
+// owner is passed through unchanged.
+func (s *Session) BareRepoNames() []string {
+	names := make([]string, 0, len(s.Repos))
+	for _, r := range s.Repos {
+		if _, name, ok := strings.Cut(r, "/"); ok {
+			names = append(names, name)
+		} else {
+			names = append(names, r)
+		}
+	}
+	return names
+}
+
 // Contains reports whether the given owner/name is within this
 // session's scope ceiling. The comparison is case-insensitive (GitHub
 // is case-preserving but case-insensitive on path), and tolerates a
@@ -82,22 +100,20 @@ func (s *Session) Contains(repo string) bool {
 	return false
 }
 
-// normalizeRepo strips ".git" suffix (case-insensitive), trims trailing
-// slashes, takes the first two slash-separated segments (owner/name),
-// and lowercases. Returns "" if the input doesn't have an owner/name
-// shape.
+// normalizeRepo canonicalizes an "owner/name" for case-insensitive scope
+// comparison. It delegates the parsing (strip ".git", trailing slash, take
+// the first two segments) to the single canonical helper
+// brokercore.RepoFromPath (issue #11 — previously broker.pathToRepo,
+// session.normalizeRepo, and the proxy each parsed repo paths their own way),
+// then lowercases (GitHub is case-preserving but case-insensitive on path).
+// Returns "" if the input isn't owner/name-shaped.
+//
+// One behavior delta vs. the prior hand-rolled parse: RepoFromPath strips a
+// leading "/", so "/owner/name" now normalizes to "owner/name" instead of ""
+// — strictly more lenient, and safe (it only ever accepts a genuine
+// owner/name, never a malformed string, as in-scope).
 func normalizeRepo(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.TrimSuffix(s, "/")
-	// Case-insensitive ".git" strip.
-	if len(s) >= 4 && strings.EqualFold(s[len(s)-4:], ".git") {
-		s = s[:len(s)-4]
-	}
-	parts := strings.SplitN(s, "/", 3)
-	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
-		return ""
-	}
-	return strings.ToLower(parts[0] + "/" + parts[1])
+	return strings.ToLower(brokercore.RepoFromPath(s))
 }
 
 // LoadFromFile parses a YAML session file at path. Returns an error

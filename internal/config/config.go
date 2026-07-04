@@ -79,7 +79,7 @@ func LoadAppConfig() (githubapp.Config, keystore.Keystore, error) {
 	cfg := githubapp.Config{
 		ClientID:       os.Getenv("REIN_APP_CLIENT_ID"),
 		InstallationID: installationID,
-		RepoName:       repoName,
+		RepoNames:      []string{repoName},
 	}
 	ks := keystore.NewSingleFileKeystore(AppKeystoreRole, os.Getenv("REIN_APP_PRIVATE_KEY_PATH"))
 	return cfg, ks, nil
@@ -100,7 +100,7 @@ func LoadAppConfig() (githubapp.Config, keystore.Keystore, error) {
 //     InstallationID may be 0 (uncached) with a NIL error — callers that need
 //     a non-zero id construct githubapp.Client LAZILY so a zero id degrades
 //     to a mint error (TM-G8 placeholder in the helper), never an early
-//     return. RepoName is left empty; every caller overrides it from the
+//     return. RepoNames is left empty; every caller overrides it from the
 //     session before constructing the client.
 //  3. else -> fail closed.
 //
@@ -134,7 +134,7 @@ func ResolveApp() (githubapp.Config, keystore.Keystore, AppSource, error) {
 			cfg := githubapp.Config{
 				ClientID:       s.Primary.ClientID,
 				InstallationID: s.Primary.InstallationID, // may be 0 (uncached)
-				// RepoName intentionally empty; callers set it from the session.
+				// RepoNames intentionally empty; callers set them from the session.
 			}
 			ks := keystore.NewFileKeystore(configDir)
 			return cfg, ks, SourceState, nil
