@@ -44,7 +44,8 @@ type Config struct {
 	RepoNames []string
 }
 
-// Client mints installation tokens for a single repository.
+// Client mints installation tokens scoped to the session's repository set
+// (Config.RepoNames).
 //
 // The private key is fetched from the Keystore lazily inside each Mint*
 // call so the Client never holds key material across calls. This is the

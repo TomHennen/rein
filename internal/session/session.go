@@ -69,15 +69,23 @@ type Session struct {
 // BareRepoNames returns the "name" halves of the session's "owner/name"
 // repos. The App installation pins the owner, so the installation-token mint
 // API only accepts bare names; the minted token is scoped to this full set
-// (issue #10: token scope == the Contains scope ceiling). An entry without an
-// owner is passed through unchanged.
+// (issue #10: token scope == the Contains scope ceiling).
+//
+// The bare name is derived from the NORMALIZED form (brokercore.RepoFromPath —
+// the same parser Validate/Contains use), NOT a raw strings.Cut: a session
+// entry like "owner/name.git", "/owner/name", or "owner/name/" Validates fine
+// but a raw Cut would yield "name.git" / a leading-slash-mangled owner, which
+// GitHub 422s at mint → every credential silently degrades to the mint-failed
+// placeholder (proxy 502) with nothing pointing at the cause (issue #10 F2).
+// Case is preserved (RepoFromPath does not lowercase); GitHub matches repo
+// names case-insensitively at mint. An unparseable entry is skipped (Validate
+// already rejects those, so this is defensive).
 func (s *Session) BareRepoNames() []string {
 	names := make([]string, 0, len(s.Repos))
 	for _, r := range s.Repos {
-		if _, name, ok := strings.Cut(r, "/"); ok {
+		norm := brokercore.RepoFromPath(r)
+		if _, name, ok := strings.Cut(norm, "/"); ok && name != "" {
 			names = append(names, name)
-		} else {
-			names = append(names, r)
 		}
 	}
 	return names
