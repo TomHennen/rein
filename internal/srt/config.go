@@ -90,6 +90,15 @@ type Params struct {
 	// WorkingTree is the agent's repo checkout — the single allowWrite path.
 	WorkingTree string
 
+	// ExtraAllowedDomains are additional egress hosts the operator opted into
+	// (the wrapped agent's own API, npm, PyPI, …). They are appended to srt's
+	// allowedDomains — egress-allowed but NEVER injected: they are deliberately
+	// kept OUT of mitmProxy.domains, so each gets a direct end-to-end TLS tunnel
+	// to itself (no rein token), validated against the system roots in the CA
+	// bundle. The caller resolves + merges these from the built-in default, the
+	// session's allow_domains, and REIN_ALLOW_DOMAINS (see ResolveExtraAllowedDomains).
+	ExtraAllowedDomains []string
+
 	// ExtraAllowWrite are additional writable dirs the caller opted into
 	// (e.g. a scratch/output dir). Each becomes an allowWrite bind AND a
 	// forbidden dir for the socket placement check.
@@ -142,9 +151,18 @@ func Build(p Params) (Config, error) {
 		}
 	}
 
-	allowed := make([]string, 0, len(proxy.InjectHosts)+len(proxy.CDNHosts))
+	// allowedDomains = the GitHub inject + CDN hosts, plus the operator's extra
+	// egress hosts. The extras go here ONLY (never into mitmProxy.domains below),
+	// so a non-GitHub host is passed through to its real endpoint uninjected.
+	// Lowercase + dedupe so an extra domain that duplicates an inject/CDN host
+	// (e.g. someone lists github.com) collapses instead of double-listing — a
+	// duplicate can never create an injection gap (injection is driven by the
+	// exact mitmProxy.domains, not the allowlist), so dedupe, don't error.
+	allowed := make([]string, 0, len(proxy.InjectHosts)+len(proxy.CDNHosts)+len(p.ExtraAllowedDomains))
 	allowed = append(allowed, proxy.InjectHosts...)
 	allowed = append(allowed, proxy.CDNHosts...)
+	allowed = append(allowed, p.ExtraAllowedDomains...)
+	allowed = dedupeLowerKeepOrder(allowed)
 
 	allowWrite := make([]string, 0, 1+len(p.ExtraAllowWrite))
 	allowWrite = append(allowWrite, filepath.Clean(p.WorkingTree))
@@ -207,6 +225,19 @@ func (c Config) Validate() error {
 	if len(n.MitmProxy.Domains) == 0 {
 		return fmt.Errorf("srt: mitmProxy.domains is empty (nothing would be injected)")
 	}
+	// Guard the allowlist itself against an over-broad wildcard that would defeat
+	// strictAllowlist. Exact hosts and strict `*.suffix` wildcards are fine (extra
+	// egress domains may legitimately be wildcards — the caller WARNs on those);
+	// a bare `*` (or an empty entry) would allow ALL egress and is rejected.
+	for _, d := range n.AllowedDomains {
+		dl := strings.ToLower(strings.TrimSpace(d))
+		if dl == "" {
+			return fmt.Errorf("srt: allowedDomains contains an empty entry")
+		}
+		if strings.Contains(dl, "*") && (dl == "*" || !strings.HasPrefix(dl, "*.") || strings.Count(dl, "*") != 1) {
+			return fmt.Errorf("srt: allowedDomains entry %q is an over-broad wildcard (only exact hosts or *.suffix are permitted; a bare * would allow all egress)", d)
+		}
+	}
 	allowedSet := toSet(n.AllowedDomains)
 	cdnSet := toSet(proxy.CDNHosts)
 	for _, d := range n.MitmProxy.Domains {
@@ -259,6 +290,23 @@ func cleanAll(in []string) []string {
 			continue
 		}
 		out = append(out, filepath.Clean(p))
+	}
+	return out
+}
+
+// dedupeLowerKeepOrder lowercases + trims each entry (dropping a trailing FQDN
+// dot and empties) and removes duplicates, preserving first-occurrence order so
+// the GitHub inject/CDN hosts stay ahead of the operator's extras.
+func dedupeLowerKeepOrder(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, d := range in {
+		k := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(d), ".")))
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, k)
 	}
 	return out
 }

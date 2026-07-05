@@ -102,6 +102,76 @@ func TestBuildGoldenShape(t *testing.T) {
 	}
 }
 
+// TestBuildThreadsExtraDomainsEgressOnly asserts CP4.5's core invariant: extra
+// egress domains land in allowedDomains (egress-allowed) but NEVER in
+// mitmProxy.domains (never injected), and a duplicate/GitHub host dedupes.
+func TestBuildThreadsExtraDomainsEgressOnly(t *testing.T) {
+	cfg, err := Build(Params{
+		SocketPath:  "/run/user/1000/rein/run-x/proxy.sock",
+		WorkingTree: "/home/dev/work/repo",
+		ExtraAllowedDomains: []string{
+			"api.anthropic.com",
+			"registry.npmjs.org",
+			"*.internal.example.com",
+			"github.com", // duplicate of an inject host -> must dedupe, not double-list
+		},
+	})
+	if err != nil {
+		t.Fatalf("Build with extra domains: %v", err)
+	}
+
+	// Each extra host is egress-allowed.
+	for _, want := range []string{"api.anthropic.com", "registry.npmjs.org", "*.internal.example.com"} {
+		if !contains(cfg.Network.AllowedDomains, want) {
+			t.Errorf("extra domain %q missing from allowedDomains: %v", want, cfg.Network.AllowedDomains)
+		}
+	}
+	// github.com appears exactly once (deduped against the inject host).
+	var ghCount int
+	for _, d := range cfg.Network.AllowedDomains {
+		if d == "github.com" {
+			ghCount++
+		}
+	}
+	if ghCount != 1 {
+		t.Errorf("github.com should appear once in allowedDomains, got %d: %v", ghCount, cfg.Network.AllowedDomains)
+	}
+
+	// NONE of the extra hosts may be injected — mitmProxy.domains stays EXACTLY
+	// the three GitHub inject hosts.
+	if len(cfg.Network.MitmProxy.Domains) != 3 {
+		t.Fatalf("mitmProxy.domains must stay the 3 inject hosts, got %v", cfg.Network.MitmProxy.Domains)
+	}
+	for _, d := range cfg.Network.MitmProxy.Domains {
+		if d == "api.anthropic.com" || d == "registry.npmjs.org" || strings.Contains(d, "*") {
+			t.Errorf("extra/egress host %q leaked into mitmProxy.domains (would be injected!)", d)
+		}
+	}
+}
+
+// TestValidateRejectsAllowAllWildcard: a bare `*` (or empty) in allowedDomains
+// defeats strictAllowlist and must be rejected; a strict *.suffix is fine.
+func TestValidateRejectsAllowAllWildcard(t *testing.T) {
+	good, err := Build(Params{SocketPath: "/run/s.sock", WorkingTree: "/w"})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	// *.suffix is accepted.
+	okWild := deepCopy(t, good)
+	okWild.Network.AllowedDomains = append(okWild.Network.AllowedDomains, "*.anthropic.com")
+	if err := okWild.Validate(); err != nil {
+		t.Errorf("Validate rejected a legal *.suffix in allowedDomains: %v", err)
+	}
+	// bare * / empty are rejected.
+	for _, bad := range []string{"*", "", "*.*"} {
+		c := deepCopy(t, good)
+		c.Network.AllowedDomains = append(c.Network.AllowedDomains, bad)
+		if err := c.Validate(); err == nil {
+			t.Errorf("Validate accepted over-broad allowedDomains entry %q", bad)
+		}
+	}
+}
+
 func TestBuildRejectsBadInput(t *testing.T) {
 	if _, err := Build(Params{WorkingTree: "/x"}); err == nil {
 		t.Error("Build allowed empty SocketPath")
