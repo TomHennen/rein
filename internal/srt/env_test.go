@@ -30,6 +30,11 @@ func TestBuildEnvIsStrictAllowlist(t *testing.T) {
 		"GH_TOKEN=ghp_parent_should_not_win",
 		// A parent SSL_CERT_FILE must NOT survive — BuildEnv sets the bundle.
 		"SSL_CERT_FILE=/parent/wrong.pem",
+		// Parent git identity/config must NOT survive — rein sets its own (or,
+		// as here with no identity supplied, drops the author vars entirely).
+		"GIT_AUTHOR_NAME=Attacker",
+		"GIT_AUTHOR_EMAIL=attacker@evil.test",
+		"GIT_CONFIG_GLOBAL=/parent/wrong-gitconfig",
 	}
 	env := BuildEnv(EnvParams{
 		Parent:       dirty,
@@ -52,6 +57,9 @@ func TestBuildEnvIsStrictAllowlist(t *testing.T) {
 		"GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "SSH_AUTH_SOCK",
 		"DBUS_SESSION_BUS_ADDRESS", "GPG_AGENT_INFO",
 		"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "TMPDIR",
+		// No identity supplied -> author vars absent; a parent GIT_CONFIG_GLOBAL
+		// must never leak through (rein owns it).
+		"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_CONFIG_GLOBAL",
 	}
 	for _, name := range forbidden {
 		if _, ok := got[name]; ok {
@@ -85,14 +93,63 @@ func TestBuildEnvIsStrictAllowlist(t *testing.T) {
 		t.Errorf("GH_TOKEN = %q, want the stub (parent value must not win)", got["GH_TOKEN"])
 	}
 
-	// The full set is ONLY passthrough + CA vars + GH_TOKEN — nothing else.
-	allowed := map[string]bool{"PATH": true, "HOME": true, "LANG": true, "LC_ALL": true, "TERM": true, "GH_TOKEN": true}
+	// GIT_CONFIG_SYSTEM is pinned to /dev/null unconditionally (no /etc/gitconfig
+	// leak), even when no identity is supplied.
+	if got["GIT_CONFIG_SYSTEM"] != "/dev/null" {
+		t.Errorf("GIT_CONFIG_SYSTEM = %q, want /dev/null", got["GIT_CONFIG_SYSTEM"])
+	}
+
+	// The full set is ONLY passthrough + CA vars + GH_TOKEN + GIT_CONFIG_SYSTEM
+	// (no identity supplied here) — nothing else.
+	allowed := map[string]bool{"PATH": true, "HOME": true, "LANG": true, "LC_ALL": true, "TERM": true, "GH_TOKEN": true, "GIT_CONFIG_SYSTEM": true}
 	for _, name := range caEnvVars {
 		allowed[name] = true
 	}
 	for k := range got {
 		if !allowed[k] {
 			t.Errorf("unexpected env var %q in sandbox env", k)
+		}
+	}
+}
+
+// TestBuildEnvGitIdentity asserts the four GIT_*_NAME/EMAIL vars and
+// GIT_CONFIG_GLOBAL are set to exactly the resolved identity when supplied — the
+// unit-level guarantee that a sandboxed commit resolves rein's non-impersonating
+// identity, not the developer's (the live author check needs a real push, per
+// the manual script).
+func TestBuildEnvGitIdentity(t *testing.T) {
+	env := BuildEnv(EnvParams{
+		Parent:              []string{"HOME=/home/dev"},
+		CABundlePath:        "/run/ca-bundle.pem",
+		StubGHToken:         "stub-tok",
+		GitAuthorName:       "Tom Hennen (via rein)",
+		GitAuthorEmail:      "287259336+agentcreds-validation-beef[bot]@users.noreply.github.com",
+		GitConfigGlobalPath: "/run/rein/gitconfig",
+	})
+	got := map[string]string{}
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		got[k] = v
+	}
+
+	wantName := "Tom Hennen (via rein)"
+	wantEmail := "287259336+agentcreds-validation-beef[bot]@users.noreply.github.com"
+	for _, tc := range []struct{ k, want string }{
+		{"GIT_AUTHOR_NAME", wantName},
+		{"GIT_COMMITTER_NAME", wantName},
+		{"GIT_AUTHOR_EMAIL", wantEmail},
+		{"GIT_COMMITTER_EMAIL", wantEmail},
+		{"GIT_CONFIG_GLOBAL", "/run/rein/gitconfig"},
+		{"GIT_CONFIG_SYSTEM", "/dev/null"},
+	} {
+		if got[tc.k] != tc.want {
+			t.Errorf("%s = %q, want %q", tc.k, got[tc.k], tc.want)
+		}
+	}
+	// The dev's real email must NEVER appear anywhere in the sandbox env.
+	for _, kv := range env {
+		if strings.Contains(kv, "tom.hennen@gmail.com") {
+			t.Errorf("developer email leaked into sandbox env: %q", kv)
 		}
 	}
 }

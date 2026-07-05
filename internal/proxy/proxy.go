@@ -48,6 +48,13 @@ type Config struct {
 	// approval pause (those come after the request is read). Zero uses
 	// defaultIdleTimeout. (C1)
 	IdleTimeout time.Duration
+
+	// OnActivity, if set, is called once per handled request (before the
+	// decision) — the per-request signal the run-level idle/hard-TTL expiry
+	// monitor (runbroker) uses to know the session is still active. Must be
+	// cheap and non-blocking (it runs inline on the request path). Nil = no
+	// activity signal (tests / expiry disabled).
+	OnActivity func()
 }
 
 // Proxy is one session's TLS-terminating injecting relay. Serve it on a
@@ -61,6 +68,7 @@ type Proxy struct {
 	client           *http.Client
 	handshakeTimeout time.Duration
 	idleTimeout      time.Duration
+	onActivity       func()
 }
 
 // Inbound deadline defaults (C1). Handshake ~10s matches the upstream
@@ -104,6 +112,7 @@ func New(cfg Config) (*Proxy, error) {
 		logger:           cfg.Logger,
 		handshakeTimeout: handshakeTimeout,
 		idleTimeout:      idleTimeout,
+		onActivity:       cfg.OnActivity,
 		client: &http.Client{
 			// No global timeout: a large git push can legitimately run long,
 			// and the CP1 recipe requires a transparent relay. Failures surface
@@ -288,6 +297,13 @@ func (p *Proxy) serveRequests(conn net.Conn, sni string) {
 // reused for a further request. A false return closes the connection (used for
 // refusals and any relay error, to avoid a desynced keep-alive stream).
 func (p *Proxy) serveOne(conn net.Conn, req *http.Request, sni string) (keepAlive bool) {
+	// Run-level activity signal (idle-expiry monitor). Fired for EVERY handled
+	// request — including refused ones — so a misbehaving-but-active agent still
+	// counts as activity (idle means "no proxy traffic at all", not "no allowed
+	// traffic"). Cheap + non-blocking by contract.
+	if p.onActivity != nil {
+		p.onActivity()
+	}
 	// Identity: the plaintext Host header MUST match the TLS SNI (design §4.1).
 	// Otherwise the agent could open a connection "to github.com" and steer an
 	// injected token at an attacker-chosen Host.

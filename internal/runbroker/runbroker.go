@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/TomHennen/rein/internal/brokercore"
@@ -83,6 +84,29 @@ type Config struct {
 	// CP1-recipe transport (HTTP/1.1, system roots). Tests inject a fake.
 	Upstream http.RoundTripper
 
+	// IdleTimeout / HardTTL bound the run's live approved-write capability
+	// (design §5.3). After IdleTimeout with NO proxy activity, or HardTTL of
+	// wall-clock regardless of activity, OnExpire fires and the proxy is torn
+	// down (subsequent GitHub requests then fail closed). Zero disables that
+	// bound; cmd/rein wires DefaultIdleTimeout / DefaultHardTTL.
+	IdleTimeout time.Duration
+	HardTTL     time.Duration
+
+	// OnExpire, if set, runs once when idle/hard expiry trips, BEFORE the proxy
+	// is stopped — the caller revokes the run's write tokens and prints a loud
+	// message here. reason is "idle" or "hard-ttl". It must NOT kill the agent
+	// process (the run tears its own credential path down; the agent keeps
+	// running credential-less).
+	OnExpire func(reason string)
+
+	// checkInterval overrides the expiry poll cadence (tests set it small).
+	// Zero derives a sane value from the bounds. Unexported: production never
+	// needs to tune it.
+	checkInterval time.Duration
+
+	// now is the clock for expiry, injectable for tests. Nil = time.Now.
+	now func() time.Time
+
 	// Logger receives forensic lines (never a token). Required.
 	Logger *log.Logger
 }
@@ -96,6 +120,14 @@ type Host struct {
 	cancel     context.CancelFunc
 	done       chan struct{}
 	closeOnce  sync.Once
+
+	// Expiry state (design §5.3). start is the launch instant (hard-TTL base);
+	// lastActivity is the atomic unixnano of the last proxy request (idle base),
+	// updated lock-free from the request path via markActivity. expireOnce
+	// guards the one-shot revoke+teardown.
+	start        time.Time
+	lastActivity atomic.Int64
+	expireOnce   sync.Once
 }
 
 // Start builds the core + proxy, creates the socket, and begins serving. On any
@@ -147,6 +179,18 @@ func Start(cfg Config) (*Host, error) {
 		audit = proxy.NewAuditLog(cfg.Audit)
 	}
 
+	now := cfg.now
+	if now == nil {
+		now = time.Now
+	}
+
+	h := &Host{
+		socketPath: cfg.SocketPath,
+		done:       make(chan struct{}),
+		start:      now(),
+	}
+	h.lastActivity.Store(now().UnixNano()) // count idle from launch, not epoch
+
 	p, err := proxy.New(proxy.Config{
 		SessionID: cfg.SessionID,
 		Core:      core,
@@ -154,6 +198,8 @@ func Start(cfg Config) (*Host, error) {
 		Audit:     audit,
 		Logger:    cfg.Logger,
 		Upstream:  cfg.Upstream,
+		// Per-request idle signal for the expiry monitor. Cheap atomic store.
+		OnActivity: func() { h.markActivity(now()) },
 	})
 	if err != nil {
 		return nil, err
@@ -166,17 +212,23 @@ func Start(cfg Config) (*Host, error) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	h := &Host{
-		socketPath: cfg.SocketPath,
-		ca:         ca,
-		ln:         ln,
-		cancel:     cancel,
-		done:       make(chan struct{}),
-	}
+	h.ca = ca
+	h.ln = ln
+	h.cancel = cancel
 	go func() {
 		defer close(h.done)
 		_ = p.Serve(ctx, ln)
 	}()
+
+	// Expiry monitor: only when a bound is configured. It shares ctx with Serve,
+	// so Close (which cancels ctx) also stops the monitor.
+	if cfg.IdleTimeout > 0 || cfg.HardTTL > 0 {
+		interval := cfg.checkInterval
+		if interval <= 0 {
+			interval = deriveCheckInterval(cfg.IdleTimeout, cfg.HardTTL)
+		}
+		go h.monitor(ctx, cfg.IdleTimeout, cfg.HardTTL, interval, now, cfg.OnExpire)
+	}
 	return h, nil
 }
 

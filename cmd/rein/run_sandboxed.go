@@ -65,7 +65,9 @@ func runSandboxed(cmdline []string) (int, error) {
 	// exact fix. No silent fallback to unsandboxed mode (design §2-3).
 	pf := srt.Preflight(srt.DefaultEnv())
 	if !printPreflightAndOK(os.Stderr, pf) {
-		return 1, fmt.Errorf("sandbox preflight failed — refusing to launch (fail-closed; direct unsandboxed mode on a real repo is NOT an automatic fallback)")
+		return 1, fmt.Errorf("sandbox preflight failed — refusing to launch. Run `rein doctor` for the fix. " +
+			"(Fail-closed: rein does NOT silently fall back to unsandboxed mode on a real repo. " +
+			"For a throwaway repo you can opt in explicitly with `rein run --direct -- <cmd>`.)")
 	}
 	srtPath := preflightSrtPath(pf)
 
@@ -247,6 +249,20 @@ func runSandboxed(cmdline []string) (int, error) {
 		CAKeystore: caKeystore,
 		Audit:      auditW,
 		Logger:     logger,
+		// Proactive session expiry (design §5.3): bound how long a granted
+		// approval + cached write token can stay live if the agent idles or runs
+		// forever. On expiry we revoke the run's write tokens and stop the proxy
+		// (the agent's next GitHub request then fails closed) but DO NOT kill the
+		// agent — it keeps running credential-less with a loud message. The
+		// double revoke (here + the deferred exit-time revoke) is harmless:
+		// revoke is idempotent/best-effort.
+		IdleTimeout: runbroker.DefaultIdleTimeout,
+		HardTTL:     runbroker.DefaultHardTTL,
+		OnExpire: func(reason string) {
+			logger.Printf("session expired (%s): revoking write tokens and stopping the proxy", reason)
+			revokeRunWriteTokens(stateDir, runID, productionRevoke(sess), time.Now())
+			printExpiryBanner(os.Stderr, reason)
+		},
 	})
 	if err != nil {
 		return 1, fmt.Errorf("start broker/proxy: %w", err)
@@ -274,11 +290,33 @@ func runSandboxed(cmdline []string) (int, error) {
 		return 1, fmt.Errorf("write CA bundle: %w", err)
 	}
 
-	// (11) Scrubbed exec environment (explicit allowlist; gap #1).
+	// (10b) NON-IMPERSONATING git identity (CP4). Resolve the author/committer
+	// name + bot noreply email OUTSIDE the sandbox (network + host `git config`
+	// happen here, at launch), write the rein-managed GIT_CONFIG_GLOBAL into the
+	// readable per-run temp dir, and feed both into BuildEnv. This stops (a) the
+	// agent's commits authoring as the developer and (b) the ~/.gitconfig leak.
+	// Fail-open: gitidentity.Resolve never errors — every fallback is a valid,
+	// non-impersonating identity — so a lookup hiccup degrades, never blocks.
+	cachePath, err := gitIdentityCachePath()
+	if err != nil {
+		return 1, err
+	}
+	gitID := resolveGitIdentity(appCfg.ClientID, ks, ownerFromRepo(sess.Repos[0]), "", cachePath, logger)
+	managedGitConfig := filepath.Join(runTmp, "gitconfig")
+	if err := writeManagedGitConfig(managedGitConfig, gitID); err != nil {
+		return 1, fmt.Errorf("write managed gitconfig: %w", err)
+	}
+	logger.Printf("git identity: author/committer = %q <%s>", gitID.Name, gitID.Email)
+
+	// (11) Scrubbed exec environment (explicit allowlist; gap #1) + the CP4 git
+	// identity + git-config redirects.
 	execEnv := srt.BuildEnv(srt.EnvParams{
-		Parent:       os.Environ(),
-		CABundlePath: bundlePath,
-		StubGHToken:  stubGHToken,
+		Parent:              os.Environ(),
+		CABundlePath:        bundlePath,
+		StubGHToken:         stubGHToken,
+		GitAuthorName:       gitID.Name,
+		GitAuthorEmail:      gitID.Email,
+		GitConfigGlobalPath: managedGitConfig,
 	})
 
 	// (12) FAIL-OPEN DEFENSE: prove the config actually applied by launching srt
@@ -367,6 +405,21 @@ func runSandboxed(cmdline []string) (int, error) {
 // session binds no issue, writes are DENIED (with a loud, actionable message)
 // rather than silently allowed: reads still flow; a push is blocked until the
 // session gets an `issue:`.
+//
+// CP4 approval invariants (an in-sandbox process cannot self-grant):
+//
+//   - This hook runs in rein's PARENT process, on its foreground /dev/tty, and
+//     the issue-number secret is read from that tty (internal/ui/grant). The
+//     sandboxed agent has no channel to rein's tty and does not know it will be
+//     asked — it cannot pre-answer or self-answer the prompt.
+//   - The on-disk approval RECORD the hook consults lives under stateDir, which
+//     is deny-read'd in-sandbox AND outside the sandbox's only writable mount
+//     (the working tree), so an in-sandbox process can neither read nor forge
+//     it. See TestInSandboxSelfGrantStructurallyFails.
+//   - There is NO control socket in the in-process model (runbroker package
+//     doc), so the daemon-era "#12 control socket reachable in-sandbox" vector
+//     is closed structurally: the only unix socket the sandbox can reach is the
+//     per-run PROXY socket, which speaks TLS/HTTP to GitHub, not approval verbs.
 func buildSandboxApprove(sess session.Session, stateDir, runID string, logger *log.Logger) func(repo string) bool {
 	if sess.Issue == 0 {
 		logger.Printf("sandbox: write-approval DENIES all writes (session has no `issue:`); reads still flow")
@@ -441,6 +494,7 @@ func credentialDenyReadPaths(stateDir string) ([]string, error) {
 		filepath.Join(home, ".gnupg"),                      // gpg default
 		filepath.Join(xdgConfig, "git"),                    // XDG git credentials (env-resolved)
 		filepath.Join(home, ".config", "git"),              // XDG git default
+		filepath.Join(home, ".gitconfig"),                  // classic ~/.gitconfig — leaks dev email + credential.helper (CP4)
 		filepath.Join(home, ".ssh"),                        // ssh keys + agent socket dir
 		filepath.Join(home, ".netrc"),                      // curl/git netrc
 		filepath.Join(home, ".git-credentials"),            // git store helper
@@ -505,6 +559,29 @@ func preflightSrtPath(checks []srt.Check) string {
 		}
 	}
 	return "srt" // fall back to PATH lookup by exec
+}
+
+// printExpiryBanner is the loud, human-facing notice when a session hits its
+// idle or hard-TTL bound. The agent process is deliberately NOT killed (that
+// would abruptly drop the user's work); instead it keeps running but can no
+// longer reach GitHub. reason is "idle" or "hard-ttl".
+func printExpiryBanner(w io.Writer, reason string) {
+	var why string
+	switch reason {
+	case "idle":
+		why = fmt.Sprintf("no proxy activity for %s (idle timeout)", runbroker.DefaultIdleTimeout)
+	case "hard-ttl":
+		why = fmt.Sprintf("run exceeded the %s hard limit", runbroker.DefaultHardTTL)
+	default:
+		why = reason
+	}
+	fmt.Fprintln(w, "\n===============================================================")
+	fmt.Fprintf(w, "rein: SESSION EXPIRED — %s.\n", why)
+	fmt.Fprintln(w, "  Revoked this run's write tokens and STOPPED the credential proxy.")
+	fmt.Fprintln(w, "  The agent is still running but can no longer reach GitHub — its")
+	fmt.Fprintln(w, "  git/gh requests will now fail. Exit it and re-run `rein run` to")
+	fmt.Fprintln(w, "  continue with a fresh, re-authorized session.")
+	fmt.Fprintln(w, "===============================================================")
 }
 
 func printSandboxBanner(w io.Writer, sess session.Session, sessSource, socketPath, workTree string, cmdline []string) {

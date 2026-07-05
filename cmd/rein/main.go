@@ -43,19 +43,59 @@ import (
 	"github.com/TomHennen/rein/internal/ui/grant"
 )
 
-// dispatchRun routes `rein run` to the sandboxed (srt) path when --sandbox is
-// present, else to direct mode (run.go). --sandbox is a CP3 opt-in; CP4 makes
-// sandboxed the default where srt is healthy. The flag must appear BEFORE the
-// "--" separator: `rein run --sandbox -- <cmd>`.
+// dispatchRun routes `rein run`. CP4 flips the default: sandboxed (srt) mode is
+// now the DEFAULT (where srt is healthy — runSandboxed hard-gates preflight and
+// fails closed, never silently dropping to unsandboxed on a real repo). Direct
+// mode moves behind an explicit --direct/--no-sandbox flag with a loud banner
+// (the reduced-protection, throwaway-only path). The mode flag, if present, must
+// come BEFORE the "--" separator:
+//
+//	rein run -- <cmd>              # sandboxed (default)
+//	rein run --sandbox -- <cmd>    # sandboxed (explicit; alias for the default)
+//	rein run --direct -- <cmd>     # DIRECT/unsandboxed (explicit opt-in + banner)
+//	rein run --no-sandbox -- <cmd> # alias for --direct
 func dispatchRun(argv []string) (int, error) {
-	if len(argv) > 0 && argv[0] == "--sandbox" {
-		cmdline, err := parseRunArgs(argv[1:])
-		if err != nil {
-			return 2, err
+	if len(argv) > 0 {
+		switch argv[0] {
+		case "--sandbox":
+			cmdline, err := parseRunArgs(argv[1:])
+			if err != nil {
+				return 2, err
+			}
+			return runSandboxed(cmdline)
+		case "--direct", "--no-sandbox":
+			// Validate the command shape before the banner so a usage error
+			// doesn't print a scary warning first.
+			if _, err := parseRunArgs(argv[1:]); err != nil {
+				return 2, err
+			}
+			printDirectModeBanner(os.Stderr)
+			return runWrapped(argv[1:])
 		}
-		return runSandboxed(cmdline)
 	}
-	return runWrapped(argv)
+	// Default (no mode flag): sandboxed. runSandboxed runs preflight and fails
+	// closed (with a `rein doctor` pointer) if srt is unhealthy — it does NOT
+	// fall back to unsandboxed mode on its own (design §2-3; CP3 fallback rule).
+	cmdline, err := parseRunArgs(argv)
+	if err != nil {
+		return 2, err
+	}
+	return runSandboxed(cmdline)
+}
+
+// printDirectModeBanner is the loud, unmissable warning for the explicit
+// unsandboxed path. rein cannot detect whether the target is a throwaway repo,
+// so this banner + the explicit --direct flag ARE the throwaway gate: the human
+// is trusted to heed it (hard constraint #1 + the CP3 fallback rule).
+func printDirectModeBanner(w io.Writer) {
+	fmt.Fprintln(w, "===============================================================")
+	fmt.Fprintln(w, "rein: WARNING — DIRECT (UNSANDBOXED) MODE")
+	fmt.Fprintln(w, "  The agent runs OUTSIDE the srt sandbox. It shares your user")
+	fmt.Fprintln(w, "  account: it CAN read your ambient credentials (gh login, SSH")
+	fmt.Fprintln(w, "  keys, ~/.netrc, keyrings) and the rein-brokered token is only")
+	fmt.Fprintln(w, "  hidden by process boundaries, not a sandbox. Use this ONLY on a")
+	fmt.Fprintln(w, "  THROWAWAY repo. For real work, drop --direct to run sandboxed.")
+	fmt.Fprintln(w, "===============================================================")
 }
 
 const (
@@ -146,7 +186,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  rein approval status")
 	fmt.Fprintln(os.Stderr, "  rein approval clear [--run-id <id>]")
 	fmt.Fprintln(os.Stderr, "  rein approval grant --run-id <id>")
-	fmt.Fprintln(os.Stderr, "  rein run [--sandbox] -- <cmd> [args...]")
+	fmt.Fprintln(os.Stderr, "  rein run -- <cmd> [args...]                (sandboxed by default)")
+	fmt.Fprintln(os.Stderr, "  rein run --direct -- <cmd> [args...]       (unsandboxed; throwaway repos only)")
 }
 
 // runCredentialHelper wires env-derived config to the broker. All errors

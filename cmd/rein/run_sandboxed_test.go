@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/TomHennen/rein/internal/approvals"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/srt"
 )
@@ -146,5 +147,67 @@ func TestCredentialDenyReadCoversRelocatedStores(t *testing.T) {
 		if !set[want] {
 			t.Errorf("default store %q missing from deny-read set", want)
 		}
+	}
+	// CP4: the classic ~/.gitconfig is hidden too (it leaks the developer's
+	// email + credential.helper config; GIT_CONFIG_GLOBAL redirects git away
+	// from it, and this denyRead stops a raw `cat`).
+	if !set["/home/someone/.gitconfig"] {
+		t.Errorf("~/.gitconfig missing from deny-read set: %v", paths)
+	}
+}
+
+// TestInSandboxSelfGrantStructurallyFails documents and verifies the CP4
+// approval invariant: an in-sandbox process CANNOT grant its own write.
+//
+// The structural argument (no test can exercise a live sandbox here, so this
+// asserts the properties the argument rests on):
+//
+//   - The only thing that flips the proxy's writesApproved flag is cfg.Approve
+//     returning true, and that runs on rein's foreground /dev/tty in the PARENT
+//     process — outside the sandbox, with no IPC channel into the in-memory flag.
+//   - grant.ObtainApproval also honors an on-disk approval RECORD first, so the
+//     load-bearing property is that the record lives under stateDir, which is
+//     (a) in the sandbox deny-read set (invisible in-sandbox) AND (b) outside
+//     the sandbox's ONLY writable bind-mount (the working tree). So an
+//     in-sandbox process can neither read nor forge the record.
+//   - There is NO control socket in the in-process model (see runbroker package
+//     doc), so the daemon-era "#12 control socket reachable in-sandbox" vector
+//     is closed structurally — there is nothing to reach.
+func TestInSandboxSelfGrantStructurallyFails(t *testing.T) {
+	t.Setenv("HOME", "/home/someone")
+	t.Setenv("XDG_STATE_HOME", "/home/someone/.local/state")
+	t.Setenv("XDG_CONFIG_HOME", "/home/someone/.config")
+
+	stateDir := "/home/someone/.local/state/rein"
+	workTree := "/home/someone/work/throwaway-repo" // the sandbox's writable mount
+
+	// (a) The approval record + run context + write-token ledger all live under
+	// stateDir — never under the writable working tree.
+	for _, p := range []string{
+		approvals.RunApprovalPath(stateDir, "run-1"),
+		approvals.RunContextPath(stateDir, "run-1"),
+		approvals.WriteTokenLedgerPath(stateDir, "run-1"),
+	} {
+		if !strings.HasPrefix(p, stateDir+string(filepath.Separator)) {
+			t.Errorf("approval-related path %q is not under stateDir %q", p, stateDir)
+		}
+		if strings.HasPrefix(p, workTree+string(filepath.Separator)) {
+			t.Errorf("approval-related path %q is under the writable working tree %q — an in-sandbox process could forge it", p, workTree)
+		}
+	}
+
+	// (b) stateDir is in the sandbox deny-read set — invisible in-sandbox.
+	deny, err := credentialDenyReadPaths(stateDir)
+	if err != nil {
+		t.Fatalf("credentialDenyReadPaths: %v", err)
+	}
+	var sawState bool
+	for _, p := range deny {
+		if p == stateDir {
+			sawState = true
+		}
+	}
+	if !sawState {
+		t.Errorf("stateDir %q not in deny-read set; the sandbox could read the approval record: %v", stateDir, deny)
 	}
 }

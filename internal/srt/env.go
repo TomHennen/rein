@@ -25,6 +25,25 @@ type EnvParams struct {
 	// presence behave. Must be non-empty (an empty GH_TOKEN can make gh prompt
 	// or fall back to keyring).
 	StubGHToken string
+
+	// GitAuthorName / GitAuthorEmail are the NON-IMPERSONATING git identity
+	// stamped into GIT_AUTHOR_NAME/EMAIL and GIT_COMMITTER_NAME/EMAIL (CP4).
+	// They are the ROBUST authorship mechanism: these env vars override any
+	// git config, so a sandboxed `git commit` authors as rein's identity, not
+	// the developer whose ~/.gitconfig git would otherwise read. Resolved by
+	// internal/gitidentity. When empty (e.g. the VerifyConfigApplied probe,
+	// which runs no git), the four vars are simply not set.
+	GitAuthorName  string
+	GitAuthorEmail string
+
+	// GitConfigGlobalPath, when non-empty, is set as GIT_CONFIG_GLOBAL — a
+	// rein-managed per-run gitconfig OUTSIDE the sandbox's view of the
+	// developer's ~/.gitconfig. This stops the leak of the developer's email +
+	// credential-helper config (which the host ~/.gitconfig would otherwise
+	// expose in-sandbox) and is the config-level twin of the GIT_AUTHOR_* env
+	// override. GIT_CONFIG_SYSTEM is always pinned to /dev/null so no
+	// /etc/gitconfig leaks either (mirrors direct mode, run.go).
+	GitConfigGlobalPath string
 }
 
 // passthroughExact is the allowlist of environment variable NAMES carried from
@@ -64,12 +83,15 @@ var caEnvVars = []string{
 
 // BuildEnv returns the explicit environment slice ("KEY=VALUE") for exec.Cmd.Env
 // on the srt launch. It is an allowlist, not a filter of the parent: the result
-// contains ONLY the passthrough vars present in Parent, the four CA vars, and
-// the stub GH_TOKEN. The output is sorted for deterministic tests and logs.
+// contains ONLY the passthrough vars present in Parent, the four CA vars, the
+// stub GH_TOKEN, and (CP4) the rein-set git identity + git-config redirects. The
+// output is sorted for deterministic tests and logs.
 //
 // Explicitly NOT propagated (even if set in Parent): HTTP_PROXY/HTTPS_PROXY/
-// NO_PROXY/TMPDIR (srt owns those), and every secret-bearing var. This is the
-// single most valuable gap-closure in CP3 (gap #1).
+// NO_PROXY/TMPDIR (srt owns those), GIT_AUTHOR_*/GIT_COMMITTER_*/GIT_CONFIG_*
+// (rein sets these itself so a stale parent value can't win), and every
+// secret-bearing var. This is the single most valuable gap-closure in CP3
+// (gap #1); the git identity extends it in CP4 (non-impersonating commits).
 func BuildEnv(p EnvParams) []string {
 	out := make([]string, 0, len(passthroughExact)+len(caEnvVars)+1)
 
@@ -86,6 +108,27 @@ func BuildEnv(p EnvParams) []string {
 		out = append(out, name+"="+p.CABundlePath)
 	}
 	out = append(out, "GH_TOKEN="+p.StubGHToken)
+
+	// Git identity (CP4). Set author AND committer to the same non-impersonating
+	// value. These override git config, so they are the authorship guarantee
+	// regardless of what config the sandbox can read. Set only when resolved
+	// (the probe path passes them empty and needs no identity).
+	if p.GitAuthorName != "" {
+		out = append(out, "GIT_AUTHOR_NAME="+p.GitAuthorName)
+		out = append(out, "GIT_COMMITTER_NAME="+p.GitAuthorName)
+	}
+	if p.GitAuthorEmail != "" {
+		out = append(out, "GIT_AUTHOR_EMAIL="+p.GitAuthorEmail)
+		out = append(out, "GIT_COMMITTER_EMAIL="+p.GitAuthorEmail)
+	}
+	// Redirect git's global config away from the developer's ~/.gitconfig (stops
+	// the email + credential-helper leak) and pin the system config to /dev/null.
+	// GIT_CONFIG_SYSTEM is set unconditionally — it is safe and desirable even on
+	// the probe path (no /etc/gitconfig should ever influence the sandbox).
+	if p.GitConfigGlobalPath != "" {
+		out = append(out, "GIT_CONFIG_GLOBAL="+p.GitConfigGlobalPath)
+	}
+	out = append(out, "GIT_CONFIG_SYSTEM=/dev/null")
 
 	sort.Strings(out)
 	return out
