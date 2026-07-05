@@ -262,6 +262,53 @@ path.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-07-05 — **CP3 srt composition DONE** (supervised agent). Delivered:
+  `internal/srt` (typed 0.0.63 settings.json Build+Validate — 6 allowed domains
+  = 3 inject + 3 CDN, mitmProxy.domains = exactly the 3 inject hosts never a
+  wildcard; working tree in allowWrite not allowRead; denyRead = cred stores +
+  rein key/state dirs + /run/user/<uid>; strict env allowlist; system+rein CA
+  bundle; preflight; VerifyConfigApplied self-test) and the `rein run --sandbox`
+  path in cmd/rein (opt-in flag for CP3; CP4 makes it default) + `rein doctor`
+  sandbox preflight. `internal/proxy` now exports InjectHosts/CDNHosts as the
+  single host-list source (drift guard test). **Live-verified end-to-end on
+  real srt 0.0.63 against the throwaway** (headless): git ls-remote + gh api
+  read + CDN clone via codeload passthrough all work through proxy injection;
+  ambient secrets (ANTHROPIC_API_KEY/AWS_*/GH_TOKEN) absent from the sandbox
+  env; host ~/.config/gh unreadable (deny-read tmpfs); AF_UNIX socket() blocked
+  (seccomp `Operation not permitted`). Full `go test ./... -race` green.
+  - **Two fail-open defenses (the CP3 crux):** (a) config self-test — launches
+    srt with a **content-sentinel** in denyRead and fails closed unless the
+    in-sandbox read returns empty (denyRead file => /dev/null bind); (b) seccomp
+    — preflight hard-gates the vendored apply-seccomp AND the same self-test
+    probe asserts socket(AF_UNIX) fails. Both proven against real srt (positive
+    + negative gated test, REIN_SANDBOX_E2E). Never sets allowAllUnixSockets.
+  - **Env allowlist settled:** PATH, HOME, LANG, LC_*, TERM (usability, not a
+    secret) from the parent; SSL_CERT_FILE/GIT_SSL_CAINFO/NODE_EXTRA_CA_CERTS/
+    CURL_CA_BUNDLE => the per-run bundle; stub GH_TOKEN. Everything else dropped.
+  - **Git-path latency (proxy vs direct):** `git ls-remote` direct median
+    ~0.39s (0.38–0.41); through the injecting proxy inside srt median ~0.41s
+    (0.23–0.56, within network noise) — proxy TLS-terminate+inject adds no
+    meaningful per-request cost. Fixed sandbox launch overhead ~0.18s (preflight
+    + one extra srt spawn for the self-test + broker start/teardown).
+  - **srt-schema-spec discrepancies (trusted running srt over the research
+    spec, per CLAUDE.md):** (1) `srt --version` hardcodes "1.0.0" while the npm
+    package is genuinely 0.0.63 — the version preflight reads package.json, not
+    the CLI flag. (2) The spec's gap #3 "config null-fallback => empty denyRead"
+    fail-open only fires with NO --settings flag; on the `-s` path rein always
+    uses, srt 0.0.63 EXITS 1 ("Refusing to run with the default config") instead
+    of falling open (cli.js:121-129). VerifyConfigApplied retained anyway
+    (version-drift guard + denyRead-semantics proof + catches srt running the
+    probe unsandboxed; srt's exit-1 still trips the verify closed).
+  - **Review finding fixed (HIGH):** credentialDenyReadPaths silently dropped
+    the home cred stores when $HOME was unresolvable (empty $HOME + XDG_* set);
+    now fails closed rather than launching with ~/.ssh readable.
+  - **E2e autonomy:** the READ path (clone, gh api reads) is fully
+    non-interactive — the supervisor can run it headless. The WRITE path (git
+    push) hits the write-approval hook on rein's OWN foreground tty (broker is
+    out of the sandbox), so it needs a tty or a pre-seeded
+    `rein approval grant --run-id <id>`; not autonomous. A no-issue session
+    DENIES writes (reads still flow).
+
 - 2026-07-05 — **CP2 proxy arm DONE** (supervised agent team). Delivered:
   `internal/proxy` (TLS-terminating injecting MITM on a per-run unix socket —
   the CP1 6-point relay recipe productized: ALPN http/1.1 pin, ContentLength/
