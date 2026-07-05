@@ -360,7 +360,24 @@ path.
 
 (Append as you work. Format: date — issue — resolution.)
 
-- 2026-07-05 — **Open decisions CLOSED (Tom):**
+- 2026-07-05 — **BLOCKER for real use (found while assessing readiness): the
+  sandbox is GitHub-egress-only, so it cannot wrap a real agent.**
+  `srt.Build` sets `AllowedDomains = InjectHosts + CDNHosts` (GitHub only) with
+  `StrictAllowlist: true`, and `srt.Params`/`run_sandboxed` expose NO way to add
+  domains. Empirically confirmed in-sandbox: `api.anthropic.com → 000`,
+  `registry.npmjs.org → 000` (blocked). Consequence: **`rein run -- claude`
+  can't run Claude Code** — it can't reach api.anthropic.com — and no project
+  tooling that needs npm/PyPI/other hosts works. Every CP1–CP4 live gate ran
+  git/gh/curl commands, NOT the actual agent, so this went unnoticed. The design
+  anticipated it (§4.4 "including the agent's own API endpoint"; §4.2 CA bundle
+  = system roots so non-GitHub HTTPS works — the CDN test already proved direct
+  TLS to a non-injected host works), so this is a wiring gap, not a redesign.
+  NEEDED before any real (or even real-agent throwaway) use: a configurable
+  **additional-allowed-domains** mechanism — at minimum the agent's API
+  endpoint, ideally per-session/per-project (a session `allow_domains:` field
+  and/or global config), threaded ExtraAllowedDomains → srt.Params → Build,
+  validated as egress-allowed-but-never-injected (non-GitHub → direct TLS via
+  system roots, already proven). Est. ~0.5 day. Treat as CP4.5 / CP6-prerequisite.
   - **Stop-condition (b): CONTINUE — settled.** The masking analysis + the
     decision to build CP3/CP4 was the answer; rein's moat is the brokering
     semantics (mint/scope/approval), which Claude Code's static masking does
