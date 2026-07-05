@@ -103,22 +103,56 @@ func TestMintBackoffAfterRateLimit(t *testing.T) {
 	}
 }
 
-// TestApprovalMemoPerRepo verifies approvals are memoized per repo (one prompt
-// per repo for the run), not globally.
-func TestApprovalMemoPerRepo(t *testing.T) {
-	prompts := map[string]int{}
+// TestApprovalRunScoped verifies write approval is RUN-SCOPED, not per repo:
+// the first in-scope write prompts once (naming the triggering repo), and every
+// later in-scope write — any repo, git OR GraphQL (repo-less, key "") — proceeds
+// without re-prompting. brokercore runs inScope before confirm, so only in-scope
+// requests ever reach here.
+func TestApprovalRunScoped(t *testing.T) {
+	var prompts int32
+	var firstRepo string
 	core := NewSessionCore(SessionConfig{
 		MintWrite: func(ctx context.Context) (string, time.Time, error) {
 			return "wtok", time.Now().Add(time.Hour), nil
 		},
-		Approve: func(repo string) bool { prompts[repo]++; return true },
+		Approve: func(repo string) bool {
+			if atomic.AddInt32(&prompts, 1) == 1 {
+				firstRepo = repo
+			}
+			return true
+		},
 	})
-	for i := 0; i < 2; i++ {
-		core.Serve(context.Background(), brokercore.Request{Repo: "o/a", WriteIntent: true})
-		core.Serve(context.Background(), brokercore.Request{Repo: "o/b", WriteIntent: true})
+
+	// (a) write to repoA then repoB (both in the session's scope) → ONE prompt.
+	core.Serve(context.Background(), brokercore.Request{Repo: "o/a", WriteIntent: true})
+	core.Serve(context.Background(), brokercore.Request{Repo: "o/b", WriteIntent: true})
+	// (b) a GraphQL mutation (repo-less, empty key) after the approved push →
+	//     NO second prompt.
+	core.Serve(context.Background(), brokercore.Request{Repo: "", WriteIntent: true})
+
+	if got := atomic.LoadInt32(&prompts); got != 1 {
+		t.Errorf("prompts = %d, want exactly 1 (run-scoped)", got)
 	}
-	if prompts["o/a"] != 1 || prompts["o/b"] != 1 {
-		t.Errorf("prompts = %v, want one per repo", prompts)
+	if firstRepo != "o/a" {
+		t.Errorf("first prompt named repo %q, want the triggering repo o/a", firstRepo)
+	}
+}
+
+// TestApprovalInfoRefsThenReceivePack keeps the existing invariant: a single
+// git push (info/refs advertisement + receive-pack) prompts at most once.
+func TestApprovalInfoRefsThenReceivePack(t *testing.T) {
+	var prompts int32
+	core := NewSessionCore(SessionConfig{
+		MintWrite: func(ctx context.Context) (string, time.Time, error) {
+			return "wtok", time.Now().Add(time.Hour), nil
+		},
+		Approve: func(string) bool { atomic.AddInt32(&prompts, 1); return true },
+	})
+	// info/refs?service=git-receive-pack then the receive-pack POST — same repo.
+	core.Serve(context.Background(), brokercore.Request{Repo: "o/r", WriteIntent: true})
+	core.Serve(context.Background(), brokercore.Request{Repo: "o/r", WriteIntent: true})
+	if got := atomic.LoadInt32(&prompts); got != 1 {
+		t.Errorf("prompts = %d, want exactly 1 for one push", got)
 	}
 }
 

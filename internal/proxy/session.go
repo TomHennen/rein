@@ -70,7 +70,7 @@ type SessionConfig struct {
 type sessionState struct {
 	mu sync.Mutex
 
-	approvedRepos map[string]bool // run-scoped write approvals, per repo
+	writesApproved bool // run-scoped: once the human approves, all in-scope writes proceed
 
 	writeToken  string
 	writeExpiry time.Time
@@ -81,14 +81,22 @@ type sessionState struct {
 // NewSessionCore builds the brokercore.Core for one session, layering the
 // proxy-rate caching the design requires on top of the shared decision core:
 //
-//   - reads: brokercore caches via cfg.ReadCache (per session).
+//   - reads: brokercore caches via cfg.ReadCache (per session). Reads never
+//     prompt.
 //   - writes: memoized here — one mint covers a whole run until expiry, so a
 //     git push (info/refs + receive-pack) mints once, not twice.
-//   - approvals: memoized per repo — one prompt covers the run (issue #20).
+//   - approvals: RUN-SCOPED (Tom's model, design §5.3) — the FIRST in-scope
+//     write of the run prompts once (naming the triggering repo), and every
+//     subsequent in-scope write (any repo in the session set, git OR GraphQL)
+//     proceeds without re-prompting until token expiry. Safe because
+//     brokercore.Serve runs inScope BEFORE confirmWrite, so only requests
+//     within the session's declared set (and the empty-path/GraphQL case
+//     EmptyPathScope=allow lets through) ever reach confirm, and the minted
+//     token already covers the full session set (#10).
 //   - backoff: after a GitHub rate-limit/abuse mint failure, write mints are
 //     suppressed for MintBackoff so the proxy doesn't hammer the API.
 func NewSessionCore(cfg SessionConfig) *brokercore.Core {
-	st := &sessionState{approvedRepos: map[string]bool{}}
+	st := &sessionState{}
 	backoff := cfg.MintBackoff
 	if backoff <= 0 {
 		backoff = 30 * time.Second
@@ -102,13 +110,14 @@ func NewSessionCore(cfg SessionConfig) *brokercore.Core {
 		readSkew = 30 * time.Second // match direct mode (broker.applyDefaults)
 	}
 
-	// Always install the memo wrapper: even with a nil Approve (auto-approve)
-	// we keep the run-scoped "prompt once per repo" bookkeeping so a push's
-	// info/refs + receive-pack pair yields at most one prompt (issue #20).
+	// Run-scoped approval: once the human approves the first in-scope write,
+	// every later in-scope write proceeds without re-prompting until expiry.
+	// The first call still passes the triggering repo to cfg.Approve so the
+	// prompt can name it. A nil Approve means auto-approve (tests).
 	confirm := func(repo string) bool {
 		st.mu.Lock()
 		defer st.mu.Unlock()
-		if st.approvedRepos[repo] {
+		if st.writesApproved {
 			return true
 		}
 		approved := true
@@ -116,7 +125,7 @@ func NewSessionCore(cfg SessionConfig) *brokercore.Core {
 			approved = cfg.Approve(repo)
 		}
 		if approved {
-			st.approvedRepos[repo] = true
+			st.writesApproved = true
 		}
 		return approved
 	}
