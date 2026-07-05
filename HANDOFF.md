@@ -203,11 +203,10 @@ Before dogfood: durable VM time-sync (#23) and re-verify the srt pin. Read:
 **The write path needs a human tty** — verify with `docs/cp3-manual-test.sh`
 (read path is autonomous) and the CP4 identity/push check `docs/cp4-manual-test.sh`.
 
-Three things still want Tom's input (PLAN-1 Notes 2026-07-05): the stop-condition
-(b) re-read (Claude Code shipped first-party masking); whether to file the staged
-srt-upstream BYO-proxy issue (Tom: hold until CP3/dogfood — now reached); and
-whether `--direct` should have a harder gate than its informational banner
-(footgun-on-real-repo is currently possible by design).
+Three prior open questions are now CLOSED (Tom, 2026-07-05; see PLAN-1 Notes):
+stop-condition (b) → CONTINUE (settled, don't re-raise); srt-upstream issue →
+track locally, file post-going-public; `--direct` → informational banner is
+final (no harder gate). The remaining gate is CP6 dogfood itself.
 
 **Carry-forward invariants** (don't re-derive): the 6-point relay recipe
 (spike-findings "CP1 results"); per-run socket must sit outside every srt

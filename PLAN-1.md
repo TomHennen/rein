@@ -360,6 +360,21 @@ path.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-07-05 — **Open decisions CLOSED (Tom):**
+  - **Stop-condition (b): CONTINUE — settled.** The masking analysis + the
+    decision to build CP3/CP4 was the answer; rein's moat is the brokering
+    semantics (mint/scope/approval), which Claude Code's static masking does
+    not provide. Do NOT re-raise this as open.
+  - **srt-upstream BYO-proxy issue: track locally, file POST-going-public.**
+    Not filed now (outward-facing; premature while private). It's a
+    when-rein-goes-public TODO — draft is staged
+    (`~/.claude/jobs/.../srt-upstream-issue-draft.md` on the origin machine;
+    reconstructable from the researcher's report). Tracked here as the
+    canonical local record.
+  - **`--direct` gate: informational banner is FINAL.** No confirm-prompt /
+    REIN_ALLOW_DIRECT env. Footgun-on-real-repo is accepted (hard-constraint
+    #1 trust model — rein can't detect a throwaway; the human is the gate).
+
 - 2026-07-05 — **CP3 srt composition DONE** (supervised agent). Delivered:
   `internal/srt` (typed 0.0.63 settings.json Build+Validate — 6 allowed domains
   = 3 inject + 3 CDN, mitmProxy.domains = exactly the 3 inject hosts never a
