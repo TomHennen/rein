@@ -174,11 +174,37 @@ useful message; latency recorded.
 
 ### CP4 — Session & approval integration (sandboxed mode)
 
-**Status: IMPLEMENTED (2026-07-05), awaiting supervisor live-gate.** Commit
-a0aa7bd. Much of the literal CP4 text was already delivered by the in-process
-pivot (approval on rein's foreground tty; write-token revoke + teardown on agent
-exit; run-scoped approval; #12 closed structurally — no control socket). CP4's
-remaining work landed:
+**Status: DONE (2026-07-05).** Implemented (a0aa7bd), reviewed (code + security),
+fix pass (3531cb5), and **supervisor live-gate PASSED**. Much of the literal CP4
+text was already delivered by the in-process pivot (approval on rein's foreground
+tty; write-token revoke + teardown on agent exit; run-scoped approval; #12 closed
+structurally — no control socket).
+
+**Reviews + live-gate (2026-07-05):** Security review found NO critical/high and
+**overturned the #32 tty concern in rein's favor** — srt's bwrap uses
+`--new-session` (setsid) so the sandbox child has NO controlling terminal;
+empirically /dev/tty → ENXIO (unopenable) and TIOCSTI → ENOTTY even on an
+inherited real-pty fd, **independent of the host `dev.tty.legacy_tiocsti`
+sysctl** → in-sandbox self-grant is structurally impossible (approval
+non-replayability, design §5.5, holds). #32 downgraded to "re-verify on srt
+bump"; a per-launch /dev/tty self-test now enforces it (fails closed if a future
+srt drops --new-session). Code review: no blockers; fix pass closed a double-
+revoke-on-expiry warning + test gaps (incl. the idle-clock wiring, now guarded)
++ the tty self-test. **Supervisor live-gate on real srt 0.0.63:** bare `rein run`
+(no flag) launches SANDBOXED (default-flip works); a real in-sandbox commit
+authored + committed as **`Tom Hennen (via rein) <287259336+agentcreds-
+validation-beef[bot]@users.noreply.github.com>`** (host ~/.gitconfig not the
+source); /dev/tty unopenable in-sandbox (ENXIO); `--direct` prints the loud
+reduced-protection banner. Expiry (idle 30m / hard TTL 4h, revoke-before-close)
++ concurrent isolation are unit+`-race` covered (no fast-timeout override for a
+live expiry test). **Tom's decisions:** default-flip to sandbox ACCEPTED ("no one
+is using this yet"); commit-author identity = his name + "(via rein)" + App-bot
+noreply. **Surfaced/deferred:** `--direct` uses an informational banner (no
+confirm) — a user can footgun direct on a real repo; that's the hard-constraint-#1
+trust model (rein can't detect a throwaway). A harder gate (confirm prompt /
+`REIN_ALLOW_DIRECT=1`) is available if Tom wants it — not a CP4 defect.
+
+**Remaining CP4 work (all landed):**
 
 - **Git author identity (Tom's request):** sandboxed commits no longer author as
   the developer. `internal/srt.BuildEnv` stamps GIT_AUTHOR_*/GIT_COMMITTER_*

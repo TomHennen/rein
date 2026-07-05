@@ -149,7 +149,9 @@ If that works, your machine is fully set up.
 
 ## 4. Where the spine stands — resume here
 
-**CP1, CP2, and CP3 are DONE on `cp2-daemon-core` (unpushed as of 2026-07-05).**
+**CP1, CP2, CP3, and CP4 are DONE on `cp2-daemon-core` (unpushed as of
+2026-07-05). The full sandboxed-mode spine is built and live-verified; the only
+remaining checkpoint is CP6 (dogfood), which needs Tom's explicit go-ahead.**
 CP1 proved `git push` through a MITM. CP2 landed the **proxy arm**
 (`internal/proxy` — TLS-terminating injecting MITM on a per-run unix socket —
 + `internal/runbroker`, the in-process per-run host) on the CP2 foundation
@@ -172,30 +174,40 @@ repo set until token expiry). srt pin is **0.0.63** (bumped from 0.0.54). The
 healthy. Details in `PLAN-1.md` Notes (2026-07-05) + the correction banner atop
 `docs/phase1-design.md`.
 
-**NEXT is CP4 — session & approval integration (sandboxed mode).** Note the
-in-process pivot **shrinks CP4**: there is no daemon→foreground approval relay
-to build (issue #12's sandboxed analogue closed structurally). What remains
-(PLAN-1 CP4): the write-approval prompt already fires on rein's foreground tty
-via `buildSandboxApprove` — harden/verify it; run-scoped approval reuse +
-clear-on-exit + revoke-on-exit (partly done in CP2/CP3); session expiry (idle,
-hard TTL, agent-exit); and the default-mode UX (sandboxed becomes the `rein
-run` default where srt is healthy, direct behind an explicit flag + loud
-banner). Read, in order:
+CP4 added **session & approval integration**: git author identity
+(`internal/gitidentity` — sandboxed commits author as "<name> (via rein)" + the
+App-bot noreply email, not the developer; `~/.gitconfig` leak closed), session
+expiry (`internal/runbroker/expiry.go` — idle 30m / hard TTL 4h, revoke +
+proxy-close on expiry), the **default-mode flip** (`rein run` sandboxes by
+default; `--direct`/`--no-sandbox` for direct behind a loud banner; fail closed
+if srt unhealthy), and the approval-non-replayability verification (srt
+`--new-session` severs the controlling tty → in-sandbox /dev/tty unopenable, a
+per-launch self-test enforces it; #32 downgraded). Reviewed + supervisor
+live-gate passed (bare `rein run` sandboxes; a real commit authored as the
+delegated identity; /dev/tty ENXIO in-sandbox; `--direct` banner).
 
-1. `PLAN-1.md` — CP4 section + the "Notes" tail (live status).
-2. `docs/phase1-design.md` — the 2026-07-05 correction banner FIRST, then §5.5
-   (approval channel — the daemon-relay half is superseded by the in-process
-   tty prompt) and §5.2 (session identity).
-3. The CP3 commits on this branch (`git log 61d6d37..HEAD`);
-   `cmd/rein/run_sandboxed.go` (`buildSandboxApprove`, the tty approval path).
+**NEXT is CP6 — dogfood (needs Tom's explicit go-ahead; there is no CP5 on the
+Linux spine — macOS parity is the off-spine CP5 track).** The GATE: `wrangle` is
+the FIRST real-repo use; the throwaway-only hard-constraint #1 has held since
+Phase 0, and crossing it is Tom's conscious decision after the spine runs clean
+on throwaways — not something reaching CP6 grants. Plan (PLAN-1 CP6): Tom runs
+sandboxed mode on a throwaway for a few sessions, then on `wrangle`, testing the
+design.md §7.2 hypothesis (two weeks, no PAT fallback under deadline pressure).
+Before dogfood: durable VM time-sync (#23) and re-verify the srt pin. Read:
 
-**The write path needs a human tty** — verify it with the manual script
-`docs/cp3-manual-test.sh` (clones the throwaway, commits, `git push` through
-the sandbox, approve on the tty). The read path is autonomous.
+1. `PLAN-1.md` — CP6 section + the full 2026-07-05 Notes tail (the whole spine's
+   live status + every design decision made building it).
+2. `docs/phase1-design.md` — the 2026-07-05 correction banner + §7.2 hypothesis.
+3. The CP4 commits (`git log 46b892d..HEAD`); `cmd/rein/run_sandboxed.go`.
 
-Two things still want Tom's input (PLAN-1 Notes 2026-07-05): the stop-condition
-(b) re-read (Claude Code shipped first-party masking), and whether to file the
-staged srt-upstream BYO-proxy issue (Tom: hold until CP3/dogfood — now reached).
+**The write path needs a human tty** — verify with `docs/cp3-manual-test.sh`
+(read path is autonomous) and the CP4 identity/push check `docs/cp4-manual-test.sh`.
+
+Three things still want Tom's input (PLAN-1 Notes 2026-07-05): the stop-condition
+(b) re-read (Claude Code shipped first-party masking); whether to file the staged
+srt-upstream BYO-proxy issue (Tom: hold until CP3/dogfood — now reached); and
+whether `--direct` should have a harder gate than its informational banner
+(footgun-on-real-repo is currently possible by design).
 
 **Carry-forward invariants** (don't re-derive): the 6-point relay recipe
 (spike-findings "CP1 results"); per-run socket must sit outside every srt
