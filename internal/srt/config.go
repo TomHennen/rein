@@ -5,14 +5,23 @@
 // silently disarm rein's protections. See cp3-srt-0063-schema.md for the
 // authoritative 0.0.63 schema and the six gaps rein must close outside srt.
 //
-// Design stance: srt's config loader FAILS OPEN. loadConfig returns null on a
-// missing/empty/malformed/schema-invalid settings file, and cli falls back to
-// getDefaultConfig() whose denyRead is EMPTY (credential stores readable) and
-// whose network is unrestricted. rein therefore (a) emits the config from a
-// TYPED struct and Validate()s it before writing, and (b) treats the running
-// srt as ground truth via VerifyConfigApplied — never trusts that the file it
-// wrote took effect. The verify step is the guarantee; the typed struct is
-// merely how we avoid hand-rolled-JSON mistakes.
+// Design stance: never trust that the settings file rein wrote took effect.
+// rein (a) emits the config from a TYPED struct and Validate()s it before
+// writing, and (b) treats the RUNNING srt as ground truth via
+// VerifyConfigApplied. The typed struct only avoids hand-rolled-JSON mistakes;
+// the verify step is the guarantee.
+//
+// Verified on 0.0.63 (schema-spec discrepancy, cli.js:121-129): the spec warns
+// that loadConfig returns null on a missing/malformed settings file and cli
+// falls back to getDefaultConfig() with an EMPTY denyRead — a fail-open. That
+// fallback only fires when NO --settings flag is passed. rein ALWAYS passes
+// `-s <settings>`, and on that path srt EXITS 1 ("Refusing to run with the
+// default config") on any load failure rather than falling open. So the empty-
+// denyRead fail-open is NOT reachable on rein's path in 0.0.63 — but rein keeps
+// VerifyConfigApplied anyway: it guards against that behavior changing in a
+// future srt, proves denyRead SEMANTICS (file => /dev/null) hold for this
+// version, and catches srt running the probe unsandboxed. srt's own exit-1 is
+// itself caught (VerifyConfigApplied sees a non-ProbeOK code => fail closed).
 package srt
 
 import (

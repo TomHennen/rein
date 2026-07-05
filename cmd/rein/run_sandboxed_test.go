@@ -75,3 +75,34 @@ func TestSandboxApproveNeverNilAndDeniesWithoutIssue(t *testing.T) {
 		t.Error("no-issue session approved a write; sandboxed mode must DENY (reads flow, writes blocked)")
 	}
 }
+
+// TestCredentialDenyReadFailsClosedWithoutHome asserts the sandbox refuses to
+// assemble the deny-read set when $HOME is unresolvable (empty $HOME while XDG_*
+// still resolves) — otherwise it would launch with ~/.ssh etc. exposed while
+// every other check stayed green. Fail closed, don't return a partial list.
+func TestCredentialDenyReadFailsClosedWithoutHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	// XDG dirs still resolve, mirroring the reachable fail-open scenario.
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if _, err := credentialDenyReadPaths(t.TempDir()); err == nil {
+		t.Error("credentialDenyReadPaths returned nil error with $HOME unset; it must fail closed rather than drop the home credential stores")
+	}
+
+	// Sanity: with a home it returns the stores including ~/.ssh.
+	t.Setenv("HOME", "/home/someone")
+	paths, err := credentialDenyReadPaths(t.TempDir())
+	if err != nil {
+		t.Fatalf("unexpected error with HOME set: %v", err)
+	}
+	var sawSSH bool
+	for _, p := range paths {
+		if p == "/home/someone/.ssh" {
+			sawSSH = true
+		}
+	}
+	if !sawSSH {
+		t.Errorf("~/.ssh missing from deny-read set: %v", paths)
+	}
+}

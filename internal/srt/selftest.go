@@ -22,9 +22,11 @@ const (
 	// keyring/ssh-agent sockets). This is gap #4 firing.
 	ProbeSeccompFailOpen = 10
 	// ProbeDenyReadFailOpen: the sentinel file read back its known marker
-	// content inside the sandbox — denyRead did NOT apply, so srt fell back to
-	// the default config with an EMPTY denyRead (credential stores readable).
-	// This is gap #3 firing.
+	// content inside the sandbox — denyRead did NOT apply, so credential stores
+	// would be readable. On 0.0.63's `-s` path srt refuses to run rather than
+	// applying an empty-denyRead default (see config.go), so this is a
+	// version-drift / denyRead-semantics guard rather than a live gap #3 on this
+	// version — but it must still hard-fail the launch if it ever fires.
 	ProbeDenyReadFailOpen = 11
 	// ProbeError: the probe hit an internal error (couldn't run its checks).
 	// Treated as fail-closed by the verifier.

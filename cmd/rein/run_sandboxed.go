@@ -153,7 +153,14 @@ func runSandboxed(cmdline []string) (int, error) {
 
 	// (7) denyRead set: ambient credential stores + rein's own key/state dirs +
 	// the runtime socket dir + /run/user/<uid>. Missing paths are harmless.
-	denyStores := credentialDenyReadPaths(stateDir)
+	// FAIL CLOSED if the home stores can't be enumerated: launching with an
+	// incomplete denyRead would expose ~/.ssh etc., and neither Validate (which
+	// checks structure, not completeness) nor the /tmp-sentinel self-test would
+	// catch it — the banner would falsely claim the stores are hidden.
+	denyStores, err := credentialDenyReadPaths(stateDir)
+	if err != nil {
+		return 1, fmt.Errorf("assemble credential deny-read set: %w (refusing to launch — an incomplete deny-read would expose credential stores)", err)
+	}
 	runtimeDeny := []string{socketDir}
 	if ru := runUserDir(); ru != "" {
 		runtimeDeny = append(runtimeDeny, ru)
@@ -340,19 +347,27 @@ func buildSandboxApprove(sess session.Session, stateDir, runID string, logger *l
 // credentialDenyReadPaths returns the ambient credential stores plus rein's own
 // key/state directories to hide from the agent. Absolute paths; missing ones are
 // harmless (denyRead of an absent path is a no-op in srt).
-func credentialDenyReadPaths(stateDir string) []string {
-	var out []string
+//
+// Fails closed if the home directory can't be resolved: the home stores
+// (~/.ssh, ~/.config/gh, …) are the highest-value secrets to hide, and
+// os.UserHomeDir() errors whenever $HOME is empty EVEN when XDG_* (and thus
+// StateDir/ConfigDir) still resolve. Returning a partial list there would let
+// the run launch with those stores readable while every other check — Validate
+// (structure only) and the /tmp-sentinel self-test — stays green: a silent
+// fail-open. Refuse instead.
+func credentialDenyReadPaths(stateDir string) ([]string, error) {
 	home, err := os.UserHomeDir()
-	if err == nil {
-		out = append(out,
-			filepath.Join(home, ".config", "gh"),               // gh login (keyring fallback file)
-			filepath.Join(home, ".ssh"),                        // ssh keys + agent socket dir
-			filepath.Join(home, ".netrc"),                      // curl/git netrc
-			filepath.Join(home, ".git-credentials"),            // git store helper
-			filepath.Join(home, ".config", "git"),              // XDG git credentials
-			filepath.Join(home, ".config", "rein-credentials"), // App private key (default path)
-			filepath.Join(home, ".gnupg"),                      // gpg
-		)
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve home dir to hide credential stores (%w); set $HOME", err)
+	}
+	out := []string{
+		filepath.Join(home, ".config", "gh"),               // gh login (keyring fallback file)
+		filepath.Join(home, ".ssh"),                        // ssh keys + agent socket dir
+		filepath.Join(home, ".netrc"),                      // curl/git netrc
+		filepath.Join(home, ".git-credentials"),            // git store helper
+		filepath.Join(home, ".config", "git"),              // XDG git credentials
+		filepath.Join(home, ".config", "rein-credentials"), // App private key (default path)
+		filepath.Join(home, ".gnupg"),                      // gpg
 	}
 	// rein's managed keystore + CA live in ConfigDir; audit log, token caches,
 	// gh-env.sh, and the shim live in StateDir. Hide both — the sandboxed agent
@@ -365,7 +380,7 @@ func credentialDenyReadPaths(stateDir string) []string {
 	if p := os.Getenv("REIN_APP_PRIVATE_KEY_PATH"); p != "" {
 		out = append(out, filepath.Dir(p))
 	}
-	return out
+	return out, nil
 }
 
 // runUserDir returns /run/user/<uid> (D-Bus/Secret Service/agent sockets),
