@@ -9,13 +9,18 @@ gate** (`wrangle` — your conscious call, hard-constraint #1).
 agent's API + package hosts, agent's own credential reaches it). Until then
 `rein run -- claude` can't start.
 
-**How writes get approved in automated runs:** the write-approval prompt reads
-`/dev/tty`, which the sandboxed agent cannot reach (no controlling terminal).
-For *automation*, the human is stood in for by `rein approval grant --run-id
-<id>` run from the **host** (same uid, outside the sandbox) — the in-sandbox
-agent can't call it, so this doesn't weaken the security property; it's just the
-test harness playing the human. For *your* interactive runs, a real terminal
-(including over SSH) gives the tty and you approve live.
+**How writes get approved in automated runs — drive the REAL tty prompt.** The
+approval prompt opens `/dev/tty` directly (not stdin). To automate the *actual*
+human path, wrap `rein run` in a pseudo-terminal and script the interaction with
+**`pexpect`** (installed here, 4.9.0): spawn the run under a pty, wait for the
+approval prompt, `sendline(str(issue_number))`. This is faithful and does NOT
+weaken the security model — pexpect gives the *host-side `rein run`* process a
+controlling tty; the *sandboxed agent* still has none (srt `--new-session`), so
+it still can't reach the prompt. The harness is the host-side human, exactly
+where a real approver sits. (`tmux send-keys`/`capture-pane` is an alternative;
+`rein approval grant --run-id <id>` from the host exercises the *secondary*
+grant path and is worth one run too.) For *your* interactive runs, a real
+terminal (local or SSH) gives the tty and you approve live.
 
 ---
 
