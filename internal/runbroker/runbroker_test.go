@@ -226,6 +226,47 @@ func TestHostCloseTerminatesInflightConn(t *testing.T) {
 	}
 }
 
+// TestHostCloseUnderConcurrentTraffic drives many concurrent requests while
+// Close races in, asserting no panic/race and that Close returns cleanly (run
+// under -race).
+func TestHostCloseUnderConcurrentTraffic(t *testing.T) {
+	h, _ := startHost(t, Config{SessionID: "s", EmptyPathScope: "allow"})
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c := clientThrough(t, h)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				resp, err := c.Get("https://api.github.com/repos/o/r")
+				if err != nil {
+					return // expected once Close tears the proxy down
+				}
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}
+		}()
+	}
+
+	time.Sleep(50 * time.Millisecond) // let traffic get in flight
+	done := make(chan struct{})
+	go func() { h.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close hung under concurrent traffic")
+	}
+	close(stop)
+	wg.Wait()
+}
+
 func TestHostPlacementFailsClosed(t *testing.T) {
 	bind := t.TempDir()
 	_, err := Start(Config{

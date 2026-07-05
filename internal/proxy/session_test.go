@@ -3,12 +3,58 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/TomHennen/rein/internal/brokercore"
 )
+
+// TestConcurrentWriteDedup drives N parallel requests (a mix of reads and
+// writes on the same repo) through one core and asserts the write-mint and
+// approval dedup hold under contention: exactly one write mint and one approval
+// (run -race). Reads are served throughout.
+func TestConcurrentWriteDedup(t *testing.T) {
+	var writeMints, approvals int32
+	core := NewSessionCore(SessionConfig{
+		MintRead: func(context.Context) (string, time.Time, error) {
+			return "rtok", time.Now().Add(time.Hour), nil
+		},
+		MintWrite: func(context.Context) (string, time.Time, error) {
+			atomic.AddInt32(&writeMints, 1)
+			return "wtok", time.Now().Add(time.Hour), nil
+		},
+		Approve:   func(string) bool { atomic.AddInt32(&approvals, 1); return true },
+		ReadCache: NewMemCache(),
+	})
+
+	const n = 32
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		write := i%2 == 0
+		go func(write bool) {
+			defer wg.Done()
+			cred := core.Serve(context.Background(), brokercore.Request{Repo: "o/r", WriteIntent: write})
+			want := "rtok"
+			if write {
+				want = "wtok"
+			}
+			if cred.Password != want {
+				t.Errorf("write=%v got %q, want %q", write, cred.Password, want)
+			}
+		}(write)
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&writeMints); got != 1 {
+		t.Errorf("write mints = %d, want exactly 1 under contention", got)
+	}
+	if got := atomic.LoadInt32(&approvals); got != 1 {
+		t.Errorf("approvals = %d, want exactly 1 under contention", got)
+	}
+}
 
 // TestWriteMintCachedAcrossRequests verifies one mint covers repeated write
 // requests within the run (until expiry).
