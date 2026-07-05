@@ -378,6 +378,37 @@ path.
   and/or global config), threaded ExtraAllowedDomains → srt.Params → Build,
   validated as egress-allowed-but-never-injected (non-GitHub → direct TLS via
   system roots, already proven). Est. ~0.5 day. Treat as CP4.5 / CP6-prerequisite.
+  - 2026-07-05 — **CP4.5 RESOLVED (this blocker).** Added `ExtraAllowedDomains`
+    to `srt.Params`, threaded into `Build` (append to `allowedDomains` ONLY,
+    never `mitmProxy.domains` — extras get direct end-to-end TLS, no injected
+    token). Sources merged as a UNION (dedupe): built-in default
+    (`api.anthropic.com`), `REIN_ALLOW_DOMAINS` (comma-sep), and a session
+    `allow_domains:` list. Loud stderr EGRESS WARNING on wildcards / large sets;
+    `Validate` rejects a bare `*` (allow-all) in `allowedDomains` while allowing
+    `*.suffix`. Empirical minimal set for `claude -p`: **`api.anthropic.com`
+    ALONE** — even with `*.anthropic.com` allowed, claude made only 2 connections,
+    both to api.anthropic.com; statsig/sentry/MCP(claude.ai) are best-effort and
+    NOT required, so excluded to keep the exfil surface minimal. Auth: claude
+    reads `~/.claude/.credentials.json` (OAuth), which is readable in-sandbox and
+    NOT in the deny-read set — **no env passthrough added** (`ANTHROPIC_API_KEY`
+    et al. STILL scrubbed). Also surgically deny-read the dev's cross-project
+    Claude work history (`~/.claude/{history.jsonl,projects,sessions,todos,
+    shell-snapshots}`) so a prompt-injected agent can't exfil it via the new
+    egress — `.credentials.json`+`settings.json` stay readable. Banner now prints
+    the extra egress hosts + a `\claude`/`command claude` bypass hint.
+  - 2026-07-05 — **SURPRISE / dogfood caveat (surface to Tom).** Dev box has
+    **srt 1.0.0**, but rein/schema targets **0.0.63**. The domain+cred MECHANISM
+    is fully proven on 1.0.0 (curl `api.anthropic.com` => HTTP 405 real response;
+    unlisted host => 000; gated e2e `VerifyConfigApplied` passes on 1.0.0), but a
+    real `claude -p` INSIDE srt 1.0.0 connects to the API (2x) yet emits NO output
+    (exit 0) — reproduced even outside the nested-session concern, so it is a
+    claude-2.1.201/srt-1.0.0 interaction, NOT a domain/auth/rein bug (node IPC
+    works in-sandbox; only api.anthropic.com attempted; the same claude prints
+    HELLO outside srt). Per the task's sanctioned fallback, verified the mechanism
+    with the curl-proof and left the full agent run for the dogfood on target srt
+    (`/tmp/cp4.5-manual-test.sh`). The `~/.claude` history deny-read is likewise
+    untestable here (agent doesn't emit) — re-verify it doesn't break claude in
+    the dogfood.
   - **Stop-condition (b): CONTINUE — settled.** The masking analysis + the
     decision to build CP3/CP4 was the answer; rein's moat is the brokering
     semantics (mint/scope/approval), which Claude Code's static masking does
