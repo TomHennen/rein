@@ -65,6 +65,7 @@ func resolveGitIdentity(clientID string, ks keystore.Keystore, ownerLogin, known
 		NameTemplate:  os.Getenv("REIN_GIT_AUTHOR_TEMPLATE"),
 		EmailOverride: os.Getenv("REIN_GIT_AUTHOR_EMAIL"),
 		KnownSlug:     knownSlug,
+		AppIdentity:   clientID, // invalidates a cached email if the App changes
 		CachePath:     cachePath,
 		LookupSlug:    lookupSlug,
 		LookupBotID:   lookupBotID,

@@ -92,6 +92,14 @@ type Params struct {
 	// letting Resolve skip the GET /app call. Empty to discover via LookupSlug.
 	KnownSlug string
 
+	// AppIdentity keys the on-disk cache to a specific App (the App Client ID).
+	// It is the robust cache-invalidation signal on the env-var config path,
+	// where no slug is known up front (KnownSlug=="") so a slug-only check can't
+	// tell that the developer switched Apps: a cached email whose AppIdentity
+	// differs from the current one is ignored (re-resolved). Empty disables the
+	// identity check (falls back to the slug check alone).
+	AppIdentity string
+
 	// CachePath is the JSON file the resolved bot email is cached to/from.
 	// Empty disables caching (every launch re-resolves).
 	CachePath string
@@ -104,12 +112,14 @@ type Params struct {
 	Logger *log.Logger
 }
 
-// cacheFile is the on-disk shape of the bot-email cache. Keyed by slug so a
-// changed App (rare) invalidates a stale entry.
+// cacheFile is the on-disk shape of the bot-email cache. Keyed by App identity
+// (Client ID) AND slug so a changed App invalidates a stale entry even on the
+// env-var config path where no slug is known up front.
 type cacheFile struct {
-	Slug      string `json:"slug"`
-	BotUserID int64  `json:"bot_user_id"`
-	Email     string `json:"email"`
+	AppIdentity string `json:"app_identity,omitempty"`
+	Slug        string `json:"slug"`
+	BotUserID   int64  `json:"bot_user_id"`
+	Email       string `json:"email"`
 }
 
 // Resolve returns the non-impersonating identity. It never errors: on any
@@ -159,11 +169,8 @@ func resolveEmail(ctx context.Context, p Params) string {
 	}
 
 	if p.CachePath != "" {
-		if c, ok := readCache(p.CachePath); ok && c.Email != "" {
-			// Trust the cache unless we independently know a different slug now.
-			if p.KnownSlug == "" || c.Slug == "" || strings.EqualFold(c.Slug, p.KnownSlug) {
-				return c.Email
-			}
+		if c, ok := readCache(p.CachePath); ok && c.Email != "" && cacheMatches(c, p) {
+			return c.Email
 		}
 	}
 
@@ -193,7 +200,7 @@ func resolveEmail(ctx context.Context, p Params) string {
 		if err == nil && id > 0 {
 			email := BotEmail(id, slug)
 			if p.CachePath != "" {
-				writeCache(p.CachePath, cacheFile{Slug: slug, BotUserID: id, Email: email}, p.Logger)
+				writeCache(p.CachePath, cacheFile{AppIdentity: p.AppIdentity, Slug: slug, BotUserID: id, Email: email}, p.Logger)
 			}
 			return email
 		}
@@ -222,6 +229,21 @@ func NonLinkingBotEmail(slug string) string {
 // DefaultEmail is the branded last-ditch address when no slug is known.
 func DefaultEmail() string {
 	return "rein[bot]@users.noreply.github.com"
+}
+
+// cacheMatches reports whether a cached entry may be trusted for these Params.
+// It is invalidated when EITHER the App identity (Client ID) OR a known slug
+// differs — so switching Apps re-resolves even on the env-var path (no slug up
+// front) via the identity key. An empty key on either side skips that check
+// (best-effort back-compat with pre-key cache files).
+func cacheMatches(c cacheFile, p Params) bool {
+	if p.AppIdentity != "" && c.AppIdentity != "" && !strings.EqualFold(c.AppIdentity, p.AppIdentity) {
+		return false
+	}
+	if p.KnownSlug != "" && c.Slug != "" && !strings.EqualFold(c.Slug, p.KnownSlug) {
+		return false
+	}
+	return true
 }
 
 // readCache reads the bot-email cache file. Returns ok=false on any error

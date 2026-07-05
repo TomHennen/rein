@@ -93,6 +93,34 @@ func TestResolveEmailStaleCacheIgnoredOnSlugChange(t *testing.T) {
 	}
 }
 
+func TestResolveEmailCacheInvalidatedOnAppChange(t *testing.T) {
+	// The env-var config path carries no slug (KnownSlug==""), so only the
+	// AppIdentity (Client ID) key can tell that the developer switched Apps.
+	cache := filepath.Join(t.TempDir(), "bot.json")
+	writeCache(cache, cacheFile{AppIdentity: "Iv-OLD", Slug: "oldapp", BotUserID: 1, Email: "1+oldapp[bot]@users.noreply.github.com"}, nil)
+
+	// Same App id -> cache trusted (no lookups).
+	same := Resolve(context.Background(), Params{
+		AppIdentity: "Iv-OLD",
+		CachePath:   cache,
+		LookupSlug:  func(context.Context) (string, error) { t.Fatal("must not re-resolve on a cache hit"); return "", nil },
+	})
+	if same.Email != "1+oldapp[bot]@users.noreply.github.com" {
+		t.Errorf("same-app email = %q, want the cached value", same.Email)
+	}
+
+	// Different App id, no slug known -> cache ignored, re-resolve.
+	changed := Resolve(context.Background(), Params{
+		AppIdentity: "Iv-NEW",
+		CachePath:   cache,
+		LookupSlug:  func(context.Context) (string, error) { return "newapp", nil },
+		LookupBotID: func(context.Context, string) (int64, error) { return 7, nil },
+	})
+	if changed.Email != "7+newapp[bot]@users.noreply.github.com" {
+		t.Errorf("changed-app email = %q, want the re-resolved newapp value (stale cache must be ignored)", changed.Email)
+	}
+}
+
 func TestResolveEmailNonLinkingFallbackWhenIDFails(t *testing.T) {
 	id := Resolve(context.Background(), Params{
 		KnownSlug:   "myapp",
