@@ -215,11 +215,23 @@ out-of-scope request already 403s fail-closed (no prompt). A scope-EXPANSION
 flow (agent asks to add a repo mid-run, human confirms) is a later UX track, not
 needed for the dogfood spine — deferred rather than over-built.
 
-**Finding (issue #32, low sev):** the self-grant invariant additionally relies
-on the host kernel disabling TIOCSTI (the srt child shares rein's controlling
-tty; no `Setsid`). `dev.tty.legacy_tiocsti = 0` on this host (kernel 6.17,
-default ≥6.2) closes it; older kernels with it enabled are theoretically
-reachable. Doctor-check / Setsid follow-up filed.
+**Finding (issue #32, RESOLVED in our favor):** the security review empirically
+confirmed srt launches the child with bwrap `--new-session` (setsid), so the
+sandbox has NO controlling terminal — `/dev/tty` is unopenable (ENXIO) and
+TIOCSTI fails, INDEPENDENT of the host `dev.tty.legacy_tiocsti` sysctl. Self-
+grant is structurally impossible on every kernel; no `Setsid` needed. Hardened
+per-launch (fix pass, commit 3531cb5): the `__sandbox-probe` now opens `/dev/tty`
+and `VerifyConfigApplied` fails closed (`ProbeControllingTTY`) if it succeeds, so
+a future srt that dropped `--new-session` can't silently reopen the channel. The
+gated e2e positive case now also confirms `/dev/tty` is unopenable in the real
+sandbox. #32 downgraded to a "re-verify on srt bump" tracker.
+
+**Fix pass (commit 3531cb5) — review findings addressed:** F1 (expiry now clears
+the ledger so the exit-time revoke is a clean no-op — no spurious per-token
+warnings); F2 (end-to-end idle-clock wiring test, verified it fails if the proxy
+`OnActivity` hook is removed); F3 (`parseRunMode` routing table test); F4
+(corrupt-cache re-resolve test); Nit5 (`Host.Close` joins the expiry monitor);
+plus the /dev/tty self-test above. Reviews found NO critical/high/blocker.
 
 **Unit-verifiable vs live-gate:** BuildEnv emitting the 4 GIT_* vars + the
 resolved values, the fail-open chain, expiry policy + teardown, dispatch/fail-
