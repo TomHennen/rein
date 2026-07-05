@@ -336,7 +336,14 @@ path.
   the user's *existing long-lived* token, the exact primitive rein replaces.
   Read: the injection plumbing is now commodity; rein's moat is the brokering
   semantics. Not a hard §0(b) stop as worded, but the delta shrank — decide
-  consciously before investing CP3+.
+  consciously before investing CP3+. **Positioning now documented** in
+  `phase1-design.md` §5.6: masking protects against *theft*, rein additionally
+  limits *contemporaneous capability* (scope + read/write + write-approval);
+  rein's blast radius is bounded by *App installation* (not account reach like
+  a PAT), and with no `gh auth login` there's no user token on disk at all;
+  agent-agnostic is real but bounded (local CLI subprocess / HTTPS / CA-env).
+  Tom (2026-07-05): don't file the srt upstream issue until CP3/dogfood gives a
+  working integration to point at — draft stays staged.
 
 - 2026-07-05 — **srt upstream (researcher, 0.0.63 tarball-diffed):**
   `network.mitmProxy.socketPath` schema is byte-identical 0.0.54→0.0.63 and
