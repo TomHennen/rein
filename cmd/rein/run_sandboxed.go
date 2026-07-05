@@ -183,12 +183,30 @@ func runSandboxed(cmdline []string) (int, error) {
 		runtimeDeny = append(runtimeDeny, ru)
 	}
 
+	// (7b) EXTRA egress allowlist (CP4.5). Merge the built-in default (the wrapped
+	// agent's own API endpoint, so `rein run -- claude` works out of the box), the
+	// machine-wide REIN_ALLOW_DOMAINS, and the session's allow_domains into one
+	// list of hosts that are egress-allowed but NEVER injected (no rein token —
+	// they get a direct TLS tunnel to their real endpoint). Broad egress is a
+	// data-exfiltration surface, so warnings (wildcards / large sets) are printed
+	// LOUDLY. A malformed entry fails the launch closed.
+	extraDomains, egressWarnings, err := srt.ResolveExtraAllowedDomains(sess.AllowDomains, os.Getenv(srt.EnvAllowDomains))
+	if err != nil {
+		return 1, fmt.Errorf("resolve extra allowed egress domains: %w", err)
+	}
+	for _, wmsg := range egressWarnings {
+		fmt.Fprintf(os.Stderr, "rein: EGRESS WARNING: %s\n", wmsg)
+	}
+
 	// (8) Build + validate the srt config (typed struct; no hand-rolled JSON).
+	// baseParams is shared by BOTH the VerifyConfigApplied probe and the real
+	// agent launch, so both see the identical allowlist (including the extras).
 	baseParams := srt.Params{
-		SocketPath:         socketPath,
-		WorkingTree:        workTree,
-		DenyReadCredStores: denyStores,
-		RuntimeDenyRead:    runtimeDeny,
+		SocketPath:          socketPath,
+		WorkingTree:         workTree,
+		ExtraAllowedDomains: extraDomains,
+		DenyReadCredStores:  denyStores,
+		RuntimeDenyRead:     runtimeDeny,
 	}
 	cfg, err := srt.Build(baseParams)
 	if err != nil {
@@ -371,7 +389,7 @@ func runSandboxed(cmdline []string) (int, error) {
 		return 1, fmt.Errorf("write settings: %w", err)
 	}
 
-	printSandboxBanner(os.Stderr, sess, sessSource, socketPath, workTree, cmdline)
+	printSandboxBanner(os.Stderr, sess, sessSource, socketPath, workTree, extraDomains, cmdline)
 
 	srtArgv := append([]string{"-s", settingsPath, "--"}, cmdline...)
 	cmd := exec.Command(srtPath, srtArgv...)
@@ -529,6 +547,25 @@ func credentialDenyReadPaths(stateDir string) ([]string, error) {
 	}
 	out = append(out, cfgDir)
 	out = append(out, stateDir)
+
+	// The wrapped agent (Claude Code) authenticates from ~/.claude/.credentials.json,
+	// which stays READABLE (the agent needs it — see CP4.5). But ~/.claude ALSO
+	// holds the developer's cross-project work history — hide those artifacts so a
+	// (possibly prompt-injected) sandboxed agent can't read them and exfiltrate via
+	// the extra egress the operator opened. denyRead of a DIR is an empty WRITABLE
+	// tmpfs in-sandbox (so this doubles as claude's ephemeral per-run scratch);
+	// denyRead of a FILE is /dev/null. .credentials.json and settings.json are
+	// deliberately NOT hidden. This is a deliberate, minimal expansion of rein's
+	// remit (hiding the agent's own work artifacts, not just credential stores);
+	// it is safe (added protection) and untested against a live claude here (srt
+	// 1.0.0 in the dev box doesn't emit) — re-verify in the dogfood.
+	claudeDir := os.Getenv("CLAUDE_CONFIG_DIR")
+	if claudeDir == "" {
+		claudeDir = filepath.Join(home, ".claude")
+	}
+	for _, sub := range []string{"history.jsonl", "projects", "sessions", "todos", "shell-snapshots"} {
+		out = append(out, filepath.Join(claudeDir, sub))
+	}
 	// Explicit App key path override, if set outside the dirs above.
 	if p := os.Getenv("REIN_APP_PRIVATE_KEY_PATH"); p != "" {
 		out = append(out, filepath.Dir(p))
@@ -601,7 +638,7 @@ func printExpiryBanner(w io.Writer, reason string) {
 	fmt.Fprintln(w, "===============================================================")
 }
 
-func printSandboxBanner(w io.Writer, sess session.Session, sessSource, socketPath, workTree string, cmdline []string) {
+func printSandboxBanner(w io.Writer, sess session.Session, sessSource, socketPath, workTree string, extraDomains, cmdline []string) {
 	fmt.Fprintln(w, "rein: launching SANDBOXED (srt) run:")
 	fmt.Fprintf(w, "  session: %s (role=%s, repos=%v, issue=#%d) [source=%s]\n",
 		sess.ID, sess.Role, sess.Repos, sess.Issue, sessSource)
@@ -609,10 +646,17 @@ func printSandboxBanner(w io.Writer, sess session.Session, sessSource, socketPat
 	fmt.Fprintf(w, "  working tree (writable in sandbox): %s\n", workTree)
 	fmt.Fprintln(w, "  the agent sees NO real token; git/gh are injected at the proxy.")
 	fmt.Fprintln(w, "  credential stores, ~/.ssh, keyring/agent sockets are hidden.")
+	if len(extraDomains) > 0 {
+		fmt.Fprintf(w, "  extra egress ALLOWED (direct TLS, NOT injected, no rein token): %s\n", strings.Join(extraDomains, ", "))
+	}
 	if sess.Issue == 0 && isWriteCapableRole(sess.Role) {
 		fmt.Fprintln(w, "  WARN: session has no `issue:` — WRITES ARE BLOCKED (reads flow); add `issue:` to enable approvals.")
 	} else if sess.Issue != 0 {
 		fmt.Fprintln(w, "  first write triggers an approval prompt on THIS terminal (rein hosts the broker out of the sandbox).")
+	}
+	if len(cmdline) > 0 {
+		agent := filepath.Base(cmdline[0])
+		fmt.Fprintf(w, "  to run %s WITHOUT rein for one command: `\\%s` (bash/zsh) or `command %s` (fish)\n", agent, agent, agent)
 	}
 	fmt.Fprintln(w, "rein: running:", strings.Join(cmdline, " "))
 	fmt.Fprintln(w, "---")

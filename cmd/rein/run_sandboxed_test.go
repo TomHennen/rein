@@ -212,6 +212,66 @@ func TestInSandboxSelfGrantStructurallyFails(t *testing.T) {
 	}
 }
 
+// TestCredentialDenyReadHidesClaudeWorkArtifacts is the CP4.5 regression: the
+// wrapped agent's OAuth file (~/.claude/.credentials.json) stays readable so the
+// agent can authenticate, but the developer's cross-project Claude work history
+// (history.jsonl, projects/, sessions/) is hidden so a prompt-injected agent
+// can't read it and exfiltrate via the extra egress the operator opened.
+func TestCredentialDenyReadHidesClaudeWorkArtifacts(t *testing.T) {
+	t.Setenv("HOME", "/home/someone")
+	t.Setenv("XDG_CONFIG_HOME", "/home/someone/.config")
+	t.Setenv("XDG_STATE_HOME", "/home/someone/.local/state")
+
+	paths, err := credentialDenyReadPaths(t.TempDir())
+	if err != nil {
+		t.Fatalf("credentialDenyReadPaths: %v", err)
+	}
+	set := map[string]bool{}
+	for _, p := range paths {
+		set[p] = true
+	}
+	for _, want := range []string{
+		"/home/someone/.claude/history.jsonl",
+		"/home/someone/.claude/projects",
+		"/home/someone/.claude/sessions",
+	} {
+		if !set[want] {
+			t.Errorf("claude work artifact %q missing from deny-read set: %v", want, paths)
+		}
+	}
+	// The agent's OWN credential + settings must NOT be hidden — hiding them would
+	// break the agent's ability to authenticate/run.
+	for _, mustRead := range []string{
+		"/home/someone/.claude/.credentials.json",
+		"/home/someone/.claude/settings.json",
+		"/home/someone/.claude", // the whole dir must not be tmpfs'd
+	} {
+		if set[mustRead] {
+			t.Errorf("path %q must stay readable in-sandbox but is in the deny-read set", mustRead)
+		}
+	}
+}
+
+// TestSandboxBannerHintsAndEgress asserts the CP4.5 banner additions: the extra
+// egress hosts are surfaced, and the one-line "run without rein" bypass hint is
+// present (\claude for bash/zsh, command claude for fish).
+func TestSandboxBannerHintsAndEgress(t *testing.T) {
+	var buf bytes.Buffer
+	sess := session.Session{ID: "sess_test", Role: "implement", Repos: []string{"owner/repo"}}
+	printSandboxBanner(&buf, sess, "file:/x", "/run/s.sock", "/work", []string{"api.anthropic.com", "registry.npmjs.org"}, []string{"claude", "-p", "hi"})
+	out := buf.String()
+
+	if !strings.Contains(out, "api.anthropic.com") || !strings.Contains(out, "registry.npmjs.org") {
+		t.Errorf("banner should list extra egress domains; got:\n%s", out)
+	}
+	if !strings.Contains(out, "NOT injected") {
+		t.Errorf("banner should clarify extra egress is not injected; got:\n%s", out)
+	}
+	if !strings.Contains(out, `\claude`) || !strings.Contains(out, "command claude") {
+		t.Errorf("banner missing the bypass hint (\\claude / command claude); got:\n%s", out)
+	}
+}
+
 // TestParseRunModeRouting locks in the CP4 default-mode flip and the
 // validate-before-banner ordering: bare `run --` is sandboxed, --direct/
 // --no-sandbox select direct mode, --sandbox stays sandboxed, and a bad command
