@@ -6,6 +6,28 @@ import (
 	"github.com/TomHennen/rein/internal/brokercore"
 )
 
+// InjectHosts are the exact GitHub hosts rein TLS-terminates and injects a
+// credential into (design §4.3): the git smart-HTTP host and the two REST/
+// upload API hosts. These — and ONLY these — go in srt's mitmProxy.domains
+// (gap #6: mitmProxy.domains must be exact hosts, never a wildcard, or a CDN
+// host gets pulled into the injector). Kept next to classifyHost so the two
+// never drift: every entry here must classify as an inject class below.
+var InjectHosts = []string{
+	"github.com",
+	"api.github.com",
+	"uploads.github.com",
+}
+
+// CDNHosts are the GitHub asset/CDN hosts the agent reaches via tokenized
+// redirects from github.com. They are allowed egress (in srt's allowedDomains)
+// but are NEVER injected into — they get direct TLS with GitHub's real cert
+// (classPassthrough). They must NOT appear in mitmProxy.domains.
+var CDNHosts = []string{
+	"codeload.github.com",
+	"objects.githubusercontent.com",
+	"raw.githubusercontent.com",
+}
+
 // hostClass is the injection treatment for a GitHub host (design §4.3).
 type hostClass int
 
