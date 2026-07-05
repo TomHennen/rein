@@ -174,6 +174,59 @@ useful message; latency recorded.
 
 ### CP4 — Session & approval integration (sandboxed mode)
 
+**Status: IMPLEMENTED (2026-07-05), awaiting supervisor live-gate.** Commit
+a0aa7bd. Much of the literal CP4 text was already delivered by the in-process
+pivot (approval on rein's foreground tty; write-token revoke + teardown on agent
+exit; run-scoped approval; #12 closed structurally — no control socket). CP4's
+remaining work landed:
+
+- **Git author identity (Tom's request):** sandboxed commits no longer author as
+  the developer. `internal/srt.BuildEnv` stamps GIT_AUTHOR_*/GIT_COMMITTER_*
+  (override any gitconfig). NAME = "<host `git config user.name`> (via rein)"
+  (template configurable via `REIN_GIT_AUTHOR_TEMPLATE`); EMAIL = the App bot's
+  LINKING noreply "<botUserID>+<slug>[bot]@users.noreply.github.com" (verified
+  live: our App slug=agentcreds-validation-beef, botID=287259336; format proven
+  against dependabot). Resolved in `internal/gitidentity` with a fail-open chain
+  that NEVER yields the dev's real email (override → cache → /app slug +
+  /users id → non-linking "<slug>[bot]@…" → branded default), cached to
+  ConfigDir/bot-identity.json. `githubapp.AppSlug` (JWT GET /app) +
+  `githubapp.BotUserID` (UNAUTHENTICATED GET /users/<slug>[bot] — JWT 401s
+  there). Leak fix: managed GIT_CONFIG_GLOBAL + GIT_CONFIG_SYSTEM=/dev/null +
+  ~/.gitconfig added to deny-read.
+- **Session expiry:** `internal/runbroker` idle (30m) + hard-TTL (4h, = the
+  approvalTTL sweep backstop) monitor. Proxy `OnActivity` feeds an atomic
+  last-activity clock; on expiry rein revokes the run's write tokens and stops
+  the proxy (agent then fails closed) with a loud banner — the agent process is
+  NOT killed.
+- **Default-mode UX (user-visible change — supervisor to surface to Tom):**
+  `rein run -- <cmd>` is now SANDBOXED by default. If srt is unhealthy it fails
+  closed with a `rein doctor` pointer (no silent unsandboxed fallback). Direct
+  mode is behind `--direct`/`--no-sandbox` with a loud reduced-protection banner
+  (the throwaway-only path; rein can't detect a throwaway, so the flag + banner
+  ARE the gate). `--sandbox` kept as an explicit alias.
+- **Approval invariants:** in-sandbox self-grant is structurally impossible
+  (approval records under stateDir = deny-read AND outside the writable mount;
+  prompt on the parent tty; no control socket) —
+  `TestInSandboxSelfGrantStructurallyFails` + doc comments. Concurrent runs
+  isolated — `TestConcurrentRunsIsolated`.
+
+**Scope-change-confirm (design §5.5): DEFERRED.** In the in-process model an
+out-of-scope request already 403s fail-closed (no prompt). A scope-EXPANSION
+flow (agent asks to add a repo mid-run, human confirms) is a later UX track, not
+needed for the dogfood spine — deferred rather than over-built.
+
+**Finding (issue #32, low sev):** the self-grant invariant additionally relies
+on the host kernel disabling TIOCSTI (the srt child shares rein's controlling
+tty; no `Setsid`). `dev.tty.legacy_tiocsti = 0` on this host (kernel 6.17,
+default ≥6.2) closes it; older kernels with it enabled are theoretically
+reachable. Doctor-check / Setsid follow-up filed.
+
+**Unit-verifiable vs live-gate:** BuildEnv emitting the 4 GIT_* vars + the
+resolved values, the fail-open chain, expiry policy + teardown, dispatch/fail-
+closed, and both approval invariants are all unit-verified. The one claim that
+survives on the LIVE PUSH (manual script, tty) not unit tests: that GitHub
+actually ATTRIBUTES the commit to the App from the bot noreply email.
+
 **Estimate:** 2 days.
 
 - Session start/scope negotiation mediated by the daemon: scope is bound
