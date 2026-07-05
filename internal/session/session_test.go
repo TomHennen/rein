@@ -166,6 +166,20 @@ repos:
 			t.Errorf("Issue = %d, want 73", s.Issue)
 		}
 	})
+	t.Run("session with allow_domains field (CP4.5)", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "egress.yaml")
+		body := "id: x\nrole: implement\nrepos:\n  - o/r\nallow_domains:\n  - registry.npmjs.org\n  - pypi.org\n"
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		s, err := LoadFromFile(p)
+		if err != nil {
+			t.Fatalf("LoadFromFile: %v", err)
+		}
+		if len(s.AllowDomains) != 2 || s.AllowDomains[0] != "registry.npmjs.org" || s.AllowDomains[1] != "pypi.org" {
+			t.Errorf("AllowDomains = %v, want [registry.npmjs.org pypi.org]", s.AllowDomains)
+		}
+	})
 	t.Run("malformed YAML → error", func(t *testing.T) {
 		p := filepath.Join(t.TempDir(), "bad.yaml")
 		if err := os.WriteFile(p, []byte("id: x\nrepos: not-a-list\n"), 0o600); err != nil {

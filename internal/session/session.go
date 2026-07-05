@@ -64,6 +64,17 @@ type Session struct {
 	// authored before CP5 (env-fallback included) keep working without
 	// the prompt. The prompt is opt-in via the file's `issue:` field.
 	Issue int `yaml:"issue,omitempty"`
+
+	// AllowDomains is the per-session EXTRA egress allowlist (CP4.5): hosts the
+	// sandboxed agent may reach IN ADDITION to GitHub and the built-in agent
+	// endpoint — e.g. registry.npmjs.org, pypi.org, files.pythonhosted.org. Each
+	// is egress-allowed but NEVER injected with a rein credential (a non-GitHub
+	// host gets a direct TLS tunnel to itself). Merged as a UNION with the
+	// built-in default and REIN_ALLOW_DOMAINS. Entries are bare hosts or strict
+	// `*.suffix` wildcards; a wildcard or a large set triggers a loud egress
+	// warning at launch because broad egress is a data-exfiltration surface.
+	// Optional and empty by default (Sandboxed mode only; ignored in direct mode).
+	AllowDomains []string `yaml:"allow_domains,omitempty"`
 }
 
 // BareRepoNames returns the "name" halves of the session's "owner/name"
