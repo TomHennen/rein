@@ -211,3 +211,45 @@ func TestInSandboxSelfGrantStructurallyFails(t *testing.T) {
 		t.Errorf("stateDir %q not in deny-read set; the sandbox could read the approval record: %v", stateDir, deny)
 	}
 }
+
+// TestParseRunModeRouting locks in the CP4 default-mode flip and the
+// validate-before-banner ordering: bare `run --` is sandboxed, --direct/
+// --no-sandbox select direct mode, --sandbox stays sandboxed, and a bad command
+// shape returns a usage error (so dispatchRun never prints the direct banner).
+func TestParseRunModeRouting(t *testing.T) {
+	cases := []struct {
+		name     string
+		argv     []string
+		wantMode runMode
+		wantCmd  []string
+		wantErr  bool
+	}{
+		{"default is sandboxed", []string{"--", "claude", "foo"}, modeSandbox, []string{"claude", "foo"}, false},
+		{"explicit --sandbox", []string{"--sandbox", "--", "claude"}, modeSandbox, []string{"claude"}, false},
+		{"--direct selects direct", []string{"--direct", "--", "claude"}, modeDirect, []string{"claude"}, false},
+		{"--no-sandbox aliases direct", []string{"--no-sandbox", "--", "claude"}, modeDirect, []string{"claude"}, false},
+		{"missing -- is a usage error", []string{"claude"}, modeSandbox, nil, true},
+		{"--direct without command is a usage error", []string{"--direct"}, modeDirect, nil, true},
+		{"--direct without -- is a usage error", []string{"--direct", "claude"}, modeDirect, nil, true},
+		{"no command at all", []string{}, modeSandbox, nil, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mode, cmd, err := parseRunMode(tc.argv)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if mode != tc.wantMode {
+				t.Errorf("mode = %v, want %v", mode, tc.wantMode)
+			}
+			if !tc.wantErr && strings.Join(cmd, " ") != strings.Join(tc.wantCmd, " ") {
+				t.Errorf("cmdline = %v, want %v", cmd, tc.wantCmd)
+			}
+			// A usage error must be returned even for the direct mode, so the
+			// caller rejects it BEFORE printing the banner.
+			if tc.wantErr && cmd != nil {
+				t.Errorf("cmdline = %v on error, want nil", cmd)
+			}
+		})
+	}
+}

@@ -31,6 +31,16 @@ const (
 	// ProbeError: the probe hit an internal error (couldn't run its checks).
 	// Treated as fail-closed by the verifier.
 	ProbeError = 12
+	// ProbeControllingTTY: opening /dev/tty SUCCEEDED inside the sandbox — the
+	// child HAS a controlling terminal. The write-approval non-replayability
+	// defense relies on the sandboxed agent having NO route to rein's approval
+	// tty; srt delivers this by launching the child with bwrap `--new-session`
+	// (setsid), which detaches the controlling terminal so /dev/tty is
+	// unopenable (ENXIO) and TIOCSTI fails — independent of the host's
+	// dev.tty.legacy_tiocsti sysctl. If /dev/tty opens, that guarantee has
+	// regressed (e.g. a future srt dropped --new-session) and an in-sandbox
+	// process could reach a terminal; refuse to launch (issue #32).
+	ProbeControllingTTY = 13
 )
 
 // sentinelMarker is the known content written to the host-side sentinel file.
@@ -132,6 +142,8 @@ func VerifyConfigApplied(vp VerifyParams) error {
 		return fmt.Errorf("srt verify: SECCOMP FAIL-OPEN — AF_UNIX socket creation was NOT blocked inside the sandbox; the agent could reach keyring/ssh-agent sockets. Refusing to launch (gap #4). output: %s", trim(out))
 	case ProbeDenyReadFailOpen:
 		return fmt.Errorf("srt verify: CONFIG FAIL-OPEN — the credential sentinel was READABLE inside the sandbox; srt did not apply rein's denyRead (likely null-fallback to the default config with empty denyRead). Refusing to launch (gap #3). output: %s", trim(out))
+	case ProbeControllingTTY:
+		return fmt.Errorf("srt verify: CONTROLLING-TTY PRESENT — /dev/tty was OPENABLE inside the sandbox, so the child has a controlling terminal. The write-approval channel could be reachable from in-sandbox (an in-sandbox process could inject the approval). This means srt no longer launches the child with --new-session (setsid). Refusing to launch (issue #32). output: %s", trim(out))
 	case ProbeError:
 		return fmt.Errorf("srt verify: probe reported an internal error; failing closed. output: %s", trim(out))
 	default:
@@ -150,6 +162,10 @@ func VerifyConfigApplied(vp VerifyParams) error {
 //     ro-binds /dev/null (reads empty); denyRead of a DIR tmpfs's it (file
 //     absent). Either way the marker must be gone. If the marker comes back,
 //     denyRead did not apply.
+//   - opening /dev/tty must FAIL. In a --new-session (setsid) sandbox the child
+//     has no controlling terminal, so /dev/tty is unopenable (ENXIO). If it
+//     opens, the child HAS a controlling terminal and the approval channel could
+//     be reachable in-sandbox — fail closed (issue #32).
 func RunProbe(args []string) int {
 	if len(args) < 2 {
 		return ProbeError
@@ -164,7 +180,17 @@ func RunProbe(args []string) int {
 	if err == nil && string(data) == marker {
 		return ProbeDenyReadFailOpen
 	}
-	// err != nil (absent/tmpfs) or empty (/dev/null bind) => denyRead applied.
+
+	// Controlling-terminal check: /dev/tty must be unopenable. Opening it does
+	// not block or read; a successful open (err == nil) means a controlling
+	// terminal is attached, which must not be the case under --new-session.
+	if f, terr := os.OpenFile("/dev/tty", os.O_RDONLY, 0); terr == nil {
+		_ = f.Close()
+		return ProbeControllingTTY
+	}
+
+	// err != nil (absent/tmpfs) or empty (/dev/null bind) => denyRead applied,
+	// and /dev/tty was unopenable => no controlling terminal.
 	return ProbeOK
 }
 

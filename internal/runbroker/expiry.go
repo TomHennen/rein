@@ -81,11 +81,16 @@ func (h *Host) monitor(ctx context.Context, idle, hard, interval time.Duration, 
 // expire fires the caller's OnExpire (BEFORE teardown, so tokens are revoked
 // while the proxy still holds them) then Closes the host, stopping the proxy.
 // Guarded so it happens exactly once even if a later manual Close races it.
+//
+// It runs on the monitor goroutine, so it marks the monitor done BEFORE calling
+// Close — otherwise Close's <-monitorDone join (which waits for THIS goroutine)
+// would deadlock. The monitor's own deferred markMonitorDone is then a no-op.
 func (h *Host) expire(reason string, onExpire func(reason string)) {
 	h.expireOnce.Do(func() {
 		if onExpire != nil {
 			onExpire(reason)
 		}
+		h.markMonitorDone()
 		_ = h.Close()
 	})
 }

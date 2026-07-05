@@ -95,6 +95,48 @@ func TestHostIdleExpiry(t *testing.T) {
 	}
 }
 
+// TestHostActivityDefersIdleThenExpires is the end-to-end guard on the idle-
+// clock WIRING (proxy OnActivity -> markActivity -> idle deferral): while
+// requests flow faster than the idle bound, OnExpire must NOT fire; once traffic
+// stops, it must. This fails if the p.onActivity() hook is removed from the
+// proxy request path (lastActivity would stay pinned at launch and expiry would
+// fire mid-traffic).
+func TestHostActivityDefersIdleThenExpires(t *testing.T) {
+	fired := make(chan string, 1)
+	h, _ := startHost(t, Config{
+		SessionID:      "s",
+		EmptyPathScope: "allow",
+		IdleTimeout:    150 * time.Millisecond,
+		checkInterval:  10 * time.Millisecond,
+		OnExpire:       func(reason string) { fired <- reason },
+	})
+	c := clientThrough(t, h)
+
+	// Phase 1: drive traffic every 25ms for 350ms (> 2x the idle bound). Each
+	// request must reset the idle clock, so NO expiry may fire in this window.
+	// Without the OnActivity wiring, expiry would fire at ~150ms — mid-window.
+	deadline := time.Now().Add(350 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		select {
+		case r := <-fired:
+			t.Fatalf("idle expiry fired (%s) WHILE traffic was flowing — proxy activity is not resetting the idle clock", r)
+		default:
+		}
+		getOK(t, c, "https://api.github.com/repos/o/r")
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	// Phase 2: go quiet — expiry must now fire.
+	select {
+	case r := <-fired:
+		if r != "idle" {
+			t.Errorf("expiry reason = %q, want idle", r)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("idle expiry did not fire after traffic stopped")
+	}
+}
+
 // TestHostHardTTLExpiry asserts the hard cap trips regardless of activity.
 func TestHostHardTTLExpiry(t *testing.T) {
 	fired := make(chan string, 1)

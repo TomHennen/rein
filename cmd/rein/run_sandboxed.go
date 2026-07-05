@@ -261,6 +261,16 @@ func runSandboxed(cmdline []string) (int, error) {
 		OnExpire: func(reason string) {
 			logger.Printf("session expired (%s): revoking write tokens and stopping the proxy", reason)
 			revokeRunWriteTokens(stateDir, runID, productionRevoke(sess), time.Now())
+			// Clear the ledger now that its tokens are revoked, so the deferred
+			// exit-time revokeRunWriteTokens reads an empty ledger and is a clean
+			// no-op — otherwise it would re-revoke already-dead tokens and print a
+			// spurious "exit-revoke of a write token failed" per token (F1). The
+			// deferred ClearRun still runs at exit (idempotent). A write approved
+			// in the brief window before the proxy stops re-appends to the ledger
+			// and is caught by that deferred exit-time revoke.
+			if err := approvals.ClearRun(stateDir, runID); err != nil {
+				logger.Printf("expiry: clear write-token ledger failed (best-effort): %v", err)
+			}
 			printExpiryBanner(os.Stderr, reason)
 		},
 	})
@@ -411,7 +421,14 @@ func runSandboxed(cmdline []string) (int, error) {
 //   - This hook runs in rein's PARENT process, on its foreground /dev/tty, and
 //     the issue-number secret is read from that tty (internal/ui/grant). The
 //     sandboxed agent has no channel to rein's tty and does not know it will be
-//     asked — it cannot pre-answer or self-answer the prompt.
+//     asked — it cannot pre-answer or self-answer the prompt. Concretely: srt
+//     launches the child with bwrap `--new-session` (setsid), so the sandbox has
+//     NO controlling terminal — /dev/tty is unopenable (ENXIO) and TIOCSTI
+//     injection fails, independent of the host's dev.tty.legacy_tiocsti sysctl.
+//     VerifyConfigApplied re-checks this EVERY launch (ProbeControllingTTY: the
+//     in-sandbox probe opens /dev/tty and fails the launch closed if it
+//     succeeds), so a future srt that dropped --new-session can't silently
+//     reopen the channel (issue #32).
 //   - The on-disk approval RECORD the hook consults lives under stateDir, which
 //     is deny-read'd in-sandbox AND outside the sandbox's only writable mount
 //     (the working tree), so an in-sandbox process can neither read nor forge

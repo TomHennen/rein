@@ -262,6 +262,11 @@ func readCache(path string) (cacheFile, bool) {
 
 // writeCache atomically writes the cache (temp + rename, mode 0600). Best-effort:
 // a failure only means the next launch re-resolves over the network.
+//
+// A SIGKILL between CreateTemp and Rename can orphan a ".bot-identity-*.json"
+// temp in the config dir (the deferred Remove won't run). Truly minor: the dir
+// is deny-read'd in-sandbox and the temp holds only a bot noreply address, not a
+// secret; a later successful write leaves it, harmless, alongside the real file.
 func writeCache(path string, c cacheFile, logger *log.Logger) {
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {

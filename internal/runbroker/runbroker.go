@@ -121,6 +121,13 @@ type Host struct {
 	done       chan struct{}
 	closeOnce  sync.Once
 
+	// monitorDone is closed when the expiry monitor goroutine has returned (or
+	// immediately if none was started). Close joins it so no expiry callback
+	// (a network revoke) can run after Close returns. monitorOnce guards the
+	// close so the monitor's normal exit and the expire path can't double-close.
+	monitorDone chan struct{}
+	monitorOnce sync.Once
+
 	// Expiry state (design §5.3). start is the launch instant (hard-TTL base);
 	// lastActivity is the atomic unixnano of the last proxy request (idle base),
 	// updated lock-free from the request path via markActivity. expireOnce
@@ -185,9 +192,10 @@ func Start(cfg Config) (*Host, error) {
 	}
 
 	h := &Host{
-		socketPath: cfg.SocketPath,
-		done:       make(chan struct{}),
-		start:      now(),
+		socketPath:  cfg.SocketPath,
+		done:        make(chan struct{}),
+		monitorDone: make(chan struct{}),
+		start:       now(),
 	}
 	h.lastActivity.Store(now().UnixNano()) // count idle from launch, not epoch
 
@@ -221,15 +229,27 @@ func Start(cfg Config) (*Host, error) {
 	}()
 
 	// Expiry monitor: only when a bound is configured. It shares ctx with Serve,
-	// so Close (which cancels ctx) also stops the monitor.
+	// so Close (which cancels ctx) also stops the monitor. Close joins
+	// monitorDone; pre-close it when no monitor runs so Close never blocks.
 	if cfg.IdleTimeout > 0 || cfg.HardTTL > 0 {
 		interval := cfg.checkInterval
 		if interval <= 0 {
 			interval = deriveCheckInterval(cfg.IdleTimeout, cfg.HardTTL)
 		}
-		go h.monitor(ctx, cfg.IdleTimeout, cfg.HardTTL, interval, now, cfg.OnExpire)
+		go func() {
+			defer h.markMonitorDone()
+			h.monitor(ctx, cfg.IdleTimeout, cfg.HardTTL, interval, now, cfg.OnExpire)
+		}()
+	} else {
+		h.markMonitorDone()
 	}
 	return h, nil
+}
+
+// markMonitorDone closes monitorDone exactly once (idempotent across the
+// monitor's normal exit and the expire path).
+func (h *Host) markMonitorDone() {
+	h.monitorOnce.Do(func() { close(h.monitorDone) })
 }
 
 // SocketPath is the per-run proxy socket the sandbox connects to.
@@ -240,12 +260,16 @@ func (h *Host) SocketPath() string { return h.socketPath }
 func (h *Host) CACertPEM() []byte { return h.ca.CertPEM() }
 
 // Close stops the proxy and releases the socket. Idempotent; blocks until the
-// serve loop has returned so the socket is fully gone on return.
+// serve loop AND the expiry monitor have returned, so on return the socket is
+// gone and no expiry callback (a network revoke) can still fire. When Close is
+// invoked FROM the expire path (on the monitor goroutine), expire has already
+// marked monitorDone, so the <-h.monitorDone join does not self-deadlock.
 func (h *Host) Close() error {
 	h.closeOnce.Do(func() {
 		h.cancel()
 		h.ln.Close()
 		<-h.done
+		<-h.monitorDone
 	})
 	return nil
 }

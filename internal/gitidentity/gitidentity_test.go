@@ -3,6 +3,7 @@ package gitidentity
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -155,6 +156,24 @@ func TestResolveNeverLeaksDevEmail(t *testing.T) {
 		if got := id.Email; got == "tom.hennen@gmail.com" {
 			t.Errorf("dev email leaked: %q", got)
 		}
+	}
+}
+
+func TestResolveEmailCorruptCacheReResolves(t *testing.T) {
+	cache := filepath.Join(t.TempDir(), "bot.json")
+	if err := os.WriteFile(cache, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id := Resolve(context.Background(), Params{
+		CachePath:   cache,
+		KnownSlug:   "myapp",
+		LookupBotID: func(context.Context, string) (int64, error) { return 5, nil },
+	})
+	if id.Email != "5+myapp[bot]@users.noreply.github.com" {
+		t.Errorf("email = %q, want the re-resolved value (corrupt cache must be ignored)", id.Email)
+	}
+	if id.Email == "" {
+		t.Error("email must never be empty even with a corrupt cache")
 	}
 }
 

@@ -55,32 +55,52 @@ import (
 //	rein run --direct -- <cmd>     # DIRECT/unsandboxed (explicit opt-in + banner)
 //	rein run --no-sandbox -- <cmd> # alias for --direct
 func dispatchRun(argv []string) (int, error) {
-	if len(argv) > 0 {
-		switch argv[0] {
-		case "--sandbox":
-			cmdline, err := parseRunArgs(argv[1:])
-			if err != nil {
-				return 2, err
-			}
-			return runSandboxed(cmdline)
-		case "--direct", "--no-sandbox":
-			// Validate the command shape before the banner so a usage error
-			// doesn't print a scary warning first.
-			if _, err := parseRunArgs(argv[1:]); err != nil {
-				return 2, err
-			}
-			printDirectModeBanner(os.Stderr)
-			return runWrapped(argv[1:])
-		}
-	}
-	// Default (no mode flag): sandboxed. runSandboxed runs preflight and fails
-	// closed (with a `rein doctor` pointer) if srt is unhealthy — it does NOT
-	// fall back to unsandboxed mode on its own (design §2-3; CP3 fallback rule).
-	cmdline, err := parseRunArgs(argv)
+	mode, cmdline, err := parseRunMode(argv)
 	if err != nil {
 		return 2, err
 	}
+	if mode == modeDirect {
+		// Banner only AFTER the command shape validated (parseRunMode returns a
+		// usage error first), so a usage error never prints the scary warning.
+		printDirectModeBanner(os.Stderr)
+		return runWrapped(append([]string{"--"}, cmdline...))
+	}
+	// Sandboxed (default + --sandbox). runSandboxed runs preflight and fails
+	// closed (with a `rein doctor` pointer) if srt is unhealthy — it does NOT
+	// fall back to unsandboxed mode on its own (design §2-3; CP3 fallback rule).
 	return runSandboxed(cmdline)
+}
+
+// runMode is the sandbox-vs-direct decision for `rein run`.
+type runMode int
+
+const (
+	modeSandbox runMode = iota
+	modeDirect
+)
+
+// parseRunMode decides the run mode from the leading flag and validates the
+// command shape, returning the mode and the cmdline (the argv AFTER "--"). The
+// default (no recognized mode flag) is modeSandbox — the CP4 flip. A usage error
+// is returned for a bad command shape BEFORE any side effect, so dispatchRun can
+// reject it without printing the direct-mode banner.
+func parseRunMode(argv []string) (runMode, []string, error) {
+	mode := modeSandbox
+	rest := argv
+	if len(argv) > 0 {
+		switch argv[0] {
+		case "--sandbox":
+			rest = argv[1:]
+		case "--direct", "--no-sandbox":
+			mode = modeDirect
+			rest = argv[1:]
+		}
+	}
+	cmdline, err := parseRunArgs(rest)
+	if err != nil {
+		return mode, nil, err
+	}
+	return mode, cmdline, nil
 }
 
 // printDirectModeBanner is the loud, unmissable warning for the explicit
