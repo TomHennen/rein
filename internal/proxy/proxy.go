@@ -39,18 +39,39 @@ type Config struct {
 	// the CP1-recipe transport (HTTP/1.1, no compression, system roots). Tests
 	// inject a transport that redirects github.com:443 to an httptest server.
 	Upstream http.RoundTripper
+
+	// HandshakeTimeout bounds the inbound pre-request window (CONNECT preamble
+	// + TLS handshake). Zero uses defaultHandshakeTimeout. (C1)
+	HandshakeTimeout time.Duration
+	// IdleTimeout bounds how long we wait for the NEXT request's line+headers
+	// on a kept-alive connection. It does NOT bound the body upload or a human
+	// approval pause (those come after the request is read). Zero uses
+	// defaultIdleTimeout. (C1)
+	IdleTimeout time.Duration
 }
 
 // Proxy is one session's TLS-terminating injecting relay. Serve it on a
 // listener (from Listen) per accepted connection.
 type Proxy struct {
-	sessionID string
-	core      *brokercore.Core
-	ca        *CA
-	audit     *AuditLog
-	logger    *log.Logger
-	client    *http.Client
+	sessionID        string
+	core             *brokercore.Core
+	ca               *CA
+	audit            *AuditLog
+	logger           *log.Logger
+	client           *http.Client
+	handshakeTimeout time.Duration
+	idleTimeout      time.Duration
 }
+
+// Inbound deadline defaults (C1). Handshake ~10s matches the upstream
+// TLSHandshakeTimeout. Idle 5min bounds the gap BETWEEN requests on a
+// kept-alive connection while staying comfortably above git's own pauses; it
+// never bounds the body upload or a human approval pause (both happen after the
+// request line+headers are read, when we clear the read deadline).
+const (
+	defaultHandshakeTimeout = 10 * time.Second
+	defaultIdleTimeout      = 5 * time.Minute
+)
 
 // New constructs a Proxy from cfg.
 func New(cfg Config) (*Proxy, error) {
@@ -67,12 +88,22 @@ func New(cfg Config) (*Proxy, error) {
 	if transport == nil {
 		transport = defaultTransport()
 	}
+	handshakeTimeout := cfg.HandshakeTimeout
+	if handshakeTimeout <= 0 {
+		handshakeTimeout = defaultHandshakeTimeout
+	}
+	idleTimeout := cfg.IdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = defaultIdleTimeout
+	}
 	return &Proxy{
-		sessionID: cfg.SessionID,
-		core:      cfg.Core,
-		ca:        cfg.CA,
-		audit:     cfg.Audit,
-		logger:    cfg.Logger,
+		sessionID:        cfg.SessionID,
+		core:             cfg.Core,
+		ca:               cfg.CA,
+		audit:            cfg.Audit,
+		logger:           cfg.Logger,
+		handshakeTimeout: handshakeTimeout,
+		idleTimeout:      idleTimeout,
 		client: &http.Client{
 			// No global timeout: a large git push can legitimately run long,
 			// and the CP1 recipe requires a transparent relay. Failures surface
@@ -170,6 +201,14 @@ func (p *Proxy) Serve(ctx context.Context, ln net.Listener) error {
 // derive from it, and each request's Host header is validated against it.
 func (p *Proxy) handleConn(conn net.Conn) {
 	defer conn.Close()
+
+	// Deadline for the whole pre-request window (CONNECT preamble + TLS
+	// handshake). A hostile in-sandbox agent could open the socket, send the
+	// CONNECT line, then never send a ClientHello — without a deadline that
+	// pins a goroutine + fd in the TRUSTED broker process forever; repeated a
+	// few thousand times it exhausts them. (C1)
+	_ = conn.SetDeadline(time.Now().Add(p.handshakeTimeout))
+
 	br := bufio.NewReader(conn)
 
 	// srt forwards the matched-domain CONNECT as an opaque tunnel: it writes
@@ -198,7 +237,16 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	if err := tlsConn.Handshake(); err != nil {
 		return
 	}
-	sni := tlsConn.ConnectionState().ServerName
+	// Handshake done — clear the pre-request deadline; serveRequests manages
+	// per-request idle deadlines from here.
+	_ = conn.SetDeadline(time.Time{})
+
+	// Normalize the SNI ONCE (lowercase + trim the trailing FQDN dot) and use
+	// that single value everywhere downstream — upstream URL, host class,
+	// tier classification, repo extraction, graphql gate. This removes a whole
+	// class of case/dot mismatch (e.g. the old `sni == "api.github.com"`
+	// graphql gate missed `API.github.com.`). (L1)
+	sni := strings.ToLower(strings.TrimSuffix(tlsConn.ConnectionState().ServerName, "."))
 	if sni == "" {
 		// No SNI ⇒ no identity ⇒ we can't safely inject or route. Fail closed.
 		p.logger.Printf("connection with no SNI; refusing")
@@ -208,11 +256,19 @@ func (p *Proxy) handleConn(conn net.Conn) {
 }
 
 // serveRequests runs the keep-alive request loop against a TLS-terminated
-// connection whose identity host is sni.
+// connection whose identity host is the already-normalized sni.
 func (p *Proxy) serveRequests(conn net.Conn, sni string) {
 	defer conn.Close()
 	r := bufio.NewReader(conn)
 	for {
+		// Idle deadline: bound how long we wait for the NEXT request line +
+		// headers, so a stalled/slowloris client can't hold the connection
+		// (and its goroutine/fd) open indefinitely. (C1) We CLEAR it once the
+		// request is read: the body upload and any human write-approval pause
+		// happen after ReadRequest returns and are legitimately unbounded — a
+		// large git push and a person deciding are both slow, and the approval
+		// pause never overlaps ReadRequest (it runs later, inside serveOne).
+		_ = conn.SetReadDeadline(time.Now().Add(p.idleTimeout))
 		req, err := http.ReadRequest(r)
 		if err != nil {
 			if err != io.EOF && !errors.Is(err, net.ErrClosed) {
@@ -220,6 +276,7 @@ func (p *Proxy) serveRequests(conn net.Conn, sni string) {
 			}
 			return
 		}
+		_ = conn.SetReadDeadline(time.Time{}) // unbounded past headers (body + approval)
 		keepAlive := p.serveOne(conn, req, sni)
 		if !keepAlive {
 			return
@@ -249,21 +306,15 @@ func (p *Proxy) serveOne(conn net.Conn, req *http.Request, sni string) (keepAliv
 		return false
 	}
 
-	// From here the request WILL have its body read/relayed. Honor
-	// Expect: 100-continue BEFORE any body read (CP1 recipe point 4) — this
-	// must precede serveInject's GraphQL buffering, or a graphql POST that
-	// waits for 100 before sending its body deadlocks. We only send 100 for a
-	// host we're going to serve (never for the refuse/mismatch cases above,
-	// where the client should see the error and abort, not upload a body).
-	if !p.handleExpectContinue(conn, req) {
-		return false
-	}
-
 	switch class {
 	case classPassthrough:
 		// CDN / asset hosts: relay verbatim, NEVER inject. The client's own
 		// Authorization (if any) passes through untouched — we neither add ours
-		// nor strip theirs (design §4.3).
+		// nor strip theirs (design §4.3). No scope/approval decision, so it is
+		// safe to invite the body now.
+		if !p.handleExpectContinue(conn, req) {
+			return false
+		}
 		return p.relay(conn, req, sni, "", "passthrough", "")
 
 	case classInjectBearer, classInjectBasic:
@@ -274,17 +325,26 @@ func (p *Proxy) serveOne(conn net.Conn, req *http.Request, sni string) (keepAliv
 
 // serveInject classifies the tier, gets a credential decision, and relays with
 // the host-appropriate injected auth — or answers locally on refusal.
+//
+// Ordering matters for Expect: 100-continue (C2): for path/method-classified
+// requests (git smart-HTTP, REST) we make the FULL scope/approval/mint decision
+// with NO body, and only send "100 Continue" once we've decided to relay — so a
+// refused or unapproved push receives the 403/502 and is NEVER invited to
+// upload its (possibly huge) pack, and on the CP4 approval path git doesn't
+// stream the pack while the human is still deciding. GraphQL is the one case
+// whose tier needs the body, so there we must send 100 first and buffer — but
+// that body is capped at 1 MiB, so the pre-decision upload is bounded.
 func (p *Proxy) serveInject(conn net.Conn, req *http.Request, sni string, class hostClass) bool {
-	// GraphQL is the only case that needs the body to classify (query vs
-	// mutation). Buffer it (queries are small) and re-attach so the relay still
-	// forwards it. Everything else is path/method-classified with a nil body —
-	// never buffer a git pack just to classify.
+	isGraphQL := sni == "api.github.com" && isGraphQLPath(req.URL.Path)
+
 	var body []byte
-	if sni == "api.github.com" && isGraphQLPath(req.URL.Path) {
-		// Read one byte past the cap to DETECT an oversized body and reject it
-		// (413), rather than silently truncating and relaying a corrupted
-		// request. GraphQL documents are small in practice. Expect:100-continue
-		// was already answered in serveOne, so this read can't deadlock.
+	if isGraphQL {
+		// Need the body to classify query-vs-mutation → invite it first, then
+		// buffer (capped). Read one past the cap to DETECT oversize and reject
+		// (413) rather than truncate-and-desync.
+		if !p.handleExpectContinue(conn, req) {
+			return false
+		}
 		const maxGraphQL = 1 << 20
 		var err error
 		body, err = io.ReadAll(io.LimitReader(req.Body, maxGraphQL+1))
@@ -312,7 +372,9 @@ func (p *Proxy) serveInject(conn net.Conn, req *http.Request, sni string, class 
 	switch cred.Password {
 	case brokercore.PlaceholderRefused:
 		// Out of scope, or write approval denied. Answer locally — do NOT
-		// forward upstream (fail closed), and never with a token.
+		// forward upstream (fail closed), and never with a token. For a
+		// non-graphql request we have NOT sent 100 Continue, so a client using
+		// Expect will get this 403 instead of being invited to upload (C2).
 		p.logger.Printf("refused: sni=%q repo=%q tier=%s reason=%q", sni, repo, tier, reason)
 		p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Tier: tier.String(), Decision: "refused-scope"})
 		p.writeLocalError(conn, http.StatusForbidden,
@@ -324,6 +386,16 @@ func (p *Proxy) serveInject(conn net.Conn, req *http.Request, sni string, class 
 		p.writeLocalError(conn, http.StatusBadGateway,
 			"rein: could not mint a GitHub token for this request. Run `rein doctor`.")
 		return false
+	}
+
+	// Decision is "relay". For a non-graphql request the body has NOT been
+	// invited yet — send 100 Continue now, AFTER the scope/approval/mint
+	// decision, so only an authorized request uploads its pack (C2). (GraphQL
+	// already answered Expect above.)
+	if !isGraphQL {
+		if !p.handleExpectContinue(conn, req) {
+			return false
+		}
 	}
 
 	// Real token in hand: inject the host-appropriate scheme and relay
@@ -341,9 +413,9 @@ func (p *Proxy) serveInject(conn net.Conn, req *http.Request, sni string, class 
 // (host-aware injection). decision/tier feed the audit line. Returns whether
 // the connection may be reused.
 func (p *Proxy) relay(conn net.Conn, req *http.Request, sni, authValue, decision, tier string) (keepAlive bool) {
-	// Expect: 100-continue was already answered in serveOne, BEFORE any body
-	// read (including serveInject's GraphQL buffering). Upstream still gets
-	// Expect stripped via the hop-by-hop set below.
+	// Expect: 100-continue was already answered by the caller (the passthrough
+	// arm, or serveInject after its scope/approval/mint decision), BEFORE any
+	// body read. Upstream still gets Expect stripped via the hop-by-hop set.
 	//
 	// Wrap the inbound body to track whether it reached EOF. If upstream
 	// responds WITHOUT reading the whole request body — GitHub 401/403'ing an

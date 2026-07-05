@@ -90,11 +90,13 @@ type harness struct {
 }
 
 type harnessOpts struct {
-	repos    []string          // session scope ceiling; nil ⇒ InScope allows all
-	approve  func(string) bool // write approval hook; nil ⇒ auto-approve
-	respond  func(http.ResponseWriter, *http.Request)
-	mintWErr error     // if set, MintWrite returns this error
-	auditW   io.Writer // if set, the proxy writes its audit log here
+	repos            []string          // session scope ceiling; nil ⇒ InScope allows all
+	approve          func(string) bool // write approval hook; nil ⇒ auto-approve
+	respond          func(http.ResponseWriter, *http.Request)
+	mintWErr         error         // if set, MintWrite returns this error
+	auditW           io.Writer     // if set, the proxy writes its audit log here
+	handshakeTimeout time.Duration // if set, overrides the inbound handshake deadline
+	idleTimeout      time.Duration // if set, overrides the inbound idle deadline
 }
 
 // syncBuffer is a goroutine-safe bytes.Buffer for capturing the audit log,
@@ -209,12 +211,14 @@ func newHarness(t *testing.T, opts harnessOpts) *harness {
 		audit = NewAuditLog(opts.auditW)
 	}
 	p, err := New(Config{
-		SessionID: "sess_test",
-		Core:      core,
-		CA:        ca,
-		Audit:     audit,
-		Logger:    testLogger(t),
-		Upstream:  upstream,
+		SessionID:        "sess_test",
+		Core:             core,
+		CA:               ca,
+		Audit:            audit,
+		Logger:           testLogger(t),
+		Upstream:         upstream,
+		HandshakeTimeout: opts.handshakeTimeout,
+		IdleTimeout:      opts.idleTimeout,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -629,6 +633,72 @@ func TestGraphQLMutationIsWrite(t *testing.T) {
 	// The buffered body must still reach upstream intact.
 	if h.gh.last().BodyN != len(q) {
 		t.Errorf("graphql body bytes = %d, want %d", h.gh.last().BodyN, len(q))
+	}
+}
+
+// TestHandshakeTimeoutReclaimsConn is the C1 guard: a client that sends the
+// CONNECT preamble then NEVER sends a ClientHello must be timed out and its
+// connection reclaimed, not pinned forever.
+func TestHandshakeTimeoutReclaimsConn(t *testing.T) {
+	h := newHarness(t, harnessOpts{handshakeTimeout: 250 * time.Millisecond})
+	raw, err := net.Dial("unix", h.socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	// Send the CONNECT preamble, read the 200, then stall (no ClientHello).
+	fmt.Fprintf(raw, "CONNECT github.com:443 HTTP/1.1\r\nHost: github.com:443\r\n\r\n")
+	br := bufio.NewReader(raw)
+	line, err := br.ReadString('\n')
+	if err != nil || !strings.Contains(line, "200") {
+		t.Fatalf("CONNECT reply = %q err=%v", line, err)
+	}
+	for { // drain to blank line
+		l, err := br.ReadString('\n')
+		if err != nil || l == "\r\n" || l == "\n" {
+			break
+		}
+	}
+	// The proxy must close the connection after the handshake deadline; a read
+	// returns EOF/err well before a generous ceiling.
+	raw.SetReadDeadline(time.Now().Add(3 * time.Second))
+	start := time.Now()
+	if _, err := br.ReadByte(); err == nil {
+		t.Fatal("connection still open after handshake deadline; goroutine/fd would leak")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("connection reclaimed after %s, want ~handshake timeout", elapsed)
+	}
+}
+
+// TestExpectRefusedBeforeUpload is the C2 guard: an out-of-scope push carrying
+// Expect: 100-continue must receive the 403 WITHOUT being invited to upload its
+// body (no "100 Continue" first, and upstream sees nothing).
+func TestExpectRefusedBeforeUpload(t *testing.T) {
+	h := newHarness(t, harnessOpts{repos: []string{"allowed/repo"}})
+	tc := h.rawTLS(t, "github.com")
+	defer tc.Close()
+	br := bufio.NewReader(tc)
+
+	// POST a receive-pack to an OUT-OF-SCOPE repo, with Expect: 100-continue,
+	// and DO NOT send the body yet — we want to observe what the proxy says
+	// before any upload.
+	fmt.Fprintf(tc, "POST /other/repo.git/git-receive-pack HTTP/1.1\r\nHost: github.com\r\nContent-Length: 1500000\r\nExpect: 100-continue\r\n\r\n")
+
+	tc.SetReadDeadline(time.Now().Add(3 * time.Second))
+	statusLine, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read status line: %v", err)
+	}
+	// The FIRST thing back must be the 403 — never "100 Continue".
+	if strings.Contains(statusLine, "100") {
+		t.Fatalf("proxy sent 100 Continue to an out-of-scope push; body would upload. Got %q", statusLine)
+	}
+	if !strings.Contains(statusLine, "403") {
+		t.Fatalf("first response line = %q, want 403", statusLine)
+	}
+	if h.gh.count() != 0 {
+		t.Errorf("out-of-scope push reached upstream")
 	}
 }
 
