@@ -24,12 +24,15 @@ be healthy before any GitHub App work (#23) or mints 401 intermittently.
 ## Environmental prerequisites (one-time, per machine)
 
 - `srt` installed (`@anthropic-ai/sandbox-runtime`), plus `bwrap`,
-  `ripgrep`, `socat` (Linux). **Pin srt 0.0.54** (latest as of 2026-06-11;
-  what the spike verified). Upstream's main-branch README describes a new
-  config format where custom-proxy support is "not yet supported … future
-  release" — the `mitmProxy.socketPath` hook will move. Track upstream;
-  expect one migration; consider filing an upstream issue describing
-  rein's use case (design §7).
+  `ripgrep`, `socat` (Linux). **Pin srt 0.0.63** (bumped from 0.0.54 on
+  2026-07-05; latest, and what CP3 builds + re-verifies against — the
+  `mitmProxy.socketPath` schema is byte-identical 0.0.54→0.0.63 and 0.0.63
+  is still the old config format, so the injection lever is intact). The
+  spike originally verified 0.0.54; CP3's live e2e is the bump re-verify.
+  Upstream's main-branch README still describes a new config format where
+  custom-proxy support is "not yet supported … future release" — the
+  `mitmProxy.socketPath` hook will move eventually. Track upstream; expect
+  one migration; standing policy is pin + re-verify-on-bump (design §7).
 - Ubuntu 24.04+: AppArmor profile granting `userns` to `/usr/bin/bwrap`
   (see spike findings) — or srt won't launch. `rein init` should detect
   and guide (folds into #22/#23 work).
@@ -353,8 +356,11 @@ path.
   first-party masking is built on `tlsTerminate` — rein's hook now competes
   with upstream's own injection path (displacement risk real). No upstream
   issue covers BYO-proxy; a draft is staged (needs Tom's go-ahead to file — it
-  is outward-facing). Keep the 0.0.54 pin through CP3, then re-verify against
-  0.0.63. Infisical Agent Vault is now a single Go binary with a built-in MITM
+  is outward-facing). **Pin BUMPED to 0.0.63 (Tom, 2026-07-05)** — build CP3
+  against current for the sandbox-escape fixes (srt is our defense-in-depth
+  boundary) and let CP3's live e2e serve as the bump re-verify, since the
+  injection lever is schema-stable and 0.0.63 is still the old config format.
+  Infisical Agent Vault is now a single Go binary with a built-in MITM
   proxy (v0.39.0) but still no GitHub opinionation — stop-condition (c) half.
 
 

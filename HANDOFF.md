@@ -42,9 +42,10 @@ sudo apt-get install -y bubblewrap ripgrep socat
 npm install -g @anthropic-ai/sandbox-runtime   # pin the version; see below
 ```
 
-**Pin srt.** The spike verified `@anthropic-ai/sandbox-runtime@0.0.54`. Its
+**Pin srt.** Current pin is `@anthropic-ai/sandbox-runtime@0.0.63` (bumped
+from 0.0.54 on 2026-07-05; CP3 builds + re-verifies against it). Its
 mitm/proxy hooks are undocumented and may move across versions — install
-that version and re-verify if you bump (`docs/phase1-srt-spike-findings.md`).
+the pinned version and re-verify if you bump (`docs/phase1-srt-spike-findings.md`).
 
 ### 1b. AppArmor profile for bwrap (Ubuntu 24.04+ ONLY)
 
