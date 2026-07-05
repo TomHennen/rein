@@ -79,6 +79,13 @@ daemon design hardens.
 
 ### CP2 — Daemon skeleton + proxy arm
 
+**Status: DONE (2026-07-05).** Proxy arm landed + reviewed (code + security)
++ live-verified against real github.com. See the 2026-07-05 Notes entries.
+Architecture changed mid-checkpoint: **in-process per run, not a resident
+daemon** (Tom's decision) — the daemon skeleton stays as unwired shelf code;
+`internal/runbroker` is the host. `curl`/`git`-through-the-proxy read/write
+tiering + scope ceiling + run-scoped approval all verified live.
+
 **Estimate:** 3-4 days.
 
 - New resident `rein` daemon: unix control socket (0700 dir, uid-checked),
@@ -251,6 +258,98 @@ path.
 ## Notes / blockers / design corrections needed
 
 (Append as you work. Format: date — issue — resolution.)
+
+- 2026-07-05 — **CP2 proxy arm DONE** (supervised agent team). Delivered:
+  `internal/proxy` (TLS-terminating injecting MITM on a per-run unix socket —
+  the CP1 6-point relay recipe productized: ALPN http/1.1 pin, ContentLength/
+  TransferEncoding copy, ErrUseLastResponse, DisableCompression, 100-continue,
+  chunked bodies; SNI==Host, §4.3 host-class inject, per-SNI leaf cache,
+  keystore-backed CA, plain redacted audit log) and `internal/runbroker` (the
+  in-process per-run host — see the pivot note below). #10 (mint the full
+  session repo set) and #11 (one RepoFromPath helper) fixed. Two code + two
+  security review passes; all confirmed findings fixed (keep-alive body-drain
+  race, BareRepoNames normalization, missing inbound I/O deadlines, 100-continue
+  ordering, log control-char sanitization, SNI normalization, fail-closed
+  nil-approval guard). **Live gate PASSED** against real github.com on the
+  throwaway (`live_test.go`, REIN_LIVE-gated): read-Bearer 200, read-git 200,
+  write-receive-pack 200 (proves push perm), out-of-scope → local 403 no
+  egress, zero token leak client-side. Minted tokens revoked on cleanup.
+  Follow-ups filed: #30 (closed — prompt now names full session scope),
+  #31 (CA/leaf rotation, deferred).
+
+- 2026-07-05 — **DESIGN CORRECTION (Tom): v1 spine is in-process per run,
+  NOT a resident daemon.** Each `rein run` hosts the broker core + proxy in
+  its own out-of-sandbox process; the write-approval prompt is in-process on
+  the foreground tty. Removed from the spine: the daemon control socket +
+  protocol, daemon lifecycle, and **CP4's daemon→foreground approval relay**;
+  issue #12's sandboxed-mode analogue closes structurally (no control channel
+  exists to reach). `internal/daemon` stays on the branch as **unwired shelf
+  code** for the later tracks that motivated it (status app, OS-notification
+  approvals, one-time biometric key unlock, shared cross-run token cache) — a
+  daemon returns only when one of those lands. Security equivalence argued and
+  accepted: tokens live in a same-uid out-of-sandbox process's memory either
+  way; same-uid residual + crash-orphan behavior identical (design §5.3/§7).
+  **CP4 shrinks** to run-scoped approvals + session expiry. `phase1-design.md`
+  §4 ("Three pieces"), §5.2, §5.5 carry daemon language superseded by this —
+  correction banner added at the design doc top; full prose sweep folded into
+  the #25 rename sweep.
+
+- 2026-07-05 — **Write-approval granularity: RUN-SCOPED for both git and
+  GraphQL** (Tom's decision, resolving a security-review finding). A deeper
+  security pass found the code memoized approval per-repo for git but blanket
+  ("" key) for repo-less/GraphQL writes. Tom's model: the human approves the
+  agent for the session's issue/repo set once; then good-to-go until token
+  expiry; reads never prompt. This matches design §5.3 ("approvals are
+  run-scoped, not per-request") and the #10 full-set token (the first approval
+  already mints a token valid across the whole session set, so per-repo
+  re-prompting was only an awareness ping, never a scope gate). Code brought in
+  line: the per-repo memo collapsed to a single per-run "writes approved" flag;
+  no GraphQL body parsing needed. Scope ceiling still enforced upstream of the
+  prompt (out-of-scope repos refused before confirmWrite). design §5.1's
+  read/write bullet should read run-scoped, not per-repo (fold into the sweep).
+
+- 2026-07-05 — **Audit log: plain append-only + token-redacted, NOT
+  hash-chained** (team simplification, v1). Rationale: the same-uid host
+  residual (§5.3) means a local attacker who can write the log can rewrite an
+  unanchored chain, so chaining buys tamper-evidence against nearly nobody; the
+  in-sandbox agent is already denied read/write of the log by the CP3 fs rules.
+  Re-add chaining with an external anchor if/when the audit-writeback track
+  lands. Redaction is **by VALUE** (the minted token strings), never by
+  pattern — GitHub is rolling out a new `ghs_APPID_JWT` installation-token
+  format (~520 chars, variable, staged from 2026-04-27), so `ghs_`-prefix/
+  length regexes rot. (rein source has no token-shape assumptions today —
+  verified.)
+
+- 2026-07-05 — **advisor() unavailable** in this background session (MCP tool
+  not connected); compensated with dual reviewer subagents (code + security,
+  two passes each) on the CP2 diff before surfacing. Re-check advisor
+  availability next session.
+
+- 2026-07-05 — **Stop-condition (b) partially triggered — needs Tom's
+  read before CP3.** Claude Code shipped first-party local credential-injection
+  plumbing: `sandbox.credentials` `"mode": "mask"` (v2.1.187+ deny, v2.1.199+
+  mask) substitutes a per-session sentinel for env credentials and re-injects
+  the real value at the sandbox proxy for allowlisted hosts, on the new
+  experimental `network.tlsTerminate`; Managed Agents (cloud beta, ~2026-06-09)
+  does the same with vault keys. What has NOT shipped: minting short-lived
+  issue-scoped App tokens, scope ceilings, write approvals — masking re-injects
+  the user's *existing long-lived* token, the exact primitive rein replaces.
+  Read: the injection plumbing is now commodity; rein's moat is the brokering
+  semantics. Not a hard §0(b) stop as worded, but the delta shrank — decide
+  consciously before investing CP3+.
+
+- 2026-07-05 — **srt upstream (researcher, 0.0.63 tarball-diffed):**
+  `network.mitmProxy.socketPath` schema is byte-identical 0.0.54→0.0.63 and
+  still undocumented (README still says custom proxy "not yet supported" in the
+  new config format — docs contradict code). NEW CONSTRAINT: srt's
+  `tlsTerminate` and `mitmProxy` are mutually exclusive at config level, and
+  first-party masking is built on `tlsTerminate` — rein's hook now competes
+  with upstream's own injection path (displacement risk real). No upstream
+  issue covers BYO-proxy; a draft is staged (needs Tom's go-ahead to file — it
+  is outward-facing). Keep the 0.0.54 pin through CP3, then re-verify against
+  0.0.63. Infisical Agent Vault is now a single Go binary with a built-in MITM
+  proxy (v0.39.0) but still no GitHub opinionation — stop-condition (c) half.
+
 
 - 2026-06-14 — **CP2 foundation landed** on `cp2-daemon-core`
   (`d452925..0c5f600`), all built + tested + pushed:

@@ -12,7 +12,8 @@ needs to move except this repo.
 > **Resume pointer:** read `PLAN-1.md` (the §"Notes" tail has the live
 > state) and `docs/phase1-design.md` (design of record) +
 > `docs/phase1-srt-spike-findings.md` (esp. the "CP1 results" relay
-> recipe). Current branch for in-progress CP2 work: **`cp2-daemon-core`**.
+> recipe). Active branch: **`cp2-daemon-core`** (CP1+CP2 done, unpushed;
+> CP3 is next — see §4).
 
 ## 0. What's where
 
@@ -147,28 +148,45 @@ If that works, your machine is fully set up.
 
 ## 4. Where CP2 stands — resume here
 
-CP1 is DONE (`git push` through a MITM proven; recipe recorded). CP2 (the
-daemon + proxy arm) is in progress on **`cp2-daemon-core`** — its
-**foundation packages are landed + tested + pushed**: `internal/brokercore`
-(the shared decision core), `internal/classify` (the read/write tier
-classifier), and `internal/daemon` (the control-socket + in-memory-cache
-skeleton). The NEXT piece is the **proxy arm** (port the CP1 relay, wire it
-to classify + brokercore.Core, per-run socket). The precise live status +
-what's-next is the **CP2 entry in `PLAN-1.md`'s "Notes" section** — read it
-first. Then, in order:
+**CP1 and CP2 are DONE on `cp2-daemon-core` (unpushed as of 2026-07-05).**
+CP1 proved `git push` through a MITM. CP2 landed the **proxy arm**:
+`internal/proxy` (the productized CP1 relay — TLS-terminating injecting MITM
+on a per-run unix socket) and `internal/runbroker` (the in-process per-run
+host), on top of the CP2 foundation (`internal/brokercore`,
+`internal/classify`, and `internal/daemon` — the last now **unwired shelf
+code**, see below). Reviewed (code + security, twice) and **live-verified**
+against real github.com (`internal/proxy/live_test.go`, run with
+`REIN_LIVE=1 go test ./internal/proxy -run Live`). #10 + #11 fixed.
 
-1. `PLAN-1.md` — CP2 section + the "Notes" tail (live status: what's done,
-   what's next).
-2. `docs/phase1-design.md` §4–§5 — the daemon/proxy/classifier/CA design and
-   the open decisions (§5.1 classifier, §5.2/§5.3 per-run socket).
-3. The CP2 commits on this branch + any open PR.
+**Architecture note (don't re-derive):** the spine is **in-process per run,
+NOT a resident daemon** (Tom's decision, 2026-07-05). No control socket, no
+approval relay; `internal/daemon` is shelf code for later tracks. Write
+approval is **run-scoped** (approve once per run, covers the session's whole
+repo set until token expiry). Details + reasoning in `PLAN-1.md` Notes
+(2026-07-05) and the correction banner atop `docs/phase1-design.md`.
+
+**NEXT is CP3 — srt composition.** `rein run`'s sandboxed path calls
+`runbroker.Start` (gives it the per-run socket path + CA cert PEM), emits the
+per-run srt settings (mitmProxy.socketPath, §4.3 host classes, fs deny-read
+of credential stores, stub GH_TOKEN, CA-trust env), and execs srt. Read, in
+order:
+
+1. `PLAN-1.md` — CP3 section + the "Notes" tail (live status).
+2. `docs/phase1-design.md` — the 2026-07-05 correction banner FIRST, then
+   §4.2/§4.4 (srt specifics, fs/env hardening, CA bundle) and §5.4 (CA trust).
+3. The CP2 commits on this branch (`git log a15ac05..HEAD`).
+
+Before CP3, two things want Tom's input (both in PLAN-1 Notes 2026-07-05):
+the stop-condition (b) re-read (Claude Code shipped first-party masking), and
+whether to file the staged srt-upstream BYO-proxy issue.
 
 **Carry-forward invariants** (don't re-derive): the 6-point relay recipe
 (spike-findings "CP1 results"); per-run socket must sit outside every srt
-bind-mount (design §5.3); read-tier tokens minted with zero write scopes
-are the hard boundary, the classifier is defense-in-depth (§5.1); keep
-**direct mode + its existing tests green** through the broker-core
-extraction.
+bind-mount (design §5.3 — `proxy.CheckPlacement` enforces it, CP3 passes the
+bind-mounts); read-tier tokens minted with zero write scopes are the hard
+boundary, the classifier is defense-in-depth (§5.1); keep **direct mode + its
+existing tests green**; audit redaction is by token VALUE, never by pattern
+(the new `ghs_APPID_JWT` format breaks prefix/length regexes).
 
 ## 5. Keeping THIS doc useful
 

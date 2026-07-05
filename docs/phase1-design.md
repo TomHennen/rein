@@ -3,6 +3,22 @@
 **Status:** DRAFT for review (2026-06-08; revised 2026-06-11 after
 multi-lens review). Opens Phase 1.
 
+> **2026-07-05 correction (CP2 implementation).** The v1 spine is
+> **in-process per run, not a resident daemon** (Tom's decision). The
+> "broker daemon" in §4 ("Three pieces"), and the daemon/control-socket
+> language in §5.2 and §5.5, are superseded: each `rein run` hosts the
+> broker core + injecting proxy in its own out-of-sandbox process and
+> prompts for write-approval on its own foreground tty — there is no
+> resident daemon and no separate control socket on the spine (so #12's
+> sandboxed-mode analogue closes structurally, and CP4's approval relay is
+> dropped). `internal/daemon` remains as unwired shelf code for later
+> tracks (status app, OS-notification approvals, biometric key unlock,
+> shared cross-run cache). Also: **write-approval is run-scoped** across
+> both git and GraphQL (§5.3's wording, not §5.1's "per-repo" — the #10
+> full-set token makes per-repo re-prompting an awareness ping, not a scope
+> gate). Full prose sweep folds into the #25 rename. See `PLAN-1.md`
+> Notes (2026-07-05) for the reasoning.
+
 Self-contained: problem and requirements first, then the design. The
 integration spike (`docs/phase1-srt-spike-findings.md`) is referenced as
 evidence but not assumed read.
