@@ -360,6 +360,37 @@ path.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-07-05 — **CP4.5 done + reviewed (shippable); `claude -p` headless in the
+  sandbox is BLOCKED on claude's own restricted-egress startup, NOT rein.**
+  Mechanism: configurable non-GitHub egress (`allow_domains:` + `REIN_ALLOW_DOMAINS`
+  + built-in `api.anthropic.com` default; egress-only, NEVER injected), agent
+  auth via its own `~/.claude/.credentials.json` file (no env passthrough — GH/
+  ambient creds stay scrubbed), `~/.claude/*` history deny-read, `\claude` hint.
+  Code+security review: both critical invariants CONFIRMED (extra egress
+  egress-only-never-injected; no cred re-exposure); SHIPPABLE. Findings:
+  - MEDIUM (record + resolve in dogfood): `~/.claude.json` is a SIBLING file
+    (not under `~/.claude/`) so the new deny-read misses it — readable
+    in-sandbox, leaks a repo-path map (every repo on the machine) + potential
+    per-project mcpServers secrets. A blind deny risks a headless-startup hang
+    (it holds hasCompletedOnboarding/hasTrustDialogAccepted); test denying it
+    live in the dogfood, else document-and-accept the residual (bulk history IS
+    hidden).
+  - **The real blocker for running a real agent:** the srt sandbox demonstrably
+    runs real GitHub workloads (pexpect write-approval tests push git IN-sandbox
+    4/4; debug proved node HTTP/2 SSE streams work through srt's tunnel). But the
+    `claude` BINARY hangs on headless `-p` startup in the restricted-egress
+    sandbox: root cause is Claude Code blocking on managed/account MCP init
+    (Todoist/Gmail/GDrive/GCal on the dev account), and the documented skip
+    (`--strict-mcp-config`/`ENABLE_CLAUDEAI_MCP_SERVERS=false`) did NOT fix it in
+    a supervisor test (still hung) — likely a second cause (onboarding/trust
+    state in `~/.claude.json` under a severed tty, or arg-quoting through srt).
+    This is a claude-integration issue, not a rein correctness bug (rein --direct
+    runs claude fine). NEXT: either wire `ENABLE_CLAUDEAI_MCP_SERVERS=false` into
+    rein's sandbox env + retest, or defer to interactive dogfood (Tom runs claude
+    over ssh, which may sidestep -p/onboarding quirks) with the 4 account MCP
+    servers disabled. Decision pending Tom. Supervisor STOPPED the automated
+    claude-chase (diminishing returns + burning API quota on nested claude runs).
+
 - 2026-07-05 — **BLOCKER for real use (found while assessing readiness): the
   sandbox is GitHub-egress-only, so it cannot wrap a real agent.**
   `srt.Build` sets `AllowedDomains = InjectHosts + CDNHosts` (GitHub only) with
