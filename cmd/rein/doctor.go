@@ -37,6 +37,7 @@ import (
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
 	"github.com/TomHennen/rein/internal/session"
+	"github.com/TomHennen/rein/internal/srt"
 	"github.com/TomHennen/rein/internal/tokencache"
 )
 
@@ -76,6 +77,10 @@ func runDoctor(args []string) error {
 		checkApprovalCache,
 		checkGhShimCache,
 	}
+	// Sandbox (srt) preflight: same checks `rein run --sandbox` hard-gates on,
+	// surfaced here read-only. A [fail] here means sandboxed mode will refuse to
+	// launch — doctor is where the operator learns why before they hit it.
+	checks = append(checks, sandboxDoctorChecks()...)
 
 	results := make([]checkResult, 0, len(checks))
 	for _, c := range checks {
@@ -412,6 +417,33 @@ func checkApprovalCache() checkResult {
 		}
 	}
 	return checkResult{"approval cache", statusOK, fmt.Sprintf("%d run(s) on disk (%d live, %d approved); see `rein approval status`", len(list), live, approved)}
+}
+
+// sandboxDoctorChecks runs the srt sandbox preflight and maps each result into
+// a doctor checkResult. These are the exact checks `rein run --sandbox`
+// hard-gates on (srt present + pinned version, seccomp availability, bwrap
+// userns health), so a green doctor here means sandboxed mode will launch.
+func sandboxDoctorChecks() []func() checkResult {
+	pf := srt.Preflight(srt.DefaultEnv())
+	out := make([]func() checkResult, 0, len(pf))
+	for _, c := range pf {
+		c := c
+		out = append(out, func() checkResult {
+			return checkResult{"sandbox: " + c.Name, srtStatusToDoctor(c.Status), c.Message}
+		})
+	}
+	return out
+}
+
+func srtStatusToDoctor(s srt.Status) checkStatus {
+	switch s {
+	case srt.StatusOK:
+		return statusOK
+	case srt.StatusWarn:
+		return statusWarn
+	default:
+		return statusFail
+	}
 }
 
 // checkGhShimCache reports on the gh read-token cache, which the rein-gh

@@ -38,9 +38,25 @@ import (
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
 	"github.com/TomHennen/rein/internal/session"
+	"github.com/TomHennen/rein/internal/srt"
 	"github.com/TomHennen/rein/internal/tokencache"
 	"github.com/TomHennen/rein/internal/ui/grant"
 )
+
+// dispatchRun routes `rein run` to the sandboxed (srt) path when --sandbox is
+// present, else to direct mode (run.go). --sandbox is a CP3 opt-in; CP4 makes
+// sandboxed the default where srt is healthy. The flag must appear BEFORE the
+// "--" separator: `rein run --sandbox -- <cmd>`.
+func dispatchRun(argv []string) (int, error) {
+	if len(argv) > 0 && argv[0] == "--sandbox" {
+		cmdline, err := parseRunArgs(argv[1:])
+		if err != nil {
+			return 2, err
+		}
+		return runSandboxed(cmdline)
+	}
+	return runWrapped(argv)
+}
 
 const (
 	// mintTimeout caps each installation-token mint. Git users feel this
@@ -100,12 +116,17 @@ func main() {
 			os.Exit(1)
 		}
 	case "run":
-		code, err := runWrapped(os.Args[2:])
+		code, err := dispatchRun(os.Args[2:])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "rein run: %v\n", err)
 			os.Exit(code)
 		}
 		os.Exit(code)
+	case "__sandbox-probe":
+		// Hidden subcommand: runs INSIDE srt during VerifyConfigApplied to
+		// prove the deny-read + seccomp protections took effect. Exits with a
+		// srt.Probe* code the parent interprets. Not user-facing.
+		os.Exit(srt.RunProbe(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -125,7 +146,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  rein approval status")
 	fmt.Fprintln(os.Stderr, "  rein approval clear [--run-id <id>]")
 	fmt.Fprintln(os.Stderr, "  rein approval grant --run-id <id>")
-	fmt.Fprintln(os.Stderr, "  rein run -- <cmd> [args...]")
+	fmt.Fprintln(os.Stderr, "  rein run [--sandbox] -- <cmd> [args...]")
 }
 
 // runCredentialHelper wires env-derived config to the broker. All errors
