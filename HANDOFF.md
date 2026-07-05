@@ -147,47 +147,64 @@ CP1 result (`docs/phase1-srt-spike-findings.md` → "CP1 results"):
 
 If that works, your machine is fully set up.
 
-## 4. Where CP2 stands — resume here
+## 4. Where the spine stands — resume here
 
-**CP1 and CP2 are DONE on `cp2-daemon-core` (unpushed as of 2026-07-05).**
-CP1 proved `git push` through a MITM. CP2 landed the **proxy arm**:
-`internal/proxy` (the productized CP1 relay — TLS-terminating injecting MITM
-on a per-run unix socket) and `internal/runbroker` (the in-process per-run
-host), on top of the CP2 foundation (`internal/brokercore`,
-`internal/classify`, and `internal/daemon` — the last now **unwired shelf
-code**, see below). Reviewed (code + security, twice) and **live-verified**
-against real github.com (`internal/proxy/live_test.go`, run with
-`REIN_LIVE=1 go test ./internal/proxy -run Live`). #10 + #11 fixed.
+**CP1, CP2, and CP3 are DONE on `cp2-daemon-core` (unpushed as of 2026-07-05).**
+CP1 proved `git push` through a MITM. CP2 landed the **proxy arm**
+(`internal/proxy` — TLS-terminating injecting MITM on a per-run unix socket —
++ `internal/runbroker`, the in-process per-run host) on the CP2 foundation
+(`internal/brokercore`, `internal/classify`, and `internal/daemon` — the last
+**unwired shelf code**). CP3 landed **srt composition**: `internal/srt` (typed
+0.0.63 settings, strict env allowlist, system+rein CA bundle, preflight, the
+two fail-open self-tests) + `cmd/rein/run_sandboxed.go` (`rein run --sandbox`).
+All reviewed (code + security) and **live-verified against real srt 0.0.63 +
+real github.com**: CP2 via `REIN_LIVE=1 go test ./internal/proxy -run Live`;
+CP3 via `REIN_SANDBOX_E2E=1 go test ./internal/srt -run E2E` (self-tests) and a
+supervisor live `rein run --sandbox` gate (injection, scope-ceiling 403, cred
+hiding incl. XDG-relocated stores, env scrub, audit redaction).
 
 **Architecture note (don't re-derive):** the spine is **in-process per run,
 NOT a resident daemon** (Tom's decision, 2026-07-05). No control socket, no
 approval relay; `internal/daemon` is shelf code for later tracks. Write
 approval is **run-scoped** (approve once per run, covers the session's whole
-repo set until token expiry). Details + reasoning in `PLAN-1.md` Notes
-(2026-07-05) and the correction banner atop `docs/phase1-design.md`.
+repo set until token expiry). srt pin is **0.0.63** (bumped from 0.0.54). The
+`--sandbox` flag is CP3 opt-in; CP4 makes sandboxed the default where srt is
+healthy. Details in `PLAN-1.md` Notes (2026-07-05) + the correction banner atop
+`docs/phase1-design.md`.
 
-**NEXT is CP3 — srt composition.** `rein run`'s sandboxed path calls
-`runbroker.Start` (gives it the per-run socket path + CA cert PEM), emits the
-per-run srt settings (mitmProxy.socketPath, §4.3 host classes, fs deny-read
-of credential stores, stub GH_TOKEN, CA-trust env), and execs srt. Read, in
-order:
+**NEXT is CP4 — session & approval integration (sandboxed mode).** Note the
+in-process pivot **shrinks CP4**: there is no daemon→foreground approval relay
+to build (issue #12's sandboxed analogue closed structurally). What remains
+(PLAN-1 CP4): the write-approval prompt already fires on rein's foreground tty
+via `buildSandboxApprove` — harden/verify it; run-scoped approval reuse +
+clear-on-exit + revoke-on-exit (partly done in CP2/CP3); session expiry (idle,
+hard TTL, agent-exit); and the default-mode UX (sandboxed becomes the `rein
+run` default where srt is healthy, direct behind an explicit flag + loud
+banner). Read, in order:
 
-1. `PLAN-1.md` — CP3 section + the "Notes" tail (live status).
-2. `docs/phase1-design.md` — the 2026-07-05 correction banner FIRST, then
-   §4.2/§4.4 (srt specifics, fs/env hardening, CA bundle) and §5.4 (CA trust).
-3. The CP2 commits on this branch (`git log a15ac05..HEAD`).
+1. `PLAN-1.md` — CP4 section + the "Notes" tail (live status).
+2. `docs/phase1-design.md` — the 2026-07-05 correction banner FIRST, then §5.5
+   (approval channel — the daemon-relay half is superseded by the in-process
+   tty prompt) and §5.2 (session identity).
+3. The CP3 commits on this branch (`git log 61d6d37..HEAD`);
+   `cmd/rein/run_sandboxed.go` (`buildSandboxApprove`, the tty approval path).
 
-Before CP3, two things want Tom's input (both in PLAN-1 Notes 2026-07-05):
-the stop-condition (b) re-read (Claude Code shipped first-party masking), and
-whether to file the staged srt-upstream BYO-proxy issue.
+**The write path needs a human tty** — verify it with the manual script
+`docs/cp3-manual-test.sh` (clones the throwaway, commits, `git push` through
+the sandbox, approve on the tty). The read path is autonomous.
+
+Two things still want Tom's input (PLAN-1 Notes 2026-07-05): the stop-condition
+(b) re-read (Claude Code shipped first-party masking), and whether to file the
+staged srt-upstream BYO-proxy issue (Tom: hold until CP3/dogfood — now reached).
 
 **Carry-forward invariants** (don't re-derive): the 6-point relay recipe
 (spike-findings "CP1 results"); per-run socket must sit outside every srt
-bind-mount (design §5.3 — `proxy.CheckPlacement` enforces it, CP3 passes the
-bind-mounts); read-tier tokens minted with zero write scopes are the hard
-boundary, the classifier is defense-in-depth (§5.1); keep **direct mode + its
-existing tests green**; audit redaction is by token VALUE, never by pattern
-(the new `ghs_APPID_JWT` format breaks prefix/length regexes).
+bind-mount (design §5.3 — `proxy.CheckPlacement` enforces it); read-tier tokens
+minted with zero write scopes are the hard boundary, the classifier is
+defense-in-depth (§5.1); keep **direct mode + its existing tests green**; audit
+redaction is by token VALUE, never by pattern (the new `ghs_APPID_JWT` format
+breaks prefix/length regexes); rein must fail closed around srt's two silent
+fail-opens (invalid config, missing seccomp) — the self-tests enforce this.
 
 ## 5. Keeping THIS doc useful
 

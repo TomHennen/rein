@@ -133,6 +133,13 @@ all fire from the proxy; direct-mode test suite still green. Unit-tested.
 
 ### CP3 — srt composition
 
+**Status: DONE (2026-07-05).** `rein run --sandbox` launches the agent inside
+srt 0.0.63 with rein's proxy injecting credentials. Reviewed (code + security:
+7/8 invariants clean, one HIGH fixed) + **supervisor live-gate PASSED** on real
+srt against the throwaway. See the 2026-07-05 CP3 Notes entry. Read path
+autonomous; write path needs a human tty (manual script). CP4 makes sandboxed
+the default; for now `--sandbox` is explicit opt-in.
+
 **Estimate:** 2-3 days.
 
 - `rein run` (sandboxed-mode path): ensure daemon up; emit a per-run srt settings
@@ -308,6 +315,32 @@ path.
     out of the sandbox), so it needs a tty or a pre-seeded
     `rein approval grant --run-id <id>`; not autonomous. A no-issue session
     DENIES writes (reads still flow).
+  - **Fix pass (both reviews) landed (21b10bd):** F1 HIGH (security) —
+    credentialDenyReadPaths now resolves the developer's stores by each tool's
+    real env precedence (GH_CONFIG_DIR / XDG_CONFIG_HOME/gh / XDG_CONFIG_HOME/git
+    / GNUPGHOME), closing a silent fail-open where an env-relocated gh/git/gpg
+    config stayed readable in-sandbox (the agent could `ls $HOME` and read the
+    relocated OAuth token; HOME is on the env allowlist). Regression test
+    reproduces-then-passes. F2 — added `approvals.Sweep` to sandboxed mode
+    (parity with direct: a SIGINT-killed run's plaintext write-token ledger is
+    now reaped; SIGINT intentionally left uncaught, comment ported). F3 —
+    ConfigDir() error now hard-fails closed. F4 — per-run **audit log** wired for
+    sandboxed runs (`stateDir/audit/sandbox-<runID>.log`, 0600, token-redacted,
+    under the denied stateDir so the agent can't read its own trail). Nits:
+    absolute-path enforcement in Build, folded package-walk helper, lazy doctor
+    checks. Deferred: file-vs-dir sentinel (DiD only); CA-bundle-in-sandbox e2e
+    (covered by the live read path).
+  - **Supervisor live-gate (2026-07-05, independent of the implementor's run),
+    real srt 0.0.63 + real github.com, throwaway:** REST Bearer inject → 200;
+    git Basic inject → real HEAD sha; out-of-scope repo (torvalds/linux) →
+    **local 403** (proxy scope ceiling); CDN raw.githubusercontent.com → 200
+    (direct TLS with GitHub's real cert validated against the bundle's system
+    roots — proves system+rein, not rein-only, closing sec-review L2); **F1
+    verified LIVE** — a relocated `XDG_CONFIG_HOME/gh/hosts.yml` seeded with a
+    fake token read back EMPTY in-sandbox, and the host's real `~/.config/gh`
+    and `~/.ssh` both empty in-sandbox; env scrub — seeded ANTHROPIC_API_KEY and
+    AWS_SECRET_ACCESS_KEY both ABSENT in-sandbox, only stub GH_TOKEN present;
+    audit logs written with **0 token substrings**. All CP3 success criteria met.
 
 - 2026-07-05 — **CP2 proxy arm DONE** (supervised agent team). Delivered:
   `internal/proxy` (TLS-terminating injecting MITM on a per-run unix socket —
