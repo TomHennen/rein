@@ -396,19 +396,27 @@ path.
     shell-snapshots}`) so a prompt-injected agent can't exfil it via the new
     egress — `.credentials.json`+`settings.json` stay readable. Banner now prints
     the extra egress hosts + a `\claude`/`command claude` bypass hint.
-  - 2026-07-05 — **SURPRISE / dogfood caveat (surface to Tom).** Dev box has
-    **srt 1.0.0**, but rein/schema targets **0.0.63**. The domain+cred MECHANISM
-    is fully proven on 1.0.0 (curl `api.anthropic.com` => HTTP 405 real response;
-    unlisted host => 000; gated e2e `VerifyConfigApplied` passes on 1.0.0), but a
-    real `claude -p` INSIDE srt 1.0.0 connects to the API (2x) yet emits NO output
-    (exit 0) — reproduced even outside the nested-session concern, so it is a
-    claude-2.1.201/srt-1.0.0 interaction, NOT a domain/auth/rein bug (node IPC
-    works in-sandbox; only api.anthropic.com attempted; the same claude prints
-    HELLO outside srt). Per the task's sanctioned fallback, verified the mechanism
-    with the curl-proof and left the full agent run for the dogfood on target srt
-    (`/tmp/cp4.5-manual-test.sh`). The `~/.claude` history deny-read is likewise
-    untestable here (agent doesn't emit) — re-verify it doesn't break claude in
-    the dogfood.
+  - 2026-07-05 — **OPEN RISK to the PRIMARY goal — surface to Tom, do NOT read as
+    settled.** The domain+cred MECHANISM is fully proven (curl `api.anthropic.com`
+    => HTTP 405 real response; unlisted host => 000; gated e2e
+    `VerifyConfigApplied` passes), so CP4.5's deliverable is done. BUT
+    `rein run -- claude` END-TO-END is NOT demonstrated: a real `claude -p` INSIDE
+    srt connects to the API (2x, so auth-from-file works) yet emits NO output
+    (exit 0). **Root cause UNDETERMINED.** Ruled OUT: domains (only
+    api.anthropic.com attempted even with `*.anthropic.com` allowed), auth (it
+    connects), rein config, node child_process IPC (works in-sandbox), and
+    read-only/stale home (fresh writable home reproduces). The same claude prints
+    HELLO *outside* srt. The dev box runs **srt 1.0.0** while rein targets
+    **0.0.63** — but I did NOT run 0.0.63, so I CANNOT claim 0.0.63 fixes this; it
+    may be an srt-proxy/claude-streaming incompatibility that ALSO hits 0.0.63,
+    which would make CP4.5 necessary-but-INSUFFICIENT for the goal. The dogfood on
+    0.0.63 (`/tmp/cp4.5-manual-test.sh`) is the decider. That script is also the
+    FIRST real run of the FULL path (BuildEnv's `NODE_EXTRA_CA_CERTS`=rein-bundle
+    on a node app + the `~/.claude` deny-reads + the live mitmProxy socket — a
+    composition no unit test or the manual curl-proofs exercised), so the dogfood
+    must confirm: (a) claude emits; (b) `NODE_EXTRA_CA_CERTS`=rein-bundle doesn't
+    break claude's TLS to api.anthropic.com; (c) the `~/.claude` deny-reads don't
+    break claude startup; (d) `gh api` still injects in the same run.
   - **Stop-condition (b): CONTINUE — settled.** The masking analysis + the
     decision to build CP3/CP4 was the answer; rein's moat is the brokering
     semantics (mint/scope/approval), which Claude Code's static masking does

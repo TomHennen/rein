@@ -162,12 +162,12 @@ func TestValidateRejectsAllowAllWildcard(t *testing.T) {
 	if err := okWild.Validate(); err != nil {
 		t.Errorf("Validate rejected a legal *.suffix in allowedDomains: %v", err)
 	}
-	// bare * / empty are rejected.
-	for _, bad := range []string{"*", "", "*.*"} {
+	// bare * / empty / wildcards covering a managed GitHub host are rejected.
+	for _, bad := range []string{"*", "", "*.*", "*.github.com", "*.githubusercontent.com"} {
 		c := deepCopy(t, good)
 		c.Network.AllowedDomains = append(c.Network.AllowedDomains, bad)
 		if err := c.Validate(); err == nil {
-			t.Errorf("Validate accepted over-broad allowedDomains entry %q", bad)
+			t.Errorf("Validate accepted conflicting/over-broad allowedDomains entry %q", bad)
 		}
 	}
 }

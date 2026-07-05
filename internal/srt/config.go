@@ -237,6 +237,21 @@ func (c Config) Validate() error {
 		if strings.Contains(dl, "*") && (dl == "*" || !strings.HasPrefix(dl, "*.") || strings.Count(dl, "*") != 1) {
 			return fmt.Errorf("srt: allowedDomains entry %q is an over-broad wildcard (only exact hosts or *.suffix are permitted; a bare * would allow all egress)", d)
 		}
+		// An extra-egress wildcard must not COVER a GitHub inject/CDN host: that
+		// overlaps the exact hosts rein manages and (depending on srt's
+		// allowlist-vs-mitmProxy precedence) could shadow injection routing. Exact
+		// duplicates are harmless (deduped in Build); an overlapping wildcard is a
+		// conflict and is rejected (extra domains must not conflict with the inject
+		// hosts). e.g. *.github.com covers api.github.com; reject it.
+		if strings.HasPrefix(dl, "*.") {
+			suffix := dl[2:]
+			for _, h := range append(append([]string{}, proxy.InjectHosts...), proxy.CDNHosts...) {
+				hl := strings.ToLower(h)
+				if hl == suffix || strings.HasSuffix(hl, "."+suffix) {
+					return fmt.Errorf("srt: allowedDomains wildcard %q overlaps managed GitHub host %q (extra egress domains must not conflict with the inject/CDN hosts)", d, h)
+				}
+			}
+		}
 	}
 	allowedSet := toSet(n.AllowedDomains)
 	cdnSet := toSet(proxy.CDNHosts)
