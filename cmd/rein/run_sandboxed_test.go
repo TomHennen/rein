@@ -239,6 +239,26 @@ func TestCredentialDenyReadHidesClaudeWorkArtifacts(t *testing.T) {
 			t.Errorf("claude work artifact %q missing from deny-read set: %v", want, paths)
 		}
 	}
+	// A relocated CLAUDE_CONFIG_DIR must ALSO be hidden, and the legacy ~/.claude
+	// default stays hidden too (belt-and-suspenders, mirroring gh/gpg).
+	t.Setenv("CLAUDE_CONFIG_DIR", "/home/someone/dotfiles/claude")
+	paths2, err := credentialDenyReadPaths(t.TempDir())
+	if err != nil {
+		t.Fatalf("credentialDenyReadPaths: %v", err)
+	}
+	set2 := map[string]bool{}
+	for _, p := range paths2 {
+		set2[p] = true
+	}
+	for _, want := range []string{
+		"/home/someone/dotfiles/claude/projects", // relocated
+		"/home/someone/.claude/projects",         // legacy default still hidden
+	} {
+		if !set2[want] {
+			t.Errorf("claude history path %q missing when CLAUDE_CONFIG_DIR set: %v", want, paths2)
+		}
+	}
+
 	// The agent's OWN credential + settings must NOT be hidden — hiding them would
 	// break the agent's ability to authenticate/run.
 	for _, mustRead := range []string{

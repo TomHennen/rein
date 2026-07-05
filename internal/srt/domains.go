@@ -120,8 +120,16 @@ func validateEgressDomain(d string) error {
 	if strings.Contains(d, "://") {
 		return fmt.Errorf("must be a bare host, not a URL (no scheme)")
 	}
-	if strings.ContainsAny(d, "/ \t") {
-		return fmt.Errorf("must be a bare host (no path or whitespace)")
+	if strings.Contains(d, "/") {
+		return fmt.Errorf("must be a bare host (no path)")
+	}
+	// Reject ANY whitespace or control char (space, tab, but also embedded
+	// \n\r\v\f that TrimSpace on the ends does not remove) — fail closed on a
+	// malformed entry rather than emit a dead allowlist string.
+	for _, r := range d {
+		if r <= ' ' || r == 0x7f {
+			return fmt.Errorf("must not contain whitespace or control characters")
+		}
 	}
 	if strings.Contains(d, ":") {
 		return fmt.Errorf("must not include a port")

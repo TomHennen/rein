@@ -559,12 +559,19 @@ func credentialDenyReadPaths(stateDir string) ([]string, error) {
 	// remit (hiding the agent's own work artifacts, not just credential stores);
 	// it is safe (added protection) and untested against a live claude here (srt
 	// 1.0.0 in the dev box doesn't emit) — re-verify in the dogfood.
-	claudeDir := os.Getenv("CLAUDE_CONFIG_DIR")
-	if claudeDir == "" {
-		claudeDir = filepath.Join(home, ".claude")
+	// Hide BOTH the env-resolved dir AND the conventional ~/.claude default
+	// (belt-and-suspenders, mirroring the gh/gpg handling above): a dev who set a
+	// non-default CLAUDE_CONFIG_DIR could still have a populated legacy ~/.claude
+	// with stale cross-project history that would otherwise stay readable. denyRead
+	// of a duplicate or absent path is a harmless no-op.
+	claudeDirs := []string{filepath.Join(home, ".claude")}
+	if cd := os.Getenv("CLAUDE_CONFIG_DIR"); cd != "" {
+		claudeDirs = append(claudeDirs, cd)
 	}
-	for _, sub := range []string{"history.jsonl", "projects", "sessions", "todos", "shell-snapshots"} {
-		out = append(out, filepath.Join(claudeDir, sub))
+	for _, cdir := range claudeDirs {
+		for _, sub := range []string{"history.jsonl", "projects", "sessions", "todos", "shell-snapshots"} {
+			out = append(out, filepath.Join(cdir, sub))
+		}
 	}
 	// Explicit App key path override, if set outside the dirs above.
 	if p := os.Getenv("REIN_APP_PRIVATE_KEY_PATH"); p != "" {

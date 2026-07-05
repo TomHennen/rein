@@ -101,6 +101,9 @@ func TestResolveExtraDomainsRejectsMalformed(t *testing.T) {
 		"foo.*",
 		"a.*.b",
 		"has space.com",
+		"a\nb.com",   // embedded newline (not trimmed by TrimSpace)
+		"a\tb.com",   // embedded tab
+		"a\x00b.com", // embedded NUL
 	}
 	for _, b := range bad {
 		if _, _, err := ResolveExtraAllowedDomains([]string{b}, ""); err == nil {
