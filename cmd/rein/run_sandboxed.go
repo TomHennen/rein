@@ -116,6 +116,21 @@ func runSandboxed(cmdline []string) (int, error) {
 	}
 	caKeystore := keystore.NewFileKeystore(configDir)
 
+	// Best-effort sweep of orphaned per-run approval/run-context/write-token
+	// ledger files from runs whose owning `rein run` is gone. This is the
+	// backstop for the uncatchable/untrapped exits: terminal SIGINT (Ctrl-C) is
+	// deliberately NOT trapped (only SIGTERM is forwarded, below) so it reaches
+	// this process via the shared process group and kills it under the default
+	// disposition — the deferred revoke/ClearRun do NOT fire on that path, nor
+	// on SIGKILL. Both are covered here: the next launch's Sweep detects the
+	// dead owning pid and reaps its files (including the plaintext write-token
+	// ledger). Same division as direct mode (run.go); parity via Sweep is why we
+	// don't add SIGINT to the Notify set. Non-fatal: a sweep hiccup must never
+	// block a launch.
+	if err := approvals.Sweep(stateDir, 24*time.Hour, time.Now()); err != nil {
+		fmt.Fprintf(os.Stderr, "rein: warning: orphan approval sweep: %v\n", err)
+	}
+
 	// (4) Per-run identity + teardown ledger (shared with the ledger the
 	// broker's RecordWrite appends to and the exit-time revoke drains).
 	runID, err := newRunID()
@@ -178,6 +193,26 @@ func runSandboxed(cmdline []string) (int, error) {
 		return 1, fmt.Errorf("build srt config: %w", err)
 	}
 
+	// (8b) Per-run audit trail (design §6). The token-redacted proxy decision
+	// log goes to a file UNDER stateDir, which is in the deny-read set (step 7),
+	// so the sandboxed agent cannot read its own audit trail. Best-effort: an
+	// audit-open failure degrades to no audit sink rather than blocking the run
+	// (fail-closed on security controls, not on observability).
+	var auditW io.Writer
+	auditDir := filepath.Join(stateDir, "audit")
+	if err := os.MkdirAll(auditDir, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "rein: warning: could not create audit dir (%v); proceeding without a per-run audit log\n", err)
+	} else {
+		auditPath := filepath.Join(auditDir, "sandbox-"+runID+".log")
+		af, err := os.OpenFile(auditPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "rein: warning: could not open audit log (%v); proceeding without one\n", err)
+		} else {
+			defer af.Close()
+			auditW = af
+		}
+	}
+
 	// (9) Start the in-process broker/proxy. runbroker.Listen placement-checks
 	// the socket against the bind-mounts (working tree) and fails closed if it
 	// would land inside one.
@@ -210,6 +245,7 @@ func runSandboxed(cmdline []string) (int, error) {
 			}
 		},
 		CAKeystore: caKeystore,
+		Audit:      auditW,
 		Logger:     logger,
 	})
 	if err != nil {
@@ -360,33 +396,67 @@ func buildSandboxApprove(sess session.Session, stateDir, runID string, logger *l
 // key/state directories to hide from the agent. Absolute paths; missing ones are
 // harmless (denyRead of an absent path is a no-op in srt).
 //
-// Fails closed if the home directory can't be resolved: the home stores
-// (~/.ssh, ~/.config/gh, …) are the highest-value secrets to hide, and
-// os.UserHomeDir() errors whenever $HOME is empty EVEN when XDG_* (and thus
-// StateDir/ConfigDir) still resolve. Returning a partial list there would let
-// the run launch with those stores readable while every other check — Validate
-// (structure only) and the /tmp-sentinel self-test — stays green: a silent
-// fail-open. Refuse instead.
+// Each store is resolved by its tool's ACTUAL env precedence, read from rein's
+// own (unscrubbed) launch environment — NOT hardcoded to ~/.config. A developer
+// who relocated their stores via XDG_CONFIG_HOME / GH_CONFIG_DIR / GNUPGHOME
+// (mainstream dotfiles setups) would otherwise have them left readable in the
+// sandbox: the agent does `ls $HOME`, finds the relocated gh config, reads the
+// OAuth token — exactly what rein exists to prevent. rein already resolves its
+// OWN key dir XDG-aware (config.ConfigDir); the dev's stores must be treated the
+// same. The plain ~/… paths are kept too (belt-and-suspenders; denyRead no-ops
+// on absent paths).
+//
+// Fails closed if the home directory OR rein's config dir can't be resolved: the
+// home stores (~/.ssh, gh config, …) and rein's own key+CA dir are the
+// highest-value secrets to hide, and os.UserHomeDir() errors whenever $HOME is
+// empty EVEN when XDG_* (and thus StateDir/ConfigDir) still resolve. Returning a
+// partial list would let the run launch with stores readable while every other
+// check — Validate (structure only) and the /tmp-sentinel self-test — stays
+// green: a silent fail-open. Refuse instead.
 func credentialDenyReadPaths(stateDir string) ([]string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("cannot resolve home dir to hide credential stores (%w); set $HOME", err)
 	}
+	xdgConfig := os.Getenv("XDG_CONFIG_HOME")
+	if xdgConfig == "" {
+		xdgConfig = filepath.Join(home, ".config")
+	}
+
+	// gh: GH_CONFIG_DIR else $XDG_CONFIG_HOME/gh else ~/.config/gh.
+	ghDir := os.Getenv("GH_CONFIG_DIR")
+	if ghDir == "" {
+		ghDir = filepath.Join(xdgConfig, "gh")
+	}
+	// gpg: GNUPGHOME else ~/.gnupg.
+	gpgDir := os.Getenv("GNUPGHOME")
+	if gpgDir == "" {
+		gpgDir = filepath.Join(home, ".gnupg")
+	}
+
 	out := []string{
-		filepath.Join(home, ".config", "gh"),               // gh login (keyring fallback file)
+		ghDir,                                              // gh login (env-resolved)
+		filepath.Join(home, ".config", "gh"),               // gh default (belt-and-suspenders)
+		gpgDir,                                             // gpg (env-resolved)
+		filepath.Join(home, ".gnupg"),                      // gpg default
+		filepath.Join(xdgConfig, "git"),                    // XDG git credentials (env-resolved)
+		filepath.Join(home, ".config", "git"),              // XDG git default
 		filepath.Join(home, ".ssh"),                        // ssh keys + agent socket dir
 		filepath.Join(home, ".netrc"),                      // curl/git netrc
 		filepath.Join(home, ".git-credentials"),            // git store helper
-		filepath.Join(home, ".config", "git"),              // XDG git credentials
-		filepath.Join(home, ".config", "rein-credentials"), // App private key (default path)
-		filepath.Join(home, ".gnupg"),                      // gpg
+		filepath.Join(xdgConfig, "rein-credentials"),       // App private key (env-resolved)
+		filepath.Join(home, ".config", "rein-credentials"), // App private key default
 	}
 	// rein's managed keystore + CA live in ConfigDir; audit log, token caches,
 	// gh-env.sh, and the shim live in StateDir. Hide both — the sandboxed agent
-	// uses the proxy, never these.
-	if cfgDir, err := config.ConfigDir(); err == nil {
-		out = append(out, cfgDir)
+	// uses the proxy, never these. ConfigDir resolution failing is fail-closed:
+	// leaving rein's own key+CA dir readable is the same class of hole as the
+	// home stores above.
+	cfgDir, err := config.ConfigDir()
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve rein config dir to hide its key+CA material (%w)", err)
 	}
+	out = append(out, cfgDir)
 	out = append(out, stateDir)
 	// Explicit App key path override, if set outside the dirs above.
 	if p := os.Getenv("REIN_APP_PRIVATE_KEY_PATH"); p != "" {

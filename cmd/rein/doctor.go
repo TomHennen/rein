@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jferrl/go-githubauth"
@@ -424,15 +425,37 @@ func checkApprovalCache() checkResult {
 // hard-gates on (srt present + pinned version, seccomp availability, bwrap
 // userns health), so a green doctor here means sandboxed mode will launch.
 func sandboxDoctorChecks() []func() checkResult {
-	pf := srt.Preflight(srt.DefaultEnv())
-	out := make([]func() checkResult, 0, len(pf))
-	for _, c := range pf {
-		c := c
-		out = append(out, func() checkResult {
-			return checkResult{"sandbox: " + c.Name, srtStatusToDoctor(c.Status), c.Message}
+	// Lazy like every other doctor check: srt.Preflight (which shells out to
+	// bwrap) runs when the FIRST sandbox check executes in runDoctor's loop, not
+	// at slice-build time. A sync.Once shares the single Preflight result across
+	// the per-row closures. The row NAMES are Preflight's stable output set;
+	// keep this list in sync if Preflight gains a check (a missing name would
+	// render as a fail row rather than silently vanish).
+	var (
+		once   sync.Once
+		byName map[string]srt.Check
+	)
+	load := func() {
+		once.Do(func() {
+			byName = map[string]srt.Check{}
+			for _, c := range srt.Preflight(srt.DefaultEnv()) {
+				byName[c.Name] = c
+			}
 		})
 	}
-	return out
+	mk := func(name string) func() checkResult {
+		return func() checkResult {
+			load()
+			c, ok := byName[name]
+			if !ok {
+				return checkResult{"sandbox: " + name, statusFail, "preflight did not report this check"}
+			}
+			return checkResult{"sandbox: " + c.Name, srtStatusToDoctor(c.Status), c.Message}
+		}
+	}
+	return []func() checkResult{
+		mk("srt present"), mk("srt version"), mk("seccomp"), mk("bwrap userns"),
+	}
 }
 
 func srtStatusToDoctor(s srt.Status) checkStatus {

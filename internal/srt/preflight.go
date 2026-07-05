@@ -148,53 +148,28 @@ func checkBwrapUserns(env Env) Check {
 // App-JWT GET — so a separate NTP-style probe here would be redundant plumbing
 // (and would need its own trusted network time reference). Reuse, per the plan.
 
-// packageVersionOf reads the version from the package.json at the root of srt's
-// npm package. It resolves the srt symlink (npm global bin is a symlink into
-// lib/node_modules/.../dist) and walks up to the nearest package.json whose
-// name is the sandbox-runtime package. This is ground truth — unlike
-// `srt --version`, which returns a hardcoded "1.0.0" on 0.0.63.
-func packageVersionOf(srtPath string) (string, error) {
-	resolved, err := filepath.EvalSymlinks(srtPath)
-	if err != nil {
-		resolved = srtPath
-	}
-	dir := filepath.Dir(resolved)
-	for i := 0; i < 8; i++ {
-		pj := filepath.Join(dir, "package.json")
-		if data, err := os.ReadFile(pj); err == nil {
-			var meta struct {
-				Name    string `json:"name"`
-				Version string `json:"version"`
-			}
-			if json.Unmarshal(data, &meta) == nil && meta.Name == "@anthropic-ai/sandbox-runtime" {
-				return meta.Version, nil
-			}
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return "", fmt.Errorf("no @anthropic-ai/sandbox-runtime package.json found near %s", srtPath)
+// pkgMeta is the subset of srt's package.json rein reads.
+type pkgMeta struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
 }
 
-// packageRootOf returns the srt package root dir (the dir containing the
-// sandbox-runtime package.json), used to locate the vendored seccomp filter.
-func packageRootOf(srtPath string) (string, error) {
-	resolved, err := filepath.EvalSymlinks(srtPath)
-	if err != nil {
+// findSrtPackage resolves the srt symlink (npm global bin is a symlink into
+// lib/node_modules/.../dist) and walks up to the nearest package.json whose name
+// is the sandbox-runtime package, returning that dir (the package ROOT) and its
+// parsed metadata. This is ground truth for the version — unlike
+// `srt --version`, which returns a hardcoded "1.0.0" on 0.0.63.
+func findSrtPackage(srtPath string) (root string, meta pkgMeta, err error) {
+	resolved, e := filepath.EvalSymlinks(srtPath)
+	if e != nil {
 		resolved = srtPath
 	}
 	dir := filepath.Dir(resolved)
 	for i := 0; i < 8; i++ {
-		pj := filepath.Join(dir, "package.json")
-		if data, err := os.ReadFile(pj); err == nil {
-			var meta struct {
-				Name string `json:"name"`
-			}
-			if json.Unmarshal(data, &meta) == nil && meta.Name == "@anthropic-ai/sandbox-runtime" {
-				return dir, nil
+		if data, e := os.ReadFile(filepath.Join(dir, "package.json")); e == nil {
+			var m pkgMeta
+			if json.Unmarshal(data, &m) == nil && m.Name == "@anthropic-ai/sandbox-runtime" {
+				return dir, m, nil
 			}
 		}
 		parent := filepath.Dir(dir)
@@ -203,7 +178,16 @@ func packageRootOf(srtPath string) (string, error) {
 		}
 		dir = parent
 	}
-	return "", fmt.Errorf("no @anthropic-ai/sandbox-runtime package root found near %s", srtPath)
+	return "", pkgMeta{}, fmt.Errorf("no @anthropic-ai/sandbox-runtime package.json found near %s", srtPath)
+}
+
+// packageVersionOf returns srt's npm package version (used by the pin check).
+func packageVersionOf(srtPath string) (string, error) {
+	_, meta, err := findSrtPackage(srtPath)
+	if err != nil {
+		return "", err
+	}
+	return meta.Version, nil
 }
 
 // seccompArch maps GOARCH to srt's vendored seccomp dir name.
@@ -221,7 +205,7 @@ func seccompArch() string {
 // seccompPresentFor reports whether srt's vendored apply-seccomp binary for this
 // arch exists under the package root.
 func seccompPresentFor(srtPath string) (bool, error) {
-	root, err := packageRootOf(srtPath)
+	root, _, err := findSrtPackage(srtPath)
 	if err != nil {
 		return false, err
 	}

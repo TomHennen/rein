@@ -126,6 +126,21 @@ func Build(p Params) (Config, error) {
 	if p.WorkingTree == "" {
 		return Config{}, fmt.Errorf("srt: WorkingTree is required")
 	}
+	// All paths MUST be absolute. A relative path would make pathWithin (used by
+	// Validate's working-tree-under-denyRead guard and the socket placement
+	// check) compare apples to oranges and silently skip the guard — a
+	// fail-open seam. Reject up front rather than clean a relative path into a
+	// CWD-relative absolute one the caller didn't intend.
+	for _, group := range [][]string{
+		{p.SocketPath, p.WorkingTree, p.SentinelPath},
+		p.ExtraAllowWrite, p.DenyReadCredStores, p.RuntimeDenyRead,
+	} {
+		for _, path := range group {
+			if path != "" && !filepath.IsAbs(path) {
+				return Config{}, fmt.Errorf("srt: path %q must be absolute", path)
+			}
+		}
+	}
 
 	allowed := make([]string, 0, len(proxy.InjectHosts)+len(proxy.CDNHosts))
 	allowed = append(allowed, proxy.InjectHosts...)

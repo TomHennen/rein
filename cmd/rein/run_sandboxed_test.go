@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"log"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -104,5 +105,46 @@ func TestCredentialDenyReadFailsClosedWithoutHome(t *testing.T) {
 	}
 	if !sawSSH {
 		t.Errorf("~/.ssh missing from deny-read set: %v", paths)
+	}
+}
+
+// TestCredentialDenyReadCoversRelocatedStores is the F1 regression: a developer
+// who relocated their credential stores via XDG_CONFIG_HOME / GH_CONFIG_DIR /
+// GNUPGHOME must have the RELOCATED paths hidden in-sandbox, not just the plain
+// ~/.config defaults. Otherwise `ls $HOME` inside the sandbox finds the
+// relocated gh config and reads the OAuth token.
+func TestCredentialDenyReadCoversRelocatedStores(t *testing.T) {
+	t.Setenv("HOME", "/home/someone")
+	xdg := "/home/someone/dotfiles/xdg"
+	ghDir := "/home/someone/dotfiles/ghconfig"
+	gpgDir := "/home/someone/dotfiles/gnupg"
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("GH_CONFIG_DIR", ghDir)
+	t.Setenv("GNUPGHOME", gpgDir)
+
+	paths, err := credentialDenyReadPaths(t.TempDir())
+	if err != nil {
+		t.Fatalf("credentialDenyReadPaths: %v", err)
+	}
+	set := map[string]bool{}
+	for _, p := range paths {
+		set[p] = true
+	}
+	// The relocated stores must all be present.
+	for _, want := range []string{
+		ghDir,                                  // GH_CONFIG_DIR
+		gpgDir,                                 // GNUPGHOME
+		filepath.Join(xdg, "git"),              // XDG_CONFIG_HOME/git
+		filepath.Join(xdg, "rein-credentials"), // XDG_CONFIG_HOME/rein-credentials
+	} {
+		if !set[want] {
+			t.Errorf("relocated store %q missing from deny-read set: %v", want, paths)
+		}
+	}
+	// And the ~/.config defaults are still present (belt-and-suspenders).
+	for _, want := range []string{"/home/someone/.config/gh", "/home/someone/.gnupg", "/home/someone/.ssh"} {
+		if !set[want] {
+			t.Errorf("default store %q missing from deny-read set", want)
+		}
 	}
 }
