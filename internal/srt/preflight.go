@@ -141,27 +141,12 @@ func checkBwrapUserns(env Env) Check {
 	return Check{"bwrap userns", StatusOK, "unprivileged user namespace works"}
 }
 
-// CheckClockSkew flags a local clock far enough off that App-JWT mints (iat/exp
-// with GitHub's ±60s tolerance) would be rejected. It reuses the App-mint clock
-// dependency (#22): rein's eager install-id App-JWT GET already fails closed on
-// skew, so this is a cheap early-warning, not the enforcement. server is a
-// trusted reference time (e.g. GitHub's Date response header); a zero server
-// time means "no reference available" => warn, don't fail.
-func CheckClockSkew(now, server time.Time, tolerance time.Duration) Check {
-	if server.IsZero() {
-		return Check{"clock skew", StatusWarn,
-			"no trusted time reference available; App-JWT mint is the backstop (it fails closed on skew)"}
-	}
-	skew := now.Sub(server)
-	if skew < 0 {
-		skew = -skew
-	}
-	if skew > tolerance {
-		return Check{"clock skew", StatusFail,
-			fmt.Sprintf("local clock differs from GitHub by %s (> %s tolerance); App-JWT mints will be rejected. Sync the clock (e.g. `sudo chronyd -q` / enable NTP).", skew.Round(time.Second), tolerance)}
-	}
-	return Check{"clock skew", StatusOK, fmt.Sprintf("within %s of GitHub", tolerance)}
-}
+// Clock skew (#22) is NOT a dedicated srt-preflight check: rein's App-JWT mint
+// path already fails closed on a skewed clock (GitHub rejects a JWT whose
+// iat/exp fall outside its ±60s tolerance). That check runs in BOTH launch
+// paths that matter — doctor's checkAppMint and `rein run`'s eager install-id
+// App-JWT GET — so a separate NTP-style probe here would be redundant plumbing
+// (and would need its own trusted network time reference). Reuse, per the plan.
 
 // packageVersionOf reads the version from the package.json at the root of srt's
 // npm package. It resolves the srt symlink (npm global bin is a symlink into

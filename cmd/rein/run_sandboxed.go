@@ -249,9 +249,21 @@ func runSandboxed(cmdline []string) (int, error) {
 	// with the probe BEFORE the agent runs. Catches srt's null-fallback (empty
 	// denyRead) and a missing/disarmed seccomp filter at runtime — the real
 	// guarantee, not trust in srt.
-	reinBin, err := resolveSelf()
+	//
+	// The probe is the rein binary itself (`rein __sandbox-probe`). resolveSelf()
+	// may point INTO a denyRead'd dir — notably the shim copy at
+	// stateDir/shim/rein, which we tmpfs out in-sandbox — so the probe would be
+	// unable to exec and the self-test would fail closed on a legitimate config.
+	// Copy rein into the readable per-run temp dir (NOT under any denyRead path)
+	// and probe with that. One small copy per launch; robust regardless of how
+	// rein was invoked.
+	self, err := resolveSelf()
 	if err != nil {
 		return 1, fmt.Errorf("resolve rein binary for self-test: %w", err)
+	}
+	reinBin := filepath.Join(runTmp, "rein")
+	if err := copyFile(self, reinBin, 0o700); err != nil {
+		return 1, fmt.Errorf("stage rein probe binary: %w", err)
 	}
 	fmt.Fprintln(os.Stderr, "rein: verifying sandbox config applies (deny-read + seccomp self-test)…")
 	if err := srt.VerifyConfigApplied(srt.VerifyParams{

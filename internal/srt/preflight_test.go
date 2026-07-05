@@ -90,21 +90,3 @@ func TestPreflightBwrapUnhealthy(t *testing.T) {
 		t.Error("broken userns should fail")
 	}
 }
-
-func TestClockSkew(t *testing.T) {
-	base := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
-	tol := 30 * time.Second
-
-	if c := CheckClockSkew(base, base.Add(10*time.Second), tol); c.Status != StatusOK {
-		t.Errorf("within tolerance should be ok, got %v", c.Status)
-	}
-	if c := CheckClockSkew(base, base.Add(5*time.Minute), tol); c.Status != StatusFail {
-		t.Errorf("large skew should fail, got %v", c.Status)
-	}
-	if c := CheckClockSkew(base, base.Add(-5*time.Minute), tol); c.Status != StatusFail {
-		t.Errorf("large negative skew should fail, got %v", c.Status)
-	}
-	if c := CheckClockSkew(base, time.Time{}, tol); c.Status != StatusWarn {
-		t.Errorf("no reference should warn, got %v", c.Status)
-	}
-}
