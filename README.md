@@ -10,10 +10,11 @@ then on rein mints a fresh token per operation and asks you to confirm writes.
 For the full design and threat model, see [`docs/design.md`](docs/design.md) and
 [`docs/phase1-design.md`](docs/phase1-design.md).
 
-> **Status (2026-07-05).** Phase 1 **sandboxed mode is built and is the
+> **Status (2026-07-06).** Phase 1 **sandboxed mode is built and is the
 > default**: `rein run` launches the agent inside Anthropic's
 > [`sandbox-runtime`](https://github.com/anthropic-experimental/sandbox-runtime)
-> (`srt`) and injects credentials at a local proxy. It is **Linux-only** for now
+> (`srt`) and injects credentials at a local proxy. A **real agent (`claude`)
+> runs end-to-end** in the sandbox. It is **Linux-only** for now
 > (macOS is a separate, not-yet-done track — see design §5.4). A credential-helper
 > "direct" mode remains behind `--direct` as a fallback where there's no sandbox.
 > **Use throwaway repos only** until the sandbox has been dogfooded — see
@@ -126,9 +127,74 @@ that sandbox:
 - Commits the agent makes are authored as **`<your name> (via rein)`** with the
   App's identity, so a push is attributable to the rein App, not to you
   personally. (Configurable via `REIN_GIT_AUTHOR_TEMPLATE`.)
+- The agent gets a **private writable temp dir automatically** — rein creates a
+  per-run scratch directory and wires it in as the sandbox's `TMPDIR`, so tools
+  that need scratch space (the agent itself, `npm`, builds) work without EROFS.
+  It is ephemeral (torn down on exit), holds nothing sensitive, and needs no
+  configuration from you.
+
+`rein run -- claude` runs a **real agent end-to-end** in the sandbox — it starts,
+reaches its own API, reads/writes the working tree, and pushes through the
+approval prompt.
 
 To run the agent *without* the alias for one invocation: `\claude` (bash/zsh) or
 `command claude` (fish).
+
+### Allowing extra network egress (npm, PyPI, MCP, …)
+
+By default the sandbox blocks **all** network egress except two things: GitHub
+(brokered through rein's proxy) and the wrapped agent's **own API**
+(`api.anthropic.com` for `claude`, allowed automatically so `rein run -- claude`
+works out of the box). Anything else — the npm registry, PyPI, a remote MCP
+server — is unreachable until you allow its host explicitly.
+
+Add hosts to the **`allow_domains`** allowlist, either per session or
+machine-wide:
+
+```yaml
+# in your session yaml — allow just this run's extra egress
+allow_domains:
+  - registry.npmjs.org
+  - pypi.org
+```
+
+```bash
+# or machine-wide, for every sandboxed run (comma-separated)
+export REIN_ALLOW_DOMAINS="registry.npmjs.org,pypi.org"
+```
+
+Allowed hosts get a **direct TLS tunnel to themselves** — rein injects **no**
+credential on them (they are egress-only; only GitHub gets an injected token).
+Entries are bare hosts (`pypi.org`) or a strict wildcard (`*.example.com`).
+Because a sandboxed agent can send data to any allowed host, **widening egress is
+a data-exfiltration surface**: rein prints a loud `EGRESS WARNING` for each
+wildcard and for a large custom set. Keep the list minimal and deliberate.
+
+### MCP servers in the sandbox
+
+Claude Code's MCP servers work under `rein run`, with one rule: **an MCP server's
+network host must be reachable**, i.e. in `allow_domains`.
+
+- **Local / stdio MCP servers** (added with `claude mcp add`, a project
+  `.mcp.json`, or `mcpServers` in settings) run as a **subprocess inside the
+  sandbox** and need **no egress** — they work out of the box. (Verified: a local
+  stdio MCP tool is callable in-sandbox.)
+- **Remote MCP servers, and the account / claude.ai connectors** (Todoist, Gmail,
+  Google Drive/Calendar synced from your Claude account) reach a **network host**
+  — add that host to `allow_domains` to let them connect. rein **no longer
+  force-disables** these connectors; claude connects them **non-blocking**, so an
+  unreachable one just fails quietly in the background and **does not hang
+  startup**. To turn the account connectors off entirely (minimal egress
+  surface), set **`REIN_DISABLE_CLAUDE_MCP=1`**.
+
+**To use an MCP server in the sandbox:**
+
+1. Configure it the way you normally would for Claude Code (`claude mcp add …`,
+   a project `.mcp.json`, or settings `mcpServers`).
+2. If it is **remote**, add its host to `allow_domains` (session field or
+   `REIN_ALLOW_DOMAINS`). Local stdio servers skip this step.
+3. Run `rein run -- claude`. The server loads inside the sandbox; a remote one
+   connects only if its host is allowed (egress only — never an injected token).
 
 **`--direct` (fallback, throwaway only).** Where there's no working sandbox,
 `rein run --direct -- <cmd>` runs the credential-helper path instead — the agent
@@ -181,6 +247,42 @@ what's wrong.
   grant`.
 - **Logs** — per-run audit log (token-redacted): `~/.local/state/rein/audit/`;
   direct-mode credential helper: `~/.local/state/rein/helper.log`.
+
+## Running the tests
+
+Three layers, from hermetic to live:
+
+- **Unit / hermetic** — the Go suite. No network, no sandbox, no secrets; safe
+  anywhere:
+
+  ```bash
+  go test ./...
+  go test -race ./...        # the concurrency-sensitive packages
+  ```
+
+- **Gated sandbox e2e** — actually launches `srt` to prove the deny-read +
+  seccomp self-test applies on this machine. Needs the sandbox stack healthy
+  (`rein doctor`); off by default so `go test ./...` stays hermetic:
+
+  ```bash
+  REIN_SANDBOX_E2E=1 go test ./internal/srt -run E2E
+  ```
+
+- **Interactive (pexpect) suite** — drives the real `rein` binary through a pty
+  against a **live throwaway repo + a working App**: the write-approval loop and
+  a real-agent (`claude`) end-to-end run. Prereqs: `source ./dev-env` (sets
+  `REIN_*`, incl. a **throwaway** `REIN_TEST_REPO_A`), the sandbox stack, host
+  `gh` authed, and `python3` + `pexpect`. See
+  [`tests/interactive/README.md`](tests/interactive/README.md).
+
+  ```bash
+  tests/interactive/run.sh                    # whole suite
+  tests/interactive/run.sh test_write_approval # one module
+  tests/interactive/run.sh test_realagent_e2e  # the real-agent e2e (runs one claude)
+  ```
+
+  The interactive suite is **never** run by `go test ./...` (no `.go` files
+  under `tests/interactive/`), so the Go suite stays fast and offline.
 
 ## Known limits
 
