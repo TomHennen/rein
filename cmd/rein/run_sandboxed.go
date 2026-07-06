@@ -183,6 +183,24 @@ func runSandboxed(cmdline []string) (int, error) {
 		runtimeDeny = append(runtimeDeny, ru)
 	}
 
+	// (7c) Per-run WRITABLE scratch dir for the agent (the sandboxed child's
+	// TMPDIR). srt's getDefaultWritePaths lists /tmp/claude and sets the child's
+	// TMPDIR there, but bwrap SKIPS an allowWrite source that does not exist on
+	// the host (linux-sandbox-utils.js) and srt never creates /tmp/claude — so the
+	// child's TMPDIR lands under the read-only root bind and its first temp write
+	// fails EROFS (claude, npm, builds, …). rein instead creates a per-run dir,
+	// binds it writable via ExtraAllowWrite, and points the child's TMPDIR at it
+	// through srt's CLAUDE_CODE_TMPDIR lever (BuildEnv). It is ephemeral (0700,
+	// torn down on exit), agent-scoped, holds nothing sensitive, and sits OUTSIDE
+	// every denyRead credential path — a writable temp is not a leak surface. It
+	// is deliberately NOT runTmp (which holds the probe binary + settings.json):
+	// the agent must not be able to tamper with those.
+	agentTmp, err := os.MkdirTemp("", "rein-agent-tmp-*")
+	if err != nil {
+		return 1, fmt.Errorf("create agent temp dir: %w", err)
+	}
+	defer os.RemoveAll(agentTmp)
+
 	// (7b) EXTRA egress allowlist (CP4.5). Merge the built-in default (the wrapped
 	// agent's own API endpoint, so `rein run -- claude` works out of the box), the
 	// machine-wide REIN_ALLOW_DOMAINS, and the session's allow_domains into one
@@ -205,6 +223,7 @@ func runSandboxed(cmdline []string) (int, error) {
 		SocketPath:          socketPath,
 		WorkingTree:         workTree,
 		ExtraAllowedDomains: extraDomains,
+		ExtraAllowWrite:     []string{agentTmp},
 		DenyReadCredStores:  denyStores,
 		RuntimeDenyRead:     runtimeDeny,
 	}
@@ -345,6 +364,7 @@ func runSandboxed(cmdline []string) (int, error) {
 		GitAuthorName:       gitID.Name,
 		GitAuthorEmail:      gitID.Email,
 		GitConfigGlobalPath: managedGitConfig,
+		AgentTmpDir:         agentTmp,
 	})
 
 	// (12) FAIL-OPEN DEFENSE: prove the config actually applied by launching srt
@@ -568,8 +588,15 @@ func credentialDenyReadPaths(stateDir string) ([]string, error) {
 	if cd := os.Getenv("CLAUDE_CONFIG_DIR"); cd != "" {
 		claudeDirs = append(claudeDirs, cd)
 	}
+	// session-env is BOTH a dev-history artifact to hide AND a dir claude's
+	// SessionStart machinery writes into per run (mkdir ~/.claude/session-env/<id>).
+	// denyRead of a DIR is a writable, EMPTY tmpfs in-sandbox, so listing it here
+	// hides the host's accumulated session-env entries (same rationale as
+	// projects/sessions) while giving claude a fresh writable scratch dir — without
+	// it, that mkdir hits EROFS under the read-only root bind (surfaced as a
+	// SessionStart hook error when running a real claude in-sandbox).
 	for _, cdir := range claudeDirs {
-		for _, sub := range []string{"history.jsonl", "projects", "sessions", "todos", "shell-snapshots"} {
+		for _, sub := range []string{"history.jsonl", "projects", "sessions", "session-env", "todos", "shell-snapshots"} {
 			out = append(out, filepath.Join(cdir, sub))
 		}
 	}
