@@ -289,6 +289,70 @@ class ReinRun:
         m = re.search(rf"SBX_PUSH{n}_RC=(\d+)", self.text())
         return int(m.group(1)) if m else None
 
+    # -- interactive (TUI) helpers, for the real-agent e2e ------------------
+
+    def read_until_ready(self, ready_markers, dialog_markers=None, timeout=60):
+        """Drain the pty until a ready marker appears (ANSI-stripped match).
+
+        A TUI redraws constantly, so `expect` on a single banner is brittle;
+        instead we accumulate bytes and substring-match the stripped buffer.
+        Returns (ready: bool, dialog: bool, exited: bool). `dialog` flags a
+        startup dialog (trust/theme/login) so the caller never misreads one as
+        a hang.
+        """
+        import pexpect as _px
+
+        dialog_markers = dialog_markers or []
+        buf = ""
+        ready = dialog = exited = False
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                buf += self.child.read_nonblocking(size=4096, timeout=3)
+            except _px.TIMEOUT:
+                pass
+            except _px.EOF:
+                exited = True
+                break
+            low = strip_ansi(buf).lower()
+            if any(m.lower() in low for m in ready_markers):
+                ready = True
+                break
+            if any(m.lower() in low for m in dialog_markers):
+                dialog = True
+        return ready, dialog, exited
+
+    def send_and_collect(self, line: str, settle: float = 12.0, timeout: float = 10.0) -> str:
+        """Send a line to the TUI, wait `settle`s, drain the reply; return it
+        ANSI-stripped."""
+        import pexpect as _px
+
+        self.child.send(line + "\r")
+        time.sleep(settle)
+        out = ""
+        try:
+            out = self.child.read_nonblocking(size=16384, timeout=timeout)
+        except (_px.TIMEOUT, _px.EOF):
+            pass
+        return strip_ansi(out)
+
+    def quit_tui(self):
+        """Best-effort teardown of an interactive claude session."""
+        try:
+            self.child.sendcontrol("c")
+            time.sleep(0.5)
+            self.child.sendcontrol("c")
+            time.sleep(0.5)
+            self.child.sendline("/exit")
+            time.sleep(0.5)
+            self.child.sendcontrol("d")
+        except Exception:
+            pass
+        try:
+            self.child.close(force=True)
+        except Exception:
+            pass
+
 
 def spawn_rein_run(
     inner_argv: list[str],
@@ -332,6 +396,69 @@ def spawn_rein_run(
 def make_workdir() -> str:
     """A scratch working tree OUTSIDE the repo (srt's allowWrite mount)."""
     return tempfile.mkdtemp(prefix="rein-itest-")
+
+
+# --------------------------------------------------------------------------
+# Interactive real-agent (claude) under `rein run` — for the e2e test
+# --------------------------------------------------------------------------
+#
+# Unlike spawn_rein_run (which drives a `bash -c` write script and appends the
+# workdir as the script's $0), the real-agent e2e drives INTERACTIVE `claude`.
+# We must NOT append a trailing positional: for interactive claude a positional
+# is treated as the initial prompt. So this helper runs plain `rein run -- claude
+# [extra]` with NO trailing arg. cwd defaults to the repo (a path already trusted
+# by claude, so no folder-trust dialog fires); the sandbox makes it the writable
+# mount, but the 2+2 probe writes nothing.
+
+# TUI-ready markers: any of these appearing means claude's interactive prompt is
+# up and accepting input. Matched ANSI-stripped (see ReinRun.read_until_ready).
+CLAUDE_READY_MARKERS = ["? for shortcuts", 'try "', "esc to", "how can i help"]
+# Startup-dialog markers (trust/theme/onboarding/login) — distinct from an MCP
+# hang; surfaced so a dialog is never misread as a hang.
+CLAUDE_DIALOG_MARKERS = [
+    "do you trust", "trust the files", "onboarding", "select theme",
+    "dark mode", "light mode", "log in", "sign in", "authenticate",
+]
+
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+_OSC = re.compile(r"\x1b\][0-9;].*?(\x07|\x1b\\)")
+
+
+def strip_ansi(s: str) -> str:
+    """Strip CSI + OSC escapes so TUI redraws don't defeat substring matching."""
+    return _OSC.sub("", _ANSI.sub("", s))
+
+
+def spawn_claude_interactive(
+    extra_args: list[str] | None = None,
+    *,
+    cwd: str | None = None,
+    env: dict | None = None,
+    extra_env: dict | None = None,
+    timeout: int = 60,
+) -> ReinRun:
+    """Spawn interactive `rein run -- claude [extra_args]` under a pty.
+
+    No trailing workdir positional (that would become claude's initial prompt).
+    cwd defaults to the repo root (a claude-trusted path, so no trust dialog).
+    """
+    env = dict(env or rein_env())
+    if extra_env:
+        env.update(extra_env)
+    args = ["run", "--", "claude", *(extra_args or [])]
+    transcript = io.StringIO()
+    child = pexpect.spawn(
+        str(REIN_BIN),
+        args,
+        cwd=str(cwd or REPO_ROOT),
+        env=env,
+        encoding="utf-8",
+        codec_errors="replace",
+        timeout=timeout,
+        dimensions=(40, 120),
+    )
+    child.logfile_read = transcript
+    return ReinRun(child=child, transcript=transcript, workdir=str(cwd or REPO_ROOT))
 
 
 # --------------------------------------------------------------------------

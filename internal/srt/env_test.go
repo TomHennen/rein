@@ -99,11 +99,12 @@ func TestBuildEnvIsStrictAllowlist(t *testing.T) {
 		t.Errorf("GIT_CONFIG_SYSTEM = %q, want /dev/null", got["GIT_CONFIG_SYSTEM"])
 	}
 
-	// ENABLE_CLAUDEAI_MCP_SERVERS is set unconditionally to the string "false"
-	// (must be "false", not "0"), disabling claude.ai remote MCP connectors so
-	// startup does not hang on hosts outside the egress allowlist.
-	if got["ENABLE_CLAUDEAI_MCP_SERVERS"] != "false" {
-		t.Errorf("ENABLE_CLAUDEAI_MCP_SERVERS = %q, want \"false\"", got["ENABLE_CLAUDEAI_MCP_SERVERS"])
+	// By DEFAULT (DisableClaudeAIMCP false) rein does NOT set
+	// ENABLE_CLAUDEAI_MCP_SERVERS — claude's native default (connectors enabled,
+	// non-blocking) applies so a user's MCP servers work when their host is in
+	// allow_domains. The opt-out arm is asserted in TestBuildEnvDisableClaudeMCP.
+	if _, ok := got["ENABLE_CLAUDEAI_MCP_SERVERS"]; ok {
+		t.Errorf("ENABLE_CLAUDEAI_MCP_SERVERS present by default (should only appear when DisableClaudeAIMCP): %q", got["ENABLE_CLAUDEAI_MCP_SERVERS"])
 	}
 
 	// No AgentTmpDir supplied here -> CLAUDE_CODE_TMPDIR must be absent (the probe
@@ -113,16 +114,63 @@ func TestBuildEnvIsStrictAllowlist(t *testing.T) {
 		t.Errorf("CLAUDE_CODE_TMPDIR present with no AgentTmpDir: %q", got["CLAUDE_CODE_TMPDIR"])
 	}
 
-	// The full set is ONLY passthrough + CA vars + GH_TOKEN + GIT_CONFIG_SYSTEM +
-	// ENABLE_CLAUDEAI_MCP_SERVERS (no identity or AgentTmpDir supplied here) —
+	// The full set is ONLY passthrough + CA vars + GH_TOKEN + GIT_CONFIG_SYSTEM
+	// (no identity or AgentTmpDir supplied here, and MCP not disabled by default) —
 	// nothing else.
-	allowed := map[string]bool{"PATH": true, "HOME": true, "LANG": true, "LC_ALL": true, "TERM": true, "GH_TOKEN": true, "GIT_CONFIG_SYSTEM": true, "ENABLE_CLAUDEAI_MCP_SERVERS": true}
+	allowed := map[string]bool{"PATH": true, "HOME": true, "LANG": true, "LC_ALL": true, "TERM": true, "GH_TOKEN": true, "GIT_CONFIG_SYSTEM": true}
 	for _, name := range caEnvVars {
 		allowed[name] = true
 	}
 	for k := range got {
 		if !allowed[k] {
 			t.Errorf("unexpected env var %q in sandbox env", k)
+		}
+	}
+}
+
+// TestBuildEnvDisableClaudeMCP asserts the opt-OUT arm: when DisableClaudeAIMCP
+// is set, BuildEnv emits ENABLE_CLAUDEAI_MCP_SERVERS=false (the string "false",
+// not "0"), restoring the minimal-surface behavior; the closed allowlist then
+// includes exactly that one extra name.
+func TestBuildEnvDisableClaudeMCP(t *testing.T) {
+	env := BuildEnv(EnvParams{
+		Parent:             []string{"HOME=/home/dev"},
+		CABundlePath:       "/run/ca-bundle.pem",
+		StubGHToken:        "stub-tok",
+		DisableClaudeAIMCP: true,
+	})
+	got := map[string]string{}
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		got[k] = v
+	}
+	if got["ENABLE_CLAUDEAI_MCP_SERVERS"] != "false" {
+		t.Errorf("ENABLE_CLAUDEAI_MCP_SERVERS = %q, want \"false\" when DisableClaudeAIMCP set", got["ENABLE_CLAUDEAI_MCP_SERVERS"])
+	}
+	// Closed set for this arm: HOME + CA vars + GH_TOKEN + GIT_CONFIG_SYSTEM +
+	// the one MCP-disable var. Nothing else.
+	allowed := map[string]bool{"HOME": true, "GH_TOKEN": true, "GIT_CONFIG_SYSTEM": true, "ENABLE_CLAUDEAI_MCP_SERVERS": true}
+	for _, name := range caEnvVars {
+		allowed[name] = true
+	}
+	for k := range got {
+		if !allowed[k] {
+			t.Errorf("unexpected env var %q in disable-MCP sandbox env", k)
+		}
+	}
+}
+
+// TestDisableClaudeMCPFromEnv covers the truthy parser: only explicit truthy
+// values opt out; everything else (unset/empty/"0"/garbage) keeps MCP enabled.
+func TestDisableClaudeMCPFromEnv(t *testing.T) {
+	for _, v := range []string{"1", "true", "TRUE", "yes", "on", " On "} {
+		if !DisableClaudeMCPFromEnv(v) {
+			t.Errorf("DisableClaudeMCPFromEnv(%q) = false, want true", v)
+		}
+	}
+	for _, v := range []string{"", "0", "false", "no", "off", "nope", "2"} {
+		if DisableClaudeMCPFromEnv(v) {
+			t.Errorf("DisableClaudeMCPFromEnv(%q) = true, want false", v)
 		}
 	}
 }

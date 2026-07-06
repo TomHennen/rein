@@ -365,6 +365,7 @@ func runSandboxed(cmdline []string) (int, error) {
 		GitAuthorEmail:      gitID.Email,
 		GitConfigGlobalPath: managedGitConfig,
 		AgentTmpDir:         agentTmp,
+		DisableClaudeAIMCP:  srt.DisableClaudeMCPFromEnv(os.Getenv(srt.EnvDisableClaudeMCP)),
 	})
 
 	// (12) FAIL-OPEN DEFENSE: prove the config actually applied by launching srt

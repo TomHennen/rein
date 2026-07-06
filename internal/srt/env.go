@@ -5,6 +5,30 @@ import (
 	"strings"
 )
 
+// EnvDisableClaudeMCP is the rein-side, per-run opt-OUT that restores the old
+// behavior of disabling Claude Code's account/claude.ai remote MCP connectors
+// (see EnvParams.DisableClaudeAIMCP). By DEFAULT rein no longer disables them —
+// claude's native default (connectors enabled, connected non-blocking) applies,
+// so a user's MCP servers work when their host is in allow_domains and unreachable
+// ones just fail in the background. This var is for operators who want the
+// minimal egress/connection surface. Read from rein's OWN launch environment
+// OUTSIDE the sandbox; never carried into the injected env as a passthrough.
+// Truthy values: "1", "true", "yes", "on" (case-insensitive).
+const EnvDisableClaudeMCP = "REIN_DISABLE_CLAUDE_MCP"
+
+// DisableClaudeMCPFromEnv reports whether the given value of REIN_DISABLE_CLAUDE_MCP
+// opts OUT of claude's account/claude.ai MCP connectors. Only an explicit truthy
+// value disables; anything else (unset, empty, "0", "false", garbage) keeps the
+// default (MCP enabled).
+func DisableClaudeMCPFromEnv(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 // EnvParams are the inputs to BuildEnv.
 type EnvParams struct {
 	// Parent is the environment to draw the passthrough vars FROM (normally
@@ -44,6 +68,25 @@ type EnvParams struct {
 	// override. GIT_CONFIG_SYSTEM is always pinned to /dev/null so no
 	// /etc/gitconfig leaks either (mirrors direct mode, run.go).
 	GitConfigGlobalPath string
+
+	// DisableClaudeAIMCP controls the ENABLE_CLAUDEAI_MCP_SERVERS knob for Claude
+	// Code. When FALSE (the DEFAULT), rein does NOT set the var, so claude's own
+	// default applies: the ACCOUNT/claude.ai remote MCP connectors (Todoist/Gmail/
+	// GDrive/GCal, synced from a claude.ai account) are enabled and connected
+	// NON-BLOCKING at startup — a user's MCP servers work when their host is in
+	// allow_domains, and unreachable ones just fail in the background without
+	// hanging startup (verified: with connectors enabled and their hosts unallowed,
+	// the agent starts and answers normally). When TRUE, rein sets
+	// ENABLE_CLAUDEAI_MCP_SERVERS=false, restoring the old minimal-surface behavior
+	// (account connectors off). Set via REIN_DISABLE_CLAUDE_MCP.
+	//
+	// This knob gates ONLY the account/claude.ai remote connectors. USER-configured
+	// MCP servers (local stdio via `claude mcp add`, project .mcp.json, settings
+	// mcpServers) are a SEPARATE path this env var does not touch — those work in
+	// the sandbox regardless (a local stdio server needs no egress; a remote one
+	// needs its host in allow_domains). Read OUTSIDE the sandbox; never a
+	// passthrough of a parent var into the injected set.
+	DisableClaudeAIMCP bool
 
 	// AgentTmpDir, when non-empty, is the per-run writable scratch dir rein
 	// created for the agent and added to srt's allowWrite. It is delivered to the
@@ -105,13 +148,15 @@ var caEnvVars = []string{
 // secret-bearing var. This is the single most valuable gap-closure in CP3
 // (gap #1); the git identity extends it in CP4 (non-impersonating commits).
 //
-// rein DOES set two agent-facing knobs here (both fixed, non-secret): CLAUDE_CODE_TMPDIR
-// (srt's sanctioned lever for the child's TMPDIR — see AgentTmpDir) and
-// ENABLE_CLAUDEAI_MCP_SERVERS=false (disables Claude Code's account/claude.ai
-// remote MCP connectors so startup doesn't block trying to reach hosts that are
-// not in the egress allowlist). ENABLE_CLAUDEAI_MCP_SERVERS is claude-specific
-// but benign to other agents (an unknown env var they ignore); its value MUST be
-// the string "false" (not "0") to take effect. Neither carries a secret.
+// rein sets CLAUDE_CODE_TMPDIR (srt's sanctioned lever for the child's TMPDIR —
+// see AgentTmpDir; fixed, non-secret) and, ONLY when the operator opts out via
+// DisableClaudeAIMCP, ENABLE_CLAUDEAI_MCP_SERVERS=false (turns off Claude Code's
+// account/claude.ai remote MCP connectors). By default that var is NOT set, so
+// claude's native default (connectors enabled, non-blocking) applies and a user's
+// MCP servers work when their host is in allow_domains. ENABLE_CLAUDEAI_MCP_SERVERS
+// is claude-specific but benign to other agents (an unknown env var they ignore);
+// its value MUST be the string "false" (not "0") to take effect. Neither carries a
+// secret.
 func BuildEnv(p EnvParams) []string {
 	out := make([]string, 0, len(passthroughExact)+len(caEnvVars)+3)
 
@@ -155,10 +200,15 @@ func BuildEnv(p EnvParams) []string {
 	if p.AgentTmpDir != "" {
 		out = append(out, "CLAUDE_CODE_TMPDIR="+p.AgentTmpDir)
 	}
-	// Disable Claude Code's account/claude.ai remote MCP connectors so startup
-	// does not hang trying to reach hosts outside the egress allowlist. Fixed,
-	// non-secret; value must be exactly "false".
-	out = append(out, "ENABLE_CLAUDEAI_MCP_SERVERS=false")
+	// By default rein leaves Claude Code's account/claude.ai MCP connectors at
+	// claude's native setting (enabled, connected non-blocking): a user's MCP
+	// servers work when their host is in allow_domains, and unreachable ones fail
+	// in the background without hanging startup. Only when the operator opts OUT
+	// (REIN_DISABLE_CLAUDE_MCP → DisableClaudeAIMCP) does rein force the connectors
+	// off. Non-secret; value must be exactly "false" (not "0") to take effect.
+	if p.DisableClaudeAIMCP {
+		out = append(out, "ENABLE_CLAUDEAI_MCP_SERVERS=false")
+	}
 
 	sort.Strings(out)
 	return out
