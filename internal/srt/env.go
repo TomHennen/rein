@@ -44,6 +44,18 @@ type EnvParams struct {
 	// override. GIT_CONFIG_SYSTEM is always pinned to /dev/null so no
 	// /etc/gitconfig leaks either (mirrors direct mode, run.go).
 	GitConfigGlobalPath string
+
+	// AgentTmpDir, when non-empty, is the per-run writable scratch dir rein
+	// created for the agent and added to srt's allowWrite. It is delivered to the
+	// sandboxed child as CLAUDE_CODE_TMPDIR — srt's OWN sanctioned override for
+	// the child's TMPDIR (generateProxyEnvVars sets TMPDIR = CLAUDE_CODE_TMPDIR ||
+	// CLAUDE_TMPDIR || '/tmp/claude'). rein does NOT set TMPDIR directly: srt owns
+	// TMPDIR and overrides it via bwrap --setenv, so a rein-set TMPDIR would be
+	// clobbered; CLAUDE_CODE_TMPDIR is the input srt reads to compute it. Without
+	// this, srt defaults the child's TMPDIR to /tmp/claude, which it never creates
+	// and — because bwrap skips allowWrite sources that don't exist on the host —
+	// never binds writable, so the child hits EROFS on its first temp write.
+	AgentTmpDir string
 }
 
 // passthroughExact is the allowlist of environment variable NAMES carried from
@@ -92,8 +104,16 @@ var caEnvVars = []string{
 // (rein sets these itself so a stale parent value can't win), and every
 // secret-bearing var. This is the single most valuable gap-closure in CP3
 // (gap #1); the git identity extends it in CP4 (non-impersonating commits).
+//
+// rein DOES set two agent-facing knobs here (both fixed, non-secret): CLAUDE_CODE_TMPDIR
+// (srt's sanctioned lever for the child's TMPDIR — see AgentTmpDir) and
+// ENABLE_CLAUDEAI_MCP_SERVERS=false (disables Claude Code's account/claude.ai
+// remote MCP connectors so startup doesn't block trying to reach hosts that are
+// not in the egress allowlist). ENABLE_CLAUDEAI_MCP_SERVERS is claude-specific
+// but benign to other agents (an unknown env var they ignore); its value MUST be
+// the string "false" (not "0") to take effect. Neither carries a secret.
 func BuildEnv(p EnvParams) []string {
-	out := make([]string, 0, len(passthroughExact)+len(caEnvVars)+1)
+	out := make([]string, 0, len(passthroughExact)+len(caEnvVars)+3)
 
 	for _, kv := range p.Parent {
 		name, _, ok := strings.Cut(kv, "=")
@@ -129,6 +149,16 @@ func BuildEnv(p EnvParams) []string {
 		out = append(out, "GIT_CONFIG_GLOBAL="+p.GitConfigGlobalPath)
 	}
 	out = append(out, "GIT_CONFIG_SYSTEM=/dev/null")
+
+	// Per-run writable scratch dir → srt's CLAUDE_CODE_TMPDIR lever (see AgentTmpDir).
+	// Set only when provided (the probe path passes it empty and does no temp work).
+	if p.AgentTmpDir != "" {
+		out = append(out, "CLAUDE_CODE_TMPDIR="+p.AgentTmpDir)
+	}
+	// Disable Claude Code's account/claude.ai remote MCP connectors so startup
+	// does not hang trying to reach hosts outside the egress allowlist. Fixed,
+	// non-secret; value must be exactly "false".
+	out = append(out, "ENABLE_CLAUDEAI_MCP_SERVERS=false")
 
 	sort.Strings(out)
 	return out

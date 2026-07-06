@@ -99,9 +99,24 @@ func TestBuildEnvIsStrictAllowlist(t *testing.T) {
 		t.Errorf("GIT_CONFIG_SYSTEM = %q, want /dev/null", got["GIT_CONFIG_SYSTEM"])
 	}
 
-	// The full set is ONLY passthrough + CA vars + GH_TOKEN + GIT_CONFIG_SYSTEM
-	// (no identity supplied here) — nothing else.
-	allowed := map[string]bool{"PATH": true, "HOME": true, "LANG": true, "LC_ALL": true, "TERM": true, "GH_TOKEN": true, "GIT_CONFIG_SYSTEM": true}
+	// ENABLE_CLAUDEAI_MCP_SERVERS is set unconditionally to the string "false"
+	// (must be "false", not "0"), disabling claude.ai remote MCP connectors so
+	// startup does not hang on hosts outside the egress allowlist.
+	if got["ENABLE_CLAUDEAI_MCP_SERVERS"] != "false" {
+		t.Errorf("ENABLE_CLAUDEAI_MCP_SERVERS = %q, want \"false\"", got["ENABLE_CLAUDEAI_MCP_SERVERS"])
+	}
+
+	// No AgentTmpDir supplied here -> CLAUDE_CODE_TMPDIR must be absent (the probe
+	// path does no temp work). It is present only when a scratch dir is provided
+	// (asserted in TestBuildEnvAgentTmpDir).
+	if _, ok := got["CLAUDE_CODE_TMPDIR"]; ok {
+		t.Errorf("CLAUDE_CODE_TMPDIR present with no AgentTmpDir: %q", got["CLAUDE_CODE_TMPDIR"])
+	}
+
+	// The full set is ONLY passthrough + CA vars + GH_TOKEN + GIT_CONFIG_SYSTEM +
+	// ENABLE_CLAUDEAI_MCP_SERVERS (no identity or AgentTmpDir supplied here) —
+	// nothing else.
+	allowed := map[string]bool{"PATH": true, "HOME": true, "LANG": true, "LC_ALL": true, "TERM": true, "GH_TOKEN": true, "GIT_CONFIG_SYSTEM": true, "ENABLE_CLAUDEAI_MCP_SERVERS": true}
 	for _, name := range caEnvVars {
 		allowed[name] = true
 	}
@@ -109,6 +124,30 @@ func TestBuildEnvIsStrictAllowlist(t *testing.T) {
 		if !allowed[k] {
 			t.Errorf("unexpected env var %q in sandbox env", k)
 		}
+	}
+}
+
+// TestBuildEnvAgentTmpDir asserts that a supplied AgentTmpDir is delivered as
+// CLAUDE_CODE_TMPDIR (srt's sanctioned lever for the child's TMPDIR) and that
+// rein never sets TMPDIR directly (srt owns it and would clobber a rein value).
+func TestBuildEnvAgentTmpDir(t *testing.T) {
+	env := BuildEnv(EnvParams{
+		Parent:       []string{"HOME=/home/dev", "TMPDIR=/tmp/parent-should-not-win"},
+		CABundlePath: "/run/ca-bundle.pem",
+		StubGHToken:  "stub-tok",
+		AgentTmpDir:  "/run/rein/agent-tmp",
+	})
+	got := map[string]string{}
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		got[k] = v
+	}
+	if got["CLAUDE_CODE_TMPDIR"] != "/run/rein/agent-tmp" {
+		t.Errorf("CLAUDE_CODE_TMPDIR = %q, want the agent scratch dir", got["CLAUDE_CODE_TMPDIR"])
+	}
+	// rein must NOT emit TMPDIR itself (srt sets it from CLAUDE_CODE_TMPDIR).
+	if _, ok := got["TMPDIR"]; ok {
+		t.Errorf("TMPDIR must not be set by rein (srt owns it); got %q", got["TMPDIR"])
 	}
 }
 
