@@ -102,6 +102,29 @@ func TestBuildGoldenShape(t *testing.T) {
 	}
 }
 
+// TestBuildExtraAllowWrite asserts that an ExtraAllowWrite dir (the per-run agent
+// scratch dir that becomes the sandboxed child's TMPDIR) is bound writable
+// ALONGSIDE the working tree — the config-level half of the EROFS fix.
+func TestBuildExtraAllowWrite(t *testing.T) {
+	rt, err := Build(Params{
+		SocketPath:      "/run/user/1000/rein/run-x/proxy.sock",
+		WorkingTree:     "/home/dev/work/repo",
+		ExtraAllowWrite: []string{"/tmp/rein-agent-tmp-abc"},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	awSet := map[string]bool{}
+	for _, w := range rt.Filesystem.AllowWrite {
+		awSet[w] = true
+	}
+	for _, want := range []string{"/home/dev/work/repo", "/tmp/rein-agent-tmp-abc"} {
+		if !awSet[want] {
+			t.Errorf("allowWrite missing %q; got %v", want, rt.Filesystem.AllowWrite)
+		}
+	}
+}
+
 // TestBuildThreadsExtraDomainsEgressOnly asserts CP4.5's core invariant: extra
 // egress domains land in allowedDomains (egress-allowed) but NEVER in
 // mitmProxy.domains (never injected), and a duplicate/GitHub host dedupes.

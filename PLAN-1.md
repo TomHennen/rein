@@ -360,6 +360,42 @@ path.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-07-06 — **RESOLVED: `rein run -- claude` now runs a task end-to-end in the
+  sandbox (verified INTERACTIVELY via pexpect — headless `-p` masked the real
+  error).** Two discovered mechanisms, both design corrections to the prior
+  hypothesis:
+  1. **bwrap SKIPS an `allowWrite` source that does not exist on the host.** The
+     prior guess was "rein's explicit `allowWrite` REPLACES srt's default writable
+     set." WRONG — srt UNIONS them (`[...getDefaultWritePaths(), ...userAllowWrite]`,
+     sandbox-manager.js). `/tmp/claude` was read-only because srt's default write
+     path `/tmp/claude` is only bind-mounted writable IF it already exists on the
+     host (linux-sandbox-utils.js: `if (!fs.existsSync(p)) skip`), and srt never
+     creates it — yet srt still sets the child's `TMPDIR=/tmp/claude`, so the first
+     temp write hit EROFS (broke claude AND any tool needing scratch: npm, builds).
+     Fix: rein creates a per-run scratch dir, binds it via `ExtraAllowWrite`, and
+     points the child's TMPDIR at it through srt's OWN sanctioned lever
+     `CLAUDE_CODE_TMPDIR` (srt: `TMPDIR = CLAUDE_CODE_TMPDIR || CLAUDE_TMPDIR ||
+     '/tmp/claude'`). rein does NOT set TMPDIR directly (srt clobbers it via bwrap
+     `--setenv`). Ephemeral, agent-scoped, outside all denyRead paths.
+  2. **claude's SessionStart machinery needs `~/.claude/session-env` writable.**
+     After the TMPDIR fix, a real claude still errored on `mkdir
+     ~/.claude/session-env/<uuid>` (EROFS) — a NEW `~/.claude` subdir not in the
+     CP4.5 enumerated deny-read set, so it stayed read-only under the root bind.
+     Fix: add `session-env` to that set — denyRead of a dir is a writable empty
+     tmpfs in-sandbox, so one entry both HIDES the dev's session-env history (same
+     rationale as projects/sessions) AND gives claude a fresh writable scratch dir.
+  Also wired `ENABLE_CLAUDEAI_MCP_SERVERS=false` (fixed non-secret env var) to
+  disable claude.ai remote MCP connectors so startup does not block on hosts
+  outside the egress allowlist. VERIFIED: interactive claude under `rein run --
+  claude` starts (no EROFS), passes MCP init with no hang, and answers "what is
+  2+2" → "4" — i.e. the FULL chain works (startup + TMPDIR write + MCP init + the
+  Anthropic API round-trip through srt's egress allowlist and rein's proxy
+  passthrough). No regression: write-approval pexpect suite 4/4, gated srt e2e
+  PASS, `go test ./... -race` + vet + gofmt green. FOR TOM: the `session-env`
+  addition changes deny-read behavior for ALL sandboxed claude runs (analogous to
+  the CP4.5 `~/.claude` expansion) — flagging per the same discipline. `~/.claude.json`
+  left readable as directed (onboarding/trust state; denying it risks a hang).
+
 - 2026-07-05 — **CP4.5 done + reviewed (shippable); `claude -p` headless in the
   sandbox is BLOCKED on claude's own restricted-egress startup, NOT rein.**
   Mechanism: configurable non-GitHub egress (`allow_domains:` + `REIN_ALLOW_DOMAINS`

@@ -234,6 +234,10 @@ func TestCredentialDenyReadHidesClaudeWorkArtifacts(t *testing.T) {
 		"/home/someone/.claude/history.jsonl",
 		"/home/someone/.claude/projects",
 		"/home/someone/.claude/sessions",
+		// session-env is hidden AND (as a denyRead dir => writable tmpfs) doubles
+		// as the writable scratch claude's SessionStart machinery mkdir's per run;
+		// without it the in-sandbox mkdir hits EROFS under the read-only root.
+		"/home/someone/.claude/session-env",
 	} {
 		if !set[want] {
 			t.Errorf("claude work artifact %q missing from deny-read set: %v", want, paths)
