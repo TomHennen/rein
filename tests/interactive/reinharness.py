@@ -412,7 +412,10 @@ def make_workdir() -> str:
 
 # TUI-ready markers: any of these appearing means claude's interactive prompt is
 # up and accepting input. Matched ANSI-stripped (see ReinRun.read_until_ready).
-CLAUDE_READY_MARKERS = ["? for shortcuts", 'try "', "esc to", "how can i help"]
+# Strong, prompt-specific ready signals only. The generic "esc to" is
+# deliberately excluded — it can appear in a startup dialog ("esc to go back")
+# and would false-ready before the input box is live.
+CLAUDE_READY_MARKERS = ["? for shortcuts", 'try "', "how can i help"]
 # Startup-dialog markers (trust/theme/onboarding/login) — distinct from an MCP
 # hang; surfaced so a dialog is never misread as a hang.
 CLAUDE_DIALOG_MARKERS = [

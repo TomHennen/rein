@@ -180,12 +180,16 @@ network host must be reachable**, i.e. in `allow_domains`.
   sandbox** and need **no egress** — they work out of the box. (Verified: a local
   stdio MCP tool is callable in-sandbox.)
 - **Remote MCP servers, and the account / claude.ai connectors** (Todoist, Gmail,
-  Google Drive/Calendar synced from your Claude account) reach a **network host**
-  — add that host to `allow_domains` to let them connect. rein **no longer
+  Google Drive/Calendar synced from your Claude account) reach **network hosts**,
+  so they connect only when those hosts are in `allow_domains`. rein **no longer
   force-disables** these connectors; claude connects them **non-blocking**, so an
-  unreachable one just fails quietly in the background and **does not hang
-  startup**. To turn the account connectors off entirely (minimal egress
-  surface), set **`REIN_DISABLE_CLAUDE_MCP=1`**.
+  unreachable one fails quietly in the background rather than hanging startup
+  (tested: with connectors enabled and their hosts unallowed, the agent starts
+  and answers normally). Note the account connectors typically also need
+  **`claude.ai`** egress to authenticate/fetch, on top of the third-party host
+  (e.g. Todoist) — allow both, or expect them to stay unconnected. To turn the
+  account connectors off entirely (minimal egress surface), set
+  **`REIN_DISABLE_CLAUDE_MCP=1`**.
 
 **To use an MCP server in the sandbox:**
 

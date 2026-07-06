@@ -74,9 +74,13 @@ type EnvParams struct {
 	// default applies: the ACCOUNT/claude.ai remote MCP connectors (Todoist/Gmail/
 	// GDrive/GCal, synced from a claude.ai account) are enabled and connected
 	// NON-BLOCKING at startup — a user's MCP servers work when their host is in
-	// allow_domains, and unreachable ones just fail in the background without
-	// hanging startup (verified: with connectors enabled and their hosts unallowed,
-	// the agent starts and answers normally). When TRUE, rein sets
+	// allow_domains, and unreachable ones fail in the background rather than
+	// hanging startup. TESTED: with connectors enabled and their hosts NOT in
+	// allow_domains, the agent started and answered a prompt normally — startup
+	// did not hang. That the account connectors are gated by egress reachability
+	// is INFERRED (they must reach claude.ai/provider hosts, which are not in the
+	// default allowlist), not directly observed; a local stdio MCP tool, by
+	// contrast, was observed callable in-sandbox. When TRUE, rein sets
 	// ENABLE_CLAUDEAI_MCP_SERVERS=false, restoring the old minimal-surface behavior
 	// (account connectors off). Set via REIN_DISABLE_CLAUDE_MCP.
 	//
