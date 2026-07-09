@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jferrl/go-githubauth"
@@ -37,6 +38,7 @@ import (
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
 	"github.com/TomHennen/rein/internal/session"
+	"github.com/TomHennen/rein/internal/srt"
 	"github.com/TomHennen/rein/internal/tokencache"
 )
 
@@ -76,6 +78,10 @@ func runDoctor(args []string) error {
 		checkApprovalCache,
 		checkGhShimCache,
 	}
+	// Sandbox (srt) preflight: same checks `rein run --sandbox` hard-gates on,
+	// surfaced here read-only. A [fail] here means sandboxed mode will refuse to
+	// launch — doctor is where the operator learns why before they hit it.
+	checks = append(checks, sandboxDoctorChecks()...)
 
 	results := make([]checkResult, 0, len(checks))
 	for _, c := range checks {
@@ -313,11 +319,12 @@ func checkAppMint() checkResult {
 		return checkResult{"app credentials", statusWarn,
 			"install-id not cached; `rein run` will fetch it on next launch (App not yet installed, or first run)"}
 	}
-	// On the state path ResolveApp leaves RepoName empty; MintReadOnlyToken
-	// needs it. Set it from the session, matching the helper / rein-gh.
-	if appCfg.RepoName == "" {
+	// On the state path ResolveApp leaves RepoNames empty; MintReadOnlyToken
+	// needs at least one. Set them from the session, matching the helper /
+	// rein-gh.
+	if len(appCfg.RepoNames) == 0 {
 		if sess, _, serr := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A")); serr == nil && len(sess.Repos) > 0 {
-			appCfg.RepoName = bareRepoName(sess.Repos[0])
+			appCfg.RepoNames = sess.BareRepoNames()
 		}
 	}
 	client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
@@ -411,6 +418,55 @@ func checkApprovalCache() checkResult {
 		}
 	}
 	return checkResult{"approval cache", statusOK, fmt.Sprintf("%d run(s) on disk (%d live, %d approved); see `rein approval status`", len(list), live, approved)}
+}
+
+// sandboxDoctorChecks runs the srt sandbox preflight and maps each result into
+// a doctor checkResult. These are the exact checks `rein run --sandbox`
+// hard-gates on (srt present + pinned version, seccomp availability, bwrap
+// userns health), so a green doctor here means sandboxed mode will launch.
+func sandboxDoctorChecks() []func() checkResult {
+	// Lazy like every other doctor check: srt.Preflight (which shells out to
+	// bwrap) runs when the FIRST sandbox check executes in runDoctor's loop, not
+	// at slice-build time. A sync.Once shares the single Preflight result across
+	// the per-row closures. The row NAMES are Preflight's stable output set;
+	// keep this list in sync if Preflight gains a check (a missing name would
+	// render as a fail row rather than silently vanish).
+	var (
+		once   sync.Once
+		byName map[string]srt.Check
+	)
+	load := func() {
+		once.Do(func() {
+			byName = map[string]srt.Check{}
+			for _, c := range srt.Preflight(srt.DefaultEnv()) {
+				byName[c.Name] = c
+			}
+		})
+	}
+	mk := func(name string) func() checkResult {
+		return func() checkResult {
+			load()
+			c, ok := byName[name]
+			if !ok {
+				return checkResult{"sandbox: " + name, statusFail, "preflight did not report this check"}
+			}
+			return checkResult{"sandbox: " + c.Name, srtStatusToDoctor(c.Status), c.Message}
+		}
+	}
+	return []func() checkResult{
+		mk("srt present"), mk("srt version"), mk("seccomp"), mk("bwrap userns"),
+	}
+}
+
+func srtStatusToDoctor(s srt.Status) checkStatus {
+	switch s {
+	case srt.StatusOK:
+		return statusOK
+	case srt.StatusWarn:
+		return statusWarn
+	default:
+		return statusFail
+	}
 }
 
 // checkGhShimCache reports on the gh read-token cache, which the rein-gh

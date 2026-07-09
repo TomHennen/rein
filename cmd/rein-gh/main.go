@@ -178,7 +178,7 @@ func loadAppCfgWithSession(logger *log.Logger) (githubapp.Config, keystore.Keyst
 	if err != nil {
 		return githubapp.Config{}, nil, session.Session{}, fmt.Errorf("load session: %w", err)
 	}
-	appCfg.RepoName = bareRepoName(sess.Repos[0])
+	appCfg.RepoNames = sess.BareRepoNames()
 	logger.Printf("session: id=%q repos=%v source=%s", sess.ID, sess.Repos, src)
 	return appCfg, ks, sess, nil
 }
@@ -263,17 +263,6 @@ func envInt(name string) int {
 	return n
 }
 
-// bareRepoName extracts the "name" half of "owner/name". The App
-// installation already pins the owner, so the mint API only accepts the
-// bare name.
-func bareRepoName(ownerSlashName string) string {
-	_, name, ok := strings.Cut(ownerSlashName, "/")
-	if !ok {
-		return ownerSlashName
-	}
-	return name
-}
-
 // runWrite mints a fresh write-tier token (no cache), forks the real gh
 // with GH_TOKEN set, waits for it to exit, best-effort revokes the
 // token, and returns gh's exit code. On mint failure we still exec gh
@@ -305,7 +294,10 @@ func runWrite(realGh string, args []string, stateDir string, logger *log.Logger)
 			req := grant.Request{
 				Session: sess,
 				Action:  fmt.Sprintf("gh %s (write)", argSummary(args)),
-				Repo:    sess.Repos[0],
+				// Name the FULL session scope: after #10 the minted write token
+				// covers every repo in the session, so the human's consent must
+				// reflect that, not just the first repo (issue #30 / F8).
+				Repo: strings.Join(sess.Repos, ", "),
 			}
 			if !grant.ObtainApproval(context.Background(), req, cfg) {
 				logger.Printf("write tier: human approval denied; execing gh without GH_TOKEN")

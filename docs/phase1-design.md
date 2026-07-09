@@ -3,6 +3,22 @@
 **Status:** DRAFT for review (2026-06-08; revised 2026-06-11 after
 multi-lens review). Opens Phase 1.
 
+> **2026-07-05 correction (CP2 implementation).** The v1 spine is
+> **in-process per run, not a resident daemon** (Tom's decision). The
+> "broker daemon" in §4 ("Three pieces"), and the daemon/control-socket
+> language in §5.2 and §5.5, are superseded: each `rein run` hosts the
+> broker core + injecting proxy in its own out-of-sandbox process and
+> prompts for write-approval on its own foreground tty — there is no
+> resident daemon and no separate control socket on the spine (so #12's
+> sandboxed-mode analogue closes structurally, and CP4's approval relay is
+> dropped). `internal/daemon` remains as unwired shelf code for later
+> tracks (status app, OS-notification approvals, biometric key unlock,
+> shared cross-run cache). Also: **write-approval is run-scoped** across
+> both git and GraphQL (§5.3's wording, not §5.1's "per-repo" — the #10
+> full-set token makes per-repo re-prompting an awareness ping, not a scope
+> gate). Full prose sweep folds into the #25 rename. See `PLAN-1.md`
+> Notes (2026-07-05) for the reasoning.
+
 Self-contained: problem and requirements first, then the design. The
 integration spike (`docs/phase1-srt-spike-findings.md`) is referenced as
 evidence but not assumed read.
@@ -330,6 +346,68 @@ consequence of sandboxing. Two invariants:
   stderr instructions). The richer status-app/OS-notification channel
   stays a later track (§8). #12's nonce-via-tty remains open for *direct*
   mode only.
+
+### 5.6 Positioning: what rein protects that credential-masking doesn't
+
+Since this design was drafted, Claude Code shipped first-party credential
+**masking** (`sandbox.credentials` `mode: mask` on the experimental
+`network.tlsTerminate`): the sandboxed command sees a per-session sentinel,
+and the sandbox proxy substitutes the real value on requests to `injectHosts`.
+This makes the injection *plumbing* first-party — so it's now the closest
+alternative — but it protects a narrower property than rein, and the gap is
+the point of the whole project. Three distinctions, stated precisely:
+
+- **Masking protects against theft; rein additionally limits *contemporaneous
+  capability*.** Masking guarantees the agent never holds the credential in
+  readable form, so it can't be exfiltrated for later or off-machine use. But
+  during the run, every request the agent makes to an `injectHost` carries the
+  **full power of the injected credential** — a prompt-injected agent can push,
+  delete, or merge anything that credential can reach, *right now*. Masking has
+  no per-request capability restriction (`injectHosts` limits *which hosts*,
+  not *what the credential may do*, and it substitutes one static value fixed
+  at launch). rein classifies each request (§5.1), enforces the session's scope
+  ceiling, and gates writes on human approval — so even a fully-hijacked
+  in-session agent is boxed to reads within scope until a human approves a
+  write. rein shrinks the blast radius of an *in-session* compromise, not only
+  the value of a *stolen* token.
+
+- **Blast radius is bounded by App installation, not by account reach.** rein's
+  long-lived secret is a GitHub App private key, and every token it mints is
+  bounded by where the App is *installed*. A developer who belongs to several
+  orgs installs the App only on the repos the agent should touch; the key —
+  even if it leaked — can never mint a token for an org the App isn't installed
+  on. Contrast a PAT or `gh auth login` token, scoped to the **user** and thus
+  reaching every repo and org that account can access (masking-a-PAT inherits
+  that full reach). Installing rein's App narrowly, and never running
+  `gh auth login` so **no user-scoped token sits on disk at all**, removes the
+  cross-org vector entirely — arguably rein's single strongest property.
+  Within the installed repos each minted token narrows further to the session's
+  declared repos and to read-or-write permissions (installation-token
+  `Repositories` + `Permissions`), so three bounds stack: installed repos ⊇
+  session repos ⊇ per-request tier.
+
+  This is *not* a claim that the machine holds no long-lived secret: the App
+  private key is one, read on every mint through `internal/keystore`. The claim
+  is **no long-lived secret reachable by the agent** — the key lives with the
+  broker, outside the sandbox, deny-read from within. Same-uid host compromise
+  stays the residual (§5.3 / design.md TM-G4); the installation bound caps what
+  that residual can reach in *other* orgs at zero, and a hardware-backed key
+  (`sks`; keystore is the swap point) is the second-order hardening for the key
+  file itself.
+
+- **Agent-agnostic — at the network boundary, with bounds.** rein injects at
+  the OS + network boundary, not inside the agent, so it needs no per-agent
+  integration and isn't tied to one vendor's tool (unlike masking, which lives
+  in Claude Code's own settings/proxy). That agnosticism is real but bounded:
+  it fits **local CLI agents launched as a subprocess** (not IDE/desktop or
+  cloud agents), requires **HTTPS** GitHub remotes (SSH bypasses the proxy and
+  is denied — §4.2), and requires the agent's HTTP client to honor the standard
+  CA-trust env vars (§5.4). Most CLI agents shell out to `git`/`gh`, which are
+  covered — but "works with any agent" is a *design property proven so far only
+  for the git/curl/gh toolchain* (CP1/CP2), not a verified breadth claim. Some
+  tools also need a stub credential to attempt a request at all (the `gh`
+  `GH_TOKEN` stub). The README threat model (#5) should carry this positioning
+  in user-facing terms.
 
 ## 6. What we reuse vs. build new
 

@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TomHennen/rein/internal/brokercore"
 	"gopkg.in/yaml.v3"
 )
 
@@ -63,6 +64,42 @@ type Session struct {
 	// authored before CP5 (env-fallback included) keep working without
 	// the prompt. The prompt is opt-in via the file's `issue:` field.
 	Issue int `yaml:"issue,omitempty"`
+
+	// AllowDomains is the per-session EXTRA egress allowlist (CP4.5): hosts the
+	// sandboxed agent may reach IN ADDITION to GitHub and the built-in agent
+	// endpoint — e.g. registry.npmjs.org, pypi.org, files.pythonhosted.org. Each
+	// is egress-allowed but NEVER injected with a rein credential (a non-GitHub
+	// host gets a direct TLS tunnel to itself). Merged as a UNION with the
+	// built-in default and REIN_ALLOW_DOMAINS. Entries are bare hosts or strict
+	// `*.suffix` wildcards; a wildcard or a large set triggers a loud egress
+	// warning at launch because broad egress is a data-exfiltration surface.
+	// Optional and empty by default (Sandboxed mode only; ignored in direct mode).
+	AllowDomains []string `yaml:"allow_domains,omitempty"`
+}
+
+// BareRepoNames returns the "name" halves of the session's "owner/name"
+// repos. The App installation pins the owner, so the installation-token mint
+// API only accepts bare names; the minted token is scoped to this full set
+// (issue #10: token scope == the Contains scope ceiling).
+//
+// The bare name is derived from the NORMALIZED form (brokercore.RepoFromPath —
+// the same parser Validate/Contains use), NOT a raw strings.Cut: a session
+// entry like "owner/name.git", "/owner/name", or "owner/name/" Validates fine
+// but a raw Cut would yield "name.git" / a leading-slash-mangled owner, which
+// GitHub 422s at mint → every credential silently degrades to the mint-failed
+// placeholder (proxy 502) with nothing pointing at the cause (issue #10 F2).
+// Case is preserved (RepoFromPath does not lowercase); GitHub matches repo
+// names case-insensitively at mint. An unparseable entry is skipped (Validate
+// already rejects those, so this is defensive).
+func (s *Session) BareRepoNames() []string {
+	names := make([]string, 0, len(s.Repos))
+	for _, r := range s.Repos {
+		norm := brokercore.RepoFromPath(r)
+		if _, name, ok := strings.Cut(norm, "/"); ok && name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // Contains reports whether the given owner/name is within this
@@ -82,22 +119,20 @@ func (s *Session) Contains(repo string) bool {
 	return false
 }
 
-// normalizeRepo strips ".git" suffix (case-insensitive), trims trailing
-// slashes, takes the first two slash-separated segments (owner/name),
-// and lowercases. Returns "" if the input doesn't have an owner/name
-// shape.
+// normalizeRepo canonicalizes an "owner/name" for case-insensitive scope
+// comparison. It delegates the parsing (strip ".git", trailing slash, take
+// the first two segments) to the single canonical helper
+// brokercore.RepoFromPath (issue #11 — previously broker.pathToRepo,
+// session.normalizeRepo, and the proxy each parsed repo paths their own way),
+// then lowercases (GitHub is case-preserving but case-insensitive on path).
+// Returns "" if the input isn't owner/name-shaped.
+//
+// One behavior delta vs. the prior hand-rolled parse: RepoFromPath strips a
+// leading "/", so "/owner/name" now normalizes to "owner/name" instead of ""
+// — strictly more lenient, and safe (it only ever accepts a genuine
+// owner/name, never a malformed string, as in-scope).
 func normalizeRepo(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.TrimSuffix(s, "/")
-	// Case-insensitive ".git" strip.
-	if len(s) >= 4 && strings.EqualFold(s[len(s)-4:], ".git") {
-		s = s[:len(s)-4]
-	}
-	parts := strings.SplitN(s, "/", 3)
-	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
-		return ""
-	}
-	return strings.ToLower(parts[0] + "/" + parts[1])
+	return strings.ToLower(brokercore.RepoFromPath(s))
 }
 
 // LoadFromFile parses a YAML session file at path. Returns an error
@@ -131,9 +166,24 @@ func (s *Session) Validate() error {
 	if len(s.Repos) == 0 {
 		return errors.New("session.repos must have at least one entry")
 	}
+	// All repos must share ONE owner. The App installation is single-owner and
+	// the minted token scopes by bare repo NAME against that installation
+	// (BareRepoNames drops the owner), so a mixed-owner session would mint a
+	// token whose scope is ambiguous — worse, "alice/y" in the list against
+	// alice's installation could silently grant "alice/y" even if the operator
+	// meant "bob/y" (issue #10 hardening: keep token scope == the stated
+	// ceiling). Fail closed on mixed owners.
+	var owner string
 	for i, r := range s.Repos {
-		if normalizeRepo(r) == "" {
+		n := normalizeRepo(r)
+		if n == "" {
 			return fmt.Errorf("session.repos[%d] = %q is not owner/name", i, r)
+		}
+		o, _, _ := strings.Cut(n, "/")
+		if owner == "" {
+			owner = o
+		} else if o != owner {
+			return fmt.Errorf("session.repos mixes owners (%q and %q); a session must be scoped to a single owner (the App installation is single-owner)", owner, o)
 		}
 	}
 	return nil

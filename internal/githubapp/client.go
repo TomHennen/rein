@@ -1,11 +1,12 @@
 // Package githubapp wraps jferrl/go-githubauth with the surface rein needs:
-// minting installation tokens scoped to a single repository, in either a
-// read-only or read+write permission shape.
+// minting installation tokens scoped to the session's repository set, in
+// either a read-only or read+write permission shape.
 //
 // MintReadOnlyToken is used for cached session reads (TTL bounded by what
 // GitHub returns, which is 1h in practice). MintWriteToken is used JIT at
 // push time — never cached — per design §4.2.5. Both tokens are scoped to
-// the same single repository.
+// the same set of repositories (Config.RepoNames = the session's scope
+// ceiling; issue #10).
 package githubapp
 
 import (
@@ -32,12 +33,19 @@ type Config struct {
 	// InstallationID is the numeric installation ID this client mints for.
 	InstallationID int64
 
-	// RepoName is the repository name (without owner) the minted token will
-	// be scoped to. The owner is implicit in the installation.
-	RepoName string
+	// RepoNames are the repository names (without owner) the minted token is
+	// scoped to. The owner is implicit in the installation. This is the FULL
+	// session scope ceiling — every repo the session's Contains check accepts
+	// (issue #10: previously the mint was scoped to a single repo while the
+	// scope check accepted all session repos, so a token minted for one repo
+	// was handed to a request the session allowed for another repo, which then
+	// 403'd at GitHub). Scoping the token to the whole set closes that gap:
+	// token scope == scope ceiling.
+	RepoNames []string
 }
 
-// Client mints installation tokens for a single repository.
+// Client mints installation tokens scoped to the session's repository set
+// (Config.RepoNames).
 //
 // The private key is fetched from the Keystore lazily inside each Mint*
 // call so the Client never holds key material across calls. This is the
@@ -47,6 +55,21 @@ type Client struct {
 	cfg      Config
 	ks       keystore.Keystore
 	roleName string
+
+	// httpClient is the transport used for direct REST calls (RevokeToken).
+	// When nil, client() defaults to http.DefaultClient, keeping the zero
+	// value and existing constructors working. Tests set it to point at an
+	// httptest.Server transport.
+	httpClient *http.Client
+}
+
+// client returns the injectable HTTP client, defaulting to
+// http.DefaultClient when unset.
+func (c *Client) client() *http.Client {
+	if c.httpClient == nil {
+		return http.DefaultClient
+	}
+	return c.httpClient
 }
 
 // NewClient validates cfg and constructs a Client. ks is the backend the
@@ -59,8 +82,8 @@ func NewClient(cfg Config, ks keystore.Keystore, roleName string) (*Client, erro
 	if cfg.InstallationID == 0 {
 		return nil, errors.New("github app: InstallationID is required")
 	}
-	if cfg.RepoName == "" {
-		return nil, errors.New("github app: RepoName is required")
+	if len(cfg.RepoNames) == 0 {
+		return nil, errors.New("github app: RepoNames is required (at least one repo)")
 	}
 	if ks == nil {
 		return nil, errors.New("github app: keystore is required")
@@ -171,7 +194,7 @@ func (c *Client) RevokeToken(ctx context.Context, token string) error {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.client().Do(req)
 	if err != nil {
 		return fmt.Errorf("revoke: %w", err)
 	}
@@ -195,7 +218,7 @@ func (c *Client) mint(ctx context.Context, perms *githubauth.InstallationPermiss
 	}
 
 	opts := &githubauth.InstallationTokenOptions{
-		Repositories: []string{c.cfg.RepoName},
+		Repositories: c.cfg.RepoNames,
 		Permissions:  perms,
 	}
 

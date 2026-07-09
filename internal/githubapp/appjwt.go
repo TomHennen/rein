@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 
 	"github.com/jferrl/go-githubauth"
 
@@ -35,6 +36,21 @@ type AppClient struct {
 	ks       keystore.Keystore
 	roleName string
 	apiBase  string
+
+	// httpClient is the transport used for App-authenticated lookups. When
+	// nil, client() defaults to http.DefaultClient, keeping the zero value
+	// and existing constructors working. Tests set it to point at an
+	// httptest.Server transport.
+	httpClient *http.Client
+}
+
+// client returns the injectable HTTP client, defaulting to
+// http.DefaultClient when unset.
+func (c *AppClient) client() *http.Client {
+	if c.httpClient == nil {
+		return http.DefaultClient
+	}
+	return c.httpClient
 }
 
 // NewAppClient validates inputs and constructs an AppClient. clientID is the
@@ -90,7 +106,7 @@ func (c *AppClient) RepoInstallationID(ctx context.Context, owner, repo string) 
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.client().Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("lookup installation for %s/%s: %w", owner, repo, err)
 	}
@@ -119,6 +135,108 @@ func (c *AppClient) RepoInstallationID(ctx context.Context, owner, repo string) 
 	}
 	if out.ID == 0 {
 		return 0, fmt.Errorf("installation lookup for %s/%s returned id 0", owner, repo)
+	}
+	return out.ID, nil
+}
+
+// AppSlug mints an App JWT and calls GET {apiBase}/app, returning the App's
+// slug (e.g. "my-app"). The slug is the stable, URL-safe App identifier used to
+// derive the bot login "<slug>[bot]" for the git-committer noreply email (CP4).
+//
+// This is the ONLY way to learn the slug on the env-var config path (state.json
+// carries it on the manifest-flow path, but REIN_APP_* env config does not), so
+// it is the uniform resolver. JWT auth is required and accepted here (unlike the
+// public /users endpoint, which rejects the JWT — see BotUserID).
+func (c *AppClient) AppSlug(ctx context.Context) (string, error) {
+	keyPEM, err := c.ks.Get(c.roleName)
+	if err != nil {
+		return "", fmt.Errorf("read private key from keystore[%s]: %w", c.roleName, err)
+	}
+	appSrc, err := githubauth.NewApplicationTokenSource(c.clientID, keyPEM)
+	if err != nil {
+		return "", fmt.Errorf("build app token source: %w", err)
+	}
+	tok, err := appSrc.Token()
+	if err != nil {
+		return "", fmt.Errorf("mint app jwt: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.apiBase+"/app", nil)
+	if err != nil {
+		return "", fmt.Errorf("build /app request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return "", fmt.Errorf("GET /app: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("read /app response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		excerpt := string(body)
+		if len(excerpt) > 512 {
+			excerpt = excerpt[:512] + "...(truncated)"
+		}
+		return "", fmt.Errorf("GET /app returned HTTP %d: %s", resp.StatusCode, excerpt)
+	}
+	var out struct {
+		Slug string `json:"slug"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return "", fmt.Errorf("parse /app response: %w", err)
+	}
+	if out.Slug == "" {
+		return "", fmt.Errorf("GET /app returned an empty slug")
+	}
+	return out.Slug, nil
+}
+
+// BotUserID returns the numeric user id for a bot login like "myapp[bot]" via
+// GET {apiBase}/users/<login>. This endpoint is PUBLIC and must be called
+// UNAUTHENTICATED: sending the App JWT here returns 401 (live-verified) because
+// a JWT authenticates only App-scoped endpoints, not the user API. The bracket
+// characters in the login are percent-escaped.
+//
+// apiBase defaults to DefaultAPIBase when empty. Standalone (not an AppClient
+// method) because it needs no key material or App identity — only the login.
+func BotUserID(ctx context.Context, apiBase, botLogin string) (int64, error) {
+	if apiBase == "" {
+		apiBase = DefaultAPIBase
+	}
+	endpoint := apiBase + "/users/" + url.PathEscape(botLogin)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return 0, fmt.Errorf("build /users request: %w", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("GET /users/%s: %w", botLogin, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return 0, fmt.Errorf("read /users response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("GET /users/%s returned HTTP %d", botLogin, resp.StatusCode)
+	}
+	var out struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return 0, fmt.Errorf("parse /users response: %w", err)
+	}
+	if out.ID == 0 {
+		return 0, fmt.Errorf("GET /users/%s returned id 0", botLogin)
 	}
 	return out.ID, nil
 }

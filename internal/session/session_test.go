@@ -35,6 +35,38 @@ func TestNormalizeRepo(t *testing.T) {
 	}
 }
 
+func TestBareRepoNames(t *testing.T) {
+	// Spellings that Validate accepts but a raw strings.Cut would mangle into a
+	// name GitHub 422s at mint (issue #10 F2). All must yield the clean name.
+	s := &Session{Repos: []string{
+		"owner/name",
+		"owner/name.git",
+		"/owner/name2",
+		"owner/name3/",
+	}}
+	got := s.BareRepoNames()
+	want := []string{"name", "name", "name2", "name3"}
+	if len(got) != len(want) {
+		t.Fatalf("BareRepoNames() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("BareRepoNames()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestValidateRejectsMixedOwners(t *testing.T) {
+	s := &Session{ID: "s", Repos: []string{"alice/x", "bob/y"}}
+	if err := s.Validate(); err == nil {
+		t.Fatal("Validate accepted a mixed-owner session; want rejection")
+	}
+	ok := &Session{ID: "s", Repos: []string{"alice/x", "Alice/y.git", "/alice/z"}}
+	if err := ok.Validate(); err != nil {
+		t.Errorf("Validate rejected a legitimate single-owner session: %v", err)
+	}
+}
+
 func TestSessionContains(t *testing.T) {
 	s := &Session{Repos: []string{"TomHennen/agentcreds-validation-a", "Other/Repo"}}
 	cases := []struct {
@@ -132,6 +164,20 @@ repos:
 		}
 		if s.Issue != 73 {
 			t.Errorf("Issue = %d, want 73", s.Issue)
+		}
+	})
+	t.Run("session with allow_domains field (CP4.5)", func(t *testing.T) {
+		p := filepath.Join(t.TempDir(), "egress.yaml")
+		body := "id: x\nrole: implement\nrepos:\n  - o/r\nallow_domains:\n  - registry.npmjs.org\n  - pypi.org\n"
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		s, err := LoadFromFile(p)
+		if err != nil {
+			t.Fatalf("LoadFromFile: %v", err)
+		}
+		if len(s.AllowDomains) != 2 || s.AllowDomains[0] != "registry.npmjs.org" || s.AllowDomains[1] != "pypi.org" {
+			t.Errorf("AllowDomains = %v, want [registry.npmjs.org pypi.org]", s.AllowDomains)
 		}
 	})
 	t.Run("malformed YAML → error", func(t *testing.T) {

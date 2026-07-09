@@ -77,6 +77,38 @@ func TestRevokeRunWriteTokens_RevokeFailureIsBestEffort(t *testing.T) {
 	}
 }
 
+// TestExpiryClearsLedgerSoExitRevokeIsNoop is the F1 regression: on expiry,
+// OnExpire revokes the run's write tokens AND clears the ledger, so the deferred
+// exit-time revokeRunWriteTokens re-reads an empty ledger and does NOT re-revoke
+// already-dead tokens (which would print a spurious "exit-revoke failed" per
+// token). This asserts the sequence the OnExpire closure performs.
+func TestExpiryClearsLedgerSoExitRevokeIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-expiry"
+	now := time.Now()
+	mustAppend(t, dir, runID, "tok-1", now.Add(time.Hour))
+	mustAppend(t, dir, runID, "tok-2", now.Add(time.Hour))
+
+	// (1) OnExpire step 1: revoke the ledger's tokens.
+	expiry := &recordingRevoke{}
+	revokeRunWriteTokens(dir, runID, expiry.fn, now)
+	if len(expiry.tokens) != 2 {
+		t.Fatalf("expiry revoke = %v, want both tokens", expiry.tokens)
+	}
+	// (2) OnExpire step 2: clear the ledger (the F1 fix).
+	if err := approvals.ClearRun(dir, runID); err != nil {
+		t.Fatalf("ClearRun: %v", err)
+	}
+
+	// (3) Deferred exit-time revoke re-runs — must be a clean no-op (no
+	// re-revocation of the already-dead tokens, hence no spurious warning).
+	exit := &recordingRevoke{err: errors.New("would-be-non-204")}
+	revokeRunWriteTokens(dir, runID, exit.fn, now)
+	if len(exit.tokens) != 0 {
+		t.Errorf("exit-time revoke re-revoked %v after ClearRun; want none (would print spurious per-token warnings)", exit.tokens)
+	}
+}
+
 func mustAppend(t *testing.T, dir, runID, token string, exp time.Time) {
 	t.Helper()
 	if err := approvals.AppendWriteToken(dir, runID, tokencache.Entry{Token: token, ExpiresAt: exp}); err != nil {

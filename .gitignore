@@ -13,3 +13,7 @@
 
 # Local Claude Code harness state (worktrees, session scratch)
 .claude/
+
+# Python
+__pycache__/
+*.pyc

@@ -6,7 +6,7 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 
 - `docs/design.md` — full design. §0 TL;DR is enough for routine work; read specific sections as needed.
 - `PLAN-1.md` — current phase plan (Phase 1: sandboxed mode, CP1-CP6). Design of record: `docs/phase1-design.md` + `docs/phase1-srt-spike-findings.md`.
-- **Active work is on branch `cp2-daemon-core`, not `main`.** CP1 is done; the CP2 foundation (`internal/brokercore`, `internal/classify`, `internal/daemon`) is landed there. To continue (incl. on another machine): `git checkout cp2-daemon-core`, then read `HANDOFF.md` (cross-machine bring-up + the live resume pointer) and `PLAN-1.md`'s Notes tail.
+- `HANDOFF.md` — bring up Phase 1 on a fresh `git clone` (env prereqs + `rein init` for your own App) and the live resume pointer. Read when picking up on another machine.
 - `PLAN-0.5.md` and `PLAN.md` — Phase 0.5 / Phase 0 records, historical.
 - `phase0_findings.md` — what Phase 0 actually built + the 7 design corrections to the original PLAN.md + the 4 Shape B limits observed empirically. Read before doing Phase 0.5 design work; don't re-derive.
 
@@ -21,7 +21,14 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 
 ## Libraries (don't reinvent these)
 
-- Proxy: `github.com/elazarl/goproxy` (BSD)
+- Proxy: **hand-rolled** in `internal/proxy` (the CP1 relay recipe), NOT
+  goproxy. Do not "helpfully" swap goproxy back in: srt hands rein an
+  opaque byte tunnel to a unix socket (`mitmProxy.socketPath`) that rein
+  must TLS-terminate, inject into, and relay itself, and the injection
+  invariants (SNI==Host, per-host-class inject, no token on the response
+  path, HTTP/1.1-only relay, ContentLength/TransferEncoding copy,
+  no-redirect-follow) need direct control of the request/response loop —
+  goproxy's shape doesn't fit either the socket hook or those invariants.
 - GitHub App tokens: `github.com/jferrl/go-githubauth` (MIT)
 - Key storage: `github.com/99designs/keyring` (MIT) — uses Secret Service backend (libsecret/D-Bus) on Linux when available, file backend otherwise
 - Hardware keys (Phase 1+): `github.com/facebookincubator/sks` (Apache 2.0). Not used in Phase 0.

@@ -1,0 +1,76 @@
+"""test_realagent_e2e — a REAL agent (`claude`) running INSIDE the sandbox.
+
+For a long time this was SKIPPED, blocked on CP4.5 (the sandbox allowed only
+GitHub egress, so `claude` could not reach api.anthropic.com). CP4.5 landed the
+default extra-egress allowlist (api.anthropic.com) AND a writable per-run TMPDIR
+(the EROFS fix), so `rein run -- claude` now starts a real interactive agent
+in-sandbox. This test proves the FLOOR of that: the agent starts (no EROFS, no
+startup hang) and answers a trivial deterministic prompt.
+
+It runs under the SHIPPED DEFAULT (no REIN_*_MCP env set): claude's account MCP
+connectors are enabled and connected non-blocking, so this also guards against a
+regression where an unreachable MCP host blocks startup. (The blanket
+ENABLE_CLAUDEAI_MCP_SERVERS=false disable was REMOVED; see internal/srt/env.go.)
+
+Why interactive (pty) and not `claude -p`: headless `-p` masks startup errors —
+an EROFS or a hung MCP connect can still exit 0 with empty output. Driving the
+real TUI over a pty is the faithful reproduction of what a developer sees.
+
+QUOTA: this launches ONE nested `claude`. Keep it to a single trivial prompt.
+
+The fuller edit->commit->push agent task (agent autonomy + the write-approval
+loop together) is intentionally NOT an automated test: a real agent's tool
+choices are non-deterministic and would make it flaky. It lives as a documented
+manual scenario in the dogfood plan instead. The write-approval loop itself is
+covered deterministically by test_write_approval.py (a raw in-sandbox push).
+"""
+
+from __future__ import annotations
+
+import unittest
+
+import reinharness as H
+from itest_base import ReinTestCase
+
+
+class RealAgentEndToEnd(ReinTestCase):
+    def test_claude_starts_in_sandbox_and_answers(self):
+        """`rein run -- claude` starts a real agent in-sandbox (no EROFS/hang) and
+        answers 2+2 -> '4'."""
+        run = H.spawn_claude_interactive(env=self.env, timeout=90)
+        try:
+            ready, dialog, exited = run.read_until_ready(
+                H.CLAUDE_READY_MARKERS,
+                dialog_markers=H.CLAUDE_DIALOG_MARKERS,
+                timeout=75,
+            )
+            # Distinguish the failure modes so a red test is actionable.
+            self.assertFalse(
+                exited,
+                f"claude EXITED during startup (EROFS or crash?). Transcript:\n{run.text()[-1500:]}",
+            )
+            if not ready and dialog:
+                self.fail(
+                    "a STARTUP DIALOG (trust/theme/login) intercepted startup — "
+                    f"not a hang, but the agent never became ready:\n{run.text()[-1500:]}"
+                )
+            self.assertTrue(
+                ready,
+                "claude did not reach an interactive prompt within 75s (startup hang?). "
+                f"Transcript tail:\n{run.text()[-1500:]}",
+            )
+
+            reply = run.send_and_collect(
+                "what is 2+2? reply with only the number", settle=14, timeout=12
+            )
+            self.assertIn(
+                "4",
+                reply,
+                f"agent did not answer 2+2 -> 4. Reply tail:\n{reply[-800:]}",
+            )
+        finally:
+            run.quit_tui()
+
+
+if __name__ == "__main__":
+    unittest.main()

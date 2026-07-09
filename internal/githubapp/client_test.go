@@ -66,7 +66,7 @@ func genTestPEM(t *testing.T) []byte {
 }
 
 func TestNewClient_Validates(t *testing.T) {
-	good := Config{ClientID: "Iv23li-x", InstallationID: 42, RepoName: "throwaway"}
+	good := Config{ClientID: "Iv23li-x", InstallationID: 42, RepoNames: []string{"throwaway"}}
 	ks := newStubKeystore()
 
 	cases := []struct {
@@ -78,21 +78,21 @@ func TestNewClient_Validates(t *testing.T) {
 	}{
 		{
 			name: "missing-client-id",
-			cfg:  Config{InstallationID: 42, RepoName: "throwaway"},
+			cfg:  Config{InstallationID: 42, RepoNames: []string{"throwaway"}},
 			ks:   ks, roleName: "primary",
 			wantErr: "ClientID is required",
 		},
 		{
 			name: "missing-installation-id",
-			cfg:  Config{ClientID: "Iv23li-x", RepoName: "throwaway"},
+			cfg:  Config{ClientID: "Iv23li-x", RepoNames: []string{"throwaway"}},
 			ks:   ks, roleName: "primary",
 			wantErr: "InstallationID is required",
 		},
 		{
-			name: "missing-repo-name",
+			name: "missing-repo-names",
 			cfg:  Config{ClientID: "Iv23li-x", InstallationID: 42},
 			ks:   ks, roleName: "primary",
-			wantErr: "RepoName is required",
+			wantErr: "RepoNames is required",
 		},
 		{
 			name: "missing-keystore",
@@ -128,7 +128,7 @@ func TestNewClient_FromKeystore_OK(t *testing.T) {
 	c, err := NewClient(Config{
 		ClientID:       "Iv23li-x",
 		InstallationID: 42,
-		RepoName:       "throwaway",
+		RepoNames:      []string{"throwaway"},
 	}, ks, "primary")
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
@@ -144,7 +144,7 @@ func TestMint_PropagatesKeystoreError(t *testing.T) {
 	c, err := NewClient(Config{
 		ClientID:       "Iv23li-x",
 		InstallationID: 42,
-		RepoName:       "throwaway",
+		RepoNames:      []string{"throwaway"},
 	}, ks, "primary")
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)

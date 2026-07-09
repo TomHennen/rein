@@ -38,9 +38,85 @@ import (
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
 	"github.com/TomHennen/rein/internal/session"
+	"github.com/TomHennen/rein/internal/srt"
 	"github.com/TomHennen/rein/internal/tokencache"
 	"github.com/TomHennen/rein/internal/ui/grant"
 )
+
+// dispatchRun routes `rein run`. CP4 flips the default: sandboxed (srt) mode is
+// now the DEFAULT (where srt is healthy — runSandboxed hard-gates preflight and
+// fails closed, never silently dropping to unsandboxed on a real repo). Direct
+// mode moves behind an explicit --direct/--no-sandbox flag with a loud banner
+// (the reduced-protection, throwaway-only path). The mode flag, if present, must
+// come BEFORE the "--" separator:
+//
+//	rein run -- <cmd>              # sandboxed (default)
+//	rein run --sandbox -- <cmd>    # sandboxed (explicit; alias for the default)
+//	rein run --direct -- <cmd>     # DIRECT/unsandboxed (explicit opt-in + banner)
+//	rein run --no-sandbox -- <cmd> # alias for --direct
+func dispatchRun(argv []string) (int, error) {
+	mode, cmdline, err := parseRunMode(argv)
+	if err != nil {
+		return 2, err
+	}
+	if mode == modeDirect {
+		// Banner only AFTER the command shape validated (parseRunMode returns a
+		// usage error first), so a usage error never prints the scary warning.
+		printDirectModeBanner(os.Stderr)
+		return runWrapped(append([]string{"--"}, cmdline...))
+	}
+	// Sandboxed (default + --sandbox). runSandboxed runs preflight and fails
+	// closed (with a `rein doctor` pointer) if srt is unhealthy — it does NOT
+	// fall back to unsandboxed mode on its own (design §2-3; CP3 fallback rule).
+	return runSandboxed(cmdline)
+}
+
+// runMode is the sandbox-vs-direct decision for `rein run`.
+type runMode int
+
+const (
+	modeSandbox runMode = iota
+	modeDirect
+)
+
+// parseRunMode decides the run mode from the leading flag and validates the
+// command shape, returning the mode and the cmdline (the argv AFTER "--"). The
+// default (no recognized mode flag) is modeSandbox — the CP4 flip. A usage error
+// is returned for a bad command shape BEFORE any side effect, so dispatchRun can
+// reject it without printing the direct-mode banner.
+func parseRunMode(argv []string) (runMode, []string, error) {
+	mode := modeSandbox
+	rest := argv
+	if len(argv) > 0 {
+		switch argv[0] {
+		case "--sandbox":
+			rest = argv[1:]
+		case "--direct", "--no-sandbox":
+			mode = modeDirect
+			rest = argv[1:]
+		}
+	}
+	cmdline, err := parseRunArgs(rest)
+	if err != nil {
+		return mode, nil, err
+	}
+	return mode, cmdline, nil
+}
+
+// printDirectModeBanner is the loud, unmissable warning for the explicit
+// unsandboxed path. rein cannot detect whether the target is a throwaway repo,
+// so this banner + the explicit --direct flag ARE the throwaway gate: the human
+// is trusted to heed it (hard constraint #1 + the CP3 fallback rule).
+func printDirectModeBanner(w io.Writer) {
+	fmt.Fprintln(w, "===============================================================")
+	fmt.Fprintln(w, "rein: WARNING — DIRECT (UNSANDBOXED) MODE")
+	fmt.Fprintln(w, "  The agent runs OUTSIDE the srt sandbox. It shares your user")
+	fmt.Fprintln(w, "  account: it CAN read your ambient credentials (gh login, SSH")
+	fmt.Fprintln(w, "  keys, ~/.netrc, keyrings) and the rein-brokered token is only")
+	fmt.Fprintln(w, "  hidden by process boundaries, not a sandbox. Use this ONLY on a")
+	fmt.Fprintln(w, "  THROWAWAY repo. For real work, drop --direct to run sandboxed.")
+	fmt.Fprintln(w, "===============================================================")
+}
 
 const (
 	// mintTimeout caps each installation-token mint. Git users feel this
@@ -100,12 +176,17 @@ func main() {
 			os.Exit(1)
 		}
 	case "run":
-		code, err := runWrapped(os.Args[2:])
+		code, err := dispatchRun(os.Args[2:])
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "rein run: %v\n", err)
 			os.Exit(code)
 		}
 		os.Exit(code)
+	case "__sandbox-probe":
+		// Hidden subcommand: runs INSIDE srt during VerifyConfigApplied to
+		// prove the deny-read + seccomp protections took effect. Exits with a
+		// srt.Probe* code the parent interprets. Not user-facing.
+		os.Exit(srt.RunProbe(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -125,7 +206,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  rein approval status")
 	fmt.Fprintln(os.Stderr, "  rein approval clear [--run-id <id>]")
 	fmt.Fprintln(os.Stderr, "  rein approval grant --run-id <id>")
-	fmt.Fprintln(os.Stderr, "  rein run -- <cmd> [args...]")
+	fmt.Fprintln(os.Stderr, "  rein run -- <cmd> [args...]                (sandboxed by default)")
+	fmt.Fprintln(os.Stderr, "  rein run --direct -- <cmd> [args...]       (unsandboxed; throwaway repos only)")
 }
 
 // runCredentialHelper wires env-derived config to the broker. All errors
@@ -176,10 +258,9 @@ func runCredentialHelper(action string) error {
 	if err != nil {
 		return err
 	}
-	// Override the App config's repo with the session's first repo. CP4
-	// has single-repo sessions; multi-repo sessions in CP5+ will need
-	// per-mint repo selection.
-	appCfg.RepoName = bareRepoName(sess.Repos[0])
+	// Scope the App config to the session's FULL repo set so the minted token
+	// covers every repo the scope check accepts (issue #10).
+	appCfg.RepoNames = sess.BareRepoNames()
 	logger.Printf("session: id=%q role=%q repos=%v source=%s", sess.ID, sess.Role, sess.Repos, sessSource)
 
 	return runCredentialHelperWithConfig(action, os.Stdin, os.Stdout, os.Stderr, appCfg, ks, sess, stateDir, logger)
@@ -591,7 +672,7 @@ func ghAuth() error {
 	if err != nil {
 		return err
 	}
-	appCfg.RepoName = bareRepoName(sess.Repos[0])
+	appCfg.RepoNames = sess.BareRepoNames()
 	logger.Printf("gh-auth session: id=%q repos=%v source=%s", sess.ID, sess.Repos, sessSource)
 
 	stateDir, err := config.StateDir()

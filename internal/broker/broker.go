@@ -55,6 +55,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TomHennen/rein/internal/brokercore"
 	"github.com/TomHennen/rein/internal/tokencache"
 )
 
@@ -304,7 +305,11 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// handleGet is the TM-G8-bearing path. Split out for direct testing.
+// handleGet is the TM-G8-bearing path. It builds a brokercore.Request from
+// the git attributes and delegates the decision (scope → confirm → mint) to
+// the shared core, then writes the resulting credential. Non-github hosts get
+// an empty block (the credential-helper "I don't handle this host" signal),
+// never a placeholder.
 func handleGet(attrs map[string]string, stdout io.Writer, cfg Config) error {
 	host := attrs["host"]
 	protocol := attrs["protocol"]
@@ -316,101 +321,66 @@ func handleGet(attrs map[string]string, stdout io.Writer, cfg Config) error {
 		return nil
 	}
 
-	if !checkScopeCeiling(attrs["path"], cfg) {
-		// Out of scope. TM-G8: return placeholder, never empty.
-		return writeCredential(stdout, "x-access-token", "rein-placeholder-out-of-scope")
-	}
-
-	if isWriteIntent(cfg) {
-		if !checkConfirmWrite(attrs["path"], cfg) {
-			// Human-in-the-loop denial. Shares the placeholder string
-			// with out-of-scope refusal on purpose: TM-G8 wants single
-			// vocabulary for "credential present but not honored." Log
-			// lines distinguish the two refusal reasons. A reviewer
-			// suggested a distinct string ("rein-placeholder-confirm-
-			// denied") for credential-only triage; the trade-off is
-			// log-vs-credential-value distinguishability. Sticking with
-			// single placeholder for now.
-			return writeCredential(stdout, "x-access-token", "rein-placeholder-out-of-scope")
-		}
-		return serveWrite(stdout, cfg)
-	}
-	return serveRead(stdout, cfg)
+	cred := cfg.core().Serve(context.Background(), brokercore.Request{
+		Repo:        brokercore.RepoFromPath(attrs["path"]),
+		WriteIntent: isWriteIntent(cfg),
+	})
+	return writeCredential(stdout, cred.Username, cred.Password)
 }
 
-// checkConfirmWrite invokes the ConfirmWrite hook (if configured) and
-// returns true to proceed, false to refuse. A nil ConfirmWrite means
-// no confirmation required (pre-CP5 behavior).
-//
-// A panic in the hook is recovered and treated as denial — TM-G8 must
-// not be undermined by a buggy prompter.
-func checkConfirmWrite(path string, cfg Config) (approved bool) {
-	if cfg.ConfirmWrite == nil {
-		return true
+// core builds the protocol-independent decision core (internal/brokercore)
+// from this helper Config. Classification stays here (isWriteIntent, the
+// rein-git shim signal); the core owns scope, approval, and mint. The read
+// cache is file-backed in direct mode; the Phase 1 daemon swaps in memory.
+func (cfg Config) core() brokercore.Core {
+	var rc brokercore.ReadCache
+	if cfg.ReadCachePath != "" {
+		rc = fileReadCache{path: cfg.ReadCachePath, logger: cfg.Logger}
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			cfg.Logger.Printf("ConfirmWrite panicked: %v; denying", r)
-			approved = false
-		}
-	}()
-	repo := pathToRepo(path)
-	approved = cfg.ConfirmWrite(repo)
-	if approved {
-		cfg.Logger.Printf("ConfirmWrite: APPROVED for repo=%q", repo)
-	} else {
-		cfg.Logger.Printf("ConfirmWrite: DENIED for repo=%q; returning TM-G8 placeholder", repo)
+	return brokercore.Core{
+		MintRead:       brokercore.MintFunc(cfg.MintRead),
+		MintWrite:      brokercore.MintFunc(cfg.MintWrite),
+		MintTimeout:    cfg.MintTimeout,
+		ReadCache:      rc,
+		ReadCacheSkew:  cfg.ReadCacheSkew,
+		InScope:        cfg.InScope,
+		EmptyPathScope: cfg.EmptyPathScope,
+		ConfirmWrite:   cfg.ConfirmWrite,
+		RecordWrite:    cfg.RecordWrite,
+		Logger:         cfg.Logger,
+		Diag:           cfg.Diag,
 	}
-	return approved
 }
 
-// checkScopeCeiling consults Config.InScope. Returns true (proceed) when:
-//   - InScope is nil (scope enforcement disabled), OR
-//   - path normalizes to an owner/repo that InScope accepts.
-//
-// Returns false (refuse with placeholder) when InScope is set and the
-// repo is out of scope. Empty-path behavior follows EmptyPathScope.
-//
-// A refusal is logged with both the requested repo and (for help) a
-// reminder to check the session's allowed list.
-func checkScopeCeiling(path string, cfg Config) bool {
-	if cfg.InScope == nil {
-		return true
-	}
-	repo := pathToRepo(path)
-	if repo == "" {
-		// Caller hasn't configured useHttpPath=true (path attr is empty).
-		switch cfg.EmptyPathScope {
-		case "refuse":
-			cfg.Logger.Printf("scope check: path attr empty (set credential.useHttpPath=true); EmptyPathScope=refuse; returning TM-G8 placeholder")
-			return false
-		default: // "" or "allow"
-			cfg.Logger.Printf("scope check: path attr empty (set credential.useHttpPath=true for strict scope-check); allowing — token's repo scope still enforces server-side")
-			return true
-		}
-	}
-	if cfg.InScope(repo) {
-		return true
-	}
-	cfg.Logger.Printf("scope check: REFUSED repo=%q (not in session's scope ceiling); returning TM-G8 placeholder", repo)
-	return false
+// fileReadCache backs brokercore.ReadCache with the on-disk token cache
+// (internal/tokencache). Direct mode only; the Phase 1 daemon holds the read
+// token in memory instead.
+type fileReadCache struct {
+	path   string
+	logger *log.Logger
 }
 
-// pathToRepo extracts owner/repo from a credential-helper `path`
-// attribute. Strips ".git", trailing slash, takes the first two
-// segments. Returns "" if the path doesn't have owner/repo shape.
-func pathToRepo(path string) string {
-	path = strings.TrimSpace(path)
-	path = strings.TrimPrefix(path, "/")
-	path = strings.TrimSuffix(path, "/")
-	if len(path) >= 4 && strings.EqualFold(path[len(path)-4:], ".git") {
-		path = path[:len(path)-4]
+func (f fileReadCache) Get(skew time.Duration) (string, bool) {
+	e, err := tokencache.Read(f.path)
+	if err != nil {
+		if f.logger != nil && !errors.Is(err, os.ErrNotExist) {
+			f.logger.Printf("read cache load failed: %v; will mint fresh", err)
+		}
+		return "", false
 	}
-	parts := strings.SplitN(path, "/", 3)
-	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
-		return ""
+	if !e.Valid(skew) {
+		if f.logger != nil {
+			f.logger.Printf("read cache expired or within skew (expires=%s); will mint fresh", e.ExpiresAt.Format(time.RFC3339))
+		}
+		return "", false
 	}
-	return parts[0] + "/" + parts[1]
+	return e.Token, true
+}
+
+func (f fileReadCache) Put(token string, expiresAt time.Time) {
+	if err := tokencache.Write(f.path, tokencache.Entry{Token: token, ExpiresAt: expiresAt}); err != nil && f.logger != nil {
+		f.logger.Printf("read cache write failed: %v; continuing without cache", err)
+	}
 }
 
 // isWriteIntent invokes the caller-supplied DetectWrite, defaulting to
@@ -432,109 +402,6 @@ func isWriteIntent(cfg Config) (write bool) {
 		cfg.Logger.Printf("write intent detected")
 	}
 	return write
-}
-
-// writeDiag emits a short, actionable, user-facing line to cfg.Diag when
-// a mint-failed placeholder is about to be served. git surfaces a
-// credential helper's stderr to the agent/user, so this is the only
-// channel (stdout is the rigid credential protocol) by which a
-// cooperative agent learns WHY the request will fail and what to do —
-// rather than guessing or reflexively running `gh auth setup-git`. Nil
-// Diag discards; the placeholder is still written either way (TM-G8).
-func writeDiag(cfg Config) {
-	if cfg.Diag == nil {
-		return
-	}
-	fmt.Fprintln(cfg.Diag, "rein: no usable GitHub token (mint failed) — this git operation will fail.")
-	fmt.Fprintln(cfg.Diag, "      Run `rein doctor` to diagnose (e.g. the App isn't installed on this repo, or rein isn't set up).")
-}
-
-// serveWrite mints a fresh write token and writes it to stdout. On mint
-// failure it returns the TM-G8 placeholder.
-func serveWrite(stdout io.Writer, cfg Config) error {
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.MintTimeout)
-	defer cancel()
-	token, expiresAt, err := cfg.MintWrite(ctx)
-	if err != nil {
-		cfg.Logger.Printf("write mint failed: %v; returning TM-G8 placeholder credential", err)
-		writeDiag(cfg)
-		return writeCredential(stdout, "x-access-token", "rein-placeholder-mint-failed")
-	}
-	cfg.Logger.Printf("write mint succeeded: tier=write expires_at=%s ttl=%s token_len=%d",
-		expiresAt.Format(time.RFC3339),
-		time.Until(expiresAt).Round(time.Second),
-		len(token))
-	recordWrite(cfg, token, expiresAt)
-	return writeCredential(stdout, "x-access-token", token)
-}
-
-// recordWrite invokes the RecordWrite hook (if configured) so the caller
-// can ledger the freshly-minted write token for exit-time revocation
-// (issue #20). A panic in the hook is recovered and logged — a buggy or
-// unwritable ledger MUST NOT prevent the token from reaching git (TM-G8).
-func recordWrite(cfg Config, token string, expiresAt time.Time) {
-	if cfg.RecordWrite == nil {
-		return
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			cfg.Logger.Printf("RecordWrite panicked: %v; ignoring (token still served)", r)
-		}
-	}()
-	cfg.RecordWrite(token, expiresAt)
-}
-
-// serveRead returns a valid cached read token if present, or mints a fresh
-// one and caches it. On mint failure it returns the TM-G8 placeholder.
-func serveRead(stdout io.Writer, cfg Config) error {
-	if cached, ok := loadCachedRead(cfg); ok {
-		cfg.Logger.Printf("read cache hit: expires_at=%s ttl=%s token_len=%d",
-			cached.ExpiresAt.Format(time.RFC3339),
-			time.Until(cached.ExpiresAt).Round(time.Second),
-			len(cached.Token))
-		return writeCredential(stdout, "x-access-token", cached.Token)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.MintTimeout)
-	defer cancel()
-	token, expiresAt, err := cfg.MintRead(ctx)
-	if err != nil {
-		cfg.Logger.Printf("read mint failed: %v; returning TM-G8 placeholder credential", err)
-		writeDiag(cfg)
-		return writeCredential(stdout, "x-access-token", "rein-placeholder-mint-failed")
-	}
-	cfg.Logger.Printf("read mint succeeded: tier=read expires_at=%s ttl=%s token_len=%d",
-		expiresAt.Format(time.RFC3339),
-		time.Until(expiresAt).Round(time.Second),
-		len(token))
-	if cfg.ReadCachePath != "" {
-		if err := tokencache.Write(cfg.ReadCachePath, tokencache.Entry{Token: token, ExpiresAt: expiresAt}); err != nil {
-			cfg.Logger.Printf("read cache write failed: %v; continuing without cache", err)
-		}
-	}
-	return writeCredential(stdout, "x-access-token", token)
-}
-
-// loadCachedRead returns the cached read token when present and not within
-// the expiry skew. Any error (file missing, corrupt, near expiry) is a
-// cache miss; the caller mints fresh.
-func loadCachedRead(cfg Config) (tokencache.Entry, bool) {
-	if cfg.ReadCachePath == "" {
-		return tokencache.Entry{}, false
-	}
-	e, err := tokencache.Read(cfg.ReadCachePath)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			cfg.Logger.Printf("read cache load failed: %v; will mint fresh", err)
-		}
-		return tokencache.Entry{}, false
-	}
-	if !e.Valid(cfg.ReadCacheSkew) {
-		cfg.Logger.Printf("read cache expired or within skew (expires=%s); will mint fresh",
-			e.ExpiresAt.Format(time.RFC3339))
-		return tokencache.Entry{}, false
-	}
-	return e, true
 }
 
 // parseAttrs reads git's credential attribute block: one key=value per line,
