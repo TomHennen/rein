@@ -56,22 +56,20 @@ A short guided flow, in order. Every prompt has an **Enter-accepts default**, so
    `localhost`) prompt more insistently since the default won't distinguish
    machines. Always append a short uniqueness guard (§4).
 4. **App creation** (existing manifest/browser flow), now named with the label.
-5. **First repo + issue → write the session.** *"Which repo should the agent
-   work on?"* + *"Which issue backs write-approval?"* Writes
-   `dev-session.yaml`. This is the highest-value addition — it's what turns
-   "init, then read docs, then hand-write YAML" into "init, then `claude`."
+5. **First repo → write the session.** *"Which repo should the agent work
+   on?"* Writes `dev-session.yaml` (repo/scope only — NO issue). This is the
+   highest-value addition — it's what turns "init, then read docs, then
+   hand-write YAML" into "init, then `claude`."
 
-   > **HOLD (2026-07-08) — do not build the issue prompt yet.** Asking the human
-   > to pick the issue at `init` time contradicts design.md:12 ("approve scope
-   > expansions as the agent encounters them, **not to configure sessions up
-   > front**") and the agent-declared/human-confirmed mechanism in
-   > design.md:521/535 (`branch_pattern: agent/{{issue}}/{{nonce}}` +
-   > `type_issue_number`). The intended model is: the *agent* declares the issue
-   > (via the push ref), rein extracts it at the proxy, and the human confirms by
-   > typing the number at approval time — not a static session field. Phase 1
-   > shipped the static-`sess.Issue` model instead; that divergence is tracked
-   > (see PLAN-1.md notes + the GitHub issue). Keep the **repo** prompt; make the
-   > **issue** agent-declared, not init-prompted, once the model is settled.
+   > **RESOLVED (2026-07-08, #35) — init does NOT prompt for an issue.**
+   > Decision A: follow the design — the issue is **agent-declared at runtime**
+   > (via the push ref `agent/{{issue}}/{{nonce}}`, design.md:521) and
+   > **human-confirmed** by typing the number at approval time (design.md:535),
+   > NOT a static session field pre-picked at `init` (design.md:12: "not to
+   > configure sessions up front"). So step 5 asks only for the **repo**; the
+   > issue prompt is removed. This step is unblocked under that constraint —
+   > the repo/session scaffolding can be built now; the runtime
+   > agent-declared-issue mechanism is tracked separately in #35.
 6. **Alias?** *"Run `claude` through rein automatically? [Y/n]"* — edits the
    shell rc (detected from `$SHELL`, confirmable). Print the `\claude` /
    `command claude` bypass right here so opt-out is discoverable.

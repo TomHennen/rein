@@ -377,6 +377,16 @@ path.
   (agent-declared, human-confirmed issue scoping); onboarding §3 step 5 annotated
   to hold pending the model decision. Do NOT build the interactive `init` issue
   prompt until this is resolved. Surfaced by Tom recalling the original intent.
+  **RESOLVED 2026-07-08 (#35), decisions A–F:** (A) follow the design —
+  build agent-declared (`agent/{{issue}}/{{nonce}}` push ref) + human-confirmed
+  (`type_issue_number`) issue scoping. (B) keep the design's one-approval-per-
+  session-scope model; no per-operation (comment/merge) gating. (C) the issue is
+  encoded in the branch; strict matching is fine. (D) settled/no-change — the
+  token stays repo-scoped; the issue is the audit/attribution anchor, not the
+  credential boundary. (E) add a REQUIRED fetch+display of the issue title/repo
+  at confirmation time, and pressure-test the misattribution threat (handed to
+  the design-conformance audit; task spec on #35). (F) onboarding unblocked under
+  A — `init` drops the issue prompt, keeps the repo prompt.
 
 - 2026-07-06 — **RESOLVED: `rein run -- claude` now runs a task end-to-end in the
   sandbox (verified INTERACTIVELY via pexpect — headless `-p` masked the real
