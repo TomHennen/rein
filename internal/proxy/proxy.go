@@ -79,6 +79,12 @@ type Proxy struct {
 const (
 	defaultHandshakeTimeout = 10 * time.Second
 	defaultIdleTimeout      = 5 * time.Minute
+	// writeTimeout bounds a single response write toward the client so a
+	// slow-reader (or stalled) client can't pin the relay goroutine + fd
+	// indefinitely while we push the response back. It is coarse — generous
+	// enough for a large upstream response streamed to a legitimately slow
+	// client — and mirrors the read-deadline discipline in serveRequests. (C1)
+	writeTimeout = 5 * time.Minute
 )
 
 // New constructs a Proxy from cfg.
@@ -351,7 +357,7 @@ func (p *Proxy) serveOne(conn net.Conn, req *http.Request, sni string) (keepAliv
 // whose tier needs the body, so there we must send 100 first and buffer — but
 // that body is capped at 1 MiB, so the pre-decision upload is bounded.
 func (p *Proxy) serveInject(conn net.Conn, req *http.Request, sni string, class hostClass) bool {
-	isGraphQL := sni == "api.github.com" && isGraphQLPath(req.URL.Path)
+	isGraphQL := sni == "api.github.com" && classify.IsGraphQLPath(req.URL.Path)
 
 	var body []byte
 	if isGraphQL {
@@ -475,7 +481,12 @@ func (p *Proxy) relay(conn net.Conn, req *http.Request, sni, authValue, decision
 	p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Tier: tier, Decision: decision, Status: resp.StatusCode})
 
 	stripHopByHopHeaders(resp.Header) // symmetric with the request direction (F4)
+	// Bound the response write so a slow-reader client can't pin this goroutine
+	// + fd while we stream the response back. Cleared after, symmetric with the
+	// read-deadline handling in serveRequests. (C1)
+	_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	werr := resp.Write(conn)
+	_ = conn.SetWriteDeadline(time.Time{})
 	resp.Body.Close()
 	if werr != nil {
 		return false // client-side write failed; conn may be desynced — drop it (CP1 recipe point 6)
@@ -513,6 +524,10 @@ func (p *Proxy) handleExpectContinue(conn net.Conn, req *http.Request) bool {
 // closes the connection (Connection: close). The body is a fixed "rein: …"
 // string — it NEVER contains a token (design §4.1 response-path hygiene).
 func (p *Proxy) writeLocalError(conn net.Conn, status int, msg string) {
+	// Bound the write so a slow-reader client can't pin the goroutine + fd on
+	// the error path either. The connection is closed right after (Connection:
+	// close), so no need to clear the deadline. (C1)
+	_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	body := msg + "\n"
 	fmt.Fprintf(conn,
 		"HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",

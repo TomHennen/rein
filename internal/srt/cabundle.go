@@ -2,6 +2,7 @@ package srt
 
 import (
 	"bytes"
+	"encoding/pem"
 	"fmt"
 	"os"
 )
@@ -25,8 +26,12 @@ var systemCABundleCandidates = []string{
 // it. Fails closed (error) if none is found — a bundle without system roots
 // would break the CDN passthrough path, so guessing is not acceptable.
 func SystemCAPath() (string, error) {
+	// $SSL_CERT_FILE wins — but only if it actually holds CA material. An empty
+	// or garbage file that merely Stats would produce a bundle with no system
+	// roots (breaking CDN passthrough) or no CA at all; validate it holds at
+	// least one PEM CERTIFICATE block before trusting it, else fall through.
 	if p := os.Getenv("SSL_CERT_FILE"); p != "" {
-		if _, err := os.Stat(p); err == nil {
+		if containsPEMCertificate(p) {
 			return p, nil
 		}
 	}
@@ -38,10 +43,34 @@ func SystemCAPath() (string, error) {
 	return "", fmt.Errorf("no system CA bundle found (looked in %v and $SSL_CERT_FILE); cannot build a trust bundle that keeps CDN hosts working", systemCABundleCandidates)
 }
 
+// containsPEMCertificate reports whether the file at path is readable and holds
+// at least one PEM "CERTIFICATE" block. Used to reject an empty/garbage
+// $SSL_CERT_FILE before trusting it as the system CA source.
+func containsPEMCertificate(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	for len(data) > 0 {
+		var block *pem.Block
+		block, data = pem.Decode(data)
+		if block == nil {
+			break
+		}
+		if block.Type == "CERTIFICATE" {
+			return true
+		}
+	}
+	return false
+}
+
 // BuildCABundle returns system roots concatenated with reinCAPEM, ready to write
 // to the per-run bundle file. The rein CA is appended AFTER the system roots so
 // both are present; PEM concatenation order does not affect trust.
 func BuildCABundle(reinCAPEM []byte) ([]byte, error) {
+	if len(bytes.TrimSpace(reinCAPEM)) == 0 {
+		return nil, fmt.Errorf("BuildCABundle: rein CA PEM is empty; refusing to build a bundle that omits the MITM CA")
+	}
 	sysPath, err := SystemCAPath()
 	if err != nil {
 		return nil, err

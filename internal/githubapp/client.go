@@ -55,6 +55,21 @@ type Client struct {
 	cfg      Config
 	ks       keystore.Keystore
 	roleName string
+
+	// httpClient is the transport used for direct REST calls (RevokeToken).
+	// When nil, client() defaults to http.DefaultClient, keeping the zero
+	// value and existing constructors working. Tests set it to point at an
+	// httptest.Server transport.
+	httpClient *http.Client
+}
+
+// client returns the injectable HTTP client, defaulting to
+// http.DefaultClient when unset.
+func (c *Client) client() *http.Client {
+	if c.httpClient == nil {
+		return http.DefaultClient
+	}
+	return c.httpClient
 }
 
 // NewClient validates cfg and constructs a Client. ks is the backend the
@@ -179,7 +194,7 @@ func (c *Client) RevokeToken(ctx context.Context, token string) error {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.client().Do(req)
 	if err != nil {
 		return fmt.Errorf("revoke: %w", err)
 	}

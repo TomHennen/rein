@@ -89,9 +89,3 @@ func repoFromRESTPath(path string) string {
 	}
 	return ""
 }
-
-// isGraphQLPath reports whether path is the GraphQL endpoint (body-classified).
-func isGraphQLPath(path string) bool {
-	p := strings.TrimSuffix(path, "/")
-	return p == "/graphql" || p == "/api/graphql"
-}

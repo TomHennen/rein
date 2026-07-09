@@ -36,6 +36,21 @@ type AppClient struct {
 	ks       keystore.Keystore
 	roleName string
 	apiBase  string
+
+	// httpClient is the transport used for App-authenticated lookups. When
+	// nil, client() defaults to http.DefaultClient, keeping the zero value
+	// and existing constructors working. Tests set it to point at an
+	// httptest.Server transport.
+	httpClient *http.Client
+}
+
+// client returns the injectable HTTP client, defaulting to
+// http.DefaultClient when unset.
+func (c *AppClient) client() *http.Client {
+	if c.httpClient == nil {
+		return http.DefaultClient
+	}
+	return c.httpClient
 }
 
 // NewAppClient validates inputs and constructs an AppClient. clientID is the
@@ -91,7 +106,7 @@ func (c *AppClient) RepoInstallationID(ctx context.Context, owner, repo string) 
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.client().Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("lookup installation for %s/%s: %w", owner, repo, err)
 	}
@@ -154,7 +169,7 @@ func (c *AppClient) AppSlug(ctx context.Context) (string, error) {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.client().Do(req)
 	if err != nil {
 		return "", fmt.Errorf("GET /app: %w", err)
 	}

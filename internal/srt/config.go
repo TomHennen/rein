@@ -110,7 +110,7 @@ type Params struct {
 	// is a no-op in srt).
 	DenyReadCredStores []string
 
-	// RuntimeDir is the per-run socket's parent (e.g. $XDG_RUNTIME_DIR/rein/<id>)
+	// RuntimeDenyRead is the per-run socket's parent (e.g. $XDG_RUNTIME_DIR/rein/<id>)
 	// and the /run/user/<uid> tree — both denyRead'd so the agent can't reach
 	// the socket file or other users' runtime sockets from inside the sandbox.
 	RuntimeDenyRead []string
@@ -282,11 +282,16 @@ func (c Config) Validate() error {
 		return fmt.Errorf("srt: allowWrite is empty (the working tree must be writable or git ops fail under the denyRead tmpfs)")
 	}
 	// The working tree (allowWrite[0]) must NOT sit under any denyRead path, or
-	// srt tmpfs's it out from under the rw bind.
+	// srt tmpfs's it out from under the rw bind. Conversely, a denyRead path must
+	// not sit UNDER an allowWrite path either: the allowWrite rw-bind would
+	// re-expose the thing we meant to hide (e.g. a cred store nested in the tree).
 	for _, dr := range c.Filesystem.DenyRead {
 		for _, aw := range c.Filesystem.AllowWrite {
 			if pathWithin(aw, dr) {
 				return fmt.Errorf("srt: allowWrite %q is under denyRead %q (the working tree would be tmpfs'd)", aw, dr)
+			}
+			if pathWithin(dr, aw) {
+				return fmt.Errorf("srt: denyRead %q sits under allowWrite %q and would be re-exposed read-write", dr, aw)
 			}
 		}
 	}

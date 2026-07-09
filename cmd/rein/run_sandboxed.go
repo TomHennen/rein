@@ -19,6 +19,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -442,7 +443,8 @@ func runSandboxed(cmdline []string) (int, error) {
 	if waitErr == nil {
 		return 0, nil
 	}
-	if ee, ok := waitErr.(*exec.ExitError); ok {
+	var ee *exec.ExitError
+	if errors.As(waitErr, &ee) {
 		return ee.ExitCode(), nil
 	}
 	return 1, fmt.Errorf("wait srt: %w", waitErr)

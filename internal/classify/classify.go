@@ -90,7 +90,7 @@ func classifyGit(method, path, rawQuery string) (Tier, string) {
 
 // classifyAPI handles api.github.com: REST by method, GraphQL by body.
 func classifyAPI(method, path string, body []byte) (Tier, string) {
-	if isGraphQLPath(path) {
+	if IsGraphQLPath(path) {
 		return classifyGraphQL(body)
 	}
 	switch method {
@@ -103,7 +103,10 @@ func classifyAPI(method, path string, body []byte) (Tier, string) {
 	}
 }
 
-func isGraphQLPath(path string) bool {
+// IsGraphQLPath reports whether path is the GraphQL endpoint (body-classified).
+// Exported as the single source of truth: internal/proxy calls this rather than
+// keeping its own copy, so the graphql gate can't drift between the two.
+func IsGraphQLPath(path string) bool {
 	p := strings.TrimSuffix(path, "/")
 	return p == "/graphql" || p == "/api/graphql"
 }
