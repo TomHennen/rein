@@ -360,6 +360,24 @@ path.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-07-08 — **DESIGN CORRECTION NEEDED: Phase 1 issue-scoping diverged from
+  design.md and was never flagged as a deliberate simplification.** design.md:12
+  states the developer's role is "to approve scope expansions as the agent
+  encounters them, **not to configure sessions up front**," and design.md:521/535
+  specify the mechanism: the agent declares the issue by pushing to
+  `agent/{{issue}}/{{nonce}}`, rein extracts it from the push ref at the proxy,
+  and the human confirms with non-replayable `type_issue_number` input. Phase 1
+  (CP4) instead made the issue a **static `sess.Issue`** hand-set in
+  `dev-session.yaml` and pre-picked by the human up front; there is **no
+  branch-pattern issue extraction anywhere** in `internal/`/`cmd/` (grep: zero
+  hits), and no-issue → writes blocked. This is fail-closed (safe) but is the
+  "configure up front" model design.md explicitly rejects. Worse, the drafted
+  onboarding flow (`docs/onboarding-ux-design.md` §3 step 5) *cements* the
+  divergence by prompting for the issue at `init` time. Tracked as GitHub issue
+  (agent-declared, human-confirmed issue scoping); onboarding §3 step 5 annotated
+  to hold pending the model decision. Do NOT build the interactive `init` issue
+  prompt until this is resolved. Surfaced by Tom recalling the original intent.
+
 - 2026-07-06 — **RESOLVED: `rein run -- claude` now runs a task end-to-end in the
   sandbox (verified INTERACTIVELY via pexpect — headless `-p` masked the real
   error).** Two discovered mechanisms, both design corrections to the prior
