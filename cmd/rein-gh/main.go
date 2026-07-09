@@ -289,6 +289,7 @@ func runWrite(realGh string, args []string, stateDir string, logger *log.Logger)
 				RunPID:        envInt("REIN_RUN_PID"),
 				TTL:           approvalTTL,
 				PromptTimeout: 60 * time.Second,
+				PreferPopup:   grant.PopupPreferenceFromEnv(),
 				Logger:        logger,
 			}
 			req := grant.Request{
