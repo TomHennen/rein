@@ -59,6 +59,8 @@ func runInit(args []string) error {
 	var skipMint bool
 	var noSymlink bool
 	var noAlias bool
+	var aliasFlag bool
+	var requireSandbox bool
 	var shellOverride string
 	var skipAudit bool
 	var force bool
@@ -68,7 +70,9 @@ func runInit(args []string) error {
 	var assumeYes bool
 	fs.BoolVar(&skipMint, "skip-mint-check", false, "skip the App credentials network check (useful for repeated re-runs; GitHub's installation-token mint has secondary rate limits)")
 	fs.BoolVar(&noSymlink, "no-symlink", false, "skip creating the ~/.local/bin/rein symlink")
-	fs.BoolVar(&noAlias, "no-alias", false, "skip writing the `alias claude='rein run -- claude'` block to your shell rc")
+	fs.BoolVar(&aliasFlag, "alias", false, "install the `alias claude='rein run -- claude'` block to your shell rc (opt-in; default is NOT to install)")
+	fs.BoolVar(&noAlias, "no-alias", false, "force-skip the shell alias (wins if both --alias and --no-alias are given)")
+	fs.BoolVar(&requireSandbox, "require-sandbox", false, "hard-fail (non-zero exit) if the sandbox stack is unhealthy; default is a soft warning (init still finishes)")
 	fs.StringVar(&shellOverride, "shell", "", "shell to target for alias setup (bash|zsh|fish); defaults to $SHELL")
 	fs.BoolVar(&skipAudit, "skip-audit", false, "create only the primary GitHub App (skip the audit App; subsequent `rein init` will create it)")
 	fs.BoolVar(&force, "force", false, "ignore state.json and run the manifest flow from scratch (existing Apps at GitHub are NOT deleted)")
@@ -290,33 +294,74 @@ func runInit(args []string) error {
 		return fmt.Errorf("stat %s: %w", sessionPath, err)
 	}
 
+	// Alias is OPT-IN (onboarding-ux-design.md decision 4): default is NOT
+	// to install. aliasDecision is a pure function of the flags + tty so
+	// the full matrix is unit-testable; here we feed it the live gates and,
+	// when it says "prompt", ask on a real terminal defaulting to NO.
 	aliasActive := false
-	if !noAlias {
+	aliasNoted := false
+	installAlias, promptAlias := aliasDecision(aliasFlag, noAlias, assumeYes, stdinIsTerminal(os.Stdin))
+	if installAlias || promptAlias {
+		// Build the plan ONCE (not once per branch) so the rc named in the
+		// prompt is exactly the rc that gets edited, and a buildAliasPlan
+		// error surfaces the same way whether we prompt or install.
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return fmt.Errorf("locate home dir: %w", err)
 		}
 		shell := detectShell(shellOverride)
 		plan, err := buildAliasPlan(shell, home)
-		if err != nil {
+		switch {
+		case err != nil && installAlias:
+			// The user EXPLICITLY asked (--alias): can't target their shell
+			// is a hard error, surfaced loudly.
 			return err
+		case err != nil:
+			// Prompt path: the alias is opt-in and the user hasn't even said
+			// yes yet. Don't block the rest of init over an optional feature
+			// they may decline — degrade to skip-with-note.
+			fmt.Fprintf(os.Stderr, "  alias:      skipped (couldn't target shell %q: %v)\n", shell, err)
+			installAlias = false
+			aliasNoted = true
+		default:
+			if promptAlias {
+				// Name the concrete rc so the user knows exactly what will be
+				// edited. Default NO (do not assume they want it).
+				q := fmt.Sprintf("Add alias claude='rein run -- claude' to %s?", plan.rcPath)
+				installAlias = promptYesNo(os.Stdout, os.Stdin, q, false)
+			}
+			if installAlias {
+				fmt.Printf("  alias:      target shell=%s, rc=%s\n", plan.shell, plan.rcPath)
+				outcome, err := installShellAlias(plan)
+				if err != nil {
+					return fmt.Errorf("install shell alias: %w", err)
+				}
+				fmt.Printf("              %s\n", outcome.summary)
+				aliasActive = outcome.active
+				aliasNoted = true
+				// Fire the --no-symlink coupling WARN only when something was
+				// freshly written; re-runs that report "already current" don't
+				// need the operator's attention again.
+				if outcome.changed && noSymlink {
+					fmt.Fprintln(os.Stderr, "  WARN:       --no-symlink + alias means the alias relies on `rein` being on $PATH some other way; verify in a fresh shell")
+				}
+			}
 		}
-		fmt.Printf("  alias:      target shell=%s, rc=%s\n", plan.shell, plan.rcPath)
-		outcome, err := installShellAlias(plan)
-		if err != nil {
-			return fmt.Errorf("install shell alias: %w", err)
-		}
-		fmt.Printf("              %s\n", outcome.summary)
-		aliasActive = outcome.active
-		// Fire the --no-symlink coupling WARN only when something was
-		// freshly written; re-runs that report "already current" don't
-		// need the operator's attention again.
-		if outcome.changed && noSymlink {
-			fmt.Fprintln(os.Stderr, "  WARN:       --no-symlink + alias means the alias relies on `rein` being on $PATH some other way; verify in a fresh shell")
-		}
-	} else {
-		fmt.Println("  alias:      skipped (--no-alias)")
 	}
+	if !installAlias && !aliasNoted {
+		fmt.Println("  alias:      not installed (opt-in; enable with `rein init --alias`)")
+	}
+
+	// Sandbox-stack health (onboarding-ux-design.md decision 2 / §3 step 1).
+	// SOFT-BLOCK by default: run the same srt preflight `rein doctor`
+	// surfaces (reuse sandboxDoctorChecks so there's one detection path),
+	// then decide via a pure function. init has already done ALL its other
+	// setup at this point; a failing sandbox never aborts that work.
+	sandboxResults := make([]checkResult, 0, 4)
+	for _, c := range sandboxDoctorChecks() {
+		sandboxResults = append(sandboxResults, c())
+	}
+	healthy, failMsg := sandboxHealthOutcome(sandboxResults, requireSandbox)
 
 	fmt.Println()
 	fmt.Println("rein init: done.")
@@ -326,9 +371,54 @@ func runInit(args []string) error {
 		fmt.Println("  - open a new shell (or `source` your rc) so the `claude` alias is live, then run `claude`")
 	} else {
 		fmt.Println("  - run `rein run -- claude` (or another agent) to launch with rein in effect")
+		fmt.Println("  - (optional) enable the `claude` alias with `rein init --alias`")
 	}
 	fmt.Println("  - run `rein doctor` to verify everything is wired up")
+
+	// LOUD, specific warning when the sandbox stack is unhealthy. Printed
+	// last so it's the final thing the user sees. failMsg is non-empty
+	// whenever a check failed (soft or hard); only the return value differs.
+	if !healthy {
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprint(os.Stderr, failMsg)
+	}
+	if !healthy && requireSandbox {
+		return errors.New("sandbox stack unhealthy and --require-sandbox set")
+	}
 	return nil
+}
+
+// sandboxHealthOutcome is a PURE decision over the sandbox preflight
+// results: it never shells out, so it is unit-testable with synthetic
+// checkResults. It reports whether the stack is healthy and, when it is
+// not, a fully-rendered LOUD warning block (each failing check's name +
+// message plus the fix pointer) ready to print to stderr.
+//
+// requireSandbox does NOT change the message — a failure produces the same
+// warning either way. It only governs the caller's exit code: soft-block
+// (default) finishes with exit 0 after warning; hard-gate (--require-sandbox)
+// returns a non-zero error. The security posture is unchanged: `rein run`
+// already fails closed at launch, so this is onboarding-time surfacing, not
+// enforcement (onboarding-ux-design.md §7; constraint #3 is about run
+// behavior). A result with statusWarn is tolerated — only statusFail counts
+// as unhealthy, matching what `rein run --sandbox` hard-gates on.
+func sandboxHealthOutcome(results []checkResult, requireSandbox bool) (healthy bool, failMsg string) {
+	var failed []checkResult
+	for _, r := range results {
+		if r.status == statusFail {
+			failed = append(failed, r)
+		}
+	}
+	if len(failed) == 0 {
+		return true, ""
+	}
+	var b strings.Builder
+	b.WriteString("WARNING: sandbox stack is UNHEALTHY\n")
+	for _, r := range failed {
+		fmt.Fprintf(&b, "  [fail] %s: %s\n", r.name, flattenMessage(r.message))
+	}
+	b.WriteString("  sandboxed `rein run` will NOT work until you fix this; see `rein doctor` and the Prerequisites in README.md\n")
+	return false, b.String()
 }
 
 // ensureReinOnPath creates or repairs a ~/.local/bin/rein symlink pointing
@@ -582,6 +672,65 @@ func stdinIsTerminal(f *os.File) bool {
 		return false
 	}
 	return term.IsTerminal(int(f.Fd()))
+}
+
+// aliasDecision is a PURE decision (no I/O, no tty probe of its own) over
+// the alias flags + gates. It returns whether to install the alias outright
+// and whether the caller should instead PROMPT the user.
+//
+// The alias is OPT-IN (onboarding-ux-design.md decision 4):
+//
+//   - --no-alias wins over everything: explicit opt-out beats opt-in, so
+//     --alias + --no-alias -> skip (no error; documented precedence).
+//   - --alias (without --no-alias) -> install, no prompt.
+//   - neither flag, non-interactive (assumeYes OR not a tty) -> skip, no
+//     prompt: the mandatory non-interactive fallback (§7) — never block.
+//   - neither flag, real tty, --yes unset -> prompt (caller asks, default NO).
+//
+// When prompt is true, install is false; the caller resolves the real
+// answer via promptYesNo. When prompt is false, install is authoritative.
+func aliasDecision(aliasFlag, noAliasFlag, assumeYes, isTTY bool) (install bool, prompt bool) {
+	if noAliasFlag {
+		return false, false
+	}
+	if aliasFlag {
+		return true, false
+	}
+	// Neither flag: opt-in default is OFF. Only a genuinely interactive run
+	// (real tty, --yes unset) gets to ask; everything else skips silently.
+	if assumeYes || !isTTY {
+		return false, false
+	}
+	return false, true
+}
+
+// promptYesNo writes a yes/no question to w, reads a single line from in,
+// and returns the parsed answer — or def when the line is empty
+// (Enter-accepts-default) or the read fails (EOF/closed reader). Like
+// promptWithDefault it performs a blocking read, so callers MUST gate it
+// behind stdinIsTerminal; on a non-terminal reader the read returns quickly
+// (EOF) and def is returned WITHOUT blocking.
+//
+// Accepted (case-insensitive): y/yes -> true, n/no -> false. Anything else
+// (including a bare Enter) falls back to def.
+func promptYesNo(w io.Writer, in io.Reader, question string, def bool) bool {
+	hint := "[y/N]"
+	if def {
+		hint = "[Y/n]"
+	}
+	fmt.Fprintf(w, "%s %s: ", question, hint)
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && line == "" {
+		return def
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true
+	case "n", "no":
+		return false
+	default:
+		return def
+	}
 }
 
 // promptWithDefault writes prompt to w, reads a single line from in, and

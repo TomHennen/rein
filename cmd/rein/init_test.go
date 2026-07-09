@@ -160,6 +160,145 @@ func TestPromptWithDefault_NonInteractive(t *testing.T) {
 	}
 }
 
+// TestSandboxHealthOutcome verifies the PURE sandbox-health decision over
+// synthetic checkResults (no real srt shell-out): all-ok is healthy with no
+// message; a statusFail is unhealthy and renders a warning block either way,
+// with requireSandbox governing only the caller's exit (asserted separately
+// in the message content — the function itself returns the same failMsg for
+// soft and hard). A statusWarn is tolerated (only statusFail counts).
+func TestSandboxHealthOutcome(t *testing.T) {
+	allOK := []checkResult{
+		{"sandbox: srt present", statusOK, "found"},
+		{"sandbox: srt version", statusOK, "0.0.63"},
+		{"sandbox: seccomp", statusOK, "available"},
+		{"sandbox: bwrap userns", statusOK, "ok"},
+	}
+	if healthy, msg := sandboxHealthOutcome(allOK, false); !healthy || msg != "" {
+		t.Errorf("all-ok soft: got healthy=%v msg=%q, want healthy=true msg=\"\"", healthy, msg)
+	}
+	if healthy, msg := sandboxHealthOutcome(allOK, true); !healthy || msg != "" {
+		t.Errorf("all-ok hard: got healthy=%v msg=%q, want healthy=true msg=\"\"", healthy, msg)
+	}
+
+	// A warn-only result is still healthy: only statusFail gates.
+	warnOnly := []checkResult{
+		{"sandbox: srt present", statusOK, "found"},
+		{"sandbox: seccomp", statusWarn, "kernel seccomp probe inconclusive"},
+	}
+	if healthy, msg := sandboxHealthOutcome(warnOnly, false); !healthy || msg != "" {
+		t.Errorf("warn-only: got healthy=%v msg=%q, want healthy=true msg=\"\"", healthy, msg)
+	}
+
+	// A failing check: unhealthy in both modes, and the warning block names
+	// the failing check + its message + the fix pointer.
+	withFail := []checkResult{
+		{"sandbox: srt present", statusFail, "srt not found on PATH"},
+		{"sandbox: bwrap userns", statusOK, "ok"},
+	}
+	softHealthy, softMsg := sandboxHealthOutcome(withFail, false)
+	if softHealthy {
+		t.Errorf("soft with fail: got healthy=true, want false")
+	}
+	if softMsg == "" {
+		t.Fatalf("soft with fail: want a non-empty warning block")
+	}
+	for _, want := range []string{"sandbox: srt present", "srt not found on PATH", "rein doctor", "README.md", "will NOT work"} {
+		if !strings.Contains(softMsg, want) {
+			t.Errorf("soft warning block missing %q:\n%s", want, softMsg)
+		}
+	}
+
+	hardHealthy, hardMsg := sandboxHealthOutcome(withFail, true)
+	if hardHealthy {
+		t.Errorf("hard with fail: got healthy=true, want false")
+	}
+	// The message is identical soft vs hard — requireSandbox only changes
+	// the caller's exit code, not the surfaced warning.
+	if hardMsg != softMsg {
+		t.Errorf("hard warning block differs from soft:\n hard=%q\n soft=%q", hardMsg, softMsg)
+	}
+}
+
+// TestAliasDecision walks the full flag/tty matrix for the OPT-IN alias
+// decision (onboarding-ux-design.md decision 4). No real tty is needed —
+// aliasDecision is pure; the isTTY gate is passed in. Genuine interactive
+// prompting is a manual/pexpect concern.
+func TestAliasDecision(t *testing.T) {
+	cases := []struct {
+		name                           string
+		aliasFlag, noAlias, yes, isTTY bool
+		wantInstall, wantPrompt        bool
+	}{
+		// Default: neither flag, non-interactive -> off, no prompt.
+		{"default no-flags non-tty", false, false, false, false, false, false},
+		// Default on a real tty (no --yes) -> prompt (install resolved later).
+		{"tty no-flags", false, false, false, true, false, true},
+		// --alias forces install, no prompt.
+		{"alias flag", true, false, false, false, true, false},
+		{"alias flag on tty", true, false, false, true, true, false},
+		// --no-alias forces skip.
+		{"no-alias flag", false, true, false, false, false, false},
+		{"no-alias flag on tty", false, true, false, true, false, false},
+		// Both flags: --no-alias wins (explicit opt-out beats opt-in).
+		{"alias + no-alias -> off", true, true, false, false, false, false},
+		{"alias + no-alias on tty -> off", true, true, false, true, false, false},
+		// --yes with --alias still installs (explicit opt-in honored).
+		{"yes + alias", true, false, true, true, true, false},
+		// --yes alone: non-interactive default off, never prompts.
+		{"yes alone on tty", false, false, true, true, false, false},
+		{"yes alone non-tty", false, false, true, false, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotInstall, gotPrompt := aliasDecision(c.aliasFlag, c.noAlias, c.yes, c.isTTY)
+			if gotInstall != c.wantInstall || gotPrompt != c.wantPrompt {
+				t.Errorf("aliasDecision(alias=%v,noAlias=%v,yes=%v,tty=%v) = (install=%v,prompt=%v), want (install=%v,prompt=%v)",
+					c.aliasFlag, c.noAlias, c.yes, c.isTTY, gotInstall, gotPrompt, c.wantInstall, c.wantPrompt)
+			}
+			// Invariant: never install AND prompt at once.
+			if gotInstall && gotPrompt {
+				t.Errorf("aliasDecision returned install=true AND prompt=true — mutually exclusive")
+			}
+		})
+	}
+}
+
+// TestPromptYesNo drives the yes/no helper with a non-terminal reader: it
+// must return the default without blocking on EOF, and parse the standard
+// affirmatives/negatives (case-insensitive), with empty/garbage -> default.
+//
+// NOTE: like promptWithDefault this exercises the reader plumbing, not a
+// genuine tty. Real interactive behavior is a manual/pexpect concern.
+func TestPromptYesNo(t *testing.T) {
+	// Empty reader (EOF) -> default, no block. Assert both defaults.
+	if got := promptYesNo(io.Discard, strings.NewReader(""), "Add alias?", false); got != false {
+		t.Errorf("empty reader def=false: got %v, want false", got)
+	}
+	if got := promptYesNo(io.Discard, strings.NewReader(""), "Add alias?", true); got != true {
+		t.Errorf("empty reader def=true: got %v, want true", got)
+	}
+	// Bare newline (Enter) -> default.
+	if got := promptYesNo(io.Discard, strings.NewReader("\n"), "Add alias?", false); got != false {
+		t.Errorf("bare newline def=false: got %v, want false", got)
+	}
+	// Affirmatives -> true regardless of default.
+	for _, in := range []string{"y\n", "Y\n", "yes\n", "YES\n", "  yes  \n"} {
+		if got := promptYesNo(io.Discard, strings.NewReader(in), "Add alias?", false); got != true {
+			t.Errorf("input %q: got %v, want true", in, got)
+		}
+	}
+	// Negatives -> false regardless of default.
+	for _, in := range []string{"n\n", "N\n", "no\n", "NO\n", "  no  \n"} {
+		if got := promptYesNo(io.Discard, strings.NewReader(in), "Add alias?", true); got != false {
+			t.Errorf("input %q: got %v, want false", in, got)
+		}
+	}
+	// Garbage -> default.
+	if got := promptYesNo(io.Discard, strings.NewReader("maybe\n"), "Add alias?", true); got != true {
+		t.Errorf("garbage def=true: got %v, want true", got)
+	}
+}
+
 // TestStdinIsTerminal_NonTTY verifies the isatty gate returns false for a
 // non-terminal file (a pipe) and for nil — the two ways init must decline
 // to prompt.
