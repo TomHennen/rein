@@ -361,6 +361,7 @@ func buildConfirmWrite(sess session.Session, stateDir string, logger *log.Logger
 		RunPID:        envInt("REIN_RUN_PID"),
 		TTL:           approvalTTL,
 		PromptTimeout: 60 * time.Second,
+		PreferPopup:   grant.PopupPreferenceFromEnv(),
 		Logger:        logger,
 		// Stderr, Prompter, TmuxRunner default to production
 		// (os.Stderr, TTYPrompter, DefaultTmuxRunner).

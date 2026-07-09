@@ -3,6 +3,7 @@ package grant
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -234,6 +235,144 @@ func TestObtainApproval_Layer3_TmuxPopupClosedWithoutApproval(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "rein approval grant --run-id") {
 		t.Errorf("expected layer-4 stderr after tmux popup didn't approve\n%s", stderr.String())
+	}
+}
+
+// --- PreferPopup: popup-first ordering (the agent-TUI collision fix) ---
+
+// spyPrompter records whether the inline /dev/tty prompter was consulted
+// and delegates to inner (nil inner => behaves like noTTYPrompter). Used to
+// assert the inline prompt is NOT touched when the popup is preferred — the
+// whole point of the fix is that it would corrupt a full-screen agent TUI.
+type spyPrompter struct {
+	inner  prompt.Prompter
+	called bool
+}
+
+func (s *spyPrompter) Confirm(ctx context.Context, req prompt.Request) (bool, error) {
+	s.called = true
+	if s.inner == nil {
+		return false, prompt.ErrNoTTY
+	}
+	return s.inner.Confirm(ctx, req)
+}
+
+// PreferPopup + popup approves: the popup is tried FIRST and the inline
+// /dev/tty prompt is never consulted.
+func TestObtainApproval_PreferPopup_PopupFirstApproved(t *testing.T) {
+	t.Setenv("TMUX", "/some/socket")
+	sess := sampleSession()
+	stateDir := t.TempDir()
+	tmuxCalled := false
+	tmux := func(ctx context.Context, command []string) error {
+		tmuxCalled = true
+		rec := approvals.Record{
+			Signature:  approvals.SignatureOf(sess),
+			SessionID:  sess.ID,
+			ApprovedAt: time.Now(),
+			ExpiresAt:  time.Now().Add(time.Hour),
+		}
+		return approvals.WriteApproval(stateDir, testRunID, rec)
+	}
+	spy := &spyPrompter{inner: matchingPrompter{Answer: 1}}
+	cfg := Config{
+		StateDir:      stateDir,
+		RunID:         testRunID,
+		TTL:           time.Hour,
+		PromptTimeout: time.Second,
+		Stderr:        &bytes.Buffer{},
+		Prompter:      spy,
+		TmuxRunner:    tmux,
+		PreferPopup:   true,
+		Logger:        discardLogger(),
+	}
+	if !ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, cfg) {
+		t.Fatal("expected approval via popup-first path")
+	}
+	if !tmuxCalled {
+		t.Error("popup should have been tried first when PreferPopup is set")
+	}
+	if spy.called {
+		t.Error("inline /dev/tty prompt must NOT be consulted when the popup approves (TUI-collision guard)")
+	}
+}
+
+// PreferPopup + popup closed without approval: DENY, and do NOT fall back to
+// the inline /dev/tty prompt (that fallback is the collision we're avoiding).
+func TestObtainApproval_PreferPopup_DeclinedDoesNotFallToTTY(t *testing.T) {
+	t.Setenv("TMUX", "/some/socket")
+	sess := sampleSession()
+	stderr := &bytes.Buffer{}
+	tmux := func(ctx context.Context, command []string) error { return nil } // closed, wrote no record
+	spy := &spyPrompter{inner: matchingPrompter{Answer: 1}}                  // would approve if (wrongly) consulted
+	cfg := Config{
+		StateDir:      t.TempDir(),
+		RunID:         testRunID,
+		TTL:           time.Hour,
+		PromptTimeout: time.Second,
+		Stderr:        stderr,
+		Prompter:      spy,
+		TmuxRunner:    tmux,
+		PreferPopup:   true,
+		Logger:        discardLogger(),
+	}
+	if ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, cfg) {
+		t.Fatal("a declined popup must deny, not fall through to an auto-approving tty")
+	}
+	if spy.called {
+		t.Error("must NOT fall back to inline /dev/tty after the human declined the popup (would corrupt a TUI)")
+	}
+	if !strings.Contains(stderr.String(), "rein approval grant --run-id") {
+		t.Errorf("expected helpful deny stderr after the popup was declined\n%s", stderr.String())
+	}
+}
+
+// PreferPopup but the popup can't launch (e.g. tmux too old): fall back to
+// the inline /dev/tty prompt as a best effort.
+func TestObtainApproval_PreferPopup_PopupUnavailableFallsToTTY(t *testing.T) {
+	t.Setenv("TMUX", "/some/socket")
+	sess := sampleSession()
+	tmux := func(ctx context.Context, command []string) error { return errors.New("tmux too old for display-popup") }
+	spy := &spyPrompter{inner: matchingPrompter{Answer: 1}}
+	cfg := Config{
+		StateDir:      t.TempDir(),
+		RunID:         testRunID,
+		TTL:           time.Hour,
+		PromptTimeout: time.Second,
+		Stderr:        &bytes.Buffer{},
+		Prompter:      spy,
+		TmuxRunner:    tmux,
+		PreferPopup:   true,
+		Logger:        discardLogger(),
+	}
+	if !ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, cfg) {
+		t.Fatal("expected fallback to inline /dev/tty when the popup can't launch")
+	}
+	if !spy.called {
+		t.Error("inline /dev/tty must be consulted as the fallback when the popup fails to launch")
+	}
+}
+
+func TestPopupPreferenceFromEnv(t *testing.T) {
+	cases := []struct {
+		name     string
+		approval string
+		tmux     string
+		want     bool
+	}{
+		{"force tty even in tmux", "tty", "/sock", false},
+		{"force popup even without tmux", "popup", "", true},
+		{"default prefers popup inside tmux", "", "/sock", true},
+		{"default prefers tty outside tmux", "", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("REIN_APPROVAL", c.approval)
+			t.Setenv("TMUX", c.tmux)
+			if got := PopupPreferenceFromEnv(); got != c.want {
+				t.Errorf("PopupPreferenceFromEnv() = %v, want %v (REIN_APPROVAL=%q TMUX=%q)", got, c.want, c.approval, c.tmux)
+			}
+		})
 	}
 }
 

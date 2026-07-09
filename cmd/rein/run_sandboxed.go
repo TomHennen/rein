@@ -492,6 +492,7 @@ func buildSandboxApprove(sess session.Session, stateDir, runID string, logger *l
 		RunPID:        os.Getpid(),
 		TTL:           approvalTTL,
 		PromptTimeout: 60 * time.Second,
+		PreferPopup:   grant.PopupPreferenceFromEnv(),
 		Logger:        logger,
 	}
 	return func(repo string) bool {

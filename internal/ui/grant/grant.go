@@ -4,21 +4,23 @@
 //
 // # Layers
 //
-// ObtainApproval tries layers in order until one resolves:
+// ObtainApproval tries layers until one resolves:
 //
 //  1. Existing approval record (internal/approvals). If a valid record
 //     covers the current session signature, return true immediately.
-//  2. Inline /dev/tty prompt. If a controlling terminal is reachable
-//     (typically: a developer at a shell), prompt and record on
-//     approval. Fast for interactive use.
-//  3. Tmux popup. If $TMUX is set, spawn `tmux popup -E "rein approval
-//     grant"` and wait for it to close. The popup runs the grant
-//     subcommand, which uses /dev/tty inside the popup's pty. After
-//     close, re-check the approval record.
-//  4. Helpful stderr + deny. If none of the above resolved, emit a
-//     message to stderr telling the user to run `rein approval grant`
-//     in another terminal, then deny. The user runs it, retries the
-//     operation.
+//  2. Interactive approval, via one of two surfaces:
+//     - Inline /dev/tty prompt — fast for a developer at a plain shell.
+//     - Tmux popup — `tmux popup -E "rein approval grant"`, whose pty is
+//     its own /dev/tty. This is REQUIRED when the wrapped process is a
+//     full-screen agent TUI (e.g. claude): `rein run` keeps the parent's
+//     controlling terminal, so the inline prompt would render into — and
+//     corrupt — the TUI's screen. When Config.PreferPopup is set (the
+//     default inside $TMUX; see PopupPreferenceFromEnv) the popup is
+//     tried FIRST and the inline prompt is only a fallback for when the
+//     popup can't launch; otherwise the inline prompt is first and the
+//     popup is the ErrNoTTY fallback.
+//  3. Helpful stderr + deny. If nothing resolved, tell the user to run
+//     `rein approval grant` in another terminal, then deny.
 //
 // # Shape B limit
 //
@@ -104,6 +106,14 @@ type Config struct {
 	// doesn't actually shell out.
 	TmuxRunner TmuxRunner
 
+	// PreferPopup makes the tmux popup the PRIMARY approval surface, tried
+	// before the inline /dev/tty prompt. Set it whenever the wrapped process
+	// may be a full-screen TUI that shares this controlling terminal (the
+	// default inside $TMUX): the inline prompt would render into and corrupt
+	// the TUI's screen. Callers compute it via PopupPreferenceFromEnv (which
+	// honors REIN_APPROVAL=tty|popup); ObtainApproval reads no env for this.
+	PreferPopup bool
+
 	// Logger receives forensic log lines.
 	Logger *log.Logger
 }
@@ -124,6 +134,41 @@ func DefaultTmuxRunner(ctx context.Context, command []string) error {
 	cmd.Stdout = os.Stderr // popup detail goes to the helper's stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// PopupPreferenceFromEnv decides whether the tmux popup is the PRIMARY
+// approval surface (tried before the inline /dev/tty prompt), from
+// REIN_APPROVAL and $TMUX:
+//
+//	REIN_APPROVAL=tty    -> false (force the inline /dev/tty prompt first)
+//	REIN_APPROVAL=popup  -> true  (force the popup first)
+//	otherwise            -> true iff $TMUX is set
+//
+// The default-inside-tmux behavior exists because `rein run -- <agent>`
+// keeps the parent's controlling terminal, so the inline prompt collides
+// with a full-screen agent TUI (e.g. claude). Callers pass the result as
+// Config.PreferPopup.
+func PopupPreferenceFromEnv() bool {
+	switch os.Getenv("REIN_APPROVAL") {
+	case "tty":
+		return false
+	case "popup":
+		return true
+	default:
+		return os.Getenv("TMUX") != ""
+	}
+}
+
+// resolveReinCmd returns the best path to invoke `rein` for an
+// out-of-process grant: the sibling of the calling shim binary if present
+// (so the popup's shell needs no configured PATH), else the bare name.
+func resolveReinCmd() string {
+	if abs, err := os.Executable(); err == nil {
+		if rp := filepath.Join(filepath.Dir(abs), "rein"); fileExists(rp) {
+			return rp
+		}
+	}
+	return "rein"
 }
 
 // ObtainApproval is the layered entry point. Returns true iff write
@@ -199,12 +244,29 @@ func ObtainApproval(ctx context.Context, req Request, cfg Config) bool {
 		// snapshot is absent).
 	}
 
-	// Layer 2: inline /dev/tty prompt. Works for users at a regular
-	// shell. Inside agent TUIs that detach the controlling terminal,
-	// the prompter returns ErrNoTTY and we fall through to layer 3.
-	// A Ctrl-C OR prompt-timeout is an EXPLICIT human denial — that
-	// returns ErrCancelled, and we short-circuit (no further layers,
-	// no helpful-stderr; the human knew what they were doing).
+	// Interactive approval. When PreferPopup is set (default inside tmux),
+	// try the tmux popup FIRST: the inline /dev/tty prompt would render into
+	// a full-screen agent TUI sharing this controlling terminal and corrupt
+	// it. The popup's pty is its own /dev/tty, so it never collides.
+	if cfg.PreferPopup {
+		if approved, launched := attemptPopup(ctx, cfg, sig); approved {
+			return true
+		} else if launched {
+			// The human saw the popup and closed it without approving. Do
+			// NOT fall back to the inline /dev/tty prompt — that collision is
+			// exactly what PreferPopup exists to avoid. Deny helpfully.
+			cfg.Logger.Printf("grant: popup declined; not falling back to /dev/tty")
+			return denyHelpful(req, cfg)
+		}
+		// Popup could not launch (no tmux, or a launch error). Fall through
+		// to the inline /dev/tty prompt as a best effort.
+		cfg.Logger.Printf("grant: popup preferred but unavailable; trying inline /dev/tty")
+	}
+
+	// Inline /dev/tty prompt. Works for a developer at a plain shell.
+	// A Ctrl-C OR prompt-timeout is an EXPLICIT human denial — that returns
+	// ErrCancelled, and we short-circuit (no further layers, no
+	// helpful-stderr; the human knew what they were doing).
 	pr := prompt.Request{
 		SessionID: req.Session.ID,
 		Role:      req.Session.Role,
@@ -227,41 +289,60 @@ func ObtainApproval(ctx context.Context, req Request, cfg Config) bool {
 		return false
 	default:
 		// ErrNoTTY or other open-failure: prompter couldn't even ask.
-		// Fall through to tmux popup / helpful stderr.
-		cfg.Logger.Printf("grant: /dev/tty unavailable (%v); trying tmux popup", err)
+		cfg.Logger.Printf("grant: /dev/tty unavailable (%v)", err)
 	}
 
-	// Layer 3: tmux popup if we're inside tmux. (Snapshot already written
-	// above, so the popup's out-of-process grant can resolve the session.)
-	if os.Getenv("TMUX") != "" {
-		// Pass an absolute path to rein so the popup's shell doesn't
-		// need a configured PATH. Same sibling-of-shim trick as the
-		// stderr message.
-		reinCmd := "rein"
-		if abs, err := os.Executable(); err == nil {
-			if rp := filepath.Join(filepath.Dir(abs), "rein"); fileExists(rp) {
-				reinCmd = rp
-			}
-		}
-		cfg.Logger.Printf("grant: launching tmux popup (%s approval grant --run-id %s)", reinCmd, cfg.RunID)
-		ctxPopup, cancel := context.WithTimeout(ctx, 90*time.Second)
-		defer cancel()
-		if err := cfg.TmuxRunner(ctxPopup, []string{reinCmd, "approval", "grant", "--run-id", cfg.RunID}); err != nil {
-			cfg.Logger.Printf("grant: tmux popup failed: %v; falling through", err)
-		}
-		if rec, err := approvals.ReadApproval(cfg.StateDir, cfg.RunID); err == nil && approvals.Valid(rec, sig) {
-			cfg.Logger.Printf("grant: APPROVED via tmux popup")
+	// Tmux popup fallback — only when we did NOT already prefer it above
+	// (PreferPopup already tried the popup and fell through here because it
+	// couldn't launch, so re-trying would be pointless). Snapshot was
+	// written above, so the popup's out-of-process grant can resolve the
+	// session.
+	if !cfg.PreferPopup {
+		if approved, _ := attemptPopup(ctx, cfg, sig); approved {
 			return true
 		}
-		cfg.Logger.Printf("grant: tmux popup closed without approval")
 	}
 
-	// Layer 4: emit helpful stderr and deny. The user has to run
-	// `rein approval grant` in another terminal and retry.
-	//
-	// We lead with the absolute path because a fresh terminal often
-	// doesn't have the shim dir on PATH. Mention the bare form as
-	// the convenience option for users with PATH set up.
+	// Helpful stderr + deny.
+	return denyHelpful(req, cfg)
+}
+
+// attemptPopup tries the tmux popup approval surface. approved is true iff
+// the popup's `rein approval grant` subcommand wrote a valid approval
+// record. launched is true iff the popup actually ran ($TMUX set and the
+// runner returned without error): when launched is true but approved is
+// false, the human saw the popup and declined, so a PreferPopup caller must
+// NOT fall back to the inline /dev/tty prompt (it would collide with an
+// agent TUI); when launched is false the popup was unavailable and the
+// caller should fall back.
+func attemptPopup(ctx context.Context, cfg Config, sig string) (approved, launched bool) {
+	if os.Getenv("TMUX") == "" {
+		return false, false
+	}
+	reinCmd := resolveReinCmd()
+	cfg.Logger.Printf("grant: launching tmux popup (%s approval grant --run-id %s)", reinCmd, cfg.RunID)
+	ctxPopup, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	runErr := cfg.TmuxRunner(ctxPopup, []string{reinCmd, "approval", "grant", "--run-id", cfg.RunID})
+	if runErr != nil {
+		cfg.Logger.Printf("grant: tmux popup failed: %v", runErr)
+	}
+	if rec, err := approvals.ReadApproval(cfg.StateDir, cfg.RunID); err == nil && approvals.Valid(rec, sig) {
+		cfg.Logger.Printf("grant: APPROVED via tmux popup")
+		return true, true
+	}
+	if runErr == nil {
+		cfg.Logger.Printf("grant: tmux popup closed without approval")
+		return false, true
+	}
+	return false, false
+}
+
+// denyHelpful emits the "grant in another terminal" message and denies.
+// We lead with the absolute path because a fresh terminal often doesn't have
+// the shim dir on PATH. TM-G8 preserved: returns false so the caller serves
+// the placeholder.
+func denyHelpful(req Request, cfg Config) bool {
 	reinCmd := "rein"
 	if abs, err := os.Executable(); err == nil {
 		if rp := filepath.Join(filepath.Dir(abs), "rein"); fileExists(rp) {
@@ -280,7 +361,7 @@ func ObtainApproval(ctx context.Context, req Request, cfg Config) bool {
 	fmt.Fprintln(cfg.Stderr, "  Note: invoking grant from this same terminal (e.g. claude's `!` shell")
 	fmt.Fprintln(cfg.Stderr, "  escape) won't work — the agent's bash subprocess has no /dev/tty.")
 	fmt.Fprintln(cfg.Stderr)
-	cfg.Logger.Printf("grant: DENIED — no /dev/tty, no tmux; emitted helpful stderr")
+	cfg.Logger.Printf("grant: DENIED — emitted helpful stderr")
 	return false
 }
 
@@ -415,12 +496,7 @@ func Grant(ctx context.Context, cfg Config) error {
 	// itself was launched from inside tmux.
 	cfg.Logger.Printf("grant subcommand: /dev/tty unavailable (%v); trying tmux popup", err)
 	if os.Getenv("TMUX") != "" {
-		reinCmd := "rein"
-		if abs, err := os.Executable(); err == nil {
-			if rp := filepath.Join(filepath.Dir(abs), "rein"); fileExists(rp) {
-				reinCmd = rp
-			}
-		}
+		reinCmd := resolveReinCmd()
 		ctxPopup, cancel := context.WithTimeout(ctx, 90*time.Second)
 		defer cancel()
 		_ = cfg.TmuxRunner(ctxPopup, []string{reinCmd, "approval", "grant", "--run-id", cfg.RunID})
