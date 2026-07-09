@@ -82,11 +82,11 @@ go build -o bin/ ./...
    `PATH` (`~/.local/bin/rein`), and adds `alias claude='rein run -- claude'`
    to your shell rc (opt out with `--no-alias`).
 4. **Scaffold your dev session.** init writes `~/.config/rein/dev-session.yaml`
-   scoped to a repo you name. It takes the repo from `--repo owner/name`, else
-   the `REIN_TEST_REPO_A` env var, else it prompts *"Which repo should the agent
-   work on?"* (Enter to skip). On a headless/CI run or with `--yes`, and no repo
-   given, it skips scaffolding gracefully — init **never blocks on a prompt**.
-   Re-running init keeps an existing session file.
+   scoped to a repo you name. It takes the repo from `--repo owner/name`, else it
+   prompts *"Which repo should the agent work on?"* (Enter to skip). On a
+   headless/CI run or with `--yes`, and no `--repo` given, it skips scaffolding
+   gracefully — init **never blocks on a prompt**. Re-running init keeps an
+   existing session file.
 
 After init, **install the App on the repos you want** using the deep-links rein
 prints (`https://github.com/apps/<slug>/installations/new`).

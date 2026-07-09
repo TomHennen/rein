@@ -88,11 +88,11 @@ func TestScaffoldSessionFile_RejectsBadSlug(t *testing.T) {
 	}
 }
 
-// TestResolveRepoForSession_Precedence verifies the repo-value precedence:
-// --repo flag beats REIN_TEST_REPO_A env. Both the no-tty gate and the
-// assumeYes gate mean these calls never block on a prompt (stdin here is a
-// pipe reader, not a terminal).
-func TestResolveRepoForSession_Precedence(t *testing.T) {
+// TestResolveRepoForSession_FlagWins verifies --repo is used when set, and
+// that a whitespace-only flag is treated as empty (falling through to the
+// non-interactive fallback, which returns "" on a non-tty stdin). There is
+// no env fallback — REIN_TEST_REPO_A is deliberately not consulted (#40).
+func TestResolveRepoForSession_FlagWins(t *testing.T) {
 	// A non-terminal stdin so the prompt branch (if ever reached) can't
 	// block. An os.Pipe read end is a real *os.File that is NOT a tty.
 	r, w, err := os.Pipe()
@@ -101,24 +101,20 @@ func TestResolveRepoForSession_Precedence(t *testing.T) {
 	}
 	t.Cleanup(func() { r.Close(); w.Close() })
 
-	// flag > env: both set, flag wins.
-	if got := resolveRepoForSession("flag-owner/flag-repo", "env-owner/env-repo", r, false); got != "flag-owner/flag-repo" {
-		t.Errorf("flag>env: got %q, want flag-owner/flag-repo", got)
+	// --repo set: used verbatim.
+	if got := resolveRepoForSession("flag-owner/flag-repo", r, false); got != "flag-owner/flag-repo" {
+		t.Errorf("flag set: got %q, want flag-owner/flag-repo", got)
 	}
-	// flag empty -> env used.
-	if got := resolveRepoForSession("", "env-owner/env-repo", r, false); got != "env-owner/env-repo" {
-		t.Errorf("env fallback: got %q, want env-owner/env-repo", got)
-	}
-	// whitespace-only flag is treated as empty; env used.
-	if got := resolveRepoForSession("   ", "env-owner/env-repo", r, false); got != "env-owner/env-repo" {
-		t.Errorf("blank flag falls through to env: got %q, want env-owner/env-repo", got)
+	// whitespace-only flag is treated as empty; non-tty stdin -> "".
+	if got := resolveRepoForSession("   ", r, false); got != "" {
+		t.Errorf("blank flag on non-tty: got %q, want \"\"", got)
 	}
 }
 
 // TestResolveRepoForSession_NonInteractiveFallback verifies the mandatory
-// non-interactive fallback (onboarding-ux-design.md §7): with no flag and
-// no env, a non-terminal stdin (or --yes) must NOT prompt and must return
-// "" without blocking — init then leaves the session unscaffolded.
+// non-interactive fallback (onboarding-ux-design.md §7): with no flag, a
+// non-terminal stdin (or --yes) must NOT prompt and must return "" without
+// blocking — init then leaves the session unscaffolded.
 func TestResolveRepoForSession_NonInteractiveFallback(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -126,14 +122,14 @@ func TestResolveRepoForSession_NonInteractiveFallback(t *testing.T) {
 	}
 	t.Cleanup(func() { r.Close(); w.Close() })
 
-	// No flag, no env, non-tty stdin: returns "" (no prompt, no block).
-	if got := resolveRepoForSession("", "", r, false); got != "" {
-		t.Errorf("no-tty with no flag/env: got %q, want \"\"", got)
+	// No flag, non-tty stdin: returns "" (no prompt, no block).
+	if got := resolveRepoForSession("", r, false); got != "" {
+		t.Errorf("no-tty with no flag: got %q, want \"\"", got)
 	}
 	// --yes forces non-interactive even if stdin were a tty; here stdin is
 	// non-tty anyway, but assert the assumeYes gate explicitly.
-	if got := resolveRepoForSession("", "", r, true); got != "" {
-		t.Errorf("--yes with no flag/env: got %q, want \"\"", got)
+	if got := resolveRepoForSession("", r, true); got != "" {
+		t.Errorf("--yes with no flag: got %q, want \"\"", got)
 	}
 }
 

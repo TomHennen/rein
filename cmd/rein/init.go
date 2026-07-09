@@ -74,7 +74,7 @@ func runInit(args []string) error {
 	fs.BoolVar(&force, "force", false, "ignore state.json and run the manifest flow from scratch (existing Apps at GitHub are NOT deleted)")
 	fs.StringVar(&expectedOwner, "owner", "", "expected GitHub owner login (user or org); if set, manifest flow refuses to persist if the App was created under a different account")
 	fs.IntVar(&manifestPort, "port", 0, "pin the manifest-flow callback port (default: random ephemeral); set this on headless/remote machines so you can `ssh -L <port>:127.0.0.1:<port>` before running init")
-	fs.StringVar(&repoFlag, "repo", "", "repo (owner/name) to scaffold the dev session against; non-interactive override for the \"which repo?\" prompt (takes precedence over REIN_TEST_REPO_A)")
+	fs.StringVar(&repoFlag, "repo", "", "repo (owner/name) to scaffold the dev session against; non-interactive override for the \"which repo?\" prompt")
 	fs.BoolVar(&assumeYes, "yes", false, "accept defaults and never prompt (non-interactive); required in headless/CI so init never blocks on a prompt")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
@@ -267,16 +267,17 @@ func runInit(args []string) error {
 	case err == nil:
 		fmt.Printf("  session:    existing file kept at %s\n", sessionPath)
 	case os.IsNotExist(err):
-		// Resolve the repo to scaffold against. Precedence (first
-		// non-empty wins): --repo flag > REIN_TEST_REPO_A env >
+		// Resolve the repo to scaffold against. Precedence: --repo flag >
 		// interactive prompt. The prompt only fires on a real terminal
 		// with --yes unset (resolveRepoForSession gates on that), so
-		// headless/CI/piped runs fall through to flag/env and, if none,
-		// leave the session unscaffolded rather than blocking. init must
-		// never hang on a prompt (onboarding-ux-design.md §7).
-		repo := resolveRepoForSession(repoFlag, os.Getenv("REIN_TEST_REPO_A"), os.Stdin, assumeYes)
+		// headless/CI/piped runs fall through and, with no --repo, leave
+		// the session unscaffolded rather than blocking. init must never
+		// hang on a prompt (onboarding-ux-design.md §7). (REIN_TEST_REPO_A
+		// is deliberately NOT read here — a test var must not drive
+		// production session scope; see #40.)
+		repo := resolveRepoForSession(repoFlag, os.Stdin, assumeYes)
 		if repo == "" {
-			fmt.Printf("  session:    not scaffolded (pass --repo owner/name or set REIN_TEST_REPO_A to scaffold)\n")
+			fmt.Printf("  session:    not scaffolded (pass --repo owner/name to scaffold)\n")
 		} else {
 			if err := scaffoldSessionFile(sessionPath, repo); err != nil {
 				return fmt.Errorf("scaffold session file: %w", err)
@@ -542,8 +543,8 @@ repos:
 }
 
 // resolveRepoForSession picks the repo slug to scaffold the dev session
-// against, applying the precedence: --repo flag > REIN_TEST_REPO_A env >
-// interactive prompt. The first non-empty of flag/env wins outright.
+// against, applying the precedence: --repo flag > interactive prompt. A
+// non-empty --repo wins outright.
 //
 // The prompt fires ONLY when stdin is a real terminal AND assumeYes is
 // false (onboarding-ux-design.md §7: non-interactive fallback is
@@ -555,14 +556,11 @@ repos:
 // stdin is passed in (rather than read from os.Stdin directly) so tests
 // can drive the no-tty path with a non-terminal reader; the tty gate is
 // derived from that same file descriptor when it is an *os.File.
-func resolveRepoForSession(repoFlag, envRepo string, stdin *os.File, assumeYes bool) string {
+func resolveRepoForSession(repoFlag string, stdin *os.File, assumeYes bool) string {
 	if r := strings.TrimSpace(repoFlag); r != "" {
 		return r
 	}
-	if r := strings.TrimSpace(envRepo); r != "" {
-		return r
-	}
-	// No flag, no env: prompt only if we can, else fall back to "".
+	// No --repo: prompt only if we can, else fall back to "".
 	if assumeYes || !stdinIsTerminal(stdin) {
 		return ""
 	}

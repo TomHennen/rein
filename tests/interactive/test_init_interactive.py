@@ -2,8 +2,12 @@
 
 RED IS THE POINT. These tests encode the SETTLED parts of the interactive-init
 design (docs/onboarding-ux-design.md) as executable specs for a build that does
-NOT exist yet. Today `rein init` is fully NON-interactive: it reads
-REIN_TEST_REPO_A from the env and hardcodes `issue: 1`. So the settled specs
+NOT exist yet. STALE SPECS (reconcile in CP4.6): CP1 (#39) made `rein init`
+scaffold a REPO-ONLY session from `--repo`/a repo prompt (no REIN_TEST_REPO_A,
+no hardcoded `issue: 1`), and decision A (#35) settled that init must NOT prompt
+for an issue at all — so `test_init_prompts_for_the_issue_number` below is
+superseded and should be removed/inverted when the interactive flow is built.
+So the settled specs
 below FAIL — cleanly, as `unittest.expectedFailure` (== pytest xfail), NOT as
 uncontrolled errors. When interactive init ships, these flip to "unexpected
 success" and the suite goes red, signaling "promote me to a real test."
