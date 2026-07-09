@@ -29,10 +29,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -42,6 +44,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"regexp"
+
+	"golang.org/x/term"
 
 	"github.com/TomHennen/rein/internal/appsetup"
 	"github.com/TomHennen/rein/internal/config"
@@ -60,6 +64,8 @@ func runInit(args []string) error {
 	var force bool
 	var expectedOwner string
 	var manifestPort int
+	var repoFlag string
+	var assumeYes bool
 	fs.BoolVar(&skipMint, "skip-mint-check", false, "skip the App credentials network check (useful for repeated re-runs; GitHub's installation-token mint has secondary rate limits)")
 	fs.BoolVar(&noSymlink, "no-symlink", false, "skip creating the ~/.local/bin/rein symlink")
 	fs.BoolVar(&noAlias, "no-alias", false, "skip writing the `alias claude='rein run -- claude'` block to your shell rc")
@@ -68,6 +74,8 @@ func runInit(args []string) error {
 	fs.BoolVar(&force, "force", false, "ignore state.json and run the manifest flow from scratch (existing Apps at GitHub are NOT deleted)")
 	fs.StringVar(&expectedOwner, "owner", "", "expected GitHub owner login (user or org); if set, manifest flow refuses to persist if the App was created under a different account")
 	fs.IntVar(&manifestPort, "port", 0, "pin the manifest-flow callback port (default: random ephemeral); set this on headless/remote machines so you can `ssh -L <port>:127.0.0.1:<port>` before running init")
+	fs.StringVar(&repoFlag, "repo", "", "repo (owner/name) to scaffold the dev session against; non-interactive override for the \"which repo?\" prompt (takes precedence over REIN_TEST_REPO_A)")
+	fs.BoolVar(&assumeYes, "yes", false, "accept defaults and never prompt (non-interactive); required in headless/CI so init never blocks on a prompt")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -259,18 +267,23 @@ func runInit(args []string) error {
 	case err == nil:
 		fmt.Printf("  session:    existing file kept at %s\n", sessionPath)
 	case os.IsNotExist(err):
-		// scaffoldSessionFile needs a repo slug. In the manifest-flow
-		// path with no REIN_TEST_REPO_A, we can't scaffold meaningfully
-		// — the user will edit ~/.config/rein/dev-session.yaml when
-		// they're ready. Surface the gap as a note rather than fail.
-		repo := os.Getenv("REIN_TEST_REPO_A")
+		// Resolve the repo to scaffold against. Precedence (first
+		// non-empty wins): --repo flag > REIN_TEST_REPO_A env >
+		// interactive prompt. The prompt only fires on a real terminal
+		// with --yes unset (resolveRepoForSession gates on that), so
+		// headless/CI/piped runs fall through to flag/env and, if none,
+		// leave the session unscaffolded rather than blocking. init must
+		// never hang on a prompt (onboarding-ux-design.md §7).
+		repo := resolveRepoForSession(repoFlag, os.Getenv("REIN_TEST_REPO_A"), os.Stdin, assumeYes)
 		if repo == "" {
-			fmt.Printf("  session:    not scaffolded (REIN_TEST_REPO_A unset; create %s manually with `id`, `role`, `repos`, `issue` fields)\n", sessionPath)
+			fmt.Printf("  session:    not scaffolded (pass --repo owner/name or set REIN_TEST_REPO_A to scaffold)\n")
 		} else {
 			if err := scaffoldSessionFile(sessionPath, repo); err != nil {
 				return fmt.Errorf("scaffold session file: %w", err)
 			}
-			fmt.Printf("  session:    scaffolded at %s (issue: 1 — edit to a real issue number)\n", sessionPath)
+			fmt.Printf("  session:    scaffolded at %s (repos: [%s])\n", sessionPath, repo)
+			fmt.Println("              note: no issue bound — git push (writes) are BLOCKED until an issue is bound.")
+			fmt.Println("              agent-declared issue support is coming (#35); reads work without it. Uncomment `issue:` in the file to enable writes now.")
 		}
 	default:
 		return fmt.Errorf("stat %s: %w", sessionPath, err)
@@ -307,7 +320,7 @@ func runInit(args []string) error {
 	fmt.Println()
 	fmt.Println("rein init: done.")
 	fmt.Println("Next:")
-	fmt.Printf("  - edit %s to set `issue:` to a real GitHub issue number\n", sessionPath)
+	fmt.Printf("  - %s is repo-scoped; reads work now. To enable writes (git push), uncomment `issue:` in it with a real issue number (agent-declared issues: #35)\n", sessionPath)
 	if aliasActive {
 		fmt.Println("  - open a new shell (or `source` your rc) so the `claude` alias is live, then run `claude`")
 	} else {
@@ -469,16 +482,22 @@ func pathContainsDir(dir string) bool {
 // scalar value when the slug is interpolated into a scaffolded file.
 var repoSlugRe = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
 
-// scaffoldSessionFile writes a starter dev-session.yaml. fallbackRepo is
-// the value of REIN_TEST_REPO_A; it must be an "owner/name" slug whose
-// characters match repoSlugRe. A fresh random suffix in the session ID
-// makes re-runs on different machines produce different IDs.
-func scaffoldSessionFile(path, fallbackRepo string) error {
-	if strings.TrimSpace(fallbackRepo) == "" {
-		return fmt.Errorf("REIN_TEST_REPO_A is empty; cannot scaffold a session without a repo")
+// scaffoldSessionFile writes a starter dev-session.yaml scoped to repo.
+// repo must be an "owner/name" slug whose characters match repoSlugRe. A
+// fresh random suffix in the session ID makes re-runs on different
+// machines produce different IDs.
+//
+// The scaffolded session is REPO-ONLY: it deliberately writes NO active
+// `issue:` field (decision A / #35 — the issue is agent-declared at
+// runtime, not pre-picked at init). A commented hint line records how to
+// opt in to writes manually until agent-declared support lands. Reads
+// work with no issue; writes (git push) are blocked until one is bound.
+func scaffoldSessionFile(path, repo string) error {
+	if strings.TrimSpace(repo) == "" {
+		return fmt.Errorf("repo is empty; cannot scaffold a session without a repo")
 	}
-	if !repoSlugRe.MatchString(fallbackRepo) {
-		return fmt.Errorf("REIN_TEST_REPO_A=%q does not match owner/name with allowed characters [A-Za-z0-9._-]", fallbackRepo)
+	if !repoSlugRe.MatchString(repo) {
+		return fmt.Errorf("repo %q does not match owner/name with allowed characters [A-Za-z0-9._-]", repo)
 	}
 	var b [4]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -491,19 +510,15 @@ func scaffoldSessionFile(path, fallbackRepo string) error {
 	}
 
 	body := fmt.Sprintf(`# rein dev session — scaffolded by `+"`rein init`"+`.
-# This file binds an agent run to a scope ceiling (a list of repos) and,
-# optionally, a GitHub issue used for the write-approval prompt.
-#
-# Edit `+"`issue:`"+` to a real issue number on the repo before relying on
-# the write-approval flow (otherwise writes are silently un-prompted).
+# This file binds an agent run to a scope ceiling (a list of repos).
 # See internal/session/session.go for field documentation.
 
 id: %s
 role: implement
 repos:
   - %s
-issue: 1
-`, sessID, fallbackRepo)
+# issue: <n>   # OPTIONAL: writes (git push) are BLOCKED until an issue is bound. Agent-declared issue support is coming (#35); until then, uncomment with a real issue number to enable writes. Reads work without it.
+`, sessID, repo)
 
 	// Atomic write: temp file in same dir, then rename.
 	tmp, err := os.CreateTemp(filepath.Dir(path), "dev-session.yaml.*")
@@ -524,4 +539,78 @@ issue: 1
 		return err
 	}
 	return os.Rename(tmpName, path)
+}
+
+// resolveRepoForSession picks the repo slug to scaffold the dev session
+// against, applying the precedence: --repo flag > REIN_TEST_REPO_A env >
+// interactive prompt. The first non-empty of flag/env wins outright.
+//
+// The prompt fires ONLY when stdin is a real terminal AND assumeYes is
+// false (onboarding-ux-design.md §7: non-interactive fallback is
+// mandatory). In headless/CI/piped runs (no tty) or under --yes, it does
+// NOT prompt and returns "" — init then leaves the session unscaffolded
+// with a graceful note rather than blocking. init must never hang on a
+// prompt.
+//
+// stdin is passed in (rather than read from os.Stdin directly) so tests
+// can drive the no-tty path with a non-terminal reader; the tty gate is
+// derived from that same file descriptor when it is an *os.File.
+func resolveRepoForSession(repoFlag, envRepo string, stdin *os.File, assumeYes bool) string {
+	if r := strings.TrimSpace(repoFlag); r != "" {
+		return r
+	}
+	if r := strings.TrimSpace(envRepo); r != "" {
+		return r
+	}
+	// No flag, no env: prompt only if we can, else fall back to "".
+	if assumeYes || !stdinIsTerminal(stdin) {
+		return ""
+	}
+	// Enter-accepts-default; default here is "" (skip scaffolding), so a
+	// bare Enter is a graceful no-op rather than an error.
+	return strings.TrimSpace(promptWithDefault(os.Stdout, stdin, "Which repo should the agent work on? (owner/name, Enter to skip)", ""))
+}
+
+// stdinIsTerminal reports whether f is a real interactive terminal. Used
+// to gate prompts: a non-tty (headless SSH -L flow with no controlling
+// terminal on stdin, CI, or a pipe) must never see a blocking prompt.
+//
+// Note: an interactive ssh session HAS a tty, so this isatty check (not
+// the browser-headless SSH_CONNECTION heuristic in internal/appsetup) is
+// the correct gate for prompts — a remote user at a real terminal should
+// still be prompted.
+func stdinIsTerminal(f *os.File) bool {
+	if f == nil {
+		return false
+	}
+	return term.IsTerminal(int(f.Fd()))
+}
+
+// promptWithDefault writes prompt to w, reads a single line from in, and
+// returns the trimmed line — or def if the line is empty (Enter-accepts-
+// default) or the read fails (EOF/closed reader). It performs a blocking
+// read, so callers MUST gate it behind stdinIsTerminal; on a non-terminal
+// reader the read returns quickly (EOF) rather than hanging, and def is
+// returned.
+//
+// This is a small, testable free-text helper: drive it with a
+// non-terminal io.Reader in tests to exercise the default/no-block path.
+// The genuinely-interactive behavior (a human typing at /dev/tty) is best
+// verified by a manual/pexpect test — a unit test cannot honestly stand
+// in for a real tty.
+func promptWithDefault(w io.Writer, in io.Reader, prompt, def string) string {
+	if def != "" {
+		fmt.Fprintf(w, "%s [%s]: ", prompt, def)
+	} else {
+		fmt.Fprintf(w, "%s: ", prompt)
+	}
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && line == "" {
+		return def
+	}
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return def
+	}
+	return line
 }

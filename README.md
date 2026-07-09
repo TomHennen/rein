@@ -81,27 +81,40 @@ go build -o bin/ ./...
 3. **Wire up your shell.** rein installs its git/`gh` shims, puts `rein` on your
    `PATH` (`~/.local/bin/rein`), and adds `alias claude='rein run -- claude'`
    to your shell rc (opt out with `--no-alias`).
+4. **Scaffold your dev session.** init writes `~/.config/rein/dev-session.yaml`
+   scoped to a repo you name. It takes the repo from `--repo owner/name`, else
+   the `REIN_TEST_REPO_A` env var, else it prompts *"Which repo should the agent
+   work on?"* (Enter to skip). On a headless/CI run or with `--yes`, and no repo
+   given, it skips scaffolding gracefully — init **never blocks on a prompt**.
+   Re-running init keeps an existing session file.
 
 After init, **install the App on the repos you want** using the deep-links rein
-prints (`https://github.com/apps/<slug>/installations/new`), then bind a
-session.
+prints (`https://github.com/apps/<slug>/installations/new`).
 
-### Bind a session (required)
+### The session (scaffolded by init)
 
-A *session* sets the scope ceiling (which repos the agent may touch) and the
-issue used for the write-confirmation prompt. **`rein run` will not start
-without one.** Create `~/.config/rein/dev-session.yaml`:
+A *session* sets the scope ceiling — which repos the agent may touch. **`rein
+run` will not start without one**, and `rein init` scaffolds it for you (step 4
+above). You only hand-edit `~/.config/rein/dev-session.yaml` to change the repo
+set or to enable writes. What init writes is **repo-only**:
 
 ```yaml
 id: my-session
 role: implement
 repos:
   - your-name/your-throwaway-repo   # the token is scoped to this whole set
-issue: 1                            # a real issue number; enables write approvals
+# issue: <n>   # OPTIONAL: writes are blocked until an issue is bound (see below)
 ```
 
-A session with **no `issue:`** is read-only: reads flow, writes are denied
-(handy for a look-only run).
+**Why no issue?** By design the issue is bound at *runtime*, not at setup: the
+agent declares which issue it's working on (via its push branch) and you confirm
+it at the approval prompt — rein doesn't ask you to pre-pick one during `init`
+(see [`docs/design.md`](docs/design.md) and issue
+[#35](https://github.com/TomHennen/rein/issues/35)). That runtime path isn't
+built yet, so **a repo-only session is effectively read-only**: clone / fetch /
+read flow, but `git push` is **blocked** until an issue is bound. To enable
+writes *today*, uncomment `issue:` with a real issue number on the repo — reads
+never need it.
 
 ## Daily use
 
