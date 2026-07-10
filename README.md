@@ -78,15 +78,29 @@ go build -o bin/ ./...
    (used to inject on the wire) is generated on first `rein run` and stored the
    same way. **No `REIN_APP_*` environment variables are needed** — rein reads
    `state.json` and fetches the installation id automatically on first use.
-3. **Wire up your shell.** rein installs its git/`gh` shims, puts `rein` on your
-   `PATH` (`~/.local/bin/rein`), and adds `alias claude='rein run -- claude'`
-   to your shell rc (opt out with `--no-alias`).
+3. **Wire up your shell.** rein installs its git/`gh` shims and puts `rein` on
+   your `PATH` (`~/.local/bin/rein`). The `alias claude='rein run -- claude'`
+   convenience is **opt-in** and is **not installed by default**. On a real
+   terminal init asks *"Add alias claude='rein run -- claude' to <rc>? [y/N]"*
+   (defaulting to **No**); pass `--alias` to install it non-interactively, or
+   `--no-alias` to force-skip. If you pass both, `--no-alias` wins. Headless/CI
+   runs and `--yes` never prompt and skip the alias. Without the alias, launch
+   with `rein run -- claude`; you can enable it later with `rein init --alias`.
 4. **Scaffold your dev session.** init writes `~/.config/rein/dev-session.yaml`
    scoped to a repo you name. It takes the repo from `--repo owner/name`, else it
    prompts *"Which repo should the agent work on?"* (Enter to skip). On a
    headless/CI run or with `--yes`, and no `--repo` given, it skips scaffolding
    gracefully — init **never blocks on a prompt**. Re-running init keeps an
    existing session file.
+
+**Sandbox-stack health.** At the end of its run, init checks the sandbox stack
+(the same `sandbox: ...` rows `rein doctor` reports). If anything is unhealthy it
+**soft-blocks**: init still finishes all its other setup, then prints a loud,
+specific warning naming each failing check and pointing you at `rein doctor` and
+the [Prerequisites](#prerequisites) — but exits 0. Pass `--require-sandbox` to
+make it **hard-fail** (non-zero exit) instead, e.g. in CI. Either way the real
+enforcement is at `rein run`, which **fails closed** and refuses to launch a
+sandboxed run on a broken stack.
 
 After init, **install the App on the repos you want** using the deep-links rein
 prints (`https://github.com/apps/<slug>/installations/new`).
