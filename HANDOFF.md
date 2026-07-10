@@ -1,4 +1,4 @@
-# HANDOFF — continuing Phase 1 (CP2) on another machine
+# HANDOFF — continuing Phase 1 on another machine
 
 You are an agent picking up Phase 1 work from a `git clone` on a fresh
 machine, and you need to **run and test live** (mint tokens, push to a
@@ -6,14 +6,24 @@ throwaway repo, run `srt`). This doc gets you from a bare clone to a
 runnable machine, then points you at where the work stands.
 
 No secrets are transferred: you create your **own** GitHub App via `rein
-init` (the Phase 0.5 manifest flow), so nothing from the origin machine
-needs to move except this repo.
+init` (the manifest flow), so nothing from the origin machine needs to move
+except this repo.
 
-> **Resume pointer:** read `PLAN-1.md` (the §"Notes" tail has the live
-> state) and `docs/phase1-design.md` (design of record) +
-> `docs/phase1-srt-spike-findings.md` (esp. the "CP1 results" relay
-> recipe). Active branch: **`cp2-daemon-core`** (CP1+CP2 done, unpushed;
-> CP3 is next — see §4).
+> **Resume pointer:** the full sandboxed-mode spine **and** the first two
+> interactive-`init` checkpoints are **merged to `main`** — work from
+> `main`, not a feature branch. Read `PLAN-1.md` (the §"Notes" tail is the
+> live state), `docs/phase1-design.md` (design of record), and §4 below for
+> what's done and what's next. Active branch: **`main`**.
+
+> **⚠️ Do NOT `source ./dev-env`.** It hardcodes the *origin author's* now-dead
+> GitHub App (`REIN_APP_CLIENT_ID`/`_ID`/`_INSTALLATION_ID`), a key path that
+> won't exist on your box, and throwaway repos that don't exist. Worse, those
+> `REIN_APP_*` vars **override** the App that `rein init` provisions for you, so
+> sourcing it makes `rein doctor` fail on `app key` / `mint failed`. On a fresh
+> machine, rely entirely on `rein init` + the managed keystore (`state.json` +
+> `~/.config/rein/*.pem`); **no `REIN_APP_*` env vars are needed or wanted.**
+> (`dev-env` is legacy Phase-0 scaffolding; cleaning it up is tracked with the
+> broader `REIN_TEST_REPO_A` deprecation, #40.)
 
 ## 0. What's where
 
@@ -95,7 +105,8 @@ date -u; curl -sI https://api.github.com | grep -i '^date:'   # should be within
 
 ### 1d. Go + build
 
-Go 1.26+ (`go.mod`). Build the binaries — **use `-o bin/`**; a bare
+Go 1.26.5+ (`go.mod`; the directive was bumped to 1.26.5 on 2026-07-09 to
+clear two stdlib CVEs — #41). Build the binaries — **use `-o bin/`**; a bare
 `go build ./...` compiles to cache and produces NO `./bin/rein`, so every
 command below would fail:
 
@@ -111,18 +122,29 @@ Follow `README.md` (the clone-to-first-push onboarding) — it covers
 installs them on a throwaway repo), then `rein doctor`. Summary:
 
 ```
-./bin/rein init      # browser App creation + install on a throwaway repo
-./bin/rein doctor     # all checks green; 'app credentials' must be [ok]
+./bin/rein init --repo <owner>/<your-throwaway-repo>   # App creation + scaffold a session
+./bin/rein doctor                                       # checks; 'app key' must be [ok]
 ```
 
-- Use a **throwaway repo you own** (hard-constraint #1 still holds for CP2).
-  **Export `REIN_TEST_REPO_A=<owner>/<your-throwaway-repo>` yourself** before
-  `rein init` — init *reads* it to scaffold a session but does not set it, and
-  `dev-env`'s hardcoded value is the origin author's repo, not yours.
+- `rein init` is now **interactive** (see README "First-time setup"): it
+  scaffolds `~/.config/rein/dev-session.yaml` from `--repo owner/name` (or an
+  interactive prompt), and on a real tty asks whether to add the `claude` alias
+  (opt-in; or pass `--alias`). Headless/CI/`--yes` never blocks. It no longer
+  reads `REIN_TEST_REPO_A` for scaffolding (#40) — pass `--repo`.
+- Use a **throwaway repo you own** (hard-constraint #1 still holds). After
+  `init`, **install the App on that repo** via the deep-link `init` prints, or
+  `doctor` will note `install-id not cached` and the first `rein run` will fetch
+  it.
+- The scaffolded session is **repo-only** (no `issue:`): reads work, but
+  `git push` is **blocked** until an issue is bound. This is deliberate —
+  runtime agent-declared/human-confirmed issues are the #35 follow-up. To do a
+  write test *today*, add `issue: <n>` (a real issue on the repo) to the session.
+- init now also **soft-blocks on an unhealthy sandbox**: it finishes but prints
+  a loud per-check warning; `--require-sandbox` makes it hard-fail. Enforcement
+  is still at `rein run` (fails closed).
 - If `doctor` shows `app credentials: 401`, it's almost always the clock
-  (§1c), not the App.
-- A minimal session file (no bound issue) is handy for non-interactive
-  write-token mints during testing — see how CP1 did it (below).
+  (§1c), not the App. If it shows `app key`/`mint failed`, check you didn't
+  `source ./dev-env` (see the warning at the top).
 
 ## 3. Verify you can do what CP1 proved
 
@@ -149,9 +171,11 @@ If that works, your machine is fully set up.
 
 ## 4. Where the spine stands — resume here
 
-**CP1, CP2, CP3, and CP4 are DONE on `cp2-daemon-core` (unpushed as of
-2026-07-05). The full sandboxed-mode spine is built and live-verified; the only
-remaining checkpoint is CP6 (dogfood), which needs Tom's explicit go-ahead.**
+**The full sandboxed-mode spine (CP1–CP4.5) is MERGED to `main`** (PR #34,
+2026-07-08) and live-verified. On top of it, the **interactive-`init` onboarding
+work has started** and two checkpoints are merged (CP1 #39, CP4.6 #42 — see
+"Recent work" below). The remaining spine checkpoint is CP6 (dogfood), which
+needs Tom's explicit go-ahead.
 CP1 proved `git push` through a MITM. CP2 landed the **proxy arm**
 (`internal/proxy` — TLS-terminating injecting MITM on a per-run unix socket —
 + `internal/runbroker`, the in-process per-run host) on the CP2 foundation
@@ -186,27 +210,59 @@ per-launch self-test enforces it; #32 downgraded). Reviewed + supervisor
 live-gate passed (bare `rein run` sandboxes; a real commit authored as the
 delegated identity; /dev/tty ENXIO in-sandbox; `--direct` banner).
 
-**NEXT is CP6 — dogfood (needs Tom's explicit go-ahead; there is no CP5 on the
-Linux spine — macOS parity is the off-spine CP5 track).** The GATE: `wrangle` is
-the FIRST real-repo use; the throwaway-only hard-constraint #1 has held since
-Phase 0, and crossing it is Tom's conscious decision after the spine runs clean
-on throwaways — not something reaching CP6 grants. Plan (PLAN-1 CP6): Tom runs
-sandboxed mode on a throwaway for a few sessions, then on `wrangle`, testing the
-design.md §7.2 hypothesis (two weeks, no PAT fallback under deadline pressure).
-Before dogfood: durable VM time-sync (#23) and re-verify the srt pin. Read:
+### Recent work since the spine merged (2026-07-08/09)
 
-1. `PLAN-1.md` — CP6 section + the full 2026-07-05 Notes tail (the whole spine's
-   live status + every design decision made building it).
-2. `docs/phase1-design.md` — the 2026-07-05 correction banner + §7.2 hypothesis.
-3. The CP4 commits (`git log 46b892d..HEAD`); `cmd/rein/run_sandboxed.go`.
+Post-#34, work moved to **interactive onboarding** plus fixes. All merged to
+`main`:
+
+- **`init` CP1 (#39):** `rein init` scaffolds a **repo-only** `dev-session.yaml`
+  from `--repo`/a prompt with a mandatory non-interactive fallback (never blocks
+  headless). No more "create the session by hand" wall.
+- **`init` CP4.6 (#42):** sandbox-health **soft-block** (loud warning + fixes,
+  exit 0; `--require-sandbox` to hard-fail) and the **opt-in `claude` alias**
+  (default off; `--alias`, or a tty `[y/N]` prompt; `--no-alias` wins).
+- **Grant TUI fix (#37, closes #36):** the write-approval prompt now prefers the
+  **tmux popup** over inline `/dev/tty` when `$TMUX` is set (default), so it no
+  longer corrupts a full-screen agent TUI. `REIN_APPROVAL=tty|popup` overrides.
+- **Stdlib CVE bump (#41):** `go` directive → 1.26.5.
+
+**Design-conformance audit is RUNNING in a separate session** (fan-out vs.
+`design.md`). Expect it to file divergence issues + generated tests; fold them
+into the plan when it reports. One divergence is already tracked:
+
+- **#35 — issue scoping.** design.md wants the issue **agent-declared at runtime**
+  (`agent/{{issue}}/{{nonce}}` push ref) + **human-confirmed** (`type_issue_number`);
+  Phase 1 shipped a static `sess.Issue`. Decisions A–F are recorded on #35 (A:
+  follow the design; onboarding `init` deliberately does NOT prompt for an issue).
+  This is the biggest open design follow-up.
+- **#40 — deprecate `REIN_TEST_REPO_A`** from production paths (it still drives
+  the env-fallback session in `cmd/rein/*` + `internal/config`). A test var must
+  not drive production scope. CP1 already removed it from `init` scaffolding.
+
+### What's next (pick with Tom)
+
+1. **More `init` slices** (`docs/onboarding-ux-design.md`, "CP4.7+"): machine-label
+   App naming (decided: prompt pre-filled with the detected hostname, editable —
+   §4), install-on-repo (§5), `doctor --fix` remediation (no-privilege tier only
+   for v1 — §6). Same subagent-implement + independent-review flow used for
+   CP1/CP4.6.
+2. **#35 agent-declared issue** — the real runtime change (proxy extracts the
+   issue from the push ref; approval prompt shows the issue title/repo). Security-
+   sensitive; see the A–F decisions on #35 first.
+3. **CP6 — dogfood** (needs Tom's explicit go-ahead; no CP5 on the Linux spine —
+   macOS is the off-spine CP5 track). GATE: `wrangle` is the FIRST real-repo use;
+   throwaway-only hard-constraint #1 has held since Phase 0, and crossing it is
+   Tom's conscious decision. Plan (PLAN-1 CP6): sandboxed mode on a throwaway for
+   a few sessions, then on `wrangle`, testing the design.md §7.2 hypothesis. Before
+   dogfood: durable VM time-sync (#23) and re-verify the srt pin.
 
 **The write path needs a human tty** — verify with `docs/cp3-manual-test.sh`
 (read path is autonomous) and the CP4 identity/push check `docs/cp4-manual-test.sh`.
+Read `PLAN-1.md` Notes tail for the full live status + every design decision.
 
-Three prior open questions are now CLOSED (Tom, 2026-07-05; see PLAN-1 Notes):
-stop-condition (b) → CONTINUE (settled, don't re-raise); srt-upstream issue →
-track locally, file post-going-public; `--direct` → informational banner is
-final (no harder gate). The remaining gate is CP6 dogfood itself.
+Three prior open questions are CLOSED (Tom, 2026-07-05; see PLAN-1 Notes):
+stop-condition (b) → CONTINUE; srt-upstream issue → track locally, file
+post-going-public; `--direct` → informational banner is final.
 
 **Carry-forward invariants** (don't re-derive): the 6-point relay recipe
 (spike-findings "CP1 results"); per-run socket must sit outside every srt
