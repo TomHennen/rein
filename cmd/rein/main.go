@@ -547,19 +547,6 @@ func approvalClear(stateDir, runID string) error {
 	return nil
 }
 
-// isWriteCapableRole returns true for the design's roles whose
-// implement-tier permissions include write access. Used by
-// buildConfirmWrite to decide whether silent-disable (no prompt)
-// warrants a WARN. CP4-CP5 roles are coarse; CP6+ will move this
-// to the role catalog.
-func isWriteCapableRole(role string) bool {
-	switch role {
-	case "implement", "triage", "review", "release":
-		return true
-	}
-	return false
-}
-
 // envInt parses a non-negative integer env var, returning 0 on unset or
 // parse error (e.g. REIN_RUN_PID). 0 means "unknown" to the approval
 // snapshot's Sweep liveness probe.
