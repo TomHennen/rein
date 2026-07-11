@@ -1,360 +1,340 @@
-"""journey_write_ceremony — THE WRITE CEREMONY, as a runnable journey.
+"""journey_write_ceremony — THE WRITE CEREMONY (declare -> confirm -> verified push).
 
-JOURNEY CATALOGUE (tests/interactive/README.md): this file IS the "write
-ceremony" journey — agent declares an issue -> human confirms on the terminal ->
-the verified push lands. Journeys live in `journey_*.py`; the assertion tests
-live in `test_*.py` and are what `run.sh` sweeps. A journey's job is to SHOW the
-behavior end to end against reality, so its output can be pasted into a PR.
+This is ONE journey. For what a journey IS, the golden-transcript rule, and how to
+author the next one, read tests/interactive/CLAUDE.md — none of that lives here.
 
-This is not an assertion test; it is the ceremony's SHOWCASE. It drives ONE real
-`rein run` against the live throwaway repo and then replays the transcript as the
-two views that matter, because the whole security argument of #35 lives in the
-GAP between them:
+The write ceremony is rein's #35 core loop:
 
-  * WHAT THE AGENT SEES (in-sandbox, no tty, no token): a pre-declaration push
-    denied by the proxy's synthesized ERR advertisement -> `rein declare <n>`
-    (which BLOCKS while a human decides) -> a verified push to
-    agent/<issue>/<nonce> that SUCCEEDS -> a non-convention ref that is REJECTED
-    even though writes are unlocked.
-  * WHAT THE HUMAN SEES (host tty): the Form A prompt carrying the issue title,
-    state and HOME repo FETCHED from GitHub (decision E — so a wrong-but-plausible
-    number is visibly wrong), and the resulting `[approved]` line.
+    agent declares an issue  ->  a human confirms it on the terminal  ->  the
+    verified push to agent/<issue>/<nonce> lands (and nothing else does).
 
-Then it verifies on GitHub which branches actually landed, and cleans up.
+The whole security argument lives in the GAP between two views of one terminal:
 
-WHY THIS FILE EXISTS AT ALL (the doctrine): the pexpect pty IS the human. An
-autonomous agent can run this end to end with nobody at the keyboard — the write
-path does NOT need a human present, only a controlling terminal. (The SANDBOXED
-agent still has none, so it can never self-approve; that boundary is intact and
-is exactly what the two views below demonstrate.) See tests/interactive/README.md.
+  * the AGENT's view (in-sandbox: no tty, no token) — a pre-declaration push
+    denied by the proxy, `rein declare <n>`, a verified push that SUCCEEDS, and a
+    non-convention ref that is REJECTED even though writes are now unlocked; and
+  * the HUMAN's view (host tty) — the Form A prompt carrying the issue title,
+    state and HOME repo FETCHED from GitHub (decision E), then `[approved]`.
 
-SELF-CONTAINED. By default it CREATES its own throwaway issue via `gh`, and in a
-`finally` it deletes every branch it made and closes the issue it opened. Pass an
-existing issue with REIN_DEMO_ISSUE=<n> to reuse one (it is then NOT closed).
+DELIVERABLE: a normalized, human-reviewable transcript checked in at
+`golden/write_ceremony.txt`. Running this journey rebuilds that transcript from a
+LIVE run and compares:
 
-HARD-CONSTRAINT #1: touches ONLY $REIN_TEST_REPO_A, the throwaway.
+    python3 tests/interactive/journey_write_ceremony.py          # exit 0 == matches golden
+    REIN_UPDATE_GOLDEN=1 python3 tests/interactive/journey_write_ceremony.py   # regenerate
+    REIN_DEMO_ISSUE=<n>  python3 tests/interactive/journey_write_ceremony.py   # reuse an issue
 
-NOT PART OF THE SWEEP. `run.sh` discovers `test_*.py`; this is `journey_*.py`, so
-the default suite never picks it up (it is slow — a full sandboxed clone + four
-network round-trips). Run it deliberately:
+Exit 0 = ceremony held AND transcript matches the golden. Exit 1 = golden drift
+(re-review the journey). Exit 2 = the ceremony itself broke.
 
-    source ./dev-env
-    python3 tests/interactive/journey_write_ceremony.py          # creates its own issue
-    REIN_DEMO_ISSUE=42 python3 tests/interactive/journey_write_ceremony.py
-    REIN_DEMO_RAW=1 python3 tests/interactive/journey_write_ceremony.py   # keep git's progress meter
+HOW THE TWO VIEWS ARE SPLIT (the #72 fix): the in-sandbox script tags EVERY line
+it emits with `SBX| ` (reinharness.SBX_TAG); git's own output is piped through
+`tr '\r' '\n' | ...tag` so even progress redraws stay tagged. reinharness.get_views
+then splits by the tag alone — no content heuristics. The host prompt is rein's
+own untagged output on the tty.
 
-The transcript it prints is intended as a doc/screenshot source, so git's
-progress meter is elided by default (REIN_DEMO_RAW=1 keeps it); nothing else is.
+SELF-CONTAINED: creates its own throwaway issue via gh, and in a `finally`
+deletes both branches and closes the issue. Touches only the throwaway
+(hard-constraint #1). The repo is resolved the rein-init way
+(reinharness.resolve_throwaway_repo): REIN_JOURNEY_REPO, else the configured
+dev-session, else the legacy REIN_TEST_REPO_A shortcut.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import re
-import subprocess
 import sys
 
 import reinharness as H
 
+GOLDEN_NAME = "write_ceremony.txt"
 ISSUE_ENV = "REIN_DEMO_ISSUE"
 
-# The Form A prompt block on the HOST tty runs from this header to the outcome
-# marker. Used to split the one pty transcript into the two views.
-PROMPT_HEADER = "=== rein: agent declares work on an issue ==="
-
-RULE = "=" * 78
-
-
-def say(s: str = "") -> None:
-    print(s, flush=True)
-
-
-def banner(title: str) -> None:
-    say()
-    say(RULE)
-    say(f"  {title}")
-    say(RULE)
+# Lines the agent emits that are NOT @-sentinels but ARE meaningful enough to
+# belong in the reviewable golden. Everything else the agent prints (git object
+# counts, clone chatter, progress) is elided from the golden as noise.
+AGENT_KEEP = (
+    "writes are locked",
+    "confirmed",
+    "[new branch]",
+    "remote rejected",
+    "refs must match",
+)
 
 
 # --------------------------------------------------------------------------
-# The throwaway issue (created by us, or supplied)
+# The in-sandbox agent script — every step emits a tagged sentinel
 # --------------------------------------------------------------------------
 
 
-def create_issue(repo: str, env: dict) -> tuple[int, str]:
-    """Open a real issue on the THROWAWAY so the declare has something to fetch.
+def ceremony_script(repo: str, issue: int, good: str, bad: str) -> str:
+    """A `bash -c` body run as the srt child. It cannot be puppeted line-by-line
+    (it is one sandboxed process), so instead each STEP emits a tagged `@PHASE..`
+    sentinel and the test asserts on those IN SEQUENCE — the run reads as
+    expect->act->expect even though the child runs once.
 
-    The declare fetches the issue before prompting (decision E), so the ceremony
-    needs a real, open issue — an invented number would 404 and fail closed.
+    `runtagged` pipes a command's combined output through `tr '\\r' '\\n'` (so
+    git's carriage-return progress redraws become real lines) and prefixes every
+    line with SBX_TAG, preserving the command's own exit code via PIPESTATUS.
     """
-    title = "rein demo: declare-ceremony walkthrough (safe to close)"
-    out = subprocess.check_output(
-        [
-            "gh", "issue", "create", "--repo", repo,
-            "--title", title,
-            "--body",
-            "Opened automatically by tests/interactive/journey_write_ceremony.py "
-            "to demonstrate the #35 declare -> confirm -> verified-push ceremony. "
-            "Throwaway repo only. This issue is closed again when the demo ends.",
-        ],
-        text=True,
-        env=env,
-    ).strip()
-    num = int(out.rstrip("/").split("/")[-1])
-    return num, title
-
-
-def issue_title(repo: str, issue: int, env: dict) -> str:
-    out = subprocess.check_output(
-        ["gh", "issue", "view", str(issue), "--repo", repo, "--json", "title"],
-        text=True,
-        env=env,
-    )
-    return json.loads(out)["title"]
-
-
-def close_issue(repo: str, issue: int, env: dict) -> None:
-    subprocess.run(
-        ["gh", "issue", "close", str(issue), "--repo", repo,
-         "--comment", "demo complete; closing."],
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-
-# --------------------------------------------------------------------------
-# The in-sandbox script: all four agent-visible events in ONE run
-# --------------------------------------------------------------------------
-
-
-def ceremony_script(repo: str, issue: int, good_branch: str, bad_branch: str) -> str:
-    """clone -> push (LOCKED) -> declare -> push agent/<n>/<nonce> (OK) -> push
-    a non-convention ref (REJECTED).
-
-    `set +e` throughout, and every step echoes an explicit RC sentinel, so the
-    demo reports each in-sandbox command's OWN outcome and can never hang.
-    Phase markers let the printer slice the transcript into the agent's view.
-    """
+    tag = H.SBX_TAG
     return f"""
 set +e
+emit() {{ printf '%s%s\\n' '{tag}' "$*"; }}
+runtagged() {{
+  "$@" 2>&1 | tr '\\r' '\\n' | while IFS= read -r l; do printf '%s%s\\n' '{tag}' "$l"; done
+  return ${{PIPESTATUS[0]}}
+}}
 cd "$0"
 rm -rf repo
-git clone --depth 1 https://github.com/{repo} repo
-cd repo || {{ echo "SBX_CLONE_FAIL"; exit 3; }}
-echo "SBX_CLONE_OK (reads flow with no declaration at all)"
+runtagged git clone --no-progress --depth 1 https://github.com/{repo} repo
+cd repo || {{ emit "@CLONE_FAIL"; exit 3; }}
+emit "@CLONE_OK  (reads flow with no declaration at all)"
 
-echo "SBX_PHASE1_START"
+emit "@PHASE1_START  push BEFORE declare (expect: locked, no prompt)"
 echo "phase 1" >> probe-1.txt
-git add -A
-git commit -q -m "demo: pre-declaration write attempt"
-git push origin HEAD:refs/heads/{good_branch}
-echo "SBX_PHASE1_RC=$?"
+runtagged git add -A
+runtagged git commit -q -m "ceremony: pre-declaration write attempt"
+runtagged git push --no-progress origin HEAD:refs/heads/{good}
+emit "@PHASE1_RC=$?"
 
-echo "SBX_PHASE2_START"
-rein declare {issue}
-echo "SBX_PHASE2_RC=$?"
+emit "@PHASE2_START  rein declare {issue} (blocks for the human)"
+runtagged rein declare {issue}
+emit "@PHASE2_RC=$?"
 
-echo "SBX_PHASE3_START"
-git push origin HEAD:refs/heads/{good_branch}
-echo "SBX_PHASE3_RC=$?"
+emit "@PHASE3_START  push agent/{issue}/<nonce> (expect: lands)"
+runtagged git push --no-progress origin HEAD:refs/heads/{good}
+emit "@PHASE3_RC=$?"
 
-echo "SBX_PHASE4_START"
-git push origin HEAD:refs/heads/{bad_branch}
-echo "SBX_PHASE4_RC=$?"
-echo "SBX_SCRIPT_DONE"
+emit "@PHASE4_START  push a non-convention ref (expect: rejected)"
+runtagged git push --no-progress origin HEAD:refs/heads/{bad}
+emit "@PHASE4_RC=$?"
+emit "@SCRIPT_DONE"
 """
 
 
 # --------------------------------------------------------------------------
-# Transcript -> the two views
+# Golden transcript assembly
 # --------------------------------------------------------------------------
 
 
-def _lines(text: str) -> list[str]:
-    return H.strip_ansi(text).replace("\r\n", "\n").replace("\r", "\n").split("\n")
-
-
-# git's progress meter (`Counting objects:  42% (3/7)`) redraws a dozen times per
-# operation and drowns the four events this demo exists to show. We elide the
-# INTERMEDIATE ticks only — every terminal `done.` line, and every error/reject
-# line, survives. Set REIN_DEMO_RAW=1 to keep the meter.
-_PROGRESS = re.compile(
-    r"^\s*(remote:\s*)?(Counting|Compressing|Receiving|Resolving|Writing|Enumerating|Unpacking)"
-    r"\s+(objects|deltas):\s+\d+%"
-)
-
-
-def _is_progress_noise(ln: str) -> bool:
-    if os.getenv("REIN_DEMO_RAW"):
-        return False
-    return bool(_PROGRESS.match(ln)) and "done." not in ln
-
-
-def host_view(text: str) -> list[str]:
-    """The Form A prompt block + its outcome — everything the HUMAN sees."""
-    out, inside = [], False
-    for ln in _lines(text):
-        if PROMPT_HEADER in ln:
+def _form_a_block(host_lines: list[str]) -> list[str]:
+    """The Form A prompt block from the host view: header .. [approved]."""
+    out: list[str] = []
+    inside = False
+    for ln in host_lines:
+        if H.PROMPT_BANNER in ln:
             inside = True
         if inside:
-            out.append(ln.rstrip())
+            out.append(ln)
             if H.APPROVED_MARK in ln or H.DENIED_MARK in ln:
                 break
     return out
 
 
-def agent_view(text: str) -> list[str]:
-    """The in-sandbox output, with the host-only lines removed.
-
-    The one pty carries BOTH sides, so this view has to subtract two things to
-    stay honest:
-
-      * everything up to and including rein's `---` handoff rule. Before that
-        rule rein prints its own HOST banner — which includes a `rein: running:
-        <script>` echo of the script SOURCE. Anchoring here (rather than on the
-        first sentinel) is what stops the script's own text being mistaken for
-        the agent's output.
-      * the Form A prompt block, which rendered on the host /dev/tty. The agent
-        never saw it — it has no tty at all.
-    """
-    host = set(host_view(text))
-    lines = [ln.rstrip() for ln in _lines(text)]
-    start = 0
-    for i, ln in enumerate(lines):
-        if ln.strip() == "---":
-            start = i + 1
-            break
-    out = []
-    for ln in lines[start:]:
-        if not ln.strip() or ln in host or _is_progress_noise(ln):
+def _agent_narrative(agent_lines: list[str]) -> list[str]:
+    """The agent view, curated to sentinels + the meaningful result lines."""
+    out: list[str] = []
+    for ln in agent_lines:
+        s = ln.strip()
+        if not s:
             continue
-        if PROMPT_HEADER in ln or ln.lstrip().startswith(">"):
-            continue
-        out.append(ln)
-        if "SBX_SCRIPT_DONE" in ln:
-            break
+        if s.startswith("@") or any(k in s for k in AGENT_KEEP):
+            out.append(ln)
     return out
 
 
-def rc(text: str, phase: int) -> int | None:
-    m = re.search(rf"SBX_PHASE{phase}_RC=(\d+)", H.strip_ansi(text))
-    return int(m.group(1)) if m else None
+def build_transcript(text: str, *, repo: str, issue: int, title: str,
+                     rcs: dict, prompts: int, landed: dict) -> str:
+    """Assemble the reviewable transcript, pre-normalization."""
+    host, agent = H.get_views(text)
+    L: list[str] = []
+    L.append("=== JOURNEY: the write ceremony (declare -> confirm -> verified push) ===")
+    L.append(f"repo   : {repo}  (throwaway)")
+    L.append(f"issue  : #{issue} {title!r}")
+    L.append("")
+    L.append("--- (a) WHAT THE AGENT SEES  (in-sandbox: no tty, no token, no prompt) ---")
+    L += [f"SBX| {ln}" for ln in _agent_narrative(agent)]
+    L.append("")
+    L.append("--- (b) WHAT THE HUMAN SEES  (host tty: the Form A prompt) ---")
+    L += _form_a_block(host)
+    L.append("")
+    L.append("--- outcomes: in-sandbox exit codes, then GitHub ground truth ---")
+    L.append(f"phase 1  push before declare        rc={rcs[1]}   (nonzero: writes locked)")
+    L.append(f"phase 2  rein declare               rc={rcs[2]}     (zero: human confirmed)")
+    L.append(f"phase 3  push agent/<issue>/<nonce> rc={rcs[3]}     (zero: verified push)")
+    L.append(f"phase 4  push non-convention ref    rc={rcs[4]}     (nonzero: ref cross-check)")
+    L.append(f"Form A prompts fired this run: {prompts}  (one confirmation covers the run)")
+    for br, ok in landed.items():
+        L.append(f"branch {br}: {'LANDED' if ok else 'ABSENT'}")
+    return "\n".join(L) + "\n"
+
+
+def normalize(text: str, *, repo: str, issue: int, title: str) -> str:
+    """Volatile bits -> stable placeholders, so two runs yield an identical golden."""
+    subs = [
+        (title, "<TITLE>"),
+        (repo, "<REPO>"),
+        (f"agent/{issue}/", "agent/<ISSUE>/"),
+        (f"#{issue}", "#<ISSUE>"),
+        (f"declare {issue}", "declare <ISSUE>"),
+        (f"({issue})", "(<ISSUE>)"),
+        (f"> {issue}", "> <ISSUE>"),
+        # NB: every issue rule above is BOUNDED (#, agent/, declare, (), > ); there
+        # is deliberately no bare `{issue}` swap, so `rc=128` etc. are never touched.
+    ]
+    return H.normalize_transcript(text, subs)
 
 
 # --------------------------------------------------------------------------
-# The ceremony
+# The journey
 # --------------------------------------------------------------------------
+
+
+def _rc(child_match) -> int:
+    return int(child_match.group(1))
+
+
+def run_ceremony(env, repo, issue, title):
+    """Drive the live run; return (transcript_text, rcs, prompts, landed, branches)."""
+    good = f"agent/{issue}/{H.unique_branch('cerem')}"
+    bad = H.unique_branch("cerem-nonconvention")
+    branches = [good, bad]
+
+    wd = H.make_workdir()
+    script = ceremony_script(repo, issue, good, bad)
+    session = _pinned_session(repo)
+    run = H.spawn_rein_run(
+        ["bash", "-c", script], workdir=wd, env=env,
+        extra_env={"REIN_SESSION_FILE": session},
+    )
+
+    rcs: dict[int, int] = {}
+    try:
+        # expect -> act -> expect, one step at a time (issue #72 review).
+        run.child.expect(r"@CLONE_OK", timeout=180)
+
+        run.child.expect(r"@PHASE1_START", timeout=60)
+        run.child.expect(r"@PHASE1_RC=(\d+)", timeout=120)
+        rcs[1] = _rc(run.child.match)
+
+        run.child.expect(r"@PHASE2_START", timeout=30)
+        # the declare BLOCKS -> the Form A prompt fires on the host tty
+        run.expect_prompt(timeout=120)
+        run.answer(str(issue))                       # type the DISPLAYED number
+        run.expect_approved(timeout=60)
+        run.child.expect(r"@PHASE2_RC=(\d+)", timeout=60)
+        rcs[2] = _rc(run.child.match)
+
+        run.child.expect(r"@PHASE3_START", timeout=30)
+        run.child.expect(r"@PHASE3_RC=(\d+)", timeout=120)
+        rcs[3] = _rc(run.child.match)
+
+        run.child.expect(r"@PHASE4_START", timeout=30)
+        run.child.expect(r"@PHASE4_RC=(\d+)", timeout=120)
+        rcs[4] = _rc(run.child.match)
+
+        run.child.expect(r"@SCRIPT_DONE", timeout=60)
+        run.wait(timeout=120)
+    finally:
+        try:
+            run.child.close(force=True)
+        except Exception:
+            pass
+
+    prompts = run.prompt_count()
+    landed = {br: H.branch_exists(repo, br, env) for br in branches}
+    return run.text(), rcs, prompts, landed, branches
 
 
 def main() -> int:
     env = H.rein_env()
-    repo = H.throwaway_repo(env)  # hard-constraint #1: the throwaway, only
+    repo = H.resolve_throwaway_repo(env)  # rein-init way first; #40
     H.build_binaries(env)
 
     supplied = os.getenv(ISSUE_ENV)
     ours = not supplied
     if supplied:
         issue = int(supplied)
-        title = issue_title(repo, issue, env)
+        title = H.issue_title(repo, issue, env)
     else:
-        issue, title = create_issue(repo, env)
-
-    good = f"agent/{issue}/{H.unique_branch('demo')}"   # follows the convention
-    bad = H.unique_branch("demo-nonconvention")         # deliberately does NOT
-    branches = [good, bad]
-    run = None
-
-    banner("JOURNEY: the write ceremony (declare -> confirm -> verified push)")
-    say(f"  repo   : {repo}  (throwaway)")
-    say(f"  issue  : #{issue} {title!r}" + ("  (created by this demo)" if ours else "  (supplied)"))
-    say(f"  refs   : {good}   <- convention-following, should LAND")
-    say(f"           {bad}   <- non-convention, should be REJECTED")
-    say()
-    say("  Nobody is at the keyboard. pexpect owns the pty and answers the")
-    say("  Form A prompt exactly as the developer would.")
-
-    try:
-        wd = H.make_workdir()
-        script = ceremony_script(repo, issue, good, bad)
-        run = H.spawn_rein_run(
-            ["bash", "-c", script],
-            workdir=wd,
-            env=env,
-            extra_env={"REIN_SESSION_FILE": _pinned_session(repo)},
+        title = "rein journey: write-ceremony walkthrough (safe to close)"
+        issue = H.create_issue(
+            repo, title,
+            "Opened by tests/interactive/journey_write_ceremony.py to demonstrate the "
+            "#35 declare -> confirm -> verified-push ceremony. Throwaway repo only; "
+            "closed again when the journey ends.",
+            env,
         )
 
-        # Block until the declare fires the prompt on the host tty, then answer
-        # it the way a human does: type the DISPLAYED issue number.
-        run.expect_prompt(timeout=180)
-        run.answer(str(issue))
-        run.expect_approved(timeout=60)
-        run.child.expect(r"SBX_SCRIPT_DONE", timeout=240)
-        run.wait(timeout=120)
+    print(f"journey: write ceremony on {repo}, issue #{issue} "
+          f"({'created' if ours else 'supplied'})", flush=True)
 
-        text = run.text()
+    branches: list[str] = []
+    try:
+        text, rcs, prompts, landed, branches = run_ceremony(env, repo, issue, title)
 
-        banner("(a) WHAT THE AGENT SEES  — in-sandbox: no tty, no token, no prompt")
-        for ln in agent_view(text):
-            say(f"  | {ln}")
+        # 1) The ceremony itself must hold — independent of the golden.
+        good = next(b for b in branches if b.startswith("agent/"))
+        bad = next(b for b in branches if not b.startswith("agent/"))
+        invariants = [
+            (rcs.get(1, 0) != 0, "phase 1 (pre-declaration push) must FAIL — writes locked"),
+            (rcs.get(2) == 0, "phase 2 (declare) must succeed after confirmation"),
+            (rcs.get(3) == 0, "phase 3 (verified push) must succeed"),
+            (rcs.get(4, 0) != 0, "phase 4 (non-convention ref) must be REJECTED"),
+            (prompts == 1, "exactly one Form A prompt for the run"),
+            (landed.get(good) is True, "the convention-following branch must LAND"),
+            (landed.get(bad) is False, "the non-convention branch must NOT land"),
+        ]
+        broken = [msg for ok, msg in invariants if not ok]
+        if broken:
+            print("CEREMONY BROKE:", flush=True)
+            for m in broken:
+                print(f"  - {m}", flush=True)
+            print(f"  rcs={rcs} prompts={prompts} landed={landed}", flush=True)
+            return 2
 
-        banner("(b) WHAT THE HUMAN SEES  — host tty: the Form A prompt")
-        for ln in host_view(text):
-            say(f"  | {ln}")
-        say()
-        say("  ^ title/state/home-repo are FETCHED from GitHub before the prompt")
-        say("    renders (decision E) — that is what makes a wrong-but-plausible")
-        say("    issue number visibly wrong to the human.")
+        # 2) Build + normalize the reviewable transcript; compare to the golden.
+        transcript = normalize(
+            build_transcript(text, repo=repo, issue=issue, title=title,
+                             rcs=rcs, prompts=prompts, landed=landed),
+            repo=repo, issue=issue, title=title,
+        )
+        print()
+        print(transcript, flush=True)
 
-        banner("OUTCOMES  (in-sandbox exit codes, then GitHub ground truth)")
-        say(f"  phase 1  push BEFORE declare        rc={rc(text, 1)}  (nonzero: writes locked)")
-        say(f"  phase 2  rein declare {issue:<15} rc={rc(text, 2)}  (zero: human confirmed)")
-        say(f"  phase 3  push agent/{issue}/<nonce>{'':<7} rc={rc(text, 3)}  (zero: verified push)")
-        say(f"  phase 4  push non-convention ref     rc={rc(text, 4)}  (nonzero: ref cross-check)")
-        say()
-        say(f"  Form A prompts fired this run: {run.prompt_count()} "
-            "(one confirmation covers the whole run)")
-        say()
-        say("  On GitHub right now:")
-        for br in branches:
-            exists = H.branch_exists(repo, br, env)
-            verdict = "LANDED " if exists else "ABSENT "
-            say(f"    [{verdict}] {br}")
+        if os.getenv("REIN_UPDATE_GOLDEN"):
+            p = H.update_golden(GOLDEN_NAME, transcript)
+            print(f"[golden UPDATED] {p}", flush=True)
+            return 0
 
-        say()
-        say("  The push that landed is the one that BOTH the human confirmed AND")
-        say("  matched agent/<issue>/<nonce>. Everything else was denied at the")
-        say("  proxy — the agent held no credential at any point.")
-        return 0
+        ok, diff = H.compare_golden(GOLDEN_NAME, transcript)
+        if ok:
+            print("[golden OK] live run matches golden/write_ceremony.txt", flush=True)
+            return 0
+        print("[golden DRIFT] live run != golden/write_ceremony.txt — re-review this journey:", flush=True)
+        print(diff, flush=True)
+        print("(regenerate with REIN_UPDATE_GOLDEN=1 once you've confirmed the change is intended)", flush=True)
+        return 1
 
     finally:
-        if run is not None:
-            try:
-                run.child.close(force=True)
-            except Exception:
-                pass
-        banner("cleanup")
         for br in branches:
-            ok = H.delete_branch(repo, br, env)
-            say(f"  branch {br}: {'deleted' if ok else 'nothing to delete'}")
+            H.delete_branch(repo, br, env)
         if ours:
-            close_issue(repo, issue, env)
-            say(f"  issue  #{issue}: closed")
-        else:
-            say(f"  issue  #{issue}: left open (supplied via {ISSUE_ENV})")
+            H.close_issue(repo, issue, env, comment="journey complete; closing.")
+        print("cleanup: branches deleted" + ("; issue closed" if ours else ""), flush=True)
 
 
 def _pinned_session(repo: str) -> str:
-    """A temp repo-only session, so the demo never depends on the machine's
-    ambient ~/.config/rein/dev-session.yaml (and never writes an `issue:` — #35
-    retired that field; the issue is agent-declared at runtime)."""
+    """A temp repo-only session, so the journey never depends on the machine's
+    ambient dev-session.yaml and never writes an `issue:` (#35 retired it)."""
     import tempfile
 
-    d = tempfile.mkdtemp(prefix="rein-demo-sess-")
+    d = tempfile.mkdtemp(prefix="rein-journey-sess-")
     path = os.path.join(d, "session.yaml")
     with open(path, "w") as f:
-        f.write("id: sess_demo_ceremony\nrole: implement\nrepos:\n" f"  - {repo}\n")
+        f.write("id: sess_journey_ceremony\nrole: implement\nrepos:\n" f"  - {repo}\n")
     return path
 
 

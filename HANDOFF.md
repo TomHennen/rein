@@ -267,12 +267,22 @@ for Tom.) The pexpect suite in `tests/interactive/` hands `rein` a real pty and
 **is** the human stand-in — it answers the Form A prompt just as a developer
 would. So an agent can and **should** self-verify the whole ceremony, autonomously:
 
+Setup is the **`rein init` world**, not `source ./dev-env` — dev-env is the dead-App
+footgun this HANDOFF's top banner warns about. `rein init` configures the App +
+a dev-session; a journey resolves its throwaway with `resolve_throwaway_repo`
+(`REIN_JOURNEY_REPO` → the configured dev-session → `REIN_TEST_REPO_A` only as a
+labeled legacy shortcut), so journeys don't depend on `REIN_TEST_REPO_A` special-
+casing (#40).
+
 ```sh
-source ./dev-env                                        # this box only (a FRESH machine: see the env prereqs above)
-gh issue create --repo "$REIN_TEST_REPO_A" --title "..." --body "..."   # declare FETCHES a real issue
+# once per machine: rein init (see the env prereqs above); this box's legacy
+# shortcut is `source ./dev-env`, but the documented path is init.
+python3 tests/interactive/journey_write_ceremony.py     # the ceremony journey (creates + closes its own issue)
+
+# the gated test_*.py take an issue via env (they don't self-create one):
+gh issue create --repo <throwaway> --title "..." --body "..."   # declare FETCHES a real issue
 REIN_ITEST_ISSUE=<n> REIN_ITEST_TITLE_ISSUE=<n> REIN_ITEST_TITLE_WORD=<word-in-title> \
   tests/interactive/run.sh                              # write_approval + confirm_shows_title + init + realagent
-python3 tests/interactive/journey_write_ceremony.py     # the ceremony journey (creates + closes its own issue)
 ```
 
 The security model is untouched: the **sandboxed** agent has no tty at all and

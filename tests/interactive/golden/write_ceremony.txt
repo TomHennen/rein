@@ -1,0 +1,40 @@
+=== JOURNEY: the write ceremony (declare -> confirm -> verified push) ===
+repo   : <REPO>  (throwaway)
+issue  : #<ISSUE> '<TITLE>'
+
+--- (a) WHAT THE AGENT SEES  (in-sandbox: no tty, no token, no prompt) ---
+SBX| @CLONE_OK  (reads flow with no declaration at all)
+SBX| @PHASE1_START  push BEFORE declare (expect: locked, no prompt)
+SBX| fatal: remote error: rein: writes are locked until you declare your issue. Run: rein declare <n> (then push to agent/<n>/<nonce>)
+SBX| @PHASE1_RC=128
+SBX| @PHASE2_START  rein declare <ISSUE> (blocks for the human)
+SBX| issue #<ISSUE> in <REPO> confirmed — writes are unlocked for this run (push to agent/<ISSUE>/<nonce>)
+SBX| @PHASE2_RC=0
+SBX| @PHASE3_START  push agent/<ISSUE>/<nonce> (expect: lands)
+SBX|  * [new branch]      HEAD -> agent/<ISSUE>/cerem-<NONCE>
+SBX| @PHASE3_RC=0
+SBX| @PHASE4_START  push a non-convention ref (expect: rejected)
+SBX|  ! [remote rejected] HEAD -> cerem-nonconvention-<NONCE> (rein: refs must match agent/<issue>/<nonce> (e.g. agent/73/kx3q))
+SBX| @PHASE4_RC=1
+SBX| @SCRIPT_DONE
+
+--- (b) WHAT THE HUMAN SEES  (host tty: the Form A prompt) ---
+=== rein: agent declares work on an issue ===
+   issue:    #<ISSUE> "<TITLE>"  [open]
+             in <REPO>
+   session:  sess_journey_ceremony (role=implement, repos=[<REPO>])
+   approving covers ALL writes for this run (git push, gh, API).
+
+To approve, type the issue number (<ISSUE>) and press enter.
+To deny, press Ctrl-C or type anything else.
+> <ISSUE>
+  [approved]
+
+--- outcomes: in-sandbox exit codes, then GitHub ground truth ---
+phase 1  push before declare        rc=128   (nonzero: writes locked)
+phase 2  rein declare               rc=0     (zero: human confirmed)
+phase 3  push agent/<issue>/<nonce> rc=0     (zero: verified push)
+phase 4  push non-convention ref    rc=1     (nonzero: ref cross-check)
+Form A prompts fired this run: 1  (one confirmation covers the run)
+branch agent/<ISSUE>/cerem-<NONCE>: LANDED
+branch cerem-nonconvention-<NONCE>: ABSENT

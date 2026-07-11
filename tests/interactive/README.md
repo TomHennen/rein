@@ -4,10 +4,17 @@ Drives the real `rein` binary through a pseudo-terminal with
 [pexpect](https://pexpect.readthedocs.io/), against a **live** throwaway repo and
 a real srt sandbox. Two kinds of file live here:
 
-| kind | naming | swept by `run.sh`? | job |
-|------|--------|--------------------|-----|
-| **assertion tests** | `test_*.py` | yes | fail when behavior regresses |
-| **journeys** | `journey_*.py` | no (run deliberately) | **show** a user journey end to end; output is pasteable into a PR |
+| kind | naming | swept by `run.sh`? | deliverable |
+|------|--------|--------------------|-------------|
+| **journeys** (major user paths) | `journey_*.py` | no (run deliberately) | a checked-in, human-reviewable **golden transcript** (`golden/*.txt`) |
+| **plain tests** (edge cases + invariants) | `test_*.py` | yes | a pass/fail assertion; no transcript |
+
+**A journey's deliverable is a golden transcript.** It runs the path live,
+normalizes the volatile bits, writes `golden/<journey>.txt`, and on re-run
+ASSERTS the live run still matches — drift = red = "re-review this journey". That
+golden is what ships in the PR: a reviewer reads the actual flow, not prose about
+it. Authoring rules (golden rule, the `SBX|` view-split, expect→act→expect,
+shared helpers, `rein init` setup) are in **`tests/interactive/CLAUDE.md`**.
 
 ## The doctrine: pexpect IS the human. No human is required.
 
@@ -36,52 +43,58 @@ human script (`scripts/cp5-manifest-manual-test.sh`).
 
 ### The recipe (copy this)
 
-The declare **fetches the real issue** before prompting (#35 decision E), so the
-write journeys need a REAL open issue on the throwaway — an invented number 404s
-and fails closed, by design.
+Setup is the **`rein init` world**, not `source ./dev-env` (the dead-App footgun
+HANDOFF warns about). `rein init` configures the App + a dev-session; a journey
+resolves its throwaway with `resolve_throwaway_repo` (`REIN_JOURNEY_REPO` → the
+configured dev-session → `REIN_TEST_REPO_A` only as a **labeled legacy shortcut**,
+so journeys don't depend on `REIN_TEST_REPO_A` special-casing — #40).
 
 ```sh
-source ./dev-env                                       # this box; a fresh machine follows HANDOFF.md instead
-gh issue create --repo "$REIN_TEST_REPO_A" \
-  --title "itest: scratch issue for the write ceremony" --body "throwaway"
+# once per machine: rein init (see HANDOFF.md); this box's legacy shortcut is
+# `source ./dev-env`, but the documented path is init.
+python3 tests/interactive/journey_write_ceremony.py    # the journey; makes + closes its OWN issue; exit 0 == matches golden
+REIN_UPDATE_GOLDEN=1 python3 tests/interactive/journey_write_ceremony.py   # regenerate the golden intentionally
 
-REIN_ITEST_ISSUE=<n> \
-REIN_ITEST_TITLE_ISSUE=<n> \
-REIN_ITEST_TITLE_WORD=<a-word-in-that-title> \
+# the gated test_*.py take an issue via env (they don't self-create one). The
+# declare FETCHES the issue, so it must be REAL (an invented number 404s):
+gh issue create --repo <throwaway> --title "..." --body "..."
+REIN_ITEST_ISSUE=<n> REIN_ITEST_TITLE_ISSUE=<n> REIN_ITEST_TITLE_WORD=<word-in-title> \
   tests/interactive/run.sh                             # the whole assertion suite
-
-python3 tests/interactive/journey_write_ceremony.py    # the journey; makes + closes its OWN issue
 ```
 
 ## The journey catalogue
 
 `tests/interactive/` is the living catalogue of rein's user journeys; the set of
-them **is** the behavioral spec. A PR either changes an existing journey (update
-its demo, paste the output in the PR) or introduces a new one (add it here). See
-the working-style rule in `CLAUDE.md`.
+them **is** the behavioral spec. A behavior-changing PR either updates an existing
+journey (regenerate its golden, ship it in the PR) or adds a new one (a new row +
+a new `golden/*.txt`). See `tests/interactive/CLAUDE.md` for the authoring rules.
 
-| # | journey | status | where |
-|---|---------|--------|-------|
-| 1 | **First-time setup** — `rein init`: repo prompt, opt-in `claude` alias, sandbox-health soft-block, shim/symlink | **PARTIAL** | `test_init_interactive.py` (8 live specs). The App-*creation* half is **UNDRIVEABLE** (browser/manifest) → `scripts/cp5-manifest-manual-test.sh`. Machine-label prompt: decided, unbuilt (xfail) |
-| 2 | **The write ceremony** — agent declares an issue → human confirms on the terminal → verified push to `agent/<n>/<nonce>` lands | **COVERED** | `journey_write_ceremony.py` (the demo) + `test_write_approval.py::DeclareConfirmPush` + `test_confirm_shows_title.py` (the prompt shows the *fetched* title/state/home-repo) |
-| 3 | **The pre-declaration lock** — agent pushes before declaring; the proxy denies with a synthesized `fatal: remote error`, no prompt ever fires | **COVERED** | `test_write_approval.py::PreDeclarationLock` + phase 1 of the journey |
-| 4 | **The denial path** — human types the wrong number; the declare fails and writes stay locked | **COVERED** | `test_write_approval.py::test_wrong_answer_denies_and_writes_stay_locked` |
-| 5 | **Ref cross-check** — after approval, a non-`agent/<n>/<nonce>` ref is still rejected (#35 decision C) | **COVERED** | `test_write_approval.py::nonmatching_ref_rejected_after_approval` + phase 4 of the journey |
-| 6 | **Scope expansion** — agent declares a SECOND issue mid-run; the prompt re-fires with the expansion header | **GAP** — the code ships (`ui/prompt` `Expansion`, `internal/declare`), nothing drives it interactively. Next journey to write. *(Note: expansion is per-ISSUE. A second **repo** mid-run is not a journey — the session's `repos:` is a hard ceiling.)* | — |
+| # | journey | status | where + golden |
+|---|---------|--------|----------------|
+| 1 | **First-time setup** — `rein init`: repo prompt, opt-in `claude` alias, sandbox-health soft-block, shim/symlink | **PARTIAL** | `test_init_interactive.py` (8 live specs). The App-*creation* half is **UNDRIVEABLE** (browser/manifest) → `scripts/cp5-manifest-manual-test.sh`. Machine-label prompt: decided, unbuilt (xfail). No golden yet — a `journey_init.py` is the next one to write |
+| 2 | **The write ceremony** — agent declares an issue → human confirms on the terminal → verified push to `agent/<n>/<nonce>` lands | **COVERED** | `journey_write_ceremony.py` → **`golden/write_ceremony.txt`** + `test_write_approval.py::DeclareConfirmPush` + `test_confirm_shows_title.py` (prompt shows the *fetched* title/state/home-repo) |
+| 3 | **The pre-declaration lock** — agent pushes before declaring; the proxy denies with a synthesized `fatal: remote error`, no prompt ever fires | **COVERED** | `test_write_approval.py::PreDeclarationLock` + phase 1 of the ceremony golden |
+| 4 | **The denial path** — human types the wrong number; the declare fails and writes stay locked | **COVERED** | `test_write_approval.py::test_wrong_answer_denies_and_writes_stay_locked` (edge case — a plain test, no golden) |
+| 5 | **Ref cross-check** — after approval, a non-`agent/<n>/<nonce>` ref is still rejected (#35 decision C) | **COVERED** | `test_write_approval.py::nonmatching_ref_rejected_after_approval` + phase 4 of the ceremony golden |
+| 6 | **Scope expansion** — agent declares a SECOND issue mid-run; the prompt re-fires with the expansion header | **GAP** — the code ships (`ui/prompt` `Expansion`, `internal/declare`), nothing drives it interactively. *(Expansion is per-ISSUE. A second **repo** mid-run is not a journey — the session's `repos:` is a hard ceiling.)* | — |
 | 7 | **Real agent in the sandbox** — interactive `claude` under `rein run`, reaching `api.anthropic.com` | **COVERED** | `test_realagent_e2e.py` (live since CP4.5 landed egress) |
-| 8 | **Sandbox hiding** — the agent cannot read credential stores, `~/.ssh`, keyrings | **COVERED, not a journey** — enforced by `rein run`'s own startup self-test + Go tests; there is no human in this loop to demo |
-| 9 | **Direct mode (`--direct`)** — the same ceremony without srt | **GAP** — `reinharness.spawn_rein_run(direct=True)` exists and is unused. Cheap journey to add |
-| 10 | **Misconfig: App not installed on a session repo** | **GAP** — this is issue **#68** (the D4 install-coverage check is skipped entirely on the env-App path). A live journey here would have caught it; the unit tests didn't |
-| 11 | **Misconfig: broken / expired session file** | **GAP** | — |
+| 8 | **tmux-popup grant** — the DEFAULT TUI path (#37): the confirm prompt fires in a tmux popup, not inline; the operator answers there | **GAP** — pexpect can drive it (spawn inside a `tmux` session, assert the popup fires, `send-keys` the answer), gated on `$TMUX`. Its own journey (`journey_tmux_popup.py`), not yet built. The popup is the default for a TUI agent, so it must not stay untested | — |
+| 9 | **Sandbox hiding** — the agent cannot read credential stores, `~/.ssh`, keyrings | **COVERED, not a journey** — enforced by `rein run`'s own startup self-test + Go tests; no human in this loop to review a transcript for | — |
+| 10 | **Direct mode (`--direct`)** — the same ceremony without srt | **GAP** — `reinharness.spawn_rein_run(direct=True)` exists and is unused. Cheap journey to add | — |
+| 11 | **Misconfig: App not installed on a session repo** | **GAP** — this is issue **#68** (the D4 install-coverage check is skipped entirely on the env-App path). A live journey here would have caught it; the unit tests didn't | — |
+| 12 | **Misconfig: broken / expired session file** | **GAP** | — |
 
 Statuses: **COVERED** (a file drives it), **PARTIAL** (some of it), **GAP** (real
 journey, no demo yet), **UNDRIVEABLE** (needs a browser — say so and move on).
 
 ## Prerequisites
 
-- **A live throwaway repo + a working App.** `source ./dev-env` sets `REIN_*`,
-  including `REIN_TEST_REPO_A` — a **throwaway** repo. Hard-constraint #1: this
-  suite touches **only** that repo. The same App setup `rein doctor` validates.
+- **A working App + a throwaway repo.** `rein init` configures the App and a
+  dev-session (the documented path); the repo is resolved by
+  `resolve_throwaway_repo` (`REIN_JOURNEY_REPO` → the configured dev-session →
+  `REIN_TEST_REPO_A` as a **legacy this-box shortcut**). Hard-constraint #1: the
+  suite touches **only** that one throwaway. `source ./dev-env` still works on
+  this VM but is the dead-App footgun HANDOFF warns about — prefer `rein init`.
 - **A healthy sandbox stack:** `srt`, `bwrap`, `socat`, `ripgrep`, and working
   unprivileged user namespaces. (`rein doctor` checks these.)
 - **`python3` + `pexpect`** (developed against 4.9.0).
@@ -166,23 +179,34 @@ they write is the tempdir's.
 A real `claude` running interactively inside the sandbox under `rein run`. Was
 skipped while CP4.5 (sandbox egress) was outstanding; CP4.5 landed, so it runs.
 
-### `journey_write_ceremony.py` — the write ceremony, as a NARRATIVE
+### `journey_write_ceremony.py` — journey #2, with a GOLDEN
 
-Not an assertion test: the ceremony's **showcase**, and journey #2 of the
-catalogue. One real `rein run`, replayed as the two views whose gap *is* the
-security argument — what the **agent** sees in-sandbox (pre-declaration push
+The write ceremony's journey. One real `rein run`, split into the two views whose
+gap *is* the security argument — the **agent** in-sandbox (pre-declaration push
 denied → `rein declare <n>` → verified push succeeds → non-convention ref
-rejected) and what the **human** sees on the tty (the Form A prompt carrying the
-fetched title/state/home-repo, then `[approved]`). It then checks GitHub for which
-branches actually landed.
+rejected) and the **human** on the tty (the Form A prompt carrying the fetched
+title/state/home-repo, then `[approved]`). It asserts the ceremony held (rc per
+phase, exactly one prompt, the right branch landed), then builds a normalized
+transcript and compares it to **`golden/write_ceremony.txt`**.
+
+- Exit **0** = ceremony held AND transcript matches the golden.
+- Exit **1** = golden drift (re-review the journey). `REIN_UPDATE_GOLDEN=1` regenerates.
+- Exit **2** = the ceremony itself broke (a phase rc/prompt/branch was wrong).
+
+The two views are split by **exact tagging**, not heuristics: the in-sandbox
+script prefixes every line it emits with `SBX| ` (piping git through
+`tr '\r' '\n'` so even progress redraws stay tagged), and `reinharness.get_views`
+splits by the tag alone. The steps run in an **expect→act→expect** sequence —
+each emits an `@PHASE..` sentinel the test waits on in order, and the declare's
+host prompt is answered live between them.
 
 **Self-contained:** creates its own throwaway issue via `gh`, deletes both
-branches and closes the issue in a `finally`. Reuse an existing issue with
-`REIN_DEMO_ISSUE=<n>` (then it is left open). Git's progress meter is elided so
-the output works as a doc/screenshot source; `REIN_DEMO_RAW=1` keeps it.
+branches and closes the issue in a `finally`. Reuse an issue with
+`REIN_DEMO_ISSUE=<n>` (then it is left open). Repo resolved via
+`resolve_throwaway_repo` (rein-init way first; #40).
 
-**Out of the `run.sh` sweep** (it's slow — a full sandboxed clone + four network
-round-trips). `run.sh` discovers `test_*.py`; journeys are `journey_*.py`:
+**Out of the `run.sh` sweep** (slow — a full sandboxed clone + four round-trips).
+`run.sh` discovers `test_*.py`; journeys are `journey_*.py`:
 
 ```sh
 python3 tests/interactive/journey_write_ceremony.py
@@ -197,16 +221,19 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
 
 ## Files
 
+- `CLAUDE.md` — journey-authoring guidance (the generic rules; read before adding one).
 - `reinharness.py` — binary build/locate, env loading, the `ReinRun` pexpect
   wrapper (transcript capture, prompt matchers, sentinel parsing), in-sandbox
-  script generation, host-side branch verify/delete, and the isolated-HOME init
-  helpers.
+  script generation, host-side branch verify/delete, isolated-HOME init helpers,
+  and the shared **journey** API (`SBX_TAG`, `get_views`, `normalize_transcript`,
+  the golden IO, `create_issue`/`close_issue`, `resolve_throwaway_repo`).
 - `itest_base.py` — `ReinTestCase` (one-time build, env + throwaway repo,
   disposable-branch cleanup) and the unittest/xfail/skip rationale.
 - `test_write_approval.py`, `test_init_interactive.py`, `test_realagent_e2e.py`,
   `test_confirm_shows_title.py` (gated on a real issue + a title word; a real
   regression spec for #35's Form A title display — see its docstring).
-- `journey_write_ceremony.py` — journey #2, the narrative demo (not swept).
+- `journey_write_ceremony.py` + `golden/write_ceremony.txt` — journey #2 and its
+  checked-in golden transcript (not swept by `run.sh`).
 - `recipes/` — per-test setup scripts for the gated tests (e.g.
   `confirm-shows-title.sh`).
 - `run.sh` — the gated runner.
