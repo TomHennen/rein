@@ -631,13 +631,18 @@ def get_views(text: str) -> tuple[list[str], list[str]]:
 
 
 def normalize_transcript(text: str, subs: list[tuple[str, str]] | None = None) -> str:
-    """Replace volatile bits with stable placeholders for a deterministic golden.
+    """Apply the generic volatile-token rules (the COMPARISON transform).
 
-    `subs` are caller-specific EXACT-string swaps applied FIRST (e.g. the run's
-    real issue number -> <ISSUE>, its repo -> <REPO>), because those are known
-    precisely at runtime and exact swaps beat guessy regexes. Then the generic
-    volatile patterns (nonces, timestamps, tmp paths, run ids, git counts and
-    hashes) are normalized.
+    PR #78 model: the golden FILE is stored RAW (real issue number, repo, title,
+    nonce, object counts). Determinism lives HERE — this transform is applied to
+    BOTH the committed golden and a fresh run before they are diffed, so a run
+    with a different issue / nonce / count still matches. The rules are therefore
+    GENERIC regexes (not runtime-exact swaps): the committed golden's baked-in
+    values differ from a fresh run's, so both must map to the same placeholder
+    with no knowledge of either's specific value.
+
+    `subs` (optional) are exact-string swaps applied first — unused by the write
+    ceremony, kept for a future journey that needs a value regex can't capture.
     """
     for old, new in subs or []:
         if old:
@@ -647,12 +652,20 @@ def normalize_transcript(text: str, subs: list[tuple[str, str]] | None = None) -
     return text
 
 
-# The KNOWN volatile-token rules. Order matters (nonce/timestamp before the
-# generic count/hash rules). Anything a rule does NOT recognize is left VERBATIM
-# — that is the point of the default-keep golden: a brand-new rein line survives
-# into the diff and trips drift. Extend this list (not a per-journey whitelist)
-# when a genuinely new volatile token appears.
+# The GENERIC volatile-token rules — the comparison transform (PR #78). Order
+# matters: issue-number rules run BEFORE the hash rule (a 7+-digit issue would
+# otherwise be eaten as a <HASH>), and RATE before SIZE. Everything a rule does
+# NOT recognize is left verbatim, so a brand-new rein line still trips drift.
+# Extend this list (not a per-journey whitelist) for a genuinely new volatile.
 _NORMALIZE_RULES = [
+    # issue number, in every context it appears (BEFORE the hash rule). NB the
+    # `agent/\d+/` rule also rewrites the literal example `agent/73/kx3q` in
+    # rein's error text — harmless, since it hits both compare sides identically.
+    (r"#\d+", "#<ISSUE>"),
+    (r"agent/\d+/", "agent/<ISSUE>/"),
+    (r"\bdeclare \d+", "declare <ISSUE>"),
+    (r"issue number \(\d+\)", "issue number (<ISSUE>)"),
+    (r"(?m)^> \d+$", "> <ISSUE>"),
     # our disposable branch suffix: <8-digit date>-<6-digit time>-<hex6>
     (r"\d{8}-\d{6}-[0-9a-f]{6}", "<NONCE>"),
     # ISO-ish timestamps the probe writes (2026-07-11T18:17:26Z)
@@ -665,7 +678,11 @@ _NORMALIZE_RULES = [
     (r"/tmp/rein-[A-Za-z0-9_.-]+", "<TMP>"),
     # git transfer chatter: keep the line, normalize every volatile number so the
     # golden is identical whatever the repo's object count / network speed is.
-    (r"\b[0-9a-f]{7,40}\b", "<HASH>"),
+    # The hash rule REQUIRES a hex letter (?=...[a-f]) so a large all-digit object
+    # count (e.g. `Total 1234567`) is NOT mistaken for a hash — it must reach the
+    # count rules below and normalize to <N>. A real git SHA effectively always
+    # has a letter, so this keeps SHA normalization intact.
+    (r"\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b", "<HASH>"),
     (r"\((?:delta|deltas) \d+\)", "(delta <N>)"),
     (r"\(from \d+\)", "(from <N>)"),
     (r"\b(reused|pack-reused|Total|Enumerating objects:|Counting objects:|"
@@ -694,17 +711,18 @@ def is_progress_tick(line: str) -> bool:
     return bool(_PROGRESS_RE.search(line)) and "done." not in line
 
 
-def build_golden_transcript(text: str, subs: list[tuple[str, str]] | None = None) -> str:
-    """The FULL terminal transcript, DEFAULT-KEEP + normalize-known-noise.
+def build_raw_transcript(text: str) -> str:
+    """The RAW terminal transcript that goes in the golden file (PR #78).
 
-    Tom's model (PR #72 ruling): keep EVERY line verbatim except (a) normalized
-    volatile tokens and (b) the one progress-tick rule. So anything rein starts
-    printing that is NOT a recognized volatile survives into the golden and trips
-    drift on re-review — including new security-relevant lines. This replaces the
-    earlier curated whitelist, whose blind spot was exactly a brand-new line.
+    REAL values throughout — real issue number, repo, title, branch nonce, object
+    counts — so a human reviewing the checked-in golden sees exactly what the run
+    produced. The ONLY things stripped are mechanical, not semantic: ANSI escapes,
+    the sub-100% progress redraw ticks (transient `\\r` overwrites a terminal
+    never shows as separate lines; the terminal `done.` summary — with its real
+    counts — stays), and runs of blank lines collapsed to one. NO placeholders.
 
-    Runs of blank lines are collapsed to one (pty spacing/`tr` CRLF artifacts are
-    the only source of consecutive blanks, and their count is timing-flaky).
+    Determinism does NOT live here; it lives in normalize_for_compare, applied to
+    both sides at compare time.
     """
     out: list[str] = []
     prev_blank = False
@@ -719,8 +737,20 @@ def build_golden_transcript(text: str, subs: list[tuple[str, str]] | None = None
         else:
             prev_blank = False
         out.append(ln)
-    body = "\n".join(out).strip("\n") + "\n"
-    return normalize_transcript(body, subs)
+    return "\n".join(out).strip("\n") + "\n"
+
+
+def normalize_for_compare(text: str) -> str:
+    """The comparison LENS: raw transcript -> volatiles replaced by placeholders.
+
+    Applied to BOTH the committed (raw) golden and a fresh (raw) run before they
+    are diffed, so different issue numbers / nonces / object counts still match
+    but a genuinely new or changed line trips drift. Idempotent: re-normalizing an
+    already-normalized transcript is a no-op (test_golden_shape asserts this).
+
+    Use REIN_SHOW_NORMALIZED=1 on a journey to eyeball this form directly.
+    """
+    return normalize_transcript(build_raw_transcript(text))
 
 
 def read_golden(name: str) -> str | None:
@@ -728,25 +758,33 @@ def read_golden(name: str) -> str | None:
     return p.read_text() if p.exists() else None
 
 
-def update_golden(name: str, text: str) -> Path:
+def update_golden(name: str, raw_text: str) -> Path:
+    """Write the RAW transcript to the golden file (real values, no placeholders)."""
     GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
     p = GOLDEN_DIR / name
-    p.write_text(text)
+    p.write_text(raw_text)
     return p
 
 
-def compare_golden(name: str, actual: str) -> tuple[bool, str]:
-    """(matches, unified_diff). Missing golden reads as a diff vs empty."""
+def compare_golden(name: str, fresh_raw: str) -> tuple[bool, str]:
+    """Compare a fresh RAW run to the committed RAW golden, NORMALIZING BOTH first.
+
+    Returns (matches, normalized_unified_diff). The diff is over the NORMALIZED
+    forms, so a human sees the meaningful change, not per-run noise. A missing
+    golden reads as a diff against empty.
+    """
     import difflib
 
-    expected = read_golden(name) or ""
-    if actual == expected:
+    golden_raw = read_golden(name) or ""
+    expected = normalize_for_compare(golden_raw)
+    actual = normalize_for_compare(fresh_raw)
+    if expected == actual:
         return True, ""
     diff = difflib.unified_diff(
         expected.splitlines(keepends=True),
         actual.splitlines(keepends=True),
-        fromfile=f"golden/{name}",
-        tofile="live-run",
+        fromfile=f"golden/{name} (normalized)",
+        tofile="fresh run (normalized)",
     )
     return False, "".join(diff)
 

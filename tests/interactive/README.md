@@ -9,12 +9,14 @@ a real srt sandbox. Two kinds of file live here:
 | **journeys** (major user paths) | `journey_*.py` | no (run deliberately) | a checked-in, human-reviewable **golden transcript** (`golden/*.txt`) |
 | **plain tests** (edge cases + invariants) | `test_*.py` | yes | a pass/fail assertion; no transcript |
 
-**A journey's deliverable is a golden transcript.** It runs the path live,
-normalizes the volatile bits, writes `golden/<journey>.txt`, and on re-run
-ASSERTS the live run still matches — drift = red = "re-review this journey". That
-golden is what ships in the PR: a reviewer reads the actual flow, not prose about
-it. Authoring rules (golden rule, the `SBX|` view-split, expect→act→expect,
-shared helpers, `rein init` setup) are in **`tests/interactive/CLAUDE.md`**.
+**A journey's deliverable is a RAW golden transcript.** It runs the path live and
+writes `golden/<journey>.txt` with the REAL values (issue number, repo, title,
+nonce, object counts) — reviewers see reality, not placeholders. On re-run it
+compares fresh-vs-golden by NORMALIZING BOTH sides first, so a different issue /
+nonce / count still matches while a genuinely new or changed line = drift = red =
+"re-review this journey". Authoring rules (the raw/normalize-on-compare model, the
+`SBX|` view-split, expect→act→expect, shared helpers, `rein init` setup) are in
+**`tests/interactive/CLAUDE.md`**.
 
 ## The doctrine: pexpect IS the human. No human is required.
 
@@ -186,19 +188,23 @@ gap *is* the security argument — the **agent** in-sandbox (pre-declaration pus
 denied → `rein declare <n>` → verified push succeeds → non-convention ref
 rejected) and the **human** on the tty (the Form A prompt carrying the fetched
 title/state/home-repo, then `[approved]`). It asserts the ceremony held (rc per
-phase, exactly one prompt, the right branch landed), then builds the
-**full-normalized transcript** and compares it to **`golden/write_ceremony.txt`**.
+phase, exactly one prompt, the right branch landed), then builds the **raw**
+transcript and compares it — **normalizing both sides** — to
+**`golden/write_ceremony.txt`**.
 
-- Exit **0** = ceremony held AND transcript matches the golden.
-- Exit **1** = golden drift (re-review the journey). `REIN_UPDATE_GOLDEN=1` regenerates.
+- Exit **0** = ceremony held AND the normalized fresh run matches the golden.
+- Exit **1** = drift; the normalized diff prints and the raw fresh transcript is
+  dropped to a scratch path. `REIN_UPDATE_GOLDEN=1` adopts the new raw golden.
 - Exit **2** = the ceremony itself broke (a phase rc/prompt/branch was wrong).
 
-The golden is **default-keep**: every terminal line survives except normalized
-volatiles and dropped progress ticks, so a brand-new `rein:` line trips drift (it
-caught the exit-time token-revoke lines a whitelist had dropped). The two views
-appear inline — the in-sandbox script prefixes every line with `SBX| ` (git piped
-through `tr '\r' '\n'` so even progress redraws stay tagged), so agent vs host is
-visible without splitting. The steps run **expect→act→expect** — each emits an
+The golden file is **RAW** (real repo/issue/nonce/counts) so a reviewer sees
+reality; determinism lives in the comparator, which normalizes both sides. Every
+terminal line is kept, so a brand-new `rein:` line trips drift (it caught the
+exit-time token-revoke lines a whitelist had dropped). `REIN_SHOW_NORMALIZED=1`
+prints the comparison lens. The two views appear inline — the in-sandbox script
+prefixes every line with `SBX| ` (git piped through `tr '\r' '\n'` so even
+progress redraws stay tagged), so agent vs host is visible without splitting. The
+steps run **expect→act→expect** — each emits an
 `@PHASE..` sentinel the test waits on in order, and the declare's host prompt is
 answered live between them.
 
@@ -228,18 +234,20 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
 - `reinharness.py` — binary build/locate, env loading, the `ReinRun` pexpect
   wrapper (transcript capture, prompt matchers, sentinel parsing), in-sandbox
   script generation, host-side branch verify/delete, isolated-HOME init helpers,
-  and the shared **journey** API (`SBX_TAG`, `get_views`, `build_golden_transcript`,
-  the golden IO, `create_issue`/`close_issue`, `resolve_throwaway_repo`).
+  and the shared **journey** API (`SBX_TAG`, `get_views`, `build_raw_transcript`,
+  `normalize_for_compare`, `compare_golden`, `create_issue`/`close_issue`,
+  `resolve_throwaway_repo`).
 - `itest_base.py` — `ReinTestCase` (one-time build, env + throwaway repo,
   disposable-branch cleanup) and the unittest/xfail/skip rationale.
 - `test_write_approval.py`, `test_init_interactive.py`, `test_realagent_e2e.py`,
   `test_confirm_shows_title.py` (gated on a real issue + a title word; a real
   regression spec for #35's Form A title display — see its docstring).
-- `test_golden_shape.py` — stack-free lint: every journey has a golden; no golden
-  leaked a raw volatile. Runs in the `run.sh` sweep and standalone.
+- `test_golden_shape.py` — stack-free lint: every journey has a golden, and
+  `normalize_for_compare` is idempotent on it. Runs in the sweep and standalone.
 - `journey_write_ceremony.py` + `golden/write_ceremony.txt` — journey #2 and its
-  checked-in golden transcript (not swept by `run.sh`).
-- `run-journeys.sh` — the on-demand runner: regenerate every golden live + report drift.
+  checked-in RAW golden transcript (not swept by `run.sh`).
+- `run-journeys.sh` — the on-demand runner: compare each journey to its golden
+  (normalized); `REIN_UPDATE_GOLDEN=1` to adopt, `--normalized` to view the lens.
 - `recipes/` — per-test setup scripts for the gated tests (e.g.
   `confirm-shows-title.sh`).
 - `run.sh` — the gated runner.

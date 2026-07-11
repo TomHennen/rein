@@ -17,41 +17,47 @@ function's output). They protect against regressions but produce no reviewable
 narrative. When in doubt: if a human would want to *read what happened*, it's a
 journey; if they just want it to stay green, it's a plain test.
 
-## The golden-transcript rule
+## The golden-transcript rule: RAW file, normalize on COMPARE (PR #78)
 
 A journey's job is to make the flow **reviewable**, not to make prose claims about
-it. So every journey:
+it. The model, decided on PR #78:
 
-1. Runs the path LIVE (real srt, real GitHub throwaway, real tty via pexpect).
-2. Captures the **full terminal transcript** and — this is the model, decided on
-   PR #72 — **DEFAULT-KEEPS every line, normalizing only known noise**:
-   - **Normalize known volatile tokens**: issue → `<ISSUE>`, branch nonce →
-     `<NONCE>`, timestamps → `<TS>`, git object counts/hashes → `<N>`/`<HASH>`,
-     tmp paths → `<TMP>`, proxy socket/run id → `<PROXY_SOCK>`/`run-<RUNID>`,
-     repo/title → `<REPO>`/`<TITLE>`. These rules live in
-     `reinharness._NORMALIZE_RULES` — extend that list, not a per-journey list.
-   - **Collapse the git progress meter**: drop the intermediate `%` redraw ticks
-     (`reinharness.is_progress_tick`) but KEEP every terminal `done.` line and
-     every error/reject line.
-   - **Everything else stays VERBATIM.** That is the whole point: if rein starts
-     printing a new line — especially a new security-relevant one — it lands in
-     the golden diff = drift = re-review. (This replaced an earlier curated
-     *whitelist* whose blind spot was exactly a brand-new line; `build_golden_
-     transcript` is the default-keep implementation.)
-3. Writes it to `golden/<journey>.txt`, **checked in**. That file is the PR's
-   deliverable — a reviewer reads the actual flow, not a description of it.
-4. On a normal run, ASSERTS the live transcript matches the golden. A drift =
-   a **red** journey = "the behavior changed, re-review it." Regenerate
-   intentionally with `REIN_UPDATE_GOLDEN=1` (or `run-journeys.sh`, below) and
-   commit the new golden.
+- **The golden FILE is RAW.** `REIN_UPDATE_GOLDEN=1` writes exactly what the run
+  produced — real issue number, real repo, real title, real branch nonce, real
+  object counts. NO `<ISSUE>`/`<N>` placeholders in the checked-in file. Reviewers
+  see reality, not a redacted sketch. (`reinharness.build_raw_transcript` builds
+  it: the only things stripped are mechanical — ANSI escapes, the sub-100%
+  progress redraw ticks a terminal never shows as lines, and blank-line runs.
+  Every terminal `done.` line with its real counts stays.)
+- **Determinism lives in the COMPARATOR, not the file.** A fresh run is compared
+  to the golden by normalizing **both** sides first
+  (`reinharness.compare_golden` → `normalize_for_compare`), then diffing. So a run
+  with a different issue / nonce / object count still matches, while a genuinely
+  new or changed line trips drift. The normalization rules are GENERIC regexes in
+  `reinharness._NORMALIZE_RULES` (issue# → `<ISSUE>`, nonce → `<NONCE>`, counts →
+  `<N>`, size/rate → `<SIZE>`/`<RATE>`, tmp/proxy/run-id → `<TMP>`/`<PROXY_SOCK>`/
+  `run-<RUNID>`) — generic because the committed golden's baked-in value differs
+  from a fresh run's, so both must map to the same placeholder with no knowledge
+  of either specific value. Extend that list, never a per-journey whitelist.
+  - The one progress rule (`is_progress_tick`) drops sub-100% redraw ticks but
+    keeps every `done.`/error line. Everything else is kept, so a brand-new rein
+    line — especially a security-relevant one — survives into the normalized diff.
+  - Repo and title are NOT normalized: they are stable by construction (the same
+    throwaway; a hard-coded issue title), so they match verbatim across runs.
+- **On drift**, the runner/journey prints the **normalized** diff (the meaningful
+  change, not per-run noise) and drops the **raw** fresh transcript to a scratch
+  path so you can eyeball reality, then `REIN_UPDATE_GOLDEN=1` to adopt it.
+- **`REIN_SHOW_NORMALIZED=1`** (or `run-journeys.sh --normalized`) prints the
+  normalized form on demand — the lens the comparator looks through, for spotting
+  anything unexpected. Normalization is the lens you look THROUGH, not what you store.
 
-**Prove the golden is deterministic before you commit it:** run the journey
-twice (each run creates its OWN throwaway issue, so the issue numbers differ) and
-confirm the second run reports `[golden OK]`. If it drifts, a volatile slipped
-through un-normalized — add a rule to `_NORMALIZE_RULES`, don't loosen the
-assertion. (`test_golden_shape.py` also greps every committed golden for raw
-scratch paths / run ids / timestamps / nonces and fails if one leaked — a cheap,
-stack-free CI catch for a normalization-rule regression.)
+**Prove determinism before you commit a golden:** run the journey twice (each
+creates its OWN issue, so issue# + nonce differ) and confirm the second reports
+`[golden OK]`. If it drifts, a per-run-varying token slipped through un-normalized
+— add a rule to `_NORMALIZE_RULES`, don't loosen the compare. `test_golden_shape.py`
+additionally asserts every journey has a golden and that `normalize_for_compare`
+is IDEMPOTENT on it (a well-formed, fixpoint comparator) — a cheap, stack-free CI
+catch. It no longer flags real values: raw goldens are supposed to show reality.
 
 ## Splitting one terminal into two views (the principled way)
 
@@ -68,11 +74,10 @@ output.
 
 `get_views` is available when a journey wants the two sides *separately* (e.g. to
 assert an invariant about only the agent's output). The golden itself does NOT
-split them: `build_golden_transcript` keeps the full interleaved transcript, where
+split them: `build_raw_transcript` keeps the full interleaved transcript, where
 the `SBX| `-tagged agent lines and rein's untagged host prompt already show the
-two views inline — which is the more faithful "one terminal" artifact. There is
-**no whitelist** and therefore no brand-new-line blind spot: default-keep means a
-new line survives into the diff.
+two views inline — the faithful "one terminal" artifact. There is **no whitelist**
+and no brand-new-line blind spot: everything is kept, so a new line survives.
 
 ## Readable expect → act → expect
 
@@ -89,10 +94,12 @@ reads top-to-bottom as expect→act→expect even though the child runs once. Do
 in `reinharness.py`, so a new journey is mostly wiring:
 
 - `SBX_TAG`, `get_views` — the exact view split (for per-side assertions).
-- `build_golden_transcript(text, subs)` — the default-keep golden (normalize
-  known noise, drop progress ticks, keep everything else). Use THIS for the
-  golden; `normalize_transcript` / `is_progress_tick` are its building blocks.
-- `read_golden` / `update_golden` / `compare_golden` — the golden file.
+- `build_raw_transcript(text)` — the RAW transcript for the golden file (real
+  values; strips only ANSI + progress ticks + blank runs).
+- `normalize_for_compare(text)` — the comparison lens (raw → placeholders).
+  `normalize_transcript` / `_NORMALIZE_RULES` / `is_progress_tick` are its parts.
+- `read_golden` / `update_golden` (writes RAW) / `compare_golden` (normalizes
+  BOTH sides, then diffs).
 - `create_issue` / `issue_title` / `close_issue` — a throwaway issue to declare.
 - `branch_exists` / `delete_branch` — HOST-side verify + cleanup (operator's gh).
 - `resolve_throwaway_repo` — the repo, resolved the rein-init way (see below).
@@ -101,20 +108,22 @@ in `reinharness.py`, so a new journey is mostly wiring:
 ## Running & refreshing goldens: `run-journeys.sh`
 
 `tests/interactive/run-journeys.sh` is the **manual, on-demand** runner (no timer,
-no background minting): it runs every `journey_*.py` live under
-`REIN_UPDATE_GOLDEN`, then `git diff`s the goldens against what's committed and
-reports a PASS / DRIFT summary with a non-zero exit on drift.
+no background minting). By default it runs every `journey_*.py` live and each one
+COMPARES its fresh run to the committed RAW golden (normalizing both sides), so a
+different issue/nonce/count still passes; it reports PASS / DRIFT / BROKE with a
+non-zero exit on drift. `REIN_UPDATE_GOLDEN=1 run-journeys.sh` instead ADOPTS —
+rewriting each raw golden from a live run (then `git diff` shows what to commit).
+`run-journeys.sh --normalized` also prints each journey's normalized transcript.
 
-- **Before a PR that changes a journey**, run it and **commit the updated golden**
-  — that regenerated golden IS the PR's reviewable deliverable.
-- On a clean tree with no intended change, the goldens are rewritten byte-for-byte,
-  so `git diff` is empty = PASS.
-- A DRIFT leaves the regenerated goldens in your working tree; review the diff,
-  then commit if intended or `git checkout -- tests/interactive/golden/` to discard.
+- Default (compare) mode does NOT rewrite the raw goldens, so a PASS leaves the
+  tree clean. DRIFT prints the normalized diff and a scratch path to the raw
+  fresh transcript; adopt an intended change with `REIN_UPDATE_GOLDEN=1`.
+- **Before a PR that changes a journey**, run with `REIN_UPDATE_GOLDEN=1` and
+  **commit the regenerated raw golden** — that raw golden IS the PR's deliverable.
 
 The `test_*.py` sweep (`run.sh`) additionally runs `test_golden_shape.py`, the
-stack-free lint that fails if a journey has no golden or a golden leaked a raw
-volatile — a cheap gate that needs no srt/GitHub/tty.
+stack-free lint that fails if a journey has no golden or if `normalize_for_compare`
+isn't idempotent on it — a cheap gate that needs no srt/GitHub/tty.
 
 ## Setup: the `rein init` world, NOT `source ./dev-env`
 

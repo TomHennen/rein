@@ -16,16 +16,22 @@ The whole security argument lives in the GAP between two views of one terminal:
   * the HUMAN's view (host tty) — the Form A prompt carrying the issue title,
     state and HOME repo FETCHED from GitHub (decision E), then `[approved]`.
 
-DELIVERABLE: a normalized, human-reviewable transcript checked in at
-`golden/write_ceremony.txt`. Running this journey rebuilds that transcript from a
-LIVE run and compares:
+DELIVERABLE: a RAW, human-reviewable transcript checked in at
+`golden/write_ceremony.txt` — real issue number, real repo, real title, real
+branch nonce, real object counts, so Tom can SEE exactly what the run produced
+(PR #78). Determinism does NOT live in the file: a fresh run is compared to the
+golden by normalizing BOTH sides first (reinharness.compare_golden), so a
+different issue / nonce / count still matches while a genuinely new or changed
+line trips drift.
 
-    python3 tests/interactive/journey_write_ceremony.py          # exit 0 == matches golden
-    REIN_UPDATE_GOLDEN=1 python3 tests/interactive/journey_write_ceremony.py   # regenerate
+    python3 tests/interactive/journey_write_ceremony.py          # exit 0 == matches (normalized)
+    REIN_UPDATE_GOLDEN=1 python3 tests/interactive/journey_write_ceremony.py   # write the RAW golden
+    REIN_SHOW_NORMALIZED=1 python3 tests/interactive/journey_write_ceremony.py # also print the compare lens
     REIN_DEMO_ISSUE=<n>  python3 tests/interactive/journey_write_ceremony.py   # reuse an issue
 
-Exit 0 = ceremony held AND transcript matches the golden. Exit 1 = golden drift
-(re-review the journey). Exit 2 = the ceremony itself broke.
+Exit 0 = ceremony held AND the normalized transcript matches the golden. Exit 1 =
+drift (the RAW fresh transcript is dropped to a scratch path; the NORMALIZED diff
+is printed). Exit 2 = the ceremony itself broke.
 
 HOW THE TWO VIEWS ARE SPLIT (the #72 fix): the in-sandbox script tags EVERY line
 it emits with `SBX| ` (reinharness.SBX_TAG); git's own output is piped through
@@ -44,6 +50,9 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
+
+import pexpect
 
 import reinharness as H
 
@@ -111,39 +120,6 @@ emit "@SCRIPT_DONE"
 
 
 # --------------------------------------------------------------------------
-# Golden transcript assembly (FULL-NORMALIZED, default-keep — PR #72 ruling)
-# --------------------------------------------------------------------------
-
-
-def journey_subs(repo: str, issue: int, title: str) -> list[tuple[str, str]]:
-    """Exact-string swaps for THIS run's known volatiles, applied before the
-    generic rules. Every issue rule is BOUNDED (#, agent/, declare, (), > ) so
-    there is deliberately no bare `{issue}` swap — `rc=128` etc. are never hit.
-    """
-    return [
-        (title, "<TITLE>"),
-        (repo, "<REPO>"),
-        (f"agent/{issue}/", "agent/<ISSUE>/"),
-        (f"#{issue}", "#<ISSUE>"),
-        (f"declare {issue}", "declare <ISSUE>"),
-        (f"({issue})", "(<ISSUE>)"),
-        (f"> {issue}", "> <ISSUE>"),
-    ]
-
-
-def build_transcript(text: str, *, repo: str, issue: int, title: str) -> str:
-    """The golden: the FULL terminal transcript, default-keep + normalize-noise.
-
-    Every line that appeared on the pty survives EXCEPT normalized volatile
-    tokens and dropped progress ticks (H.build_golden_transcript). So a brand-new
-    rein line — e.g. a new `rein: …` security notice — lands in the diff and
-    trips drift on re-review. The interleaved `SBX| `-tagged agent output and
-    rein's untagged host prompt ARE the two views, inline; no separate curation.
-    """
-    return H.build_golden_transcript(text, journey_subs(repo, issue, title))
-
-
-# --------------------------------------------------------------------------
 # The journey
 # --------------------------------------------------------------------------
 
@@ -168,7 +144,13 @@ def run_ceremony(env, repo, issue, title):
 
     rcs: dict[int, int] = {}
     try:
-        # expect -> act -> expect, one step at a time (issue #72 review).
+        # expect -> act -> expect, one step at a time (issue #72 review). A
+        # pexpect EOF/TIMEOUT here means a live step didn't happen — most often a
+        # transient clone failure (GitHub's installation-token mint has secondary
+        # rate limits; see CLAUDE.md). Catch it and return the PARTIAL rcs so
+        # main() reports a clean "ceremony broke" (exit 2) with the transcript,
+        # instead of crashing with a pexpect traceback that a runner would
+        # mislabel as golden drift.
         run.child.expect(r"@CLONE_OK", timeout=180)
 
         run.child.expect(r"@PHASE1_START", timeout=60)
@@ -193,6 +175,10 @@ def run_ceremony(env, repo, issue, title):
 
         run.child.expect(r"@SCRIPT_DONE", timeout=60)
         run.wait(timeout=120)
+    except (pexpect.EOF, pexpect.TIMEOUT):
+        # Partial rcs -> main()'s invariant check fails -> exit 2. The captured
+        # transcript (which will show e.g. @CLONE_FAIL) is still returned.
+        pass
     finally:
         try:
             run.child.close(force=True)
@@ -251,10 +237,10 @@ def main() -> int:
             print(f"  rcs={rcs} prompts={prompts} landed={landed}", flush=True)
             return 2
 
-        # 2) Build the full-normalized transcript (the golden) + compare.
-        transcript = build_transcript(text, repo=repo, issue=issue, title=title)
+        # 2) Build the RAW transcript (real values) and compare NORMALIZED.
+        raw = H.build_raw_transcript(text)
         print()
-        print(transcript, flush=True)
+        print(raw, flush=True)  # what actually happened, real numbers and all
         # The GitHub ground truth is asserted above (exit 2) and echoed here for
         # the human; it is NOT part of the golden, which is the terminal capture.
         print("--- outcomes (asserted; not in the golden) ---", flush=True)
@@ -265,18 +251,31 @@ def main() -> int:
         for br, ok in landed.items():
             print(f"  branch {br}: {'LANDED' if ok else 'ABSENT'}", flush=True)
 
+        # The normalization LENS, on demand (Tom's option): see the form the
+        # comparator actually diffs, to spot anything unexpected.
+        if os.getenv("REIN_SHOW_NORMALIZED"):
+            print("\n--- normalized (the comparison lens) ---", flush=True)
+            print(H.normalize_for_compare(raw), flush=True)
+
         if os.getenv("REIN_UPDATE_GOLDEN"):
-            p = H.update_golden(GOLDEN_NAME, transcript)
-            print(f"[golden UPDATED] {p}", flush=True)
+            p = H.update_golden(GOLDEN_NAME, raw)  # store RAW
+            print(f"[golden UPDATED] {p} (raw)", flush=True)
             return 0
 
-        ok, diff = H.compare_golden(GOLDEN_NAME, transcript)
+        ok, diff = H.compare_golden(GOLDEN_NAME, raw)  # normalizes BOTH sides
         if ok:
-            print("[golden OK] live run matches golden/write_ceremony.txt", flush=True)
+            print("[golden OK] fresh run matches golden/write_ceremony.txt (normalized)", flush=True)
             return 0
-        print("[golden DRIFT] live run != golden/write_ceremony.txt — re-review this journey:", flush=True)
+        # Show the NORMALIZED diff (meaningful change, not noise), and drop the
+        # RAW fresh transcript to a scratch path so the human can eyeball reality
+        # and, if intended, adopt it with REIN_UPDATE_GOLDEN=1.
+        scratch = os.path.join(tempfile.gettempdir(), "write_ceremony.fresh.txt")
+        with open(scratch, "w") as f:
+            f.write(raw)
+        print("[golden DRIFT] fresh run != golden/write_ceremony.txt (normalized) — re-review:", flush=True)
         print(diff, flush=True)
-        print("(regenerate with REIN_UPDATE_GOLDEN=1 once you've confirmed the change is intended)", flush=True)
+        print(f"raw fresh transcript written to {scratch}", flush=True)
+        print("(if the change is intended: REIN_UPDATE_GOLDEN=1 to adopt the new RAW golden)", flush=True)
         return 1
 
     finally:
