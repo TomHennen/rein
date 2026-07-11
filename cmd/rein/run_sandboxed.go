@@ -36,12 +36,17 @@ import (
 	"github.com/TomHennen/rein/internal/approvals"
 	"github.com/TomHennen/rein/internal/brokercore"
 	"github.com/TomHennen/rein/internal/config"
+	"github.com/TomHennen/rein/internal/declare"
+	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
+	"github.com/TomHennen/rein/internal/issuemeta"
 	"github.com/TomHennen/rein/internal/keystore"
+	"github.com/TomHennen/rein/internal/proxy"
 	"github.com/TomHennen/rein/internal/runbroker"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/srt"
 	"github.com/TomHennen/rein/internal/tokencache"
+	"github.com/TomHennen/rein/internal/ui/grant"
 )
 
 // stubGHToken is the non-secret placeholder GH_TOKEN inside the sandbox. gh
@@ -263,7 +268,26 @@ func runSandboxed(cmdline []string) (int, error) {
 		}
 		return c.MintReadOnlyToken(ctx)
 	})
+	// ghReadToken supplies the issues:read-capable read token the declare
+	// fetch and the TM-G6 transfer re-check use (the MintGhReadOnlyToken
+	// shape — the plain read mint lacks issues:read). Cached on disk via
+	// ghsession so repeated declares/re-checks don't burn mints.
+	ghReadToken := func(ctx context.Context) (string, error) {
+		c, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
+		if err != nil {
+			return "", err
+		}
+		tok, _, err := ghsession.EnsureFresh(ghsession.ReadCachePath(stateDir), c.MintGhReadOnlyToken, c.RevokeToken, 5*time.Minute, mintTimeout, logger)
+		return tok, err
+	}
 	mintWrite := brokercore.MintFunc(func(ctx context.Context) (string, time.Time, error) {
+		// TM-G6 re-check on EVERY write-token mint (#35 §6): a confirmed
+		// issue whose canonical URL now 3xx's was transferred — its
+		// confirmation is invalidated; an emptied set fails the mint
+		// (placeholder ⇒ local deny; the agent is told to re-declare).
+		if err := declare.InvalidateTransferred(ctx, stateDir, runID, sess, ghReadToken, logger, os.Stderr); err != nil {
+			return "", time.Time{}, err
+		}
 		c, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
 		if err != nil {
 			return "", time.Time{}, err
@@ -271,6 +295,7 @@ func runSandboxed(cmdline []string) (int, error) {
 		return c.MintWriteToken(ctx)
 	})
 
+	approve := buildSandboxApprove(sess, stateDir, runID, logger)
 	host, err := runbroker.Start(runbroker.Config{
 		SessionID:     sess.ID,
 		SocketPath:    socketPath,
@@ -278,7 +303,8 @@ func runSandboxed(cmdline []string) (int, error) {
 		MintRead:      mintRead,
 		MintWrite:     mintWrite,
 		InScope:       sess.Contains,
-		Approve:       buildSandboxApprove(sess, stateDir, runID, logger),
+		Approve:       approve,
+		Declaration:   buildDeclarationHooks(sess, stateDir, runID, approve, ghReadToken, logger),
 		RecordWrite: func(token string, expiresAt time.Time) {
 			if err := approvals.AppendWriteToken(stateDir, runID, tokencache.Entry{Token: token, ExpiresAt: expiresAt}); err != nil {
 				logger.Printf("write-token ledger append failed (best-effort): %v", err)
@@ -366,7 +392,11 @@ func runSandboxed(cmdline []string) (int, error) {
 		GitAuthorEmail:      gitID.Email,
 		GitConfigGlobalPath: managedGitConfig,
 		AgentTmpDir:         agentTmp,
-		DisableClaudeAIMCP:  srt.DisableClaudeMCPFromEnv(os.Getenv(srt.EnvDisableClaudeMCP)),
+		// The staged rein binary (copied into runTmp below, step 12) goes
+		// on the in-sandbox PATH so `rein declare <n>` works exactly as
+		// the deny messages instruct (#35 §3).
+		ExtraPathDir:       runTmp,
+		DisableClaudeAIMCP: srt.DisableClaudeMCPFromEnv(os.Getenv(srt.EnvDisableClaudeMCP)),
 	})
 
 	// (12) FAIL-OPEN DEFENSE: prove the config actually applied by launching srt
@@ -483,6 +513,46 @@ func buildSandboxApprove(sess session.Session, stateDir, runID string, logger *l
 		}
 		logger.Printf("sandbox write gate: no confirmed issue for run %s; denying write to %q (agent must run `rein declare <n>`)", runID, repo)
 		return false
+	}
+}
+
+// buildDeclarationHooks wires the proxy's #35 declaration gate for a
+// sandboxed run: WriteApproved shares the exact gate closure the broker
+// core uses; IssueConfirmed is the push-ref cross-check against the
+// run's confirmed set; Declare runs the full fetch + Form A + record
+// ceremony OUT of the sandbox (internal/declare), blocking while the
+// human decides.
+func buildDeclarationHooks(sess session.Session, stateDir, runID string, approve func(string) bool, ghReadToken func(context.Context) (string, error), logger *log.Logger) *proxy.DeclarationHooks {
+	sig := approvals.SignatureOf(sess)
+	return &proxy.DeclarationHooks{
+		WriteApproved: approve,
+		IssueConfirmed: func(repo string, n int) bool {
+			rec, err := approvals.ReadApproval(stateDir, runID)
+			return err == nil && approvals.Valid(rec, sig) && rec.HasIssue(repo, n)
+		},
+		Declare: func(issue int, repoArg string) proxy.DeclareOutcome {
+			out := declare.Run(context.Background(), declare.Deps{
+				StateDir: stateDir,
+				RunID:    runID,
+				RunPID:   os.Getpid(),
+				Session:  sess,
+				Fetch: func(ctx context.Context, repo string, n int) (issuemeta.Meta, error) {
+					tok, err := ghReadToken(ctx)
+					if err != nil {
+						return issuemeta.Meta{}, fmt.Errorf("obtain read token for issue fetch: %w", err)
+					}
+					return issuemeta.Fetch(ctx, os.Getenv("REIN_GITHUB_API_BASE"), tok, repo, n)
+				},
+				Grant: grant.Config{
+					TTL:           approvalTTL,
+					PromptTimeout: 60 * time.Second,
+					PreferPopup:   grant.PopupPreferenceFromEnv(),
+					Logger:        logger,
+				},
+				Logger: logger,
+			}, issue, repoArg)
+			return proxy.DeclareOutcome{OK: out.Confirmed, Issue: out.Issue, Message: out.Message, Audit: out.Audit}
+		},
 	}
 }
 

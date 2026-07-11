@@ -93,10 +93,11 @@ type harnessOpts struct {
 	repos            []string          // session scope ceiling; nil ⇒ InScope allows all
 	approve          func(string) bool // write approval hook; nil ⇒ auto-approve
 	respond          func(http.ResponseWriter, *http.Request)
-	mintWErr         error         // if set, MintWrite returns this error
-	auditW           io.Writer     // if set, the proxy writes its audit log here
-	handshakeTimeout time.Duration // if set, overrides the inbound handshake deadline
-	idleTimeout      time.Duration // if set, overrides the inbound idle deadline
+	mintWErr         error             // if set, MintWrite returns this error
+	auditW           io.Writer         // if set, the proxy writes its audit log here
+	handshakeTimeout time.Duration     // if set, overrides the inbound handshake deadline
+	idleTimeout      time.Duration     // if set, overrides the inbound idle deadline
+	decl             *DeclarationHooks // if set, the #35 declaration gate
 }
 
 // syncBuffer is a goroutine-safe bytes.Buffer for capturing the audit log,
@@ -219,6 +220,8 @@ func newHarness(t *testing.T, opts harnessOpts) *harness {
 		Upstream:         upstream,
 		HandshakeTimeout: opts.handshakeTimeout,
 		IdleTimeout:      opts.idleTimeout,
+		Declaration:      opts.decl,
+		InScope:          inScope,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -553,7 +556,9 @@ func TestOneApprovalCoversInfoRefsAndReceivePack(t *testing.T) {
 	c := h.httpClient(false)
 
 	// info/refs?service=git-receive-pack (write advertisement) then the
-	// receive-pack POST — a single push. One approval, one mint must cover both.
+	// receive-pack POST — a single push. ONE MINT must cover both (the
+	// token memo). The approval hook is consulted per request since #35
+	// (a cheap record read, deliberately un-memoized).
 	doGET(t, c, "https://github.com/o/r.git/info/refs?service=git-receive-pack")
 	req, _ := http.NewRequest("POST", "https://github.com/o/r.git/git-receive-pack", strings.NewReader("packdata"))
 	resp, err := c.Do(req)
@@ -562,8 +567,8 @@ func TestOneApprovalCoversInfoRefsAndReceivePack(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	if got := atomic.LoadInt32(&h.approvals); got != 1 {
-		t.Errorf("approvals = %d, want 1 (run-scoped, per repo)", got)
+	if got := atomic.LoadInt32(&h.approvals); got != 2 {
+		t.Errorf("approval-hook consults = %d, want one per write request (2)", got)
 	}
 	if got := atomic.LoadInt32(&h.writeCalls); got != 1 {
 		t.Errorf("write mints = %d, want 1 (cached across the push)", got)

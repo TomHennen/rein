@@ -34,6 +34,7 @@ import (
 	"github.com/TomHennen/rein/internal/approvals"
 	"github.com/TomHennen/rein/internal/broker"
 	"github.com/TomHennen/rein/internal/config"
+	"github.com/TomHennen/rein/internal/declare"
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
@@ -293,6 +294,23 @@ func runCredentialHelperWithConfig(action string, in io.Reader, out, diag io.Wri
 		return client.MintReadOnlyToken(ctx)
 	})
 	mintWrite := broker.MintFunc(func(ctx context.Context) (string, time.Time, error) {
+		// TM-G6 re-check on every write-token mint (#35 §6): a confirmed
+		// issue whose canonical URL now 3xx's was transferred — its
+		// confirmation is invalidated; an emptied set fails the mint (the
+		// broker serves the TM-G8 placeholder, never an error/empty).
+		if runID := os.Getenv("REIN_RUN_ID"); runID != "" {
+			ghReadToken := func(ctx context.Context) (string, error) {
+				client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
+				if err != nil {
+					return "", err
+				}
+				tok, _, err := ghsession.EnsureFresh(ghsession.ReadCachePath(stateDir), client.MintGhReadOnlyToken, client.RevokeToken, 5*time.Minute, mintTimeout, logger)
+				return tok, err
+			}
+			if err := declare.InvalidateTransferred(ctx, stateDir, runID, sess, ghReadToken, logger, diag); err != nil {
+				return "", time.Time{}, err
+			}
+		}
 		client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
 		if err != nil {
 			return "", time.Time{}, err

@@ -36,11 +36,12 @@ type SessionConfig struct {
 	// out-of-scope API call fails server-side anyway.
 	EmptyPathScope string
 
-	// Approve is the human-in-the-loop write approval hook (design §5.5,
-	// wired in CP4). The proxy memoizes its result per repo for the run
-	// (run-scoped approvals, issue #20), so a single git push — info/refs
-	// advertisement THEN receive-pack — prompts at most once. Nil = auto
-	// approve (tests / pre-CP4).
+	// Approve is the write-approval hook. Since issue #35 it NEVER
+	// prompts: production wires a cheap READ of the run's confirmed-issue
+	// set (cmd/rein buildSandboxApprove), consulted on EVERY write-tier
+	// request — deliberately un-memoized so a mid-run record invalidation
+	// (session edit, issue-transfer invalidation) takes effect on the
+	// next request. Nil = auto approve (tests only).
 	Approve func(repo string) bool
 
 	// ReadCache is this session's in-memory read-token cache. Injected so the
@@ -70,8 +71,6 @@ type SessionConfig struct {
 type sessionState struct {
 	mu sync.Mutex
 
-	writesApproved bool // run-scoped: once the human approves, all in-scope writes proceed
-
 	writeToken  string
 	writeExpiry time.Time
 
@@ -83,16 +82,18 @@ type sessionState struct {
 //
 //   - reads: brokercore caches via cfg.ReadCache (per session). Reads never
 //     prompt.
-//   - writes: memoized here — one mint covers a whole run until expiry, so a
-//     git push (info/refs + receive-pack) mints once, not twice.
-//   - approvals: RUN-SCOPED (Tom's model, design §5.3) — the FIRST in-scope
-//     write of the run prompts once (naming the triggering repo), and every
-//     subsequent in-scope write (any repo in the session set, git OR GraphQL)
-//     proceeds without re-prompting until token expiry. Safe because
-//     brokercore.Serve runs inScope BEFORE confirmWrite, so only requests
-//     within the session's declared set (and the empty-path/GraphQL case
-//     EmptyPathScope=allow lets through) ever reach confirm, and the minted
-//     token already covers the full session set (#10).
+//   - writes: token memoized here — one mint covers a whole run until expiry,
+//     so a git push (info/refs + receive-pack) mints once, not twice.
+//   - approvals: the hook is consulted on EVERY write-tier request and is
+//     deliberately NOT memoized (issue #35): production's Approve is a cheap
+//     read of the run's confirmed-issue set, and memoizing the first true
+//     would freeze out mid-run invalidations (session edit, transferred
+//     issue). One ceremony per scope still holds — the ceremony lives at
+//     declare time, not here, so "no re-prompt per write" is unaffected.
+//     Safe because brokercore.Serve runs inScope BEFORE confirmWrite, so only
+//     requests within the session's declared set (and the empty-path/GraphQL
+//     case EmptyPathScope=allow lets through) ever reach confirm, and the
+//     minted token already covers the full session set (#10).
 //   - backoff: after a GitHub rate-limit/abuse mint failure, write mints are
 //     suppressed for MintBackoff so the proxy doesn't hammer the API.
 func NewSessionCore(cfg SessionConfig) *brokercore.Core {
@@ -110,24 +111,11 @@ func NewSessionCore(cfg SessionConfig) *brokercore.Core {
 		readSkew = 30 * time.Second // match direct mode (broker.applyDefaults)
 	}
 
-	// Run-scoped approval: once the human approves the first in-scope write,
-	// every later in-scope write proceeds without re-prompting until expiry.
-	// The first call still passes the triggering repo to cfg.Approve so the
-	// prompt can name it. A nil Approve means auto-approve (tests).
 	confirm := func(repo string) bool {
-		st.mu.Lock()
-		defer st.mu.Unlock()
-		if st.writesApproved {
-			return true
-		}
-		approved := true
 		if cfg.Approve != nil {
-			approved = cfg.Approve(repo)
+			return cfg.Approve(repo)
 		}
-		if approved {
-			st.writesApproved = true
-		}
-		return approved
+		return true
 	}
 
 	mintWrite := func(ctx context.Context) (string, time.Time, error) {

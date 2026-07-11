@@ -65,9 +65,19 @@ type Config struct {
 	// wire a real Approve.
 	Approve func(repo string) bool
 
-	// allowAutoApprove opts in to nil-Approve auto-approval. Unexported on
-	// purpose: only in-package tests can set it, so a production caller can
-	// never silently get an ungated write path by leaving Approve nil.
+	// Declaration is the issue-declaration gate (issue #35): the run's
+	// confirmed-issue hooks + the blocking declare handler, passed through
+	// to the proxy. REQUIRED for a production run: without it the proxy
+	// loses the synthesized instructive denies AND the push-ref
+	// cross-check (§5) — writes would still be gated by Approve, but a
+	// confirmed run could push any ref. Start fails closed on nil unless
+	// the in-package test knob allowAutoApprove is set.
+	Declaration *proxy.DeclarationHooks
+
+	// allowAutoApprove opts in to nil-Approve auto-approval and a nil
+	// Declaration gate. Unexported on purpose: only in-package tests can
+	// set it, so a production caller can never silently get an ungated
+	// write path by leaving Approve/Declaration nil.
 	allowAutoApprove bool
 
 	// RecordWrite, if set, receives each minted write token (issue #20 ledger).
@@ -163,6 +173,12 @@ func Start(cfg Config) (*Host, error) {
 	if cfg.Approve == nil && !cfg.allowAutoApprove {
 		return nil, errors.New("runbroker: Approve is required (a nil write-approval hook would auto-approve every write; wire the approval channel)")
 	}
+	// The declaration gate is equally load-bearing (issue #35): without it
+	// there is no push-ref cross-check and no instructive deny — refuse to
+	// start a production run without it.
+	if cfg.Declaration == nil && !cfg.allowAutoApprove {
+		return nil, errors.New("runbroker: Declaration is required (the #35 issue-declaration gate: synthesized denies + push-ref cross-check; wire it from the run's approval record)")
+	}
 
 	ca, err := proxy.LoadOrCreateCA(cfg.CAKeystore)
 	if err != nil {
@@ -200,12 +216,14 @@ func Start(cfg Config) (*Host, error) {
 	h.lastActivity.Store(now().UnixNano()) // count idle from launch, not epoch
 
 	p, err := proxy.New(proxy.Config{
-		SessionID: cfg.SessionID,
-		Core:      core,
-		CA:        ca,
-		Audit:     audit,
-		Logger:    cfg.Logger,
-		Upstream:  cfg.Upstream,
+		SessionID:   cfg.SessionID,
+		Core:        core,
+		CA:          ca,
+		Audit:       audit,
+		Logger:      cfg.Logger,
+		Upstream:    cfg.Upstream,
+		Declaration: cfg.Declaration,
+		InScope:     cfg.InScope,
 		// Per-request idle signal for the expiry monitor. Cheap atomic store.
 		OnActivity: func() { h.markActivity(now()) },
 	})

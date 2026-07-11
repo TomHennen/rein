@@ -3,6 +3,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/TomHennen/rein/internal/proxy"
 )
 
 func TestParseDeclareArgs(t *testing.T) {
@@ -42,5 +44,14 @@ func TestParseDeclareArgs(t *testing.T) {
 				t.Errorf("got (%d, %q), want (%d, %q)", n, repo, tc.wantN, tc.wantRepo)
 			}
 		})
+	}
+}
+
+// TestDeclareHostURLMatchesProxyConstant pins the client-side URL to the
+// proxy's virtual-host constant so the two can't drift.
+func TestDeclareHostURLMatchesProxyConstant(t *testing.T) {
+	want := "https://" + proxy.DeclareHost + "/v1/declare"
+	if declareHostURL != want {
+		t.Errorf("declareHostURL = %q, want %q (must match proxy.DeclareHost)", declareHostURL, want)
 	}
 }

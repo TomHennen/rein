@@ -51,8 +51,11 @@ func TestConcurrentWriteDedup(t *testing.T) {
 	if got := atomic.LoadInt32(&writeMints); got != 1 {
 		t.Errorf("write mints = %d, want exactly 1 under contention", got)
 	}
-	if got := atomic.LoadInt32(&approvals); got != 1 {
-		t.Errorf("approvals = %d, want exactly 1 under contention", got)
+	// Since issue #35 the approval hook is a cheap record read consulted
+	// on EVERY write-tier request (16 of the 32 here) — deliberately not
+	// memoized, so a mid-run invalidation is never frozen out.
+	if got := atomic.LoadInt32(&approvals); got != 16 {
+		t.Errorf("approval-hook consults = %d, want one per write request (16)", got)
 	}
 }
 
@@ -103,56 +106,63 @@ func TestMintBackoffAfterRateLimit(t *testing.T) {
 	}
 }
 
-// TestApprovalRunScoped verifies write approval is RUN-SCOPED, not per repo:
-// the first in-scope write prompts once (naming the triggering repo), and every
-// later in-scope write — any repo, git OR GraphQL (repo-less, key "") — proceeds
-// without re-prompting. brokercore runs inScope before confirm, so only in-scope
-// requests ever reach here.
-func TestApprovalRunScoped(t *testing.T) {
-	var prompts int32
-	var firstRepo string
+// TestApprovalHookConsultedPerWrite pins the #35 gate semantics: the
+// Approve hook (production: a read of the run's confirmed-issue set) is
+// consulted on EVERY write-tier request and is deliberately NOT memoized
+// — a mid-run invalidation (session edit, transferred-issue removal)
+// must take effect on the very next request, not be frozen out by a
+// remembered first approval. "One ceremony per run" still holds because
+// the ceremony lives at declare time, not in this hook.
+func TestApprovalHookConsultedPerWrite(t *testing.T) {
+	var consults int32
+	gateOpen := atomic.Bool{}
+	gateOpen.Store(true)
 	core := NewSessionCore(SessionConfig{
 		MintWrite: func(ctx context.Context) (string, time.Time, error) {
 			return "wtok", time.Now().Add(time.Hour), nil
 		},
 		Approve: func(repo string) bool {
-			if atomic.AddInt32(&prompts, 1) == 1 {
-				firstRepo = repo
-			}
-			return true
+			atomic.AddInt32(&consults, 1)
+			return gateOpen.Load()
 		},
 	})
 
-	// (a) write to repoA then repoB (both in the session's scope) → ONE prompt.
-	core.Serve(context.Background(), brokercore.Request{Repo: "o/a", WriteIntent: true})
-	core.Serve(context.Background(), brokercore.Request{Repo: "o/b", WriteIntent: true})
-	// (b) a GraphQL mutation (repo-less, empty key) after the approved push →
-	//     NO second prompt.
-	core.Serve(context.Background(), brokercore.Request{Repo: "", WriteIntent: true})
-
-	if got := atomic.LoadInt32(&prompts); got != 1 {
-		t.Errorf("prompts = %d, want exactly 1 (run-scoped)", got)
+	// Writes to two repos + a repo-less GraphQL mutation: all pass while
+	// the confirmed set is non-empty.
+	for _, repo := range []string{"o/a", "o/b", ""} {
+		if cred := core.Serve(context.Background(), brokercore.Request{Repo: repo, WriteIntent: true}); cred.Password != "wtok" {
+			t.Errorf("write to %q should be allowed while the gate is open, got %q", repo, cred.Password)
+		}
 	}
-	if firstRepo != "o/a" {
-		t.Errorf("first prompt named repo %q, want the triggering repo o/a", firstRepo)
+	if got := atomic.LoadInt32(&consults); got != 3 {
+		t.Errorf("consults = %d, want one per write request (3)", got)
+	}
+
+	// Mid-run invalidation: the record went away (session edit / transfer
+	// invalidation) — the very next write must be denied.
+	gateOpen.Store(false)
+	if cred := core.Serve(context.Background(), brokercore.Request{Repo: "o/a", WriteIntent: true}); cred.Password != brokercore.PlaceholderRefused {
+		t.Errorf("write after invalidation must be refused, got %q", cred.Password)
 	}
 }
 
-// TestApprovalInfoRefsThenReceivePack keeps the existing invariant: a single
-// git push (info/refs advertisement + receive-pack) prompts at most once.
-func TestApprovalInfoRefsThenReceivePack(t *testing.T) {
-	var prompts int32
+// TestOnePushOneMint keeps the user-visible cost invariant: a single git
+// push (info/refs advertisement + receive-pack POST) MINTS once — the
+// token memo, not the approval hook, is what dedupes.
+func TestOnePushOneMint(t *testing.T) {
+	var mints int32
 	core := NewSessionCore(SessionConfig{
 		MintWrite: func(ctx context.Context) (string, time.Time, error) {
+			atomic.AddInt32(&mints, 1)
 			return "wtok", time.Now().Add(time.Hour), nil
 		},
-		Approve: func(string) bool { atomic.AddInt32(&prompts, 1); return true },
+		Approve: func(string) bool { return true },
 	})
 	// info/refs?service=git-receive-pack then the receive-pack POST — same repo.
 	core.Serve(context.Background(), brokercore.Request{Repo: "o/r", WriteIntent: true})
 	core.Serve(context.Background(), brokercore.Request{Repo: "o/r", WriteIntent: true})
-	if got := atomic.LoadInt32(&prompts); got != 1 {
-		t.Errorf("prompts = %d, want exactly 1 for one push", got)
+	if got := atomic.LoadInt32(&mints); got != 1 {
+		t.Errorf("mints = %d, want exactly 1 for one push", got)
 	}
 }
 

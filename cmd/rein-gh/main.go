@@ -37,6 +37,7 @@ import (
 
 	"github.com/TomHennen/rein/internal/approvals"
 	"github.com/TomHennen/rein/internal/config"
+	"github.com/TomHennen/rein/internal/declare"
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
@@ -299,6 +300,23 @@ func runWrite(realGh string, args []string, stateDir string, logger *log.Logger)
 		if issues := approvals.ConfirmedIssues(stateDir, runID, sig); len(issues) == 0 {
 			printDeclareHint(os.Stderr, runID)
 			logger.Printf("write tier: no confirmed issue for run %q (gh %s); execing gh with placeholder GH_TOKEN", runID, argSummary(args))
+			return execGhWithoutToken(realGh, args)
+		}
+		// TM-G6 re-check on every write mint (#35 §6): invalidate
+		// transferred-issue confirmations; an emptied set denies the write.
+		ghReadToken := func(ctx context.Context) (string, error) {
+			client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
+			if err != nil {
+				return "", err
+			}
+			tok, _, err := ghsession.EnsureFresh(ghsession.ReadCachePath(stateDir), client.MintGhReadOnlyToken, client.RevokeToken, refreshSkew, mintTimeout, logger)
+			return tok, err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		rerr := declare.InvalidateTransferred(ctx, stateDir, runID, sess, ghReadToken, logger, os.Stderr)
+		cancel()
+		if rerr != nil {
+			logger.Printf("write tier: transfer re-check emptied the confirmed set (%v); execing gh with placeholder GH_TOKEN", rerr)
 			return execGhWithoutToken(realGh, args)
 		}
 	}

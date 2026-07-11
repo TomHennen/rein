@@ -28,6 +28,19 @@ var CDNHosts = []string{
 	"raw.githubusercontent.com",
 }
 
+// DeclareHost is the LOCAL-ONLY virtual host the in-sandbox
+// `rein declare <n>` rides (issue #35 §3). srt routes its CONNECT to the
+// per-run socket like the inject hosts (it must appear in BOTH srt's
+// allowedDomains and mitmProxy.domains), the proxy terminates it with the
+// rein CA — and it is NEVER relayed upstream: the proxy answers every
+// request itself (classLocalDeclare), responses token-free.
+const DeclareHost = "declare.rein.internal"
+
+// LocalHosts are the virtual hosts the proxy terminates AND answers
+// locally (never relayed). Kept as a list next to InjectHosts/CDNHosts so
+// srt config assembly has one source of truth.
+var LocalHosts = []string{DeclareHost}
+
 // hostClass is the injection treatment for a GitHub host (design §4.3).
 type hostClass int
 
@@ -40,6 +53,9 @@ const (
 	classInjectBasic
 	// classPassthrough: CDN / asset hosts — relay egress, NEVER inject.
 	classPassthrough
+	// classLocalDeclare: declare.rein.internal — answered locally by the
+	// declare handler; never relayed upstream, never injected.
+	classLocalDeclare
 )
 
 // classifyHost maps an SNI host to its injection treatment (design §4.3 table).
@@ -54,6 +70,8 @@ func classifyHost(host string) hostClass {
 		return classInjectBasic
 	case "objects.githubusercontent.com", "codeload.github.com", "raw.githubusercontent.com":
 		return classPassthrough
+	case DeclareHost:
+		return classLocalDeclare
 	default:
 		return classRefuse
 	}

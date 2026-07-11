@@ -151,16 +151,20 @@ func Build(p Params) (Config, error) {
 		}
 	}
 
-	// allowedDomains = the GitHub inject + CDN hosts, plus the operator's extra
-	// egress hosts. The extras go here ONLY (never into mitmProxy.domains below),
-	// so a non-GitHub host is passed through to its real endpoint uninjected.
-	// Lowercase + dedupe so an extra domain that duplicates an inject/CDN host
-	// (e.g. someone lists github.com) collapses instead of double-listing — a
-	// duplicate can never create an injection gap (injection is driven by the
-	// exact mitmProxy.domains, not the allowlist), so dedupe, don't error.
-	allowed := make([]string, 0, len(proxy.InjectHosts)+len(proxy.CDNHosts)+len(p.ExtraAllowedDomains))
+	// allowedDomains = the GitHub inject + CDN hosts, the local-only rein
+	// virtual hosts (issue #35: declare.rein.internal must pass srt egress
+	// matching to be routed at all), plus the operator's extra egress
+	// hosts. The extras go into the allowlist ONLY (never into
+	// mitmProxy.domains below), so a non-GitHub host is passed through to
+	// its real endpoint uninjected. Lowercase + dedupe so an extra domain
+	// that duplicates an inject/CDN host (e.g. someone lists github.com)
+	// collapses instead of double-listing — a duplicate can never create
+	// an injection gap (injection is driven by the exact
+	// mitmProxy.domains, not the allowlist), so dedupe, don't error.
+	allowed := make([]string, 0, len(proxy.InjectHosts)+len(proxy.CDNHosts)+len(proxy.LocalHosts)+len(p.ExtraAllowedDomains))
 	allowed = append(allowed, proxy.InjectHosts...)
 	allowed = append(allowed, proxy.CDNHosts...)
+	allowed = append(allowed, proxy.LocalHosts...)
 	allowed = append(allowed, p.ExtraAllowedDomains...)
 	allowed = dedupeLowerKeepOrder(allowed)
 
@@ -185,8 +189,11 @@ func Build(p Params) (Config, error) {
 			StrictAllowlist: true,
 			MitmProxy: &MitmProxy{
 				SocketPath: filepath.Clean(p.SocketPath),
-				// EXACTLY the inject hosts — never CDN, never a wildcard.
-				Domains: append([]string(nil), proxy.InjectHosts...),
+				// EXACTLY the inject hosts + the local-only virtual hosts
+				// (declare.rein.internal routes to rein's socket like the
+				// inject hosts but is answered locally, never relayed) —
+				// never CDN, never a wildcard.
+				Domains: append(append([]string(nil), proxy.InjectHosts...), proxy.LocalHosts...),
 			},
 		},
 		Filesystem: Filesystem{
@@ -245,10 +252,12 @@ func (c Config) Validate() error {
 		// hosts). e.g. *.github.com covers api.github.com; reject it.
 		if strings.HasPrefix(dl, "*.") {
 			suffix := dl[2:]
-			for _, h := range append(append([]string{}, proxy.InjectHosts...), proxy.CDNHosts...) {
+			managed := append(append([]string{}, proxy.InjectHosts...), proxy.CDNHosts...)
+			managed = append(managed, proxy.LocalHosts...)
+			for _, h := range managed {
 				hl := strings.ToLower(h)
 				if hl == suffix || strings.HasSuffix(hl, "."+suffix) {
-					return fmt.Errorf("srt: allowedDomains wildcard %q overlaps managed GitHub host %q (extra egress domains must not conflict with the inject/CDN hosts)", d, h)
+					return fmt.Errorf("srt: allowedDomains wildcard %q overlaps managed host %q (extra egress domains must not conflict with the inject/CDN/local hosts)", d, h)
 				}
 			}
 		}
@@ -276,6 +285,18 @@ func (c Config) Validate() error {
 		}
 		if !injectSet[strings.ToLower(h)] {
 			return fmt.Errorf("srt: inject host %q missing from mitmProxy.domains", h)
+		}
+	}
+	// Same for the local-only virtual hosts (issue #35): a missing
+	// declare.rein.internal route would silently break `rein declare`
+	// in-sandbox — the whole write path would be locked with no way to
+	// unlock it.
+	for _, h := range proxy.LocalHosts {
+		if !allowedSet[strings.ToLower(h)] {
+			return fmt.Errorf("srt: local host %q missing from allowedDomains", h)
+		}
+		if !injectSet[strings.ToLower(h)] {
+			return fmt.Errorf("srt: local host %q missing from mitmProxy.domains", h)
 		}
 	}
 	if len(c.Filesystem.AllowWrite) == 0 {

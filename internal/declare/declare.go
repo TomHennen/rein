@@ -178,3 +178,61 @@ func resolveRepo(sess session.Session, repoFlag string) (string, error) {
 	}
 	return "", fmt.Errorf("this session scopes multiple repos %v; pass --repo owner/name (e.g. `rein declare <n> --repo %s`)", sess.Repos, sess.Repos[0])
 }
+
+// InvalidateTransferred is the per-write-mint TM-G6 re-check (issue #35
+// §6 "issue transferred" row): re-GET the canonical URL of every issue
+// in the run's confirmed set; any 3xx means the issue was transferred —
+// that confirmation is REMOVED from the record (loudly), and if the set
+// empties the mint itself fails (the caller's write degrades to the
+// fail-closed placeholder, and the agent is told to re-declare).
+//
+// Bounded verification failures (network blip, 5xx) KEEP the
+// confirmation and log: "cannot verify" is not "transferred", and the
+// write mint immediately after would surface a real outage anyway.
+// token supplies a read-tier, issues:read-capable token.
+func InvalidateTransferred(ctx context.Context, stateDir, runID string, sess session.Session, token func(ctx context.Context) (string, error), logger *log.Logger, stderr io.Writer) error {
+	if logger == nil {
+		logger = log.New(io.Discard, "", 0)
+	}
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	sig := approvals.SignatureOf(sess)
+	rec, err := approvals.ReadApproval(stateDir, runID)
+	if err != nil || !approvals.Valid(rec, sig) || len(rec.Issues) == 0 {
+		return nil // nothing confirmed — the write gates already deny
+	}
+	tok, err := token(ctx)
+	if err != nil {
+		logger.Printf("transfer re-check: no read token (%v); keeping confirmations (the mint right after will surface a real outage)", err)
+		return nil
+	}
+	kept := make([]approvals.ConfirmedIssue, 0, len(rec.Issues))
+	removed := 0
+	for _, ci := range rec.Issues {
+		cerr := issuemeta.CheckCanonical(ctx, tok, ci.CanonicalURL)
+		switch {
+		case errors.Is(cerr, issuemeta.ErrTransferred):
+			removed++
+			logger.Printf("transfer re-check: issue #%d (%s) was TRANSFERRED; confirmation invalidated", ci.Number, ci.Repo)
+			fmt.Fprintf(stderr, "rein: issue #%d (%s) was TRANSFERRED to another repo — its confirmation is INVALIDATED.\n", ci.Number, ci.Repo)
+			fmt.Fprintln(stderr, "      Re-declare it against its new home: rein declare <n> --repo <owner/name>")
+		case cerr != nil:
+			logger.Printf("transfer re-check: could not verify issue #%d (%v); keeping its confirmation", ci.Number, cerr)
+			kept = append(kept, ci)
+		default:
+			kept = append(kept, ci)
+		}
+	}
+	if removed == 0 {
+		return nil
+	}
+	rec.Issues = kept
+	if err := approvals.WriteApproval(stateDir, runID, rec); err != nil {
+		return fmt.Errorf("rewrite approval record after transfer invalidation: %w", err)
+	}
+	if len(kept) == 0 {
+		return errors.New("all confirmed issues were transferred; run `rein declare <n>` against the issue's new home before writing")
+	}
+	return nil
+}

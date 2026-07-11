@@ -40,6 +40,20 @@ type Config struct {
 	// inject a transport that redirects github.com:443 to an httptest server.
 	Upstream http.RoundTripper
 
+	// Declaration is the issue-declaration gate (issue #35): the run's
+	// confirmed-issue state + the blocking declare handler. Nil disables
+	// the gate — permitted only for bare-relay unit tests; runbroker.Start
+	// requires it for a production run (a nil gate loses the synthesized
+	// instructive denies AND the push-ref cross-check).
+	Declaration *DeclarationHooks
+
+	// InScope is the session's scope ceiling (session.Session.Contains),
+	// used ONLY to order refusals: an out-of-scope write is answered with
+	// the existing refused-scope 403 (via Core), not the declare hint.
+	// The authoritative scope enforcement stays in Core.Serve. Nil ⇒ the
+	// gate treats every repo as in-scope for message-ordering purposes.
+	InScope func(repo string) bool
+
 	// HandshakeTimeout bounds the inbound pre-request window (CONNECT preamble
 	// + TLS handshake). Zero uses defaultHandshakeTimeout. (C1)
 	HandshakeTimeout time.Duration
@@ -69,6 +83,8 @@ type Proxy struct {
 	handshakeTimeout time.Duration
 	idleTimeout      time.Duration
 	onActivity       func()
+	decl             *DeclarationHooks
+	inScope          func(repo string) bool
 }
 
 // Inbound deadline defaults (C1). Handshake ~10s matches the upstream
@@ -119,6 +135,8 @@ func New(cfg Config) (*Proxy, error) {
 		handshakeTimeout: handshakeTimeout,
 		idleTimeout:      idleTimeout,
 		onActivity:       cfg.OnActivity,
+		decl:             cfg.Declaration,
+		inScope:          cfg.InScope,
 		client: &http.Client{
 			// No global timeout: a large git push can legitimately run long,
 			// and the CP1 recipe requires a transparent relay. Failures surface
@@ -337,7 +355,11 @@ func (p *Proxy) serveOne(conn net.Conn, req *http.Request, sni string) (keepAliv
 		if !p.handleExpectContinue(conn, req) {
 			return false
 		}
-		return p.relay(conn, req, sni, "", "passthrough", "")
+		return p.relay(conn, req, sni, "", "passthrough", "", 0, nil)
+
+	case classLocalDeclare:
+		// The declare virtual host: answered locally, never relayed (#35 §3).
+		return p.serveDeclare(conn, req)
 
 	case classInjectBearer, classInjectBasic:
 		return p.serveInject(conn, req, sni, class)
@@ -386,6 +408,25 @@ func (p *Proxy) serveInject(conn net.Conn, req *http.Request, sni string, class 
 	tier, reason := classify.Classify(sni, req.Method, req.URL.Path, req.URL.RawQuery, body)
 	repo := requestRepo(sni, req.URL.Path)
 
+	// Issue-declaration gate (#35 §2): every write-tier request consults
+	// the run's confirmed-issue set BEFORE any mint. Out-of-scope repos
+	// fall through to Core's existing refused-scope answer (scope refusal
+	// outranks the declare hint). Reads are untouched (TM-G8 path as
+	// today).
+	if tierWrite(tier) && p.decl != nil && p.repoAllowedByScope(repo) {
+		approved := p.decl.WriteApproved != nil && p.decl.WriteApproved(repo)
+		if !approved {
+			// Pre-declaration: synthesized local deny per channel (ERR
+			// advertisement for the push handshake; 403 JSON elsewhere).
+			// Nothing minted, GitHub never contacted, body never invited.
+			return p.serveUndeclaredWrite(conn, req, sni, tier.String())
+		}
+		if isReceivePackPOST(sni, req) {
+			// Post-approval push: the ref-level cross-check (§5).
+			return p.serveReceivePack(conn, req, sni, repo, class, tier.String())
+		}
+	}
+
 	cred := p.core.Serve(context.Background(), brokercore.Request{
 		Repo:        repo,
 		WriteIntent: tier == classify.Write,
@@ -427,14 +468,15 @@ func (p *Proxy) serveInject(conn net.Conn, req *http.Request, sni string, class 
 	if class == classInjectBasic {
 		authValue = "Basic " + base64.StdEncoding.EncodeToString([]byte(brokercore.CredentialUsername+":"+cred.Password))
 	}
-	return p.relay(conn, req, sni, authValue, "inject", tier.String())
+	return p.relay(conn, req, sni, authValue, "inject", tier.String(), 0, nil)
 }
 
 // relay forwards req to the real upstream host (sni) and streams the response
 // back. authValue, when non-empty, OVERWRITES the Authorization header
-// (host-aware injection). decision/tier feed the audit line. Returns whether
+// (host-aware injection). decision/tier/issue/refs feed the audit line
+// (issue+refs only set by the verified receive-pack arm). Returns whether
 // the connection may be reused.
-func (p *Proxy) relay(conn net.Conn, req *http.Request, sni, authValue, decision, tier string) (keepAlive bool) {
+func (p *Proxy) relay(conn net.Conn, req *http.Request, sni, authValue, decision, tier string, issue int, refs []string) (keepAlive bool) {
 	// Expect: 100-continue was already answered by the caller (the passthrough
 	// arm, or serveInject after its scope/approval/mint decision), BEFORE any
 	// body read. Upstream still gets Expect stripped via the hop-by-hop set.
@@ -474,11 +516,11 @@ func (p *Proxy) relay(conn net.Conn, req *http.Request, sni, authValue, decision
 	resp, err := p.client.Do(out)
 	if err != nil {
 		p.logger.Printf("%s %q %q -> upstream error: %v", req.Method, sni, req.URL.Path, err)
-		p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Tier: tier, Decision: decision, Status: http.StatusBadGateway})
+		p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Tier: tier, Issue: issue, Refs: refs, Decision: decision, Status: http.StatusBadGateway})
 		p.writeLocalError(conn, http.StatusBadGateway, "rein: upstream request failed")
 		return false
 	}
-	p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Tier: tier, Decision: decision, Status: resp.StatusCode})
+	p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Tier: tier, Issue: issue, Refs: refs, Decision: decision, Status: resp.StatusCode})
 
 	stripHopByHopHeaders(resp.Header) // symmetric with the request direction (F4)
 	// Bound the response write so a slow-reader client can't pin this goroutine
