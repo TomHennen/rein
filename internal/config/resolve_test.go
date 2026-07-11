@@ -181,3 +181,52 @@ func TestResolveApp_NonManifestPhase_FailsClosed(t *testing.T) {
 		t.Fatal("ResolveApp should fail closed on a non-manifest phase")
 	}
 }
+
+// SourceEnv's contract is "InstallationID is always non-zero" — callers
+// (rein run's coverage check) rely on it, and githubapp uses 0 as the "absent"
+// sentinel. A REIN_APP_INSTALLATION_ID literally set to 0 (or negative) is a
+// misconfiguration and must be rejected at the source, not smuggled in as a
+// sentinel collision.
+func TestLoadAppConfig_RejectsNonPositiveInstallationID(t *testing.T) {
+	for _, v := range []string{"0", "-1"} {
+		t.Run(v, func(t *testing.T) {
+			clearAppEnv(t)
+			t.Setenv("REIN_APP_CLIENT_ID", "Iv23li-env")
+			t.Setenv("REIN_APP_PRIVATE_KEY_PATH", "/x.pem")
+			t.Setenv("REIN_APP_INSTALLATION_ID", v)
+			t.Setenv("REIN_TEST_REPO_A", "owner/name")
+
+			if _, _, err := LoadAppConfig(); err == nil {
+				t.Fatalf("LoadAppConfig accepted REIN_APP_INSTALLATION_ID=%s; want an error", v)
+			}
+		})
+	}
+}
+
+// A non-positive env installation id must also make ResolveApp fall THROUGH to
+// the state path rather than returning a bogus SourceEnv config: LoadAppConfig
+// is the env-validity oracle, so rejecting the id there means env is "not
+// present" for resolution purposes.
+func TestResolveApp_NonPositiveEnvInstallIDFallsThroughToState(t *testing.T) {
+	clearAppEnv(t)
+	configDir := useConfigDir(t)
+	t.Setenv("REIN_APP_CLIENT_ID", "Iv23li-env")
+	t.Setenv("REIN_APP_PRIVATE_KEY_PATH", "/x.pem")
+	t.Setenv("REIN_APP_INSTALLATION_ID", "0")
+	t.Setenv("REIN_TEST_REPO_A", "owner/name")
+
+	if err := appsetup.WriteState(configDir, appsetup.State{
+		Phase:   appsetup.PhasePrimaryDone,
+		Primary: &appsetup.AppRecord{ClientID: "Iv23li-state", InstallationID: 777, Slug: "rein-test"},
+	}); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+
+	_, _, source, err := ResolveApp()
+	if err != nil {
+		t.Fatalf("ResolveApp: %v", err)
+	}
+	if source != SourceState {
+		t.Errorf("source = %v, want SourceState (bad env id must not win)", source)
+	}
+}

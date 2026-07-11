@@ -162,15 +162,51 @@ func testSession() session.Session {
 	return session.Session{ID: "s", Role: "implement", Repos: []string{"owner/name"}}
 }
 
+// fakeProber stubs installProber. repoFn answers the per-repo coverage probes;
+// slug/slugErr answer AppSlug, which ONLY the env path's refusal deep-link
+// calls (the state path takes the slug from state.json and must never make that
+// GET — slugCalls is what asserts that, and that the happy path never pays for
+// an error message it doesn't need).
+type fakeProber struct {
+	repoFn    func(ctx context.Context, owner, repo string) (int64, error)
+	slug      string
+	slugErr   error
+	slugCalls int
+}
+
+func (f *fakeProber) RepoInstallationID(ctx context.Context, owner, repo string) (int64, error) {
+	return f.repoFn(ctx, owner, repo)
+}
+
+func (f *fakeProber) AppSlug(ctx context.Context) (string, error) {
+	f.slugCalls++
+	if f.slugErr != nil {
+		return "", f.slugErr
+	}
+	return f.slug, nil
+}
+
+// factory adapts a fakeProber to the installProberFactory seam.
+func (f *fakeProber) factory() installProberFactory {
+	return func(clientID string, ks keystore.Keystore, roleName string) (installProber, error) {
+		return f, nil
+	}
+}
+
+// proberFn is the common case: only the repo probes matter.
+func proberFn(fn func(ctx context.Context, owner, repo string) (int64, error)) installProberFactory {
+	return (&fakeProber{repoFn: fn, slug: "rein-test"}).factory()
+}
+
 func TestResolveAndCacheInstallID_FetchAndCache(t *testing.T) {
 	configDir := eagerStateDir(t)
 	seedPrimaryState(t, configDir, 0) // uncached
 
 	var calledOwner, calledRepo string
-	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+	lookup := proberFn(func(ctx context.Context, owner, repo string) (int64, error) {
 		calledOwner, calledRepo = owner, repo
 		return 777, nil
-	}
+	})
 
 	if err := resolveAndCacheInstallID(context.Background(), testSession(), lookup); err != nil {
 		t.Fatalf("resolveAndCacheInstallID: %v", err)
@@ -197,9 +233,9 @@ func TestResolveAndCacheInstallID_UnchangedNoRewrite(t *testing.T) {
 		t.Fatalf("stat: %v", err)
 	}
 
-	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+	lookup := proberFn(func(ctx context.Context, owner, repo string) (int64, error) {
 		return 555, nil // same id -> no rewrite
-	}
+	})
 	if err := resolveAndCacheInstallID(context.Background(), testSession(), lookup); err != nil {
 		t.Fatalf("resolveAndCacheInstallID: %v", err)
 	}
@@ -216,9 +252,9 @@ func TestResolveAndCacheInstallID_StaleRefresh(t *testing.T) {
 	configDir := eagerStateDir(t)
 	seedPrimaryState(t, configDir, 111) // stale cached id
 
-	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+	lookup := proberFn(func(ctx context.Context, owner, repo string) (int64, error) {
 		return 222, nil // rotated id
-	}
+	})
 	if err := resolveAndCacheInstallID(context.Background(), testSession(), lookup); err != nil {
 		t.Fatalf("resolveAndCacheInstallID: %v", err)
 	}
@@ -232,10 +268,10 @@ func TestResolveAndCacheInstallID_404FailsLoud(t *testing.T) {
 	configDir := eagerStateDir(t)
 	seedPrimaryState(t, configDir, 0)
 
-	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+	f := &fakeProber{slug: "should-not-be-asked", repoFn: func(ctx context.Context, owner, repo string) (int64, error) {
 		return 0, githubapp.ErrAppNotInstalled
-	}
-	err := resolveAndCacheInstallID(context.Background(), testSession(), lookup)
+	}}
+	err := resolveAndCacheInstallID(context.Background(), testSession(), f.factory())
 	if err == nil {
 		t.Fatal("expected fail-loud error on 404")
 	}
@@ -250,6 +286,14 @@ func TestResolveAndCacheInstallID_404FailsLoud(t *testing.T) {
 	if s.Primary.InstallationID != 0 {
 		t.Errorf("state.json should be untouched on 404, got id=%d", s.Primary.InstallationID)
 	}
+	// The state path already HAS the slug (state.json); it must not spend a
+	// GET /app to rediscover it.
+	if f.slugCalls != 0 {
+		t.Errorf("state path must not call AppSlug (called %d times)", f.slugCalls)
+	}
+	if !strings.Contains(err.Error(), "rein-test") {
+		t.Errorf("state-path refusal should use state.json's slug: %v", err)
+	}
 }
 
 // multiRepoSession is a same-owner two-repo session, the shape
@@ -263,12 +307,12 @@ func TestResolveAndCacheInstallID_MultiRepo404OnSecondRepoFailsLoud(t *testing.T
 	configDir := eagerStateDir(t)
 	seedPrimaryState(t, configDir, 555)
 
-	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+	lookup := proberFn(func(ctx context.Context, owner, repo string) (int64, error) {
 		if repo == "other" {
 			return 0, githubapp.ErrAppNotInstalled // Repos[1] not in the installation
 		}
 		return 555, nil
-	}
+	})
 	err := resolveAndCacheInstallID(context.Background(), multiRepoSession(), lookup)
 	if err == nil {
 		t.Fatal("expected fail-loud error when a non-first session repo is uncovered")
@@ -286,10 +330,10 @@ func TestResolveAndCacheInstallID_MultiRepoAllCoveredPasses(t *testing.T) {
 	seedPrimaryState(t, configDir, 0) // uncached
 
 	var probed []string
-	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+	lookup := proberFn(func(ctx context.Context, owner, repo string) (int64, error) {
 		probed = append(probed, owner+"/"+repo)
 		return 777, nil
-	}
+	})
 	if err := resolveAndCacheInstallID(context.Background(), multiRepoSession(), lookup); err != nil {
 		t.Fatalf("all-covered multi-repo session should pass: %v", err)
 	}
@@ -309,12 +353,12 @@ func TestResolveAndCacheInstallID_MultiRepoMismatchedIDsFailsLoud(t *testing.T) 
 	configDir := eagerStateDir(t)
 	seedPrimaryState(t, configDir, 0)
 
-	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+	lookup := proberFn(func(ctx context.Context, owner, repo string) (int64, error) {
 		if repo == "other" {
 			return 222, nil
 		}
 		return 111, nil
-	}
+	})
 	err := resolveAndCacheInstallID(context.Background(), multiRepoSession(), lookup)
 	if err == nil {
 		t.Fatal("expected fail-loud error when session repos resolve to different installation ids")
@@ -333,12 +377,12 @@ func TestResolveAndCacheInstallID_MultiRepoTransientOnOneRepoProceeds(t *testing
 	configDir := eagerStateDir(t)
 	seedPrimaryState(t, configDir, 0) // uncached: the resolved repo supplies the id
 
-	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+	lookup := proberFn(func(ctx context.Context, owner, repo string) (int64, error) {
 		if repo == "other" {
 			return 0, errors.New("github 503 transient")
 		}
 		return 444, nil
-	}
+	})
 	// A transient (non-404) blip on one repo must not ground the session
 	// when another repo resolved an id — mirrors the single-repo
 	// transient-with-cached-id behavior.
@@ -355,9 +399,9 @@ func TestResolveAndCacheInstallID_TransientErrorWithCachedIDProceeds(t *testing.
 	configDir := eagerStateDir(t)
 	seedPrimaryState(t, configDir, 333) // cached id available
 
-	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+	lookup := proberFn(func(ctx context.Context, owner, repo string) (int64, error) {
 		return 0, errors.New("github 503 transient")
-	}
+	})
 	// Non-404 error but a cached id exists -> proceed (nil error).
 	if err := resolveAndCacheInstallID(context.Background(), testSession(), lookup); err != nil {
 		t.Fatalf("should proceed on transient error with cached id, got: %v", err)
@@ -372,9 +416,9 @@ func TestResolveAndCacheInstallID_TransientErrorNoCacheFailsLoud(t *testing.T) {
 	configDir := eagerStateDir(t)
 	seedPrimaryState(t, configDir, 0) // no cached id
 
-	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+	lookup := proberFn(func(ctx context.Context, owner, repo string) (int64, error) {
 		return 0, errors.New("github 503 transient")
-	}
+	})
 	// Non-404 error AND no id to fall back to -> fail closed.
 	if err := resolveAndCacheInstallID(context.Background(), testSession(), lookup); err == nil {
 		t.Fatal("should fail closed on transient error with no cached id")
@@ -402,26 +446,54 @@ func eagerEnvPath(t *testing.T) string {
 	return filepath.Join(dir, "rein")
 }
 
+// uncoveredSecondRepo probes clean on Repos[0] and 404s on Repos[1] — an
+// installation that exists but does not COVER the whole session.
+func uncoveredSecondRepo(ctx context.Context, owner, repo string) (int64, error) {
+	if repo == "other" {
+		return 0, githubapp.ErrAppNotInstalled
+	}
+	return 99, nil
+}
+
 func TestResolveAndCacheInstallID_EnvPathUncoveredRepoRefused(t *testing.T) {
 	eagerEnvPath(t)
 
 	// The env config carries an installation id — but the installation does
-	// not cover Repos[1]. Presence of an id is NOT coverage: refuse.
-	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
-		if repo == "other" {
-			return 0, githubapp.ErrAppNotInstalled
-		}
-		return 99, nil
-	}
-	err := resolveAndCacheInstallID(context.Background(), multiRepoSession(), lookup)
+	// not cover Repos[1]. Presence of an id is NOT coverage: refuse. The
+	// deep-link is the App-SPECIFIC install page, whose slug the env path has
+	// to ask GitHub for (AppSlug) since it has no state.json to read it from.
+	f := &fakeProber{repoFn: uncoveredSecondRepo, slug: "rein-test"}
+	err := resolveAndCacheInstallID(context.Background(), multiRepoSession(), f.factory())
 	if err == nil {
 		t.Fatal("env path with an uncovered session repo must be refused (issue #68)")
 	}
 	if !strings.Contains(err.Error(), "owner/other") {
 		t.Errorf("error should name the uncovered repo owner/other: %v", err)
 	}
-	if !strings.Contains(err.Error(), "installations") {
-		t.Errorf("error should carry an install deep-link: %v", err)
+	if !strings.Contains(err.Error(), "https://github.com/apps/rein-test/installations/new") {
+		t.Errorf("error should carry the App-specific install deep-link: %v", err)
+	}
+}
+
+func TestResolveAndCacheInstallID_EnvPathSlugLookupFailureStillRefuses(t *testing.T) {
+	eagerEnvPath(t)
+
+	// The slug GET fails. The refusal must STILL fire — a cosmetic lookup
+	// failure may degrade the deep-link but must never soften, replace, or
+	// swallow the coverage refusal (fail closed).
+	f := &fakeProber{repoFn: uncoveredSecondRepo, slugErr: errors.New("github 503")}
+	err := resolveAndCacheInstallID(context.Background(), multiRepoSession(), f.factory())
+	if err == nil {
+		t.Fatal("uncovered repo must be refused even when the slug lookup fails")
+	}
+	if !strings.Contains(err.Error(), "owner/other") {
+		t.Errorf("error should still name the uncovered repo: %v", err)
+	}
+	if !strings.Contains(err.Error(), "https://github.com/settings/installations") {
+		t.Errorf("error should fall back to the generic installations link: %v", err)
+	}
+	if strings.Contains(err.Error(), "503") {
+		t.Errorf("the slug-lookup error must not leak into the refusal: %v", err)
 	}
 }
 
@@ -429,11 +501,11 @@ func TestResolveAndCacheInstallID_EnvPathAllCoveredProceedsNoStateWrite(t *testi
 	configDir := eagerEnvPath(t)
 
 	var probed []string
-	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+	f := &fakeProber{slug: "rein-test", repoFn: func(ctx context.Context, owner, repo string) (int64, error) {
 		probed = append(probed, owner+"/"+repo)
 		return 99, nil // agrees with REIN_APP_INSTALLATION_ID
-	}
-	if err := resolveAndCacheInstallID(context.Background(), multiRepoSession(), lookup); err != nil {
+	}}
+	if err := resolveAndCacheInstallID(context.Background(), multiRepoSession(), f.factory()); err != nil {
 		t.Fatalf("all-covered env-path session should proceed: %v", err)
 	}
 	if len(probed) != 2 || probed[0] != "owner/name" || probed[1] != "owner/other" {
@@ -443,14 +515,19 @@ func TestResolveAndCacheInstallID_EnvPathAllCoveredProceedsNoStateWrite(t *testi
 	if _, err := os.Stat(appsetup.StatePath(configDir)); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("env path must not write state.json (stat err = %v)", err)
 	}
+	// The slug is only needed to BUILD a refusal. A covered session must not
+	// pay for a GET /app it never uses.
+	if f.slugCalls != 0 {
+		t.Errorf("AppSlug called %d times on the happy path; want 0", f.slugCalls)
+	}
 }
 
 func TestResolveAndCacheInstallID_EnvPathIDMismatchFailsLoud(t *testing.T) {
 	eagerEnvPath(t)
 
-	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+	lookup := proberFn(func(ctx context.Context, owner, repo string) (int64, error) {
 		return 12345, nil // GitHub disagrees with REIN_APP_INSTALLATION_ID=99
-	}
+	})
 	err := resolveAndCacheInstallID(context.Background(), testSession(), lookup)
 	if err == nil {
 		t.Fatal("env id contradicting GitHub's id must fail loud")
@@ -466,9 +543,9 @@ func TestResolveAndCacheInstallID_EnvPathIDMismatchFailsLoud(t *testing.T) {
 func TestResolveAndCacheInstallID_EnvPathTransientProceeds(t *testing.T) {
 	eagerEnvPath(t)
 
-	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+	lookup := proberFn(func(ctx context.Context, owner, repo string) (int64, error) {
 		return 0, errors.New("github 503 transient")
-	}
+	})
 	// Transient (non-404) failure with an id in hand (the env var) -> warn and
 	// proceed, exactly as the state path does with a cached id. A GitHub blip
 	// must not ground a session the env id would have served.
