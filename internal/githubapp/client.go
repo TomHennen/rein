@@ -61,6 +61,18 @@ type Client struct {
 	// value and existing constructors working. Tests set it to point at an
 	// httptest.Server transport.
 	httpClient *http.Client
+
+	// apiBaseURL, when non-empty, overrides the GitHub API base URL for the
+	// MINT path (threaded to githubauth.WithEnterpriseURL). It is a
+	// TESTABILITY SEAM ONLY: unexported, settable solely from within this
+	// package, and no production constructor ever sets it — when empty
+	// (always, in production) the mint path is byte-for-byte the previous
+	// behavior against https://api.github.com. It exists so a unit test can
+	// point the mint at a local httptest server and assert the
+	// installation-token request body carries the scope ceiling
+	// (Repositories + Permissions) — the invariant a regression dropping
+	// `opts` below would silently break (conformance audit #44 §2).
+	apiBaseURL string
 }
 
 // client returns the injectable HTTP client, defaulting to
@@ -222,11 +234,20 @@ func (c *Client) mint(ctx context.Context, perms *githubauth.InstallationPermiss
 		Permissions:  perms,
 	}
 
+	instOpts := []githubauth.InstallationTokenSourceOpt{
+		githubauth.WithInstallationTokenOptions(opts),
+		githubauth.WithContext(ctx),
+	}
+	if c.apiBaseURL != "" {
+		// Test seam only — see the apiBaseURL field doc. Never set in
+		// production, so this branch is dead outside unit tests.
+		instOpts = append(instOpts, githubauth.WithEnterpriseURL(c.apiBaseURL))
+	}
+
 	instSrc := githubauth.NewInstallationTokenSource(
 		c.cfg.InstallationID,
 		appSrc,
-		githubauth.WithInstallationTokenOptions(opts),
-		githubauth.WithContext(ctx),
+		instOpts...,
 	)
 
 	tok, err := instSrc.Token()

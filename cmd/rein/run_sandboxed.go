@@ -239,11 +239,10 @@ func runSandboxed(cmdline []string) (int, error) {
 	// audit-open failure degrades to no audit sink rather than blocking the run
 	// (fail-closed on security controls, not on observability).
 	var auditW io.Writer
-	auditDir := filepath.Join(stateDir, "audit")
-	if err := os.MkdirAll(auditDir, 0o700); err != nil {
+	auditPath := auditLogPath(stateDir, runID)
+	if err := os.MkdirAll(filepath.Dir(auditPath), 0o700); err != nil {
 		fmt.Fprintf(os.Stderr, "rein: warning: could not create audit dir (%v); proceeding without a per-run audit log\n", err)
 	} else {
-		auditPath := filepath.Join(auditDir, "sandbox-"+runID+".log")
 		af, err := os.OpenFile(auditPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "rein: warning: could not open audit log (%v); proceeding without one\n", err)
@@ -502,6 +501,19 @@ func buildSandboxApprove(sess session.Session, stateDir, runID string, logger *l
 			Repo:    repo,
 		}, cfg)
 	}
+}
+
+// auditLogPath returns the per-run audit log path: stateDir/audit/sandbox-<runID>.log.
+//
+// INVARIANT (design §6, audit #44 §2): this path MUST stay under stateDir,
+// because credentialDenyReadPaths puts stateDir in the sandbox deny-read
+// set — that containment is the only thing keeping the sandboxed agent from
+// reading (and grooming its behavior against) its own audit trail.
+// TestAuditLogPathIsUnderDenyReadSet pins the relationship; if the audit
+// log ever moves, it must move to another deny-read location and the test
+// updated deliberately.
+func auditLogPath(stateDir, runID string) string {
+	return filepath.Join(stateDir, "audit", "sandbox-"+runID+".log")
 }
 
 // credentialDenyReadPaths returns the ambient credential stores plus rein's own
