@@ -78,21 +78,39 @@ must say the ceiling is growing, not just name an issue:
    agent asks to ADD repo:  tomh/wrangle-utils
    for issue:  #41 "Update SBOM serialization"  [open]
                in tomh/wrangle-utils
-   approving adds this repo to the scope ceiling for THE REST OF THIS RUN
-   (all writes to it flow without further prompts; not saved to the session).
+   approving adds this repo to the scope ceiling
+   (all writes to it then flow without further prompts).
 
 To approve, type the issue number (41) and press enter.
 To deny, press Ctrl-C or type anything else.
->
+> 41
+  [approved for this run]
+Also save tomh/wrangle-utils to the session for future runs? [y/N]
+> _
 ```
 
-On approve:
+(Decided — Tom, 2026-07-11: the run-only-vs-persist choice lives **in the
+prompt** as a second question, so nobody has to go run a command elsewhere.
+The number stays the sole approval token — the [y/N] only chooses persistence
+*after* approval has already succeeded, so a stray "y" can never approve
+anything by itself. Default is N = run-only, keeping the standing ceiling a
+deliberate act.)
+
+On approve with `N` (or enter):
 
 ```
-  [approved]
 rein: scope for this run is now tomh/wrangle, tomh/wrangle-utils (+#41 confirmed)
-rein: to make tomh/wrangle-utils permanent for future runs:
-      rein session add-repo tomh/wrangle-utils
+rein: (not saved; future runs will ask again — or run:
+      rein session add-repo tomh/wrangle-utils)
+```
+
+On approve with `y`:
+
+```
+rein: scope is now tomh/wrangle, tomh/wrangle-utils (+#41 confirmed)
+rein: saved to ~/.config/rein/dev-session.yaml — future runs include
+      tomh/wrangle-utils without asking. To undo:
+      rein session remove-repo tomh/wrangle-utils
 ```
 
 Agent side, the blocked declare returns:
@@ -117,41 +135,25 @@ rein: DENIED by the human. tomh/wrangle-utils remains out of scope for this
 The run continues at its original scope; nothing is torn down (deny ≠ error,
 per the #35 decision table).
 
-### 1.3 Approve semantics — run-only vs persisted (both mocked; Tom picks)
+### 1.3 Approve semantics — DECIDED: in-prompt choice (Tom, 2026-07-11)
 
-**Variant 1 — run-only (recommended).** The approval appends a
-`ConfirmedIssue` to the run's approval record — which *already carries a
-`Repo` field* (#35 proposal §5). An expansion is literally a `ConfirmedIssue`
-whose `Repo ∉ sess.Repos`; the run's effective ceiling becomes
-`sess.Repos ∪ {approved expansion repos}`, and write mints scope to that union
-(preserving issue #10's token-scope == ceiling invariant). `dev-session.yaml`
-is untouched; the next run re-prompts if the agent needs the repo again. The
-completion message prints the `session add-repo` one-liner (above) so
-promotion to permanent is one copy-paste — the #59 self-serve-remediation
-philosophy.
+Mechanics under the hood are the former "Variant 1" either way: the approval
+appends a `ConfirmedIssue` to the run's approval record — which *already
+carries a `Repo` field* (#35 proposal §5). An expansion is literally a
+`ConfirmedIssue` whose `Repo ∉ sess.Repos`; the run's effective ceiling
+becomes `sess.Repos ∪ {approved expansion repos}`, and write mints scope to
+that union. If the human answers `y` to the persistence question, rein
+*additionally* appends the repo to `dev-session.yaml` at that moment (same
+validated write path as `session add-repo`).
 
-**Variant 2 — persist on approve.** Same prompt, but approval also appends the
-repo to `dev-session.yaml`:
-
-```
-  [approved]
-rein: scope is now tomh/wrangle, tomh/wrangle-utils
-rein: saved to ~/.config/rein/dev-session.yaml — future runs include
-      tomh/wrangle-utils without asking. To undo:
-      rein session remove-repo tomh/wrangle-utils
-```
-
-**Trade-off:** Variant 2 saves one command for the genuinely-multi-repo
-project, but it makes every in-run "yes" silently widen the *standing* ceiling
-— a one-off "check that other repo's README" permanently grows what every
-future run can mint against, and the ceiling only ever ratchets up. Variant 1
-keeps the yaml a deliberate artifact (changing it is its own act), keeps the
-in-run ceremony consequence-bounded ("this run" is easy to reason about at a
-prompt), and costs one printed command when permanence is actually wanted.
-Run-only also matches the anchor most literally: the session forms itself per
-run; standing config stays minimal. Recommendation: **Variant 1**. (A middle
-path — a second token like `41!` meaning "and persist" — is rejected: the
-non-replayable ceremony should stay single-token, one meaning.)
+Why the [y/N] default is N (run-only): a persist-by-default would make every
+in-run "yes" silently widen the *standing* ceiling — a one-off "check that
+other repo's README" would permanently grow what every future run can mint
+against. Defaulting to run-only keeps the yaml a deliberate artifact while the
+in-prompt `y` still saves the multi-repo project from re-prompting every run.
+(Rejected earlier: a second approval token like `41!` meaning "and persist" —
+the non-replayable ceremony stays single-token, one meaning; the separate
+[y/N] keeps approval and persistence as two distinct acts.)
 
 ### 1.4 The install-coverage wrinkle (#53's 404)
 
@@ -288,36 +290,35 @@ line makes that behavior explicit instead of surprising.
 
 ---
 
-## 3. Flow 3 — init-time multi-repo: recommend YES, quietly
+## 3. Flow 3 — init-time repo: DECIDED single-repo + autodetect (Tom, 2026-07-11)
 
-**Recommendation: accept a repeatable `--repo`, keep the interactive question
-single-answer.** Naming two repos you already know you work across is stating
-a fact about your workspace, not "configuring sessions up front" — the anchor
-rejects making the human *predict scope expansions*, and with #35 settled the
-issue (the actual unit of work) stays agent-declared either way. What would
-violate the anchor is an interactive init that interrogates for a repo *list*
-("any more? any more?") — so the flow keeps one question and points at the two
-growth paths:
+**Decided: `init` stays single-repo, and the default is autodetected from the
+directory you run it in.** Tom's reasoning: with in-prompt scope expansion
+(§1), a repeatable `--repo` at init is unnecessary — the second repo joins the
+session the first time the agent actually needs it, one keystroke at the
+prompt. (The earlier draft recommended a repeatable `--repo`; dropped.)
 
-```
-$ rein init --repo tomh/wrangle --repo tomh/wrangle-utils
-...
-  session: tomh/wrangle, tomh/wrangle-utils  -> ~/.config/rein/dev-session.yaml
-  checking App installation... covers both   OK
-```
-
-Interactive (onboarding-ux-design.md §3 step 5, amended):
+The interactive question below is `rein init`'s (asked when `--repo` is
+absent, onboarding-ux-design.md §3 step 5, amended). The `[tomh/wrangle]`
+default is **autodetected from the cwd's git remote** (`origin` URL →
+owner/name; falls back to no default outside a repo or on a non-github
+remote):
 
 ```
-Which repo should the agent work on? [tomh/wrangle]:
+Which repo should the agent work on? [tomh/wrangle (detected from this dir)]:
   (add more later with `rein session add-repo`, or approve the agent's
    expansion requests as it encounters work)
 ```
 
-Validation is `add-repo`'s: same-owner across all `--repo` values (mixed
-owners is a hard init error naming the rule), install-coverage probe per repo
-with the step-7 install-on-repo offer extended to cover every named repo, not
-just the first.
+**Autodetection also applies to `rein run`:** launched with no session file
+(or a session that doesn't include the cwd's repo), rein detects the repo from
+the cwd's remote and offers it — instead of the current cold "no session"
+error. Exact `run`-side flow to be mocked with the #35 implementation (it
+interacts with declare); the decision of record is: **detect the repo the user
+is standing in and make it the default everywhere a repo must be named.**
+
+Validation is `add-repo`'s either way: same-owner rule, install-coverage probe
+with the step-7 install-on-repo offer.
 
 ---
 
@@ -337,24 +338,25 @@ than hand-maintained.** Three layers, each owned by one artifact:
 
 ---
 
-## 5. Open questions for Tom
+## 5. Decisions (Tom, 2026-07-11 — was "open questions")
 
-1. **Run-only vs persist on expansion approve (§1.3)** — recommendation is
-   run-only + printed `session add-repo` hint. Agree, or is re-prompting every
-   run on a real two-repo project too much friction for dogfood?
-2. **404-at-expansion surfacing (§1.4)** — deny-and-instruct with a one-line
-   terminal notice (recommended), or hold the human prompt open with the
-   deep-link in it ("install, then approve")? The latter is one fewer
-   round-trip but leaves a long-lived prompt that trains impatient approval.
-3. **Command naming** — `rein session show|add-repo|remove-repo` vs a flatter
-   `rein scope`? `session` matches the design's vocabulary; `show` vs `status`
-   also open (`status` may collide with a future daemon-health `rein status`,
-   design §2.5, so `show` is proposed).
-4. **`remove-repo` now or later?** Mocked in passing; narrowing is
-   security-positive and cheap, but it's one more surface for this checkpoint.
-5. **`--repo` repeatable at init (§3)** — confirm this doesn't read as
-   anchor-drift to you; the alternative is single-repo init + `add-repo` only.
-6. **Should `session show` fold in `approval status`'s live-run view (§2.2),
-   or stay yaml-only and point at the existing command?** Mocked folded-in
-   because "what can the agent touch right now" is the question the #53
-   discussion actually raised.
+1. **Run-only vs persist:** neither picked in advance — **ask in the prompt**
+   (§1.2/§1.3 updated): approve with the number, then `Also save to the
+   session? [y/N]`, default run-only. No separate command needed.
+2. **404-at-expansion surfacing:** OPEN pending clarification. The draft's
+   "trains impatient approval" phrasing, in plain words: if the prompt stays
+   open while the human wanders off to install the App (a browser flow that
+   can take minutes), the habit being trained is answering long-lived prompts
+   without re-reading them when they finally get back — the prompt's ceremony
+   value decays with its age. Recommendation stands: deny-and-instruct, fresh
+   prompt after the install. Tom to confirm.
+3. **Naming:** settled — `rein session show|add-repo|remove-repo`.
+4. **`remove-repo`:** later (not in the first checkpoint).
+5. **Init repo flags:** settled — single-repo init with cwd autodetection
+   (§3); repeatable `--repo` dropped as unnecessary given in-prompt expansion.
+   ("Anchor drift" was jargon for: creeping back toward the up-front-
+   configuration model design.md:12 rejects. With expansion-at-encounter in
+   place, the concern is moot.)
+6. **`session show` live-run view:** folded-in as mocked (orchestrator's call
+   on Tom's "IDK" — it answers the question #53 actually raised, and
+   unfolding it later is cheap).
