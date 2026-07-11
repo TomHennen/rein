@@ -70,50 +70,44 @@ def ceremony_script(repo: str, issue: int, good: str, bad: str) -> str:
     sentinel and the test asserts on those IN SEQUENCE — the run reads as
     expect->act->expect even though the child runs once.
 
-    `runtagged` pipes a command's combined output through `tr '\\r' '\\n'` (so
-    git's carriage-return progress redraws become real lines) and prefixes every
-    line with SBX_TAG, preserving the command's own exit code via PIPESTATUS.
+    Commands go through `run` (reinharness.sandbox_preamble): it echoes each one
+    as `SBX| $ <command>` and then tags its output, so the transcript interleaves
+    command -> output -> command like a real terminal session. The @PHASE.. lines
+    (via `emit`) stay as the human-readable "what step is this" labels.
 
-    The clone and pushes pass `--progress` ON PURPOSE. `runtagged` pipes git's
-    stderr (`2>&1 |`) so it can tag each line, which means git no longer sees a
-    tty and would auto-SUPPRESS its transfer meter; `--progress` forces the real
-    chatter (remote: Enumerating/Counting/Compressing/Total, Receiving/Resolving
-    objects) out anyway. The golden KEEPS those lines with counts normalized to
-    <N> (PR #72, Tom's line-53 note); only the sub-100% redraw ticks are dropped.
-    A full (non-shallow) clone is used so the chatter is representative, not a
-    trivial `Total 3`.
+    The clone and pushes pass `--progress` ON PURPOSE. `run` pipes git's stderr
+    (`2>&1 |`) so it can tag each line, which means git no longer sees a tty and
+    would auto-SUPPRESS its transfer meter; `--progress` forces the real chatter
+    (remote: Enumerating/Counting/Compressing/Total, Receiving/Resolving objects)
+    out anyway. The golden KEEPS those lines with counts normalized to <N> at
+    compare time; only the sub-100% redraw ticks are dropped. A full (non-shallow)
+    clone is used so the chatter is representative, not a trivial `Total 3`.
     """
-    tag = H.SBX_TAG
     return f"""
-set +e
-emit() {{ printf '%s%s\\n' '{tag}' "$*"; }}
-runtagged() {{
-  "$@" 2>&1 | tr '\\r' '\\n' | while IFS= read -r l; do printf '%s%s\\n' '{tag}' "$l"; done
-  return ${{PIPESTATUS[0]}}
-}}
+{H.sandbox_preamble()}
 cd "$0"
 rm -rf repo
-runtagged git clone --progress https://github.com/{repo} repo
+run git clone --progress https://github.com/{repo} repo
 cd repo || {{ emit "@CLONE_FAIL"; exit 3; }}
 emit "@CLONE_OK  (reads flow with no declaration at all)"
 
 emit "@PHASE1_START  push BEFORE declare (expect: locked, no prompt)"
 echo "phase 1" >> probe-1.txt
-runtagged git add -A
-runtagged git commit -q -m "ceremony: pre-declaration write attempt"
-runtagged git push --progress origin HEAD:refs/heads/{good}
+run git add -A
+run git commit -q -m "ceremony: pre-declaration write attempt"
+run git push --progress origin HEAD:refs/heads/{good}
 emit "@PHASE1_RC=$?"
 
 emit "@PHASE2_START  rein declare {issue} (blocks for the human)"
-runtagged rein declare {issue}
+run rein declare {issue}
 emit "@PHASE2_RC=$?"
 
 emit "@PHASE3_START  push agent/{issue}/<nonce> (expect: lands)"
-runtagged git push --progress origin HEAD:refs/heads/{good}
+run git push --progress origin HEAD:refs/heads/{good}
 emit "@PHASE3_RC=$?"
 
 emit "@PHASE4_START  push a non-convention ref (expect: rejected)"
-runtagged git push --progress origin HEAD:refs/heads/{bad}
+run git push --progress origin HEAD:refs/heads/{bad}
 emit "@PHASE4_RC=$?"
 emit "@SCRIPT_DONE"
 """

@@ -202,9 +202,10 @@ reality; determinism lives in the comparator, which normalizes both sides. Every
 terminal line is kept, so a brand-new `rein:` line trips drift (it caught the
 exit-time token-revoke lines a whitelist had dropped). `REIN_SHOW_NORMALIZED=1`
 prints the comparison lens. The two views appear inline — the in-sandbox script
-prefixes every line with `SBX| ` (git piped through `tr '\r' '\n'` so even
-progress redraws stay tagged), so agent vs host is visible without splitting. The
-steps run **expect→act→expect** — each emits an
+runs commands through the `run` helper (`reinharness.sandbox_preamble`), which
+echoes each as `SBX| $ <command>` then tags its output, so the transcript reads
+like a real terminal (command → output → command) and agent-vs-host is visible
+without splitting. The steps run **expect→act→expect** — each emits an
 `@PHASE..` sentinel the test waits on in order, and the declare's host prompt is
 answered live between them.
 
@@ -234,7 +235,8 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
 - `reinharness.py` — binary build/locate, env loading, the `ReinRun` pexpect
   wrapper (transcript capture, prompt matchers, sentinel parsing), in-sandbox
   script generation, host-side branch verify/delete, isolated-HOME init helpers,
-  and the shared **journey** API (`SBX_TAG`, `get_views`, `build_raw_transcript`,
+  and the shared **journey** API (`sandbox_preamble`, `SBX_TAG`, `get_views`,
+  `build_raw_transcript`,
   `normalize_for_compare`, `compare_golden`, `create_issue`/`close_issue`,
   `resolve_throwaway_repo`).
 - `itest_base.py` — `ReinTestCase` (one-time build, env + throwaway repo,

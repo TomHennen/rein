@@ -64,13 +64,17 @@ catch. It no longer flags real values: raw goldens are supposed to show reality.
 The human sees ONE terminal where the sandboxed agent's output and rein's
 `/dev/tty` prompt genuinely interleave — that interleaving IS the artifact. Don't
 reconstruct the split by guessing at content. Instead, **tag at the source**: the
-in-sandbox script prefixes every line it emits with `reinharness.SBX_TAG`
-(`SBX| `), piping git's own output through `... | tr '\r' '\n' | ...prefix` so
-even progress redraws stay tagged. Then `reinharness.get_views(text) ->
-(host, agent)` is a single pass — a line is the agent's iff it **starts with** the
-tag (rein's banner echoes the script body, so a *substring* test would mis-file
-those host lines; `startswith` is deliberate). Everything else is rein's own host
-output.
+in-sandbox script runs commands through the `run` helper in
+`reinharness.sandbox_preamble()`, which echoes each command as `SBX| $ <command>`
+and then tags every line of its output (piping through `tr '\r' '\n'` so even
+git's progress redraws stay tagged). So the transcript reads like a real terminal
+session — `$ command` then its output then the next `$ command` — and everything
+the agent produced carries `reinharness.SBX_TAG` (`SBX| `). Then
+`reinharness.get_views(text) -> (host, agent)` is a single pass — a line is the
+agent's iff it **starts with** the tag (rein's banner echoes the script body, so a
+*substring* test would mis-file those host lines; `startswith` is deliberate).
+Everything else is rein's own host output. Use `sandbox_preamble()` in a new
+journey's in-sandbox script so it inherits this exact shape.
 
 `get_views` is available when a journey wants the two sides *separately* (e.g. to
 assert an invariant about only the agent's output). The golden itself does NOT
@@ -93,6 +97,8 @@ reads top-to-bottom as expect→act→expect even though the child runs once. Do
 `journey_write_ceremony.py` is the exemplar. The reusable machinery already lives
 in `reinharness.py`, so a new journey is mostly wiring:
 
+- `sandbox_preamble()` — the bash `emit`/`run` helpers a journey's in-sandbox
+  script prepends; `run <cmd>` echoes `SBX| $ <cmd>` then tags its output.
 - `SBX_TAG`, `get_views` — the exact view split (for per-side assertions).
 - `build_raw_transcript(text)` — the RAW transcript for the golden file (real
   values; strips only ANSI + progress ticks + blank runs).

@@ -7,9 +7,9 @@ rein: sandbox preflight:
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_ceremony (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-v3tg9xri/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-4MD4739Agp69LUk3rr8alg/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-itest-p727s0_w
+  session: sess_journey_ceremony (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-yv22osl1/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-BabIxXsQLNP-ztPiPGgh0w/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-itest-ehszma1i
   the agent sees NO real token; git/gh are injected at the proxy.
   credential stores, ~/.ssh, on-disk keyrings, and keyring/agent sockets are hidden.
   extra egress ALLOWED (direct TLS, NOT injected, no rein token): api.anthropic.com
@@ -19,37 +19,39 @@ rein: launching SANDBOXED (srt) run:
 rein: running: bash -c
 set +e
 emit() { printf '%s%s\n' 'SBX| ' "$*"; }
-runtagged() {
+run() {
+  printf '%s$ %s\n' 'SBX| ' "$*"
   "$@" 2>&1 | tr '\r' '\n' | while IFS= read -r l; do printf '%s%s\n' 'SBX| ' "$l"; done
   return ${PIPESTATUS[0]}
 }
 cd "$0"
 rm -rf repo
-runtagged git clone --progress https://github.com/TomHennen/agentcreds-validation-a repo
+run git clone --progress https://github.com/TomHennen/agentcreds-validation-a repo
 cd repo || { emit "@CLONE_FAIL"; exit 3; }
 emit "@CLONE_OK  (reads flow with no declaration at all)"
 
 emit "@PHASE1_START  push BEFORE declare (expect: locked, no prompt)"
 echo "phase 1" >> probe-1.txt
-runtagged git add -A
-runtagged git commit -q -m "ceremony: pre-declaration write attempt"
-runtagged git push --progress origin HEAD:refs/heads/agent/43/cerem-20260711-210704-2cfa74
+run git add -A
+run git commit -q -m "ceremony: pre-declaration write attempt"
+run git push --progress origin HEAD:refs/heads/agent/50/cerem-20260711-225229-3eede3
 emit "@PHASE1_RC=$?"
 
-emit "@PHASE2_START  rein declare 43 (blocks for the human)"
-runtagged rein declare 43
+emit "@PHASE2_START  rein declare 50 (blocks for the human)"
+run rein declare 50
 emit "@PHASE2_RC=$?"
 
-emit "@PHASE3_START  push agent/43/<nonce> (expect: lands)"
-runtagged git push --progress origin HEAD:refs/heads/agent/43/cerem-20260711-210704-2cfa74
+emit "@PHASE3_START  push agent/50/<nonce> (expect: lands)"
+run git push --progress origin HEAD:refs/heads/agent/50/cerem-20260711-225229-3eede3
 emit "@PHASE3_RC=$?"
 
 emit "@PHASE4_START  push a non-convention ref (expect: rejected)"
-runtagged git push --progress origin HEAD:refs/heads/cerem-nonconvention-20260711-210704-92e454
+run git push --progress origin HEAD:refs/heads/cerem-nonconvention-20260711-225229-3dcd21
 emit "@PHASE4_RC=$?"
 emit "@SCRIPT_DONE"
- /tmp/rein-itest-p727s0_w
+ /tmp/rein-itest-ehszma1i
 ---
+SBX| $ git clone --progress https://github.com/TomHennen/agentcreds-validation-a repo
 SBX| Cloning into 'repo'...
 SBX| remote: Enumerating objects: 57, done.
 SBX| remote: Counting objects: 100% (3/3), done.
@@ -59,40 +61,46 @@ SBX| Receiving objects: 100% (57/57), 5.00 KiB | 5.00 MiB/s, done.
 SBX| Resolving deltas: 100% (17/17), done.
 SBX| @CLONE_OK  (reads flow with no declaration at all)
 SBX| @PHASE1_START  push BEFORE declare (expect: locked, no prompt)
+SBX| $ git add -A
+SBX| $ git commit -q -m ceremony: pre-declaration write attempt
+SBX| $ git push --progress origin HEAD:refs/heads/agent/50/cerem-20260711-225229-3eede3
 SBX| fatal: remote error: rein: writes are locked until you declare your issue. Run: rein declare <n> (then push to agent/<n>/<nonce>)
 SBX| @PHASE1_RC=128
-SBX| @PHASE2_START  rein declare 43 (blocks for the human)
+SBX| @PHASE2_START  rein declare 50 (blocks for the human)
+SBX| $ rein declare 50
 
 === rein: agent declares work on an issue ===
-   issue:    #43 "rein journey: write-ceremony walkthrough (safe to close)"  [open]
+   issue:    #50 "rein journey: write-ceremony walkthrough (safe to close)"  [open]
              in TomHennen/agentcreds-validation-a
    session:  sess_journey_ceremony (role=implement, repos=[TomHennen/agentcreds-validation-a])
    approving covers ALL writes for this run (git push, gh, API).
 
-To approve, type the issue number (43) and press enter.
+To approve, type the issue number (50) and press enter.
 To deny, press Ctrl-C or type anything else.
-> 43
+> 50
   [approved]
-SBX| issue #43 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/43/<nonce>)
+SBX| issue #50 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/50/<nonce>)
 SBX| @PHASE2_RC=0
-SBX| @PHASE3_START  push agent/43/<nonce> (expect: lands)
+SBX| @PHASE3_START  push agent/50/<nonce> (expect: lands)
+SBX| $ git push --progress origin HEAD:refs/heads/agent/50/cerem-20260711-225229-3eede3
 SBX| Enumerating objects: 4, done.
 SBX| Counting objects: 100% (4/4), done.
 SBX| Delta compression using up to 8 threads
 SBX| Compressing objects: 100% (2/2), done.
-SBX| Writing objects: 100% (3/3), 342 bytes | 342.00 KiB/s, done.
+SBX| Writing objects: 100% (3/3), 343 bytes | 343.00 KiB/s, done.
 SBX| Total 3 (delta 1), reused 0 (delta 0), pack-reused 0
 SBX| remote:
-SBX| remote: Create a pull request for 'agent/43/cerem-20260711-210704-2cfa74' on GitHub by visiting:
-SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/43/cerem-20260711-210704-2cfa74
+SBX| remote: Create a pull request for 'agent/50/cerem-20260711-225229-3eede3' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/50/cerem-20260711-225229-3eede3
 SBX| remote:
 SBX| To https://github.com/TomHennen/agentcreds-validation-a
-SBX|  * [new branch]      HEAD -> agent/43/cerem-20260711-210704-2cfa74
+SBX|  * [new branch]      HEAD -> agent/50/cerem-20260711-225229-3eede3
 SBX| @PHASE3_RC=0
 SBX| @PHASE4_START  push a non-convention ref (expect: rejected)
+SBX| $ git push --progress origin HEAD:refs/heads/cerem-nonconvention-20260711-225229-3dcd21
 SBX| Total 0 (delta 0), reused 0 (delta 0), pack-reused 0
 SBX| To https://github.com/TomHennen/agentcreds-validation-a
-SBX|  ! [remote rejected] HEAD -> cerem-nonconvention-20260711-210704-92e454 (rein: refs must match agent/<issue>/<nonce> (e.g. agent/73/kx3q))
+SBX|  ! [remote rejected] HEAD -> cerem-nonconvention-20260711-225229-3dcd21 (rein: refs must match agent/<issue>/<nonce> (e.g. agent/73/kx3q))
 SBX| error: failed to push some refs to 'https://github.com/TomHennen/agentcreds-validation-a'
 SBX| @PHASE4_RC=1
 SBX| @SCRIPT_DONE

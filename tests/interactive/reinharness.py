@@ -594,6 +594,33 @@ GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
 SBX_TAG = "SBX| "
 
 
+def sandbox_preamble() -> str:
+    """Bash helper functions every in-sandbox journey script prepends (shared so
+    #78's scope-expansion journey inherits the exact same transcript shape).
+
+    Two helpers, both tagging their output with SBX_TAG:
+      emit "<text>"   -- a tagged line (step labels, @PHASE.. sentinels).
+      run  <cmd...>   -- ECHO the command as `SBX| $ <cmd>` FIRST, then run it,
+                         tagging each line of its combined output. So the
+                         transcript reads like a real terminal: command, then its
+                         output, then the next command. (Deliberately NOT `set
+                         -x`, which would dump the while-loop/PIPESTATUS internals
+                         of the tagging machinery as noise.) The command's own exit
+                         code is preserved via PIPESTATUS, so `run git push; emit
+                         "@RC=$?"` still records the real push result.
+    """
+    tag = SBX_TAG
+    return (
+        "set +e\n"
+        f"emit() {{ printf '%s%s\\n' '{tag}' \"$*\"; }}\n"
+        "run() {\n"
+        f"  printf '%s$ %s\\n' '{tag}' \"$*\"\n"
+        f"  \"$@\" 2>&1 | tr '\\r' '\\n' | while IFS= read -r l; do printf '%s%s\\n' '{tag}' \"$l\"; done\n"
+        "  return ${PIPESTATUS[0]}\n"
+        "}"
+    )
+
+
 def _pty_lines(text: str) -> list[str]:
     """ANSI-stripped physical lines, with CR treated as a line break.
 
