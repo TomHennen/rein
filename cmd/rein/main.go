@@ -300,6 +300,25 @@ func guardHelperPanic(action string, in io.Reader, out, diag io.Writer) (err err
 			return
 		}
 		// Panicked: drop any partial output and answer from a clean stdout.
+		//
+		// Everything from here on is itself panic-guarded. The diagnostics and
+		// openLog run BEFORE the credential is served, and they touch writers
+		// and a filesystem we no longer trust — a panicking diag writer or log
+		// path would otherwise escape this defer and land right back on the
+		// TM-G8 outcome we are here to prevent (non-zero exit, empty stdout).
+		// The guard guarantees a credential block reaches git no matter what
+		// fails inside the recovery.
+		served := false
+		defer func() {
+			if r2 := recover(); r2 != nil {
+				if action == "get" && !served {
+					fmt.Fprintf(out, "username=%s\npassword=%s\n\n",
+						brokercore.CredentialUsername, brokercore.PlaceholderMintFailed)
+				}
+				err = nil // exit 0: git must never read this as "no answer"
+			}
+		}()
+
 		stack := debug.Stack()
 		fmt.Fprintf(diag, "rein: internal error in the credential helper (panic: %v)\n", r)
 		fmt.Fprintln(diag, "      Serving a placeholder credential so git fails loudly instead of falling back")
@@ -315,6 +334,7 @@ func guardHelperPanic(action string, in io.Reader, out, diag io.Writer) (err err
 		logger.Printf("PANIC in credential helper: %v\n%s", r, stack)
 
 		err = servePanicPlaceholder(action, req, out, diag, logger, r)
+		served = true
 	}()
 
 	err = runCredentialHelperEnv(action, bytes.NewReader(req), &buf, diag)

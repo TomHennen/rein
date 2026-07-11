@@ -367,3 +367,100 @@ func TestDenyEnv_FailsClosedOverInheritedPAT(t *testing.T) {
 		t.Errorf("REIN_GH_SHIM_ACTIVE = %q, want \"1\"", got)
 	}
 }
+
+// --- local tier: the `gh auth login` recovery path (#57 review follow-up) ---
+
+// TestClassify_LocalNouns pins the local tier. These manage gh's OWN state and
+// must never receive a token — not the minted one, not the placeholder.
+func TestClassify_LocalNouns(t *testing.T) {
+	for _, args := range [][]string{
+		{"auth", "login"}, {"auth", "logout"}, {"auth", "token"}, {"auth", "status"},
+		{"config", "get", "editor"}, {"alias", "list"}, {"extension", "install", "x/y"},
+	} {
+		if got := classify(args); got != "local" {
+			t.Errorf("classify(%q) = %q, want \"local\"", args, got)
+		}
+	}
+	// browse stays on the read tier (it can hit the API; it is not
+	// credential management).
+	if got := classify([]string{"browse"}); got != "read" {
+		t.Errorf("classify(browse) = %q, want \"read\" (unchanged)", got)
+	}
+}
+
+// TestRunLocalAndExec_NoTokenAndNoInheritedPAT is the regression test for the
+// `gh auth login` breakage: injecting ANY GH_TOKEN (even the fail-closed
+// placeholder) makes gh 2.67 refuse to run `gh auth login`/`logout` — the very
+// command a user needs to repair a setup where rein cannot mint. The local tier
+// must therefore exec with NO GH_TOKEN at all, while still stripping the user's
+// ambient credentials.
+//
+// runLocalAndExec syscall.Execs, so this asserts on the environment it builds
+// (baseEnv) exactly as TestDenyEnv_FailsClosedOverInheritedPAT does; the
+// end-to-end `gh auth login` behavior is covered by the manual demo.
+func TestRunLocalAndExec_NoTokenAndNoInheritedPAT(t *testing.T) {
+	for _, name := range tokenEnvVars {
+		t.Setenv(name, "ghp_users_real_full_scope_pat")
+	}
+
+	env := map[string]string{}
+	for _, kv := range baseEnv() {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			env[k] = v
+		}
+	}
+
+	if _, present := env["GH_TOKEN"]; present {
+		t.Errorf("local tier must exec with NO GH_TOKEN (any value, including the placeholder, makes `gh auth login` refuse to run); got %q", env["GH_TOKEN"])
+	}
+	assertNoInheritedPAT(t, env)
+}
+
+// TestRefuseAgentAuth_InsideRun pins the other half: the human's recovery path
+// stays open, but the AGENT's does not. Inside a `rein run` (REIN_RUN_ID set)
+// the whole `auth` noun is refused — login/logout/refresh would re-auth as the
+// developer, setup-git would displace the broker outright (TM-G8), and `gh auth
+// token` PRINTS the developer's stored hosts.yml PAT (verified on gh 2.67),
+// which is a direct exfil of the credential the scope ceiling replaces.
+func TestRefuseAgentAuth_InsideRun(t *testing.T) {
+	var msg strings.Builder
+	refuseAgentAuth(&msg, []string{"auth", "login"})
+
+	got := msg.String()
+	for _, want := range []string{"refusing", "gh auth login", "brokered"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("refusal message missing %q, got:\n%s", want, got)
+		}
+	}
+}
+
+// TestReentryEnv_StripsAmbientVarsButKeepsParentToken pins the hardened
+// re-entry path: the parent shim's GH_TOKEN rides through (that is the point
+// of the guard), but the other three credential vars are still stripped.
+func TestReentryEnv_StripsAmbientVarsButKeepsParentToken(t *testing.T) {
+	t.Setenv("GH_TOKEN", "ghs_parent_shim_minted_token")
+	t.Setenv("GITHUB_TOKEN", "ghp_users_real_full_scope_pat")
+	t.Setenv("GH_ENTERPRISE_TOKEN", "ghp_users_real_full_scope_pat")
+	t.Setenv("GITHUB_ENTERPRISE_TOKEN", "ghp_users_real_full_scope_pat")
+
+	// Mirror main()'s re-entry env construction.
+	env := baseEnv()
+	if parentToken := os.Getenv("GH_TOKEN"); parentToken != "" {
+		env = append(env, "GH_TOKEN="+parentToken)
+	}
+
+	seen := map[string]string{}
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			seen[k] = v
+		}
+	}
+	if got := seen["GH_TOKEN"]; got != "ghs_parent_shim_minted_token" {
+		t.Errorf("GH_TOKEN = %q, want the parent shim's minted token carried through", got)
+	}
+	for _, name := range []string{"GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"} {
+		if got := seen[name]; got != "" {
+			t.Errorf("%s = %q survived the re-entry exec; want stripped", name, got)
+		}
+	}
+}

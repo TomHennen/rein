@@ -269,3 +269,62 @@ func TestCredentialHelper_PanicDropsPartialStdout(t *testing.T) {
 		t.Errorf("expected the TM-G8 placeholder on stdout, got:\n%q", got)
 	}
 }
+
+// TestCredentialHelper_PanicOnStoreEraseStaysByteIdentical closes the last gap
+// the security review flagged (#61 (c)): store/erase must remain no-ops on
+// panic, byte-identical to a healthy helper. Correct by construction — the
+// recovery replays the request through the real broker, which no-ops these —
+// but untested until now. A regression that fabricated a credential block here
+// would corrupt git's protocol on every store/erase.
+func TestCredentialHelper_PanicOnStoreErase(t *testing.T) {
+	for _, action := range []string{"store", "erase"} {
+		t.Run(action, func(t *testing.T) {
+			setupHelperTestEnv(t)
+			setTestPanicHook(t, "boom")
+
+			in := strings.NewReader("protocol=https\nhost=github.com\npassword=ghs_x\n\n")
+			var out, diag strings.Builder
+
+			err := guardHelperPanic(action, in, &out, &diag)
+			if err != nil {
+				t.Fatalf("%s must not error on panic: %v", action, err)
+			}
+			if out.String() != "" {
+				t.Errorf("%s must write NOTHING to stdout even on panic, got:\n%q", action, out.String())
+			}
+			if !strings.Contains(diag.String(), "panic") {
+				t.Errorf("%s should still report the panic on stderr, got:\n%s", action, diag.String())
+			}
+		})
+	}
+}
+
+// panicWriter panics on every Write. It stands in for the writers/filesystem
+// the recovery path touches AFTER the first panic (stderr diagnostics, the log
+// file) — all of which we no longer have grounds to trust.
+type panicWriter struct{}
+
+func (panicWriter) Write([]byte) (int, error) { panic("diag writer is broken too") }
+
+// TestCredentialHelper_PanicInsideRecoveryStillServesCredential pins the
+// hardening the security review asked for (#61 (b)): the recovery's own
+// preamble (stderr diagnostics, openLog) runs BEFORE the credential is served.
+// If something in there panics, the outer defer has already fired and a second
+// panic would escape — exiting non-zero with EMPTY STDOUT, which is exactly the
+// TM-G8 failure this whole function exists to prevent. The nested guard must
+// still put a credential on git's stdin.
+func TestCredentialHelper_PanicInsideRecoveryStillServesCredential(t *testing.T) {
+	setupHelperTestEnv(t)
+	setTestPanicHook(t, "boom on the broker path")
+
+	in := strings.NewReader("protocol=https\nhost=github.com\n\n")
+	var out strings.Builder
+
+	err := guardHelperPanic("get", in, &out, panicWriter{})
+	if err != nil {
+		t.Fatalf("must not error even when the recovery path itself panics: %v", err)
+	}
+	if !strings.Contains(out.String(), "password=") {
+		t.Errorf("git must still receive a credential block when the recovery panics, got:\n%q", out.String())
+	}
+}

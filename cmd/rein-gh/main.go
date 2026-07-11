@@ -102,10 +102,21 @@ func main() {
 	// internally forks itself for some operations; the child would
 	// otherwise mint+revoke its own token, doubling API pressure per
 	// user-visible gh command. Skip and exec directly.
+	//
+	// Carry the parent shim's GH_TOKEN through (that is the whole point of
+	// the re-entry guard) but rebuild the rest from baseEnv, so the OTHER
+	// three credential vars are still stripped. On the legitimate path this
+	// is a no-op — the parent already scrubbed them. It matters only when
+	// the guard is set with a stale or hand-crafted environment, where it
+	// keeps three of the four vars from riding through unexamined.
 	if os.Getenv(reentryEnv) != "" {
 		logger.Printf("re-entrant invocation detected (%s set); execing real gh directly", reentryEnv)
+		env := baseEnv()
+		if parentToken := os.Getenv("GH_TOKEN"); parentToken != "" {
+			env = append(env, "GH_TOKEN="+parentToken)
+		}
 		argv := append([]string{realGh}, os.Args[1:]...)
-		if err := syscall.Exec(realGh, argv, os.Environ()); err != nil {
+		if err := syscall.Exec(realGh, argv, env); err != nil {
 			fmt.Fprintf(os.Stderr, "rein-gh: exec %s: %v\n", realGh, err)
 			os.Exit(127)
 		}
@@ -114,9 +125,84 @@ func main() {
 	switch cls {
 	case "write":
 		os.Exit(runWrite(realGh, os.Args[1:], stateDir, logger))
+	case "local":
+		runLocalAndExec(realGh, os.Args[1:], logger)
 	default: // "read" or "unknown"
 		runReadAndExec(realGh, os.Args[1:], stateDir, logger)
 	}
+}
+
+// runLocalAndExec handles the subcommands that manage gh's OWN local state
+// rather than talking to GitHub on rein's behalf: auth, config, alias,
+// extension. They get baseEnv() — every ambient credential still stripped, so
+// nothing leaks — but NO GH_TOKEN of any kind, not even the placeholder.
+//
+// Injecting a token here was a bug (found in review of #57): gh 2.67 refuses
+// to run `gh auth login`/`logout` while GH_TOKEN is set —
+//
+//	"The value of the GH_TOKEN environment variable is being used for
+//	 authentication. To have GitHub CLI store credentials instead, first
+//	 clear the value from the environment."
+//
+// — so the fail-closed placeholder blocked the exact command a user needs to
+// REPAIR a setup where rein cannot mint. The recovery path must stay open.
+//
+// It does not stay open for the AGENT. When REIN_RUN_ID is set we are inside a
+// `rein run`, so the caller is the agent, not the human, and the whole `auth`
+// noun is refused: see refuseAgentAuth.
+func runLocalAndExec(realGh string, args []string, logger *log.Logger) {
+	if noun := firstNoun(args); noun == "auth" && os.Getenv("REIN_RUN_ID") != "" {
+		refuseAgentAuth(os.Stderr, args)
+		logger.Printf("local tier: refused `gh %s` inside a rein run (agent must not manage the developer's gh credentials)", argSummary(args))
+		os.Exit(1)
+	}
+	logger.Printf("local tier: execing gh with no GH_TOKEN (local/credential-management subcommand)")
+	argv := append([]string{realGh}, args...)
+	if err := syscall.Exec(realGh, argv, baseEnv()); err != nil {
+		fmt.Fprintf(os.Stderr, "rein-gh: exec %s: %v\n", realGh, err)
+		os.Exit(127)
+	}
+}
+
+// refuseAgentAuth explains why `gh auth ...` is denied inside a `rein run`.
+//
+// The whole noun is refused, not just the mutating verbs, because every verb
+// under it either mutates the developer's credential store or reads it back:
+//
+//   - login / logout / refresh: re-authenticate or de-authenticate the HUMAN's
+//     gh install. An agent acquiring the developer's login is the thing rein
+//     exists to prevent.
+//   - setup-git: rewrites git's credential.helper — literal broker
+//     displacement (design §5.3, TM-G8).
+//   - token: PRINTS the token gh would use. Verified on gh 2.67. rein run
+//     scrubs the ambient token vars from the agent's env, so gh falls back to
+//     hosts.yml and prints the developer's stored PAT straight to the agent's
+//     stdout. That is a direct exfil of the credential the scope ceiling
+//     exists to replace.
+//   - status (--show-token): same exfil, one flag away.
+//
+// There is no legitimate agent use for any of them: an agent's credentials
+// come from rein, never from gh's keyring. Shape B limit, unchanged: a
+// determined agent can invoke the real gh directly and reach hosts.yml. This
+// closes the shim path, which is the path a well-behaved (or
+// prompt-injected-but-not-adversarial) agent actually takes.
+func refuseAgentAuth(w io.Writer, args []string) {
+	fmt.Fprintf(w, "rein-gh: refusing `gh %s` inside a rein run.\n", argSummary(args))
+	fmt.Fprintln(w, "         `gh auth` manages the DEVELOPER's GitHub credentials: it can log in or out as")
+	fmt.Fprintln(w, "         them, print their stored token, or repoint git's credential helper away from")
+	fmt.Fprintln(w, "         rein. An agent has no business doing any of that — your credentials are brokered")
+	fmt.Fprintln(w, "         by rein and scoped to this session's issue and repos.")
+	fmt.Fprintln(w, "         If you need different access, ask the human to change the session.")
+}
+
+// firstNoun returns the first non-option token in args (the gh noun), or "".
+func firstNoun(args []string) string {
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			return a
+		}
+	}
+	return ""
 }
 
 // tokenEnvVars is the canonical set of ambient GitHub credential env vars.
@@ -138,11 +224,20 @@ var tokenEnvVars = []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "
 // — run.go scrubs these vars and the srt env allowlist drops them. The
 // exposed case is the shim on PATH outside `rein run`.)
 //
-// Removing rather than overwriting also closes a subtler hazard: an env
-// block may carry duplicate keys, and the FIRST occurrence wins for both
-// libc getenv and Go's os.Getenv. Appending "GH_TOKEN=<minted>" to an env
-// that already held an inherited GH_TOKEN was therefore not guaranteed to
-// override it. Strip first, then append: exactly one entry, always ours.
+// Removing rather than overwriting also closes a subtler hazard, and the
+// mechanism differs between this file's two exec paths, which is exactly why
+// "just append and let the last one win" was never safe:
+//
+//   - syscall.Exec (the read/local/re-entry paths) hands the slice to execve
+//     untouched, duplicate keys and all. Go's os.Getenv is FIRST-wins, so an
+//     inherited GH_TOKEN earlier in the block SHADOWED the minted token we
+//     appended after it: the read tier's success leg was serving reads with
+//     the developer's ambient PAT while looking rein-scoped.
+//   - exec.Command (the write path) runs dedupEnv before execve, which keeps
+//     the LAST occurrence — so the same append DID override there.
+//
+// One append, two opposite outcomes. Stripping first collapses both to a
+// single entry that is unambiguously ours, whichever exec path runs.
 func baseEnv() []string {
 	src := os.Environ()
 	out := make([]string, 0, len(src))
@@ -516,10 +611,16 @@ func openLog(stateDir string) (*log.Logger, func(), error) {
 // listed defaults to "read" — safer if we misclassify (the operation
 // will 403 cleanly rather than silently use a wider token).
 //
-// Source: `gh --help` recursive walk against gh 2.67 (the version
-// installed in this VM). Local-only operations (alias, config,
-// extension install, auth login, browse) are intentionally NOT here —
-// they ignore GH_TOKEN anyway, so "read" is fine.
+// Source: `gh --help` recursive walk against gh 2.67 (the version installed
+// in this VM). Local/credential-management operations (auth, config, alias,
+// extension) are intentionally NOT here — but NOT because "they ignore
+// GH_TOKEN anyway, so read is fine", which is what this comment used to claim
+// and is demonstrably FALSE: `gh auth login` and `gh auth logout` on gh 2.67
+// REFUSE to run while GH_TOKEN is set, and `gh auth token` prints whatever
+// token gh would use. That stale claim is what let the read tier's
+// fail-closed placeholder block the user's own recovery command. They now
+// route to their own "local" tier (classify → runLocalAndExec): no token
+// injected at all, ambient credentials still stripped.
 var writeSubcommands = map[[2]string]bool{
 	{"issue", "create"}:   true,
 	{"issue", "edit"}:     true,
@@ -615,7 +716,30 @@ var writeSubcommands = map[[2]string]bool{
 	{"run", "delete"}: true,
 }
 
-// classify returns "read", "write", or "unknown" for an argv (without
+// localOnlyNouns are the gh nouns that manage gh's OWN local state instead of
+// acting on GitHub with rein's credential. They route to the "local" tier:
+// exec'd with a scrubbed env and NO GH_TOKEN (see runLocalAndExec).
+//
+//   - auth:      credential management. Injecting a token BLOCKS `gh auth
+//     login`/`logout` outright on gh 2.67, i.e. the user's own
+//     recovery command. Refused entirely inside a `rein run`
+//     (refuseAgentAuth).
+//   - config:    gh's own settings file. Never touches GitHub.
+//   - alias:     gh's own alias file. Never touches GitHub.
+//   - extension: install/list gh extensions.
+//
+// `browse` is deliberately NOT here despite the old comment grouping it with
+// these: it resolves the repo (and can hit the API to do so) and is not
+// credential management, so it stays on the read tier where its behavior is
+// unchanged.
+var localOnlyNouns = map[string]bool{
+	"auth":      true,
+	"config":    true,
+	"alias":     true,
+	"extension": true,
+}
+
+// classify returns "read", "write", "local", or "unknown" for an argv (without
 // the leading "gh"). Unknown defaults to read at the caller; this
 // function reports it separately mostly for logging.
 //
@@ -632,6 +756,9 @@ func classify(args []string) string {
 		return "unknown"
 	}
 	noun := args[0]
+	if localOnlyNouns[noun] {
+		return "local"
+	}
 	if noun == "api" {
 		return classifyAPI(args[1:])
 	}
