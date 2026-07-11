@@ -1,0 +1,69 @@
+# GOLDEN TRANSCRIPT — demo_pat_leak.sh (issue #57)
+# Captured live. /tmp paths normalized to <TMP>. Regenerate:
+#   source ./dev-env && tests/interactive/demo_pat_leak.sh
+building rein-gh -> <TMP>
+==============================================================================
+  #57 DEMO — rein-gh must not leak the developer's ambient PAT
+==============================================================================
+  poisoning the shell with GH_TOKEN=ghp_FAKE_NOT_REAL_0000000000000000000000 (a fake, non-real PAT)
+  real gh replaced by a fake env-dumper at: <TMP>
+==============================================================================
+  (a) WRITE leg — `gh issue comment` outside `rein run` (mint-failure/deny leg)
+==============================================================================
+
+  BEFORE #57 (what the RAW passthrough did — exec real gh with os.Environ()):
+  $ GH_TOKEN=ghp_FAKE_NOT_REAL_0000000000000000000000  gh issue comment 1 --body hi
+    GH_TOKEN=ghp_FAKE_NOT_REAL_0000000000000000000000
+    GITHUB_TOKEN=ghp_FAKE_NOT_REAL_0000000000000000000000
+    GH_ENTERPRISE_TOKEN=<unset>
+    GITHUB_ENTERPRISE_TOKEN=<unset>
+  ^ the developer's full-scope PAT reached gh. A write would run as THEM.
+
+  AFTER #57 (rein-gh, no REIN_RUN_ID -> write gate denies -> fail-closed env):
+  $ GH_TOKEN=ghp_FAKE_NOT_REAL_0000000000000000000000  rein-gh issue comment 1 --body hi
+    GH_TOKEN=rein-placeholder-denied
+    GITHUB_TOKEN=<unset>
+    GH_ENTERPRISE_TOKEN=<unset>
+    GITHUB_ENTERPRISE_TOKEN=<unset>
+  ^ GH_TOKEN=rein-placeholder-denied, GITHUB_TOKEN stripped. gh fails to
+    auth rather than silently using the developer's PAT.
+==============================================================================
+  (b) HUMAN recovery — `gh auth login` (no REIN_RUN_ID -> local tier)
+==============================================================================
+  $ GH_TOKEN=ghp_FAKE_NOT_REAL_0000000000000000000000  rein-gh auth login
+  rein-gh exit: 0
+    [fake gh] RAN with args: auth login
+  env the real gh received:
+    GH_TOKEN=<unset>
+    GITHUB_TOKEN=<unset>
+    GH_ENTERPRISE_TOKEN=<unset>
+    GITHUB_ENTERPRISE_TOKEN=<unset>
+  ^ gh RAN with NO GH_TOKEN at all (not even the placeholder — gh 2.67
+    refuses `auth login` if GH_TOKEN is set). The ambient PAT is still
+    stripped, so the human's login flow is unblocked but nothing leaks.
+==============================================================================
+  (c) AGENT — `gh auth ...` REFUSED inside a rein run (REIN_RUN_ID set)
+==============================================================================
+  $ REIN_RUN_ID=demo-run  rein-gh auth login
+  rein-gh exit: 1  (want non-zero: refused)
+    rein-gh: refusing `gh auth login` inside a rein run.
+             `gh auth` manages the DEVELOPER's GitHub credentials: it can log in or out as
+             them, print their stored token, or repoint git's credential helper away from
+             rein. An agent has no business doing any of that — your credentials are brokered
+             by rein and scoped to this session's issue and repos.
+             If you need different access, ask the human to change the session.
+    fake gh did NOT run (refused before exec) — correct
+
+  $ REIN_RUN_ID=demo-run  rein-gh auth token
+  rein-gh exit: 1  (want non-zero: refused)
+    rein-gh: refusing `gh auth token` inside a rein run.
+             `gh auth` manages the DEVELOPER's GitHub credentials: it can log in or out as
+             them, print their stored token, or repoint git's credential helper away from
+             rein. An agent has no business doing any of that — your credentials are brokered
+             by rein and scoped to this session's issue and repos.
+             If you need different access, ask the human to change the session.
+    fake gh did NOT run (refused before exec) — correct
+
+==============================================================================
+  DONE — (a) PAT stripped on write, (b) human auth unblocked, (c) agent auth refused.
+==============================================================================
