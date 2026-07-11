@@ -307,7 +307,30 @@ acceptable. Bundle the outstanding direct-mode macOS e2e verification
 **Success:** CP3 e2e passes on macOS, including gh via the keychain-trust
 path.
 
-### CP5.5 — Scope expansion (session UX) — NEXT, tracked in #69
+### CP5.5 — Scope expansion (session UX) — BUILT (2026-07-11), tracked in #69
+
+Implemented: multi-repo declare prompting (`rein declare <n> --repo o/r`
+fires the SCOPE EXPANSION prompt; same-owner enforced before any prompt,
+cross-owner denies structurally); the effective run ceiling = session repos
+UNION approved expansions (`internal/runscope`), with every credential
+surface (proxy InScope + write-token memo + read cache via ScopeKey; the
+read/write mint RepoNames in sandboxed + direct + gh-shim) widening together;
+in-prompt `[y/N]` persist (only after a successful number match; direct-mode
+re-signs the run's approval via `approvals.Resign` so it doesn't re-lock its
+own run); `rein session show|add-repo` (validated writes, install-coverage
+probe with deep-link); cwd git-remote autodetection at `init`/`run`; and the
+404-at-expansion interactive NOTICE (install deep-link, NO approval
+authority; the real approval fires fresh on the agent's retry). Demo:
+`tests/interactive/test_scope_expansion.py` (approve→push-to-B verified on
+GitHub, deny, cross-owner), driven live end to end.
+
+SEAM LEFT FOR #64 (local-checkout binding, built in parallel): a mid-run
+expansion grants CREDENTIALS but the sandbox binds are fixed at launch — the
+approve message steers the agent to clone into writable scratch, NOT nest in
+the workdir. The launch-time binding of an existing checkout is #64's job;
+`ExtraAllowWrite` already exists as the plumbing point.
+
+### CP5.5 — Scope expansion (session UX) — original scope, tracked in #69
 
 Added 2026-07-11, after #35 (declare-first issue scoping) landed. The issue is
 now agent-declared at runtime, but the REPO set is still hand-edited YAML —
