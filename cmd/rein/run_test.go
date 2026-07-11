@@ -251,6 +251,105 @@ func TestResolveAndCacheInstallID_404FailsLoud(t *testing.T) {
 	}
 }
 
+// multiRepoSession is a same-owner two-repo session, the shape
+// session.Validate explicitly supports (issue #44 D4: coverage of EVERY
+// repo must be verified at launch, not just Repos[0]).
+func multiRepoSession() session.Session {
+	return session.Session{ID: "s", Role: "implement", Repos: []string{"owner/name", "owner/other"}}
+}
+
+func TestResolveAndCacheInstallID_MultiRepo404OnSecondRepoFailsLoud(t *testing.T) {
+	configDir := eagerStateDir(t)
+	seedPrimaryState(t, configDir, 555)
+
+	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+		if repo == "other" {
+			return 0, githubapp.ErrAppNotInstalled // Repos[1] not in the installation
+		}
+		return 555, nil
+	}
+	err := resolveAndCacheInstallID(context.Background(), multiRepoSession(), lookup)
+	if err == nil {
+		t.Fatal("expected fail-loud error when a non-first session repo is uncovered")
+	}
+	if !strings.Contains(err.Error(), "owner/other") {
+		t.Errorf("error should name the uncovered repo owner/other: %v", err)
+	}
+	if !strings.Contains(err.Error(), "installations/new") {
+		t.Errorf("error should carry the install deep-link: %v", err)
+	}
+}
+
+func TestResolveAndCacheInstallID_MultiRepoAllCoveredPasses(t *testing.T) {
+	configDir := eagerStateDir(t)
+	seedPrimaryState(t, configDir, 0) // uncached
+
+	var probed []string
+	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+		probed = append(probed, owner+"/"+repo)
+		return 777, nil
+	}
+	if err := resolveAndCacheInstallID(context.Background(), multiRepoSession(), lookup); err != nil {
+		t.Fatalf("all-covered multi-repo session should pass: %v", err)
+	}
+	if len(probed) != 2 || probed[0] != "owner/name" || probed[1] != "owner/other" {
+		t.Errorf("every session repo must be probed, got %v", probed)
+	}
+	s, err := appsetup.ReadState(configDir)
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if s.Primary.InstallationID != 777 {
+		t.Errorf("cached id = %d, want 777", s.Primary.InstallationID)
+	}
+}
+
+func TestResolveAndCacheInstallID_MultiRepoMismatchedIDsFailsLoud(t *testing.T) {
+	configDir := eagerStateDir(t)
+	seedPrimaryState(t, configDir, 0)
+
+	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+		if repo == "other" {
+			return 222, nil
+		}
+		return 111, nil
+	}
+	err := resolveAndCacheInstallID(context.Background(), multiRepoSession(), lookup)
+	if err == nil {
+		t.Fatal("expected fail-loud error when session repos resolve to different installation ids")
+	}
+	if !strings.Contains(err.Error(), "111") || !strings.Contains(err.Error(), "222") {
+		t.Errorf("mismatch error should carry both ids: %v", err)
+	}
+	// state.json must be untouched (still 0) — no id was authoritative.
+	s, _ := appsetup.ReadState(configDir)
+	if s.Primary.InstallationID != 0 {
+		t.Errorf("state.json should be untouched on id mismatch, got id=%d", s.Primary.InstallationID)
+	}
+}
+
+func TestResolveAndCacheInstallID_MultiRepoTransientOnOneRepoProceeds(t *testing.T) {
+	configDir := eagerStateDir(t)
+	seedPrimaryState(t, configDir, 0) // uncached: the resolved repo supplies the id
+
+	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+		if repo == "other" {
+			return 0, errors.New("github 503 transient")
+		}
+		return 444, nil
+	}
+	// A transient (non-404) blip on one repo must not ground the session
+	// when another repo resolved an id — mirrors the single-repo
+	// transient-with-cached-id behavior.
+	if err := resolveAndCacheInstallID(context.Background(), multiRepoSession(), lookup); err != nil {
+		t.Fatalf("transient error on one repo with another resolved should proceed, got: %v", err)
+	}
+	s, _ := appsetup.ReadState(configDir)
+	if s.Primary.InstallationID != 444 {
+		t.Errorf("resolved id should be cached, got %d, want 444", s.Primary.InstallationID)
+	}
+}
+
 func TestResolveAndCacheInstallID_TransientErrorWithCachedIDProceeds(t *testing.T) {
 	configDir := eagerStateDir(t)
 	seedPrimaryState(t, configDir, 333) // cached id available

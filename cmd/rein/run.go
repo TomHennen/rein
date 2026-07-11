@@ -69,9 +69,10 @@ import (
 	"github.com/TomHennen/rein/internal/session"
 )
 
-// installIDTimeout caps the pre-launch installation-id lookup. One cheap
-// App-JWT GET per `rein run` launch (not per git op), so keep it modest but
-// generous enough for a cold JWT mint + round-trip.
+// installIDTimeout caps the pre-launch installation-id lookups as a whole.
+// One cheap App-JWT GET per session repo per `rein run` launch (not per git
+// op; sessions hold a handful of repos at most), so keep it modest but
+// generous enough for a cold JWT mint + the round-trips.
 const installIDTimeout = 10 * time.Second
 
 // runWrapped is the entry point for the `run` subcommand. argv is the
@@ -124,10 +125,11 @@ func runWrapped(argv []string) (int, error) {
 	// than from the per-git-op credential helper, which would spam stderr.
 	config.WarnPartialAppEnv(os.Stderr)
 
-	// Eagerly resolve + cache the installation id for the session repo on the
-	// manifest-flow (state.json) path, BEFORE the child starts, so a 404
-	// (App not installed) fails loud here instead of degrading to a TM-G8
-	// placeholder inside the child's first git op. No-op on the env path.
+	// Eagerly resolve + cache the installation id for EVERY session repo on
+	// the manifest-flow (state.json) path, BEFORE the child starts, so a 404
+	// (App not installed / repo not in the installation) fails loud here
+	// instead of degrading to a TM-G8 placeholder inside the child's first
+	// git op (issue #44 D4). No-op on the env path.
 	// This single cache write covers every later helper / rein-gh invocation
 	// (shims only run inside the PATH this wrapper sets up — single writer).
 	ctx, cancel := context.WithTimeout(context.Background(), installIDTimeout)
@@ -300,13 +302,24 @@ func fetchRepoInstallationID(ctx context.Context, clientID string, ks keystore.K
 }
 
 // resolveAndCacheInstallID ensures state.json carries a fresh installation id
-// for the session repo when running off the manifest-flow state path.
+// for the session repos when running off the manifest-flow state path.
 //
 // No-op on the env path (id already present in the env config). On the state
-// path it ALWAYS performs the App-JWT GET and rewrites state.json only when
-// the id changed — this one rule covers both first-fetch and stale-id refresh
-// (uninstall/reinstall rotates the id). 404 -> fail loud with the install
-// deep-link and DO NOT launch; other errors -> fail loud.
+// path it ALWAYS performs one App-JWT GET per session repo and rewrites
+// state.json only when the id changed — this one rule covers both first-fetch
+// and stale-id refresh (uninstall/reinstall rotates the id).
+//
+// EVERY repo in sess.Repos is probed, not just the first: mints are lazy
+// closures scoped to all session repos, so a repo the installation's
+// selected-repo list excludes would otherwise surface only as a TM-G8
+// placeholder inside the agent — design.md §4.2.4 requires a loud
+// launch-time error instead (issue #44 D4). 404 on ANY repo -> fail loud
+// naming that repo, with the install deep-link, and DO NOT launch. The
+// session is single-owner (session.Validate) and an installation is
+// single-owner, so all lookups must agree on one id; a mismatch is also a
+// loud error. Transient (non-404) lookup errors degrade to a warning as
+// long as SOME id is available (resolved from another repo, or cached) —
+// a GitHub blip must not ground a session a cached id would have served.
 func resolveAndCacheInstallID(ctx context.Context, sess session.Session, lookup installIDLookup) error {
 	appCfg, ks, source, err := config.ResolveApp()
 	if err != nil {
@@ -315,14 +328,8 @@ func resolveAndCacheInstallID(ctx context.Context, sess session.Session, lookup 
 	}
 	if source == config.SourceEnv {
 		// Env path: installation id is already present and authoritative;
-		// there is no state.json to own. Skip the GET entirely.
+		// there is no state.json to own. Skip the GETs entirely.
 		return nil
-	}
-
-	owner, _, ok := strings.Cut(sess.Repos[0], "/")
-	repo := bareRepoName(sess.Repos[0])
-	if !ok || owner == "" || repo == "" {
-		return fmt.Errorf("session repo %q is not owner/name", sess.Repos[0])
 	}
 
 	configDir, err := config.ConfigDir()
@@ -337,34 +344,65 @@ func resolveAndCacheInstallID(ctx context.Context, sess session.Session, lookup 
 		return fmt.Errorf("state.json has no primary App record; run `rein init`")
 	}
 
-	id, err := lookup(ctx, appCfg.ClientID, ks, config.AppKeystoreRole, owner, repo)
-	if err != nil {
-		if errors.Is(err, githubapp.ErrAppNotInstalled) {
-			// 404 is definitive: the App is not installed on this repo (or
-			// not granted to it). Fail loud with the deep-link; don't launch.
-			htmlURL := s.Primary.HTMLURL
-			if htmlURL == "" {
-				htmlURL = "https://github.com/apps/" + s.Primary.Slug
+	var (
+		resolvedID   int64  // first successfully resolved id this launch
+		resolvedRepo string // repo that resolved it (for the mismatch error)
+		lastErr      error  // last transient lookup error (for the all-failed message)
+	)
+	for _, r := range sess.Repos {
+		owner, _, ok := strings.Cut(r, "/")
+		repo := bareRepoName(r)
+		if !ok || owner == "" || repo == "" {
+			return fmt.Errorf("session repo %q is not owner/name", r)
+		}
+
+		id, err := lookup(ctx, appCfg.ClientID, ks, config.AppKeystoreRole, owner, repo)
+		if err != nil {
+			if errors.Is(err, githubapp.ErrAppNotInstalled) {
+				// 404 is definitive: the App is not installed on this repo (or
+				// the repo is not in the installation's selected-repo list).
+				// Fail loud with the deep-link; don't launch.
+				htmlURL := s.Primary.HTMLURL
+				if htmlURL == "" {
+					htmlURL = "https://github.com/apps/" + s.Primary.Slug
+				}
+				return fmt.Errorf("App %s is not installed on %s/%s; install it (or add the repo to the installation) at %s/installations/new, then re-run",
+					s.Primary.Slug, owner, repo, htmlURL)
 			}
-			return fmt.Errorf("App %s is not installed on %s/%s; install it at %s/installations/new, then re-run",
-				s.Primary.Slug, owner, repo, htmlURL)
+			// Transient (non-404) error for THIS repo: warn and keep probing
+			// the rest — a definitive 404 on a later repo must still refuse
+			// the launch. Whether the launch can proceed at all is decided
+			// after the loop, based on what id (if any) we ended up with.
+			fmt.Fprintf(os.Stderr, "rein: warning: could not verify installation coverage of %s/%s (%v); git operations on it may fail mid-session if the installation does not cover it\n", owner, repo, err)
+			lastErr = err
+			continue
 		}
-		// Transient (non-404) error. If we already have a cached id, the
-		// session can run from it — degrade to a warning and proceed rather
-		// than blocking launch on a hiccup. Only when we have NO id to fall
-		// back to (first fetch) do we fail closed. This bends the literal
-		// "other errors -> fail loud" so a GitHub blip doesn't ground a
-		// session that a cached id + working token would have served.
-		if s.Primary.InstallationID != 0 {
-			fmt.Fprintf(os.Stderr, "rein: warning: could not refresh installation id (%v); proceeding with cached id %d\n",
-				err, s.Primary.InstallationID)
-			return nil
+
+		if resolvedID == 0 {
+			resolvedID, resolvedRepo = id, owner+"/"+repo
+		} else if id != resolvedID {
+			// Same owner ⇒ same installation is the invariant; two ids means
+			// the state is inconsistent in a way mints cannot serve. Fail loud.
+			return fmt.Errorf("session repos resolve to different installation ids (%s -> %d, %s/%s -> %d); a single-owner session must map to one installation — check the App's installations, then re-run",
+				resolvedRepo, resolvedID, owner, repo, id)
 		}
-		return fmt.Errorf("fetch installation id for %s/%s: %w", owner, repo, err)
 	}
 
-	if id != s.Primary.InstallationID {
-		s.Primary.InstallationID = id
+	if resolvedID == 0 {
+		// Every lookup failed transiently. If we already have a cached id,
+		// the session can run from it — degrade to a warning and proceed
+		// rather than blocking launch on a hiccup. Only when we have NO id
+		// to fall back to (first fetch) do we fail closed.
+		if s.Primary.InstallationID != 0 {
+			fmt.Fprintf(os.Stderr, "rein: warning: could not refresh installation id (%v); proceeding with cached id %d\n",
+				lastErr, s.Primary.InstallationID)
+			return nil
+		}
+		return fmt.Errorf("fetch installation id for session repos %v: %w", sess.Repos, lastErr)
+	}
+
+	if resolvedID != s.Primary.InstallationID {
+		s.Primary.InstallationID = resolvedID
 		if err := appsetup.WriteState(configDir, s); err != nil {
 			return fmt.Errorf("cache installation id: %w", err)
 		}
