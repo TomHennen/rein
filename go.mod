@@ -3,7 +3,7 @@ module github.com/TomHennen/rein
 go 1.26.5
 
 require (
-	github.com/jferrl/go-githubauth v1.6.0
+	github.com/jferrl/go-githubauth v1.7.0
 	golang.org/x/term v0.44.0
 	gopkg.in/yaml.v3 v3.0.1
 )
