@@ -30,7 +30,7 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
   no-redirect-follow) need direct control of the request/response loop —
   goproxy's shape doesn't fit either the socket hook or those invariants.
 - GitHub App tokens: `github.com/jferrl/go-githubauth` (MIT)
-- Key storage: `github.com/99designs/keyring` (MIT) — uses Secret Service backend (libsecret/D-Bus) on Linux when available, file backend otherwise
+- Key storage: hand-rolled `internal/keystore` file backend (PEMs under ConfigDir with uid + mode `0o077` + O_NOFOLLOW checks). `github.com/99designs/keyring` (MIT) was planned but never adopted — it is NOT in go.mod; `internal/keystore` is the swap point for future backends (hard-constraint #6).
 - Hardware keys (Phase 1+): `github.com/facebookincubator/sks` (Apache 2.0). Not used in Phase 0.
 - CLI: `github.com/spf13/cobra`
 
@@ -39,7 +39,7 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 - Development happens directly in this Linux VM. There is no devcontainer.
 - Source `./dev-env` at the start of each work session to load the `REIN_*` environment variables.
 - The GitHub App private key is at `$REIN_APP_PRIVATE_KEY_PATH` (`~/.config/rein-credentials/app.pem`).
-- Secure Enclave is not available on Linux. Phase 0 uses the `99designs/keyring` file backend. Phase 1's hardware-backed work would require TPM2 (if this VM has one) or shift to a Mac host.
+- Secure Enclave is not available on Linux. Phase 0/1 use the `internal/keystore` file backend. Phase 1's hardware-backed work would require TPM2 (if this VM has one) or shift to a Mac host.
 - srt sandbox is out of scope for Phase 0.
 - run `gofmt -w .` before all commits.
 
