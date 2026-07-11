@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/TomHennen/rein/internal/approvals"
 	"github.com/TomHennen/rein/internal/session"
@@ -63,18 +64,36 @@ func TestPreflightGateFailsClosed(t *testing.T) {
 	}
 }
 
-// TestSandboxApproveNeverNilAndDeniesWithoutIssue asserts the sandbox write hook
-// is (a) never nil (runbroker fails closed on nil) and (b) DENIES when the
-// session binds no issue — reads flow, writes blocked, never silently allowed.
-func TestSandboxApproveNeverNilAndDeniesWithoutIssue(t *testing.T) {
+// TestSandboxApprove_ConfirmedSetGate asserts the sandbox write hook is
+// (a) never nil (runbroker fails closed on nil), (b) DENIES while the
+// run's confirmed-issue set is empty (pre-declaration — issue #35 §2),
+// (c) ALLOWS once a declare confirmed an issue, and (d) fails closed
+// again after a mid-run session edit (signature mismatch).
+func TestSandboxApprove_ConfirmedSetGate(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
-	noIssue := session.Session{ID: "s", Role: "implement", Repos: []string{"o/r"}, Issue: 0}
-	approve := buildSandboxApprove(noIssue, t.TempDir(), "run-1", logger)
+	stateDir := t.TempDir()
+	sess := session.Session{ID: "s", Role: "implement", Repos: []string{"o/r"}}
+	approve := buildSandboxApprove(sess, stateDir, "run-1", logger)
 	if approve == nil {
 		t.Fatal("buildSandboxApprove returned nil — runbroker would fail closed, but a real Approve must be wired")
 	}
 	if approve("o/r") {
-		t.Error("no-issue session approved a write; sandboxed mode must DENY (reads flow, writes blocked)")
+		t.Error("empty confirmed set must DENY (writes locked until `rein declare <n>`)")
+	}
+	// A declare confirms an issue → the gate opens for this run.
+	ci := approvals.ConfirmedIssue{Number: 73, Repo: "o/r", Title: "t", State: "open", ConfirmedAt: time.Now()}
+	if err := approvals.AppendConfirmedIssue(stateDir, "run-1", approvals.SignatureOf(sess), sess.ID, ci, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if !approve("o/r") {
+		t.Error("confirmed set non-empty must ALLOW writes for the run")
+	}
+	// Mid-run session edit → different signature → whole record invalid.
+	edited := sess
+	edited.Repos = []string{"o/r", "o/extra"}
+	approveEdited := buildSandboxApprove(edited, stateDir, "run-1", logger)
+	if approveEdited("o/r") {
+		t.Error("mid-run scope edit must invalidate the record, issue set included")
 	}
 }
 

@@ -52,33 +52,59 @@ func TestStubPrompter_ForceErr(t *testing.T) {
 	}
 }
 
-func TestWritePrompt_Format(t *testing.T) {
+func TestWritePrompt_FormA(t *testing.T) {
 	var buf bytes.Buffer
 	req := Request{
 		SessionID: "sess_test_001",
 		Role:      "implement",
-		Repo:      "Owner/Repo",
-		Action:    "git push",
+		Repos:     []string{"Owner/Repo"},
 		Issue:     73,
+		IssueRepo: "Owner/Repo",
+		Title:     "sbom-action v2 breaks when --json-output is set",
+		State:     "open",
 	}
 	if err := writePrompt(&buf, req); err != nil {
 		t.Fatalf("writePrompt: %v", err)
 	}
 	out := buf.String()
-	// Key elements that must appear in the rendered prompt.
+	// Key elements that must appear in the rendered Form A prompt (#35 §4):
+	// the fetched TITLE + STATE + HOME REPO are the load-bearing
+	// misattribution control (decision E).
 	required := []string{
-		"rein: write access requested",
-		"action:  git push",
-		"repo:    Owner/Repo",
-		"session: sess_test_001",
+		"agent declares work on an issue",
+		"#73",
+		"sbom-action v2 breaks when --json-output is set",
+		"[open]",
+		"in Owner/Repo",
+		"session:  sess_test_001",
 		"role=implement",
-		"issue=#73",
+		"covers ALL writes for this run",
 		"type the issue number (73)",
 	}
 	for _, r := range required {
 		if !strings.Contains(out, r) {
 			t.Errorf("prompt missing %q\n\n%s", r, out)
 		}
+	}
+}
+
+func TestWritePrompt_ExpansionHeader(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writePrompt(&buf, Request{Issue: 99, Expansion: true, Title: "t", State: "open"}); err != nil {
+		t.Fatalf("writePrompt: %v", err)
+	}
+	if !strings.Contains(buf.String(), "ALSO work on") {
+		t.Errorf("expansion prompt must carry the scope-expansion header, got:\n%s", buf.String())
+	}
+}
+
+func TestWritePrompt_PRLabel(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writePrompt(&buf, Request{Issue: 5, IsPR: true, Title: "a pr", State: "open"}); err != nil {
+		t.Fatalf("writePrompt: %v", err)
+	}
+	if !strings.Contains(buf.String(), "[pull request]") {
+		t.Errorf("PR declarations must be labeled (§9), got:\n%s", buf.String())
 	}
 }
 

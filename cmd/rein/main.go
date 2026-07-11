@@ -182,6 +182,11 @@ func main() {
 			os.Exit(code)
 		}
 		os.Exit(code)
+	case "declare":
+		if err := runDeclare(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "rein declare: %v\n", err)
+			os.Exit(1)
+		}
 	case "__sandbox-probe":
 		// Hidden subcommand: runs INSIDE srt during VerifyConfigApplied to
 		// prove the deny-read + seccomp protections took effect. Exits with a
@@ -206,6 +211,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  rein approval status")
 	fmt.Fprintln(os.Stderr, "  rein approval clear [--run-id <id>]")
 	fmt.Fprintln(os.Stderr, "  rein approval grant --run-id <id>")
+	fmt.Fprintln(os.Stderr, "  rein declare <issue-number> [--repo owner/name]  (declare the issue this run's work is for)")
 	fmt.Fprintln(os.Stderr, "  rein run -- <cmd> [args...]                (sandboxed by default)")
 	fmt.Fprintln(os.Stderr, "  rein run --direct -- <cmd> [args...]       (unsandboxed; throwaway repos only)")
 }
@@ -339,40 +345,46 @@ func runCredentialHelperWithConfig(action string, in io.Reader, out, diag io.Wri
 	return broker.RunCredentialHelper(action, in, out, cfg)
 }
 
-// buildConfirmWrite returns a ConfirmWrite predicate that delegates to
-// internal/ui/grant's layered approval flow: check existing record →
-// try /dev/tty → tmux popup if $TMUX → helpful stderr + deny.
+// buildConfirmWrite returns the direct-mode credential helper's write
+// gate (issue #35 §2): a pure READ of the run's confirmed-issue set. The
+// helper no longer prompts inline — the prompt lives at declare time
+// (`rein declare <n>`). Empty set (or no run id, or a mid-run session
+// edit) ⇒ deny: the core serves the TM-G8 placeholder (never empty) and
+// the stderr hint names the exact next step, which git forwards to the
+// agent (the #45/TM-G8 diag channel).
 //
-// Returns nil when the session doesn't bind an issue — no prompt
-// requested, no approval needed. Tests bypass this by constructing
-// broker.Config directly.
+// Never nil: EVERY direct-mode write is gated on a confirmed issue now
+// (one model, both modes — the old issue-less "mint without
+// confirmation" direct path is retired with sess.Issue).
 func buildConfirmWrite(sess session.Session, stateDir string, logger *log.Logger) func(repo string) bool {
-	if sess.Issue == 0 {
-		if isWriteCapableRole(sess.Role) {
-			logger.Printf("WARN: ConfirmWrite disabled for write-capable role %q (session has no `issue:` field). Write tokens will mint without human confirmation. Add `issue: <number>` to the session file to enable the prompt.", sess.Role)
-		} else {
-			logger.Printf("ConfirmWrite: disabled (session has no bound issue)")
-		}
-		return nil
-	}
-	cfg := grant.Config{
-		StateDir:      stateDir,
-		RunID:         os.Getenv("REIN_RUN_ID"),
-		RunPID:        envInt("REIN_RUN_PID"),
-		TTL:           approvalTTL,
-		PromptTimeout: 60 * time.Second,
-		PreferPopup:   grant.PopupPreferenceFromEnv(),
-		Logger:        logger,
-		// Stderr, Prompter, TmuxRunner default to production
-		// (os.Stderr, TTYPrompter, DefaultTmuxRunner).
-	}
+	runID := os.Getenv("REIN_RUN_ID")
+	sig := approvals.SignatureOf(sess)
 	return func(repo string) bool {
-		return grant.ObtainApproval(context.Background(), grant.Request{
-			Session: sess,
-			Action:  "git push (write token mint)",
-			Repo:    repo,
-		}, cfg)
+		if issues := approvals.ConfirmedIssues(stateDir, runID, sig); len(issues) > 0 {
+			logger.Printf("write gate: run %s has %d confirmed issue(s); allowing write to %q", runID, len(issues), repo)
+			return true
+		}
+		printDeclareHint(os.Stderr, runID)
+		logger.Printf("write gate: no confirmed issue for run %q; returning placeholder (repo=%q)", runID, repo)
+		return false
 	}
+}
+
+// printDeclareHint is the direct-mode deny-channel instruction (issue
+// #35 §2): git forwards helper stderr to the caller, so a cooperative
+// agent learns the exact next step instead of guessing.
+func printDeclareHint(w io.Writer, runID string) {
+	fmt.Fprintln(w)
+	if runID == "" {
+		fmt.Fprintln(w, "rein: write blocked — this operation ran OUTSIDE `rein run` (no REIN_RUN_ID),")
+		fmt.Fprintln(w, "  so no issue can be declared for it. Launch your agent via `rein run -- <cmd>`,")
+		fmt.Fprintln(w, "  then run `rein declare <n>` and retry.")
+	} else {
+		fmt.Fprintln(w, "rein: no issue declared for this run — writes are locked.")
+		fmt.Fprintln(w, "  Run: rein declare <n>   (the issue number this work is for)")
+		fmt.Fprintln(w, "  approve on your terminal, then retry this operation.")
+	}
+	fmt.Fprintln(w)
 }
 
 // runApproval handles `rein approval {status|clear|grant}` with per-run
@@ -470,14 +482,23 @@ func approvalStatus(stateDir string) error {
 		fmt.Printf("run-id: %s   pid: %d (%s)\n", st.RunID, st.Context.RunPID, liveness)
 		if st.HasContext {
 			s := st.Context.Session
-			fmt.Printf("  session:    %s role=%s repos=%v issue=#%d\n", s.ID, s.Role, s.Repos, s.Issue)
+			fmt.Printf("  session:    %s role=%s repos=%v\n", s.ID, s.Role, s.Repos)
+			if pi := st.Context.PendingIssue; pi != nil {
+				fmt.Printf("  pending:    #%d %q in %s (awaiting confirmation)\n", pi.Number, pi.Title, pi.Repo)
+			}
 		} else {
 			fmt.Println("  session:    <no run context on disk>")
 		}
 		if st.HasApproval {
-			fmt.Printf("  approval:   VALID (approved %s)\n", st.Approval.ApprovedAt.Format(time.RFC3339))
+			fmt.Printf("  approval:   VALID (first confirmed %s)\n", st.Approval.ApprovedAt.Format(time.RFC3339))
+			for _, ci := range st.Approval.Issues {
+				fmt.Printf("    issue:    #%d %q in %s (confirmed %s)\n", ci.Number, ci.Title, ci.Repo, ci.ConfirmedAt.Format(time.RFC3339))
+			}
+			if len(st.Approval.Issues) == 0 {
+				fmt.Println("    (no confirmed issues — writes locked until `rein declare <n>`)")
+			}
 		} else {
-			fmt.Println("  approval:   none (will prompt)")
+			fmt.Println("  approval:   none (agent must run `rein declare <n>`)")
 		}
 	}
 	return nil

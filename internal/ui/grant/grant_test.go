@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -26,7 +25,16 @@ func sampleSession() session.Session {
 		ID:    "sess_test_001",
 		Role:  "implement",
 		Repos: []string{"owner/repo"},
-		Issue: 1,
+	}
+}
+
+func sampleIssue(n int) approvals.ConfirmedIssue {
+	return approvals.ConfirmedIssue{
+		Number:       n,
+		Repo:         "owner/repo",
+		Title:        "fix the flux capacitor",
+		State:        "open",
+		CanonicalURL: "https://api.github.com/repos/owner/repo/issues/73",
 	}
 }
 
@@ -45,12 +53,14 @@ func defaultCfg(t *testing.T, p prompt.Prompter, stderr io.Writer, tmux TmuxRunn
 	}
 }
 
-// seedApproval writes a valid approval record for runID covering sess.
-func seedApproval(t *testing.T, stateDir, runID string, sess session.Session) {
+// seedConfirmed writes an approval record for runID covering sess with
+// the given confirmed issues.
+func seedConfirmed(t *testing.T, stateDir, runID string, sess session.Session, issues ...approvals.ConfirmedIssue) {
 	t.Helper()
 	rec := approvals.Record{
 		Signature:  approvals.SignatureOf(sess),
 		SessionID:  sess.ID,
+		Issues:     issues,
 		ApprovedAt: time.Now(),
 		ExpiresAt:  time.Now().Add(time.Hour),
 	}
@@ -66,113 +76,167 @@ func (noTTYPrompter) Confirm(ctx context.Context, _ prompt.Request) (bool, error
 	return false, prompt.ErrNoTTY
 }
 
-// matchingPrompter approves iff the request's Issue matches Answer.
+// matchingPrompter approves iff the request's Issue matches Answer —
+// i.e. the "human" types the displayed number of the RIGHT issue.
 type matchingPrompter struct{ Answer int }
 
 func (m matchingPrompter) Confirm(ctx context.Context, req prompt.Request) (bool, error) {
 	return req.Issue == m.Answer, nil
 }
 
-func TestObtainApproval_Layer1_ExistingApproval(t *testing.T) {
+func req73(sess session.Session) IssueRequest {
+	return IssueRequest{Session: sess, Issue: sampleIssue(73)}
+}
+
+func TestObtainIssueApproval_IdempotentReDeclare(t *testing.T) {
 	sess := sampleSession()
-	cfg := defaultCfg(t, nil, nil, nil)
-	seedApproval(t, cfg.StateDir, cfg.RunID, sess)
-	approved := ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, cfg)
-	if !approved {
-		t.Error("existing approval should short-circuit to true")
+	stub := &prompt.StubPrompter{Response: "never right"}
+	cfg := defaultCfg(t, stub, &bytes.Buffer{}, nil)
+	seedConfirmed(t, cfg.StateDir, cfg.RunID, sess, sampleIssue(73))
+	if !ObtainIssueApproval(context.Background(), req73(sess), cfg) {
+		t.Error("already-confirmed issue must short-circuit to true")
+	}
+	if stub.Calls != 0 {
+		t.Error("idempotent re-declare must NOT re-prompt (§3)")
 	}
 }
 
-func TestObtainApproval_Layer2_TTYApproved(t *testing.T) {
+func TestObtainIssueApproval_TTYConfirmed(t *testing.T) {
 	sess := sampleSession()
-	cfg := defaultCfg(t, matchingPrompter{Answer: 1}, &bytes.Buffer{}, nil)
-	approved := ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, cfg)
-	if !approved {
-		t.Fatal("expected approved via tty prompter")
+	cfg := defaultCfg(t, matchingPrompter{Answer: 73}, &bytes.Buffer{}, nil)
+	if !ObtainIssueApproval(context.Background(), req73(sess), cfg) {
+		t.Fatal("expected confirmation via tty prompter")
 	}
 	rec, err := approvals.ReadApproval(cfg.StateDir, cfg.RunID)
 	if err != nil {
-		t.Fatalf("expected approval record to be written: %v", err)
+		t.Fatalf("expected approval record: %v", err)
 	}
-	if rec.SessionID != sess.ID {
-		t.Errorf("recorded session = %q, want %q", rec.SessionID, sess.ID)
+	if !rec.HasIssue("owner/repo", 73) {
+		t.Errorf("record must carry the confirmed issue, got %+v", rec.Issues)
 	}
-	// The tty-approve path must ALSO write a run-context snapshot (carrying
-	// RunPID) so a long tty-approved run is never swept mid-run. Regression
-	// guard for the "no PID for tty-only runs" Sweep footgun.
-	if rc, err := approvals.ReadRunContext(cfg.StateDir, cfg.RunID); err != nil {
-		t.Errorf("tty-approve path must write a run-context snapshot: %v", err)
-	} else if rc.RunPID != cfg.RunPID {
+	if rec.SessionID != sess.ID || rec.Signature != approvals.SignatureOf(sess) {
+		t.Errorf("record identity mismatch: %+v", rec)
+	}
+	if len(rec.Issues) != 1 || rec.Issues[0].ConfirmedAt.IsZero() {
+		t.Errorf("confirmed issue must be stamped with ConfirmedAt: %+v", rec.Issues)
+	}
+	// The confirm path must ALSO write a run-context snapshot (carrying
+	// RunPID for Sweep's liveness probe + the PendingIssue transport).
+	rc, err := approvals.ReadRunContext(cfg.StateDir, cfg.RunID)
+	if err != nil {
+		t.Fatalf("snapshot must be written: %v", err)
+	}
+	if rc.RunPID != cfg.RunPID {
 		t.Errorf("snapshot RunPID = %d, want %d", rc.RunPID, cfg.RunPID)
+	}
+	if rc.PendingIssue == nil || rc.PendingIssue.Number != 73 || rc.PendingIssue.Title == "" {
+		t.Errorf("snapshot must carry the fetched PendingIssue for out-of-process surfaces: %+v", rc.PendingIssue)
 	}
 }
 
-func TestObtainApproval_Layer2_TTYDenied(t *testing.T) {
+func TestObtainIssueApproval_TTYDenied(t *testing.T) {
 	sess := sampleSession()
 	stderr := &bytes.Buffer{}
 	cfg := defaultCfg(t, matchingPrompter{Answer: 9}, stderr, nil)
-	approved := ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, cfg)
-	if approved {
+	if ObtainIssueApproval(context.Background(), req73(sess), cfg) {
 		t.Fatal("expected denial when prompter returns false")
 	}
-	if strings.Contains(stderr.String(), "To grant write access") {
-		t.Errorf("explicit denial via tty must not also emit layer-4 stderr")
+	if strings.Contains(stderr.String(), "approval grant") {
+		t.Errorf("explicit denial via tty must not also emit the other-terminal stderr")
+	}
+	if _, err := approvals.ReadApproval(cfg.StateDir, cfg.RunID); err == nil {
+		t.Error("denial must not write an approval record")
 	}
 }
 
-// cancellingPrompter simulates Ctrl-C or 60s prompt-timeout.
+// cancellingPrompter simulates Ctrl-C or prompt-timeout.
 type cancellingPrompter struct{}
 
 func (cancellingPrompter) Confirm(ctx context.Context, _ prompt.Request) (bool, error) {
 	return false, prompt.ErrCancelled
 }
 
-func TestObtainApproval_Layer2_TTYCancelled(t *testing.T) {
+func TestObtainIssueApproval_TTYCancelled(t *testing.T) {
 	sess := sampleSession()
 	stderr := &bytes.Buffer{}
 	cfg := defaultCfg(t, cancellingPrompter{}, stderr, nil)
-	approved := ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, cfg)
-	if approved {
+	if ObtainIssueApproval(context.Background(), req73(sess), cfg) {
 		t.Fatal("Ctrl-C / timeout must deny")
 	}
-	if strings.Contains(stderr.String(), "To grant write access") {
-		t.Errorf("Ctrl-C/timeout must not emit layer-4 stderr; got %q", stderr.String())
+	if strings.Contains(stderr.String(), "approval grant") {
+		t.Errorf("Ctrl-C/timeout must not emit the other-terminal stderr; got %q", stderr.String())
 	}
 }
 
-func TestObtainApproval_Layer4_HelpfulStderr(t *testing.T) {
-	t.Setenv("TMUX", "") // ensure layer 3 doesn't fire
+func TestObtainIssueApproval_HelpfulStderrWhenNoSurface(t *testing.T) {
+	t.Setenv("TMUX", "") // no popup either
 	sess := sampleSession()
 	stderr := &bytes.Buffer{}
 	cfg := defaultCfg(t, noTTYPrompter{}, stderr, nil)
-	approved := ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/in-scope"}, cfg)
-	if approved {
+	if ObtainIssueApproval(context.Background(), req73(sess), cfg) {
 		t.Fatal("expected denial when no tty + no tmux")
 	}
 	want := []string{
-		"rein: write blocked for git push on owner/in-scope",
+		"issue #73",
 		"rein approval grant --run-id " + cfg.RunID,
-		"Then retry your operation",
 	}
 	for _, w := range want {
 		if !strings.Contains(stderr.String(), w) {
 			t.Errorf("stderr missing %q\n%s", w, stderr.String())
 		}
 	}
-	// Snapshot must have been written so an out-of-process grant can resolve.
-	if _, err := approvals.ReadRunContext(cfg.StateDir, cfg.RunID); err != nil {
-		t.Errorf("expected run-context snapshot written before layer-4: %v", err)
+	// Snapshot (with PendingIssue) must have been written so an
+	// out-of-process grant can render the prompt.
+	rc, err := approvals.ReadRunContext(cfg.StateDir, cfg.RunID)
+	if err != nil {
+		t.Fatalf("expected snapshot before the helpful-deny: %v", err)
+	}
+	if rc.PendingIssue == nil || rc.PendingIssue.Number != 73 {
+		t.Errorf("snapshot must carry PendingIssue: %+v", rc.PendingIssue)
 	}
 }
 
-func TestObtainApproval_Layer3_TmuxPopupApproved(t *testing.T) {
+func TestObtainIssueApproval_ExpansionHeaderOnSecondIssue(t *testing.T) {
+	sess := sampleSession()
+	stub := &prompt.StubPrompter{Response: "99"}
+	cfg := defaultCfg(t, stub, &bytes.Buffer{}, nil)
+	seedConfirmed(t, cfg.StateDir, cfg.RunID, sess, sampleIssue(73))
+
+	second := sampleIssue(99)
+	if !ObtainIssueApproval(context.Background(), IssueRequest{Session: sess, Issue: second}, cfg) {
+		t.Fatal("second declare should confirm")
+	}
+	if !stub.Last.Expansion {
+		t.Error("a second issue mid-run must render the scope-EXPANSION prompt (design.md:254-263)")
+	}
+	rec, _ := approvals.ReadApproval(cfg.StateDir, cfg.RunID)
+	if !rec.HasIssue("owner/repo", 73) || !rec.HasIssue("owner/repo", 99) {
+		t.Errorf("expansion must APPEND, not replace: %+v", rec.Issues)
+	}
+}
+
+func TestObtainIssueApproval_PromptCarriesFetchedSnapshot(t *testing.T) {
+	sess := sampleSession()
+	stub := &prompt.StubPrompter{Response: "73"}
+	cfg := defaultCfg(t, stub, &bytes.Buffer{}, nil)
+	if !ObtainIssueApproval(context.Background(), req73(sess), cfg) {
+		t.Fatal("expected confirmation")
+	}
+	// Decision E: the prompt the human sees must carry the fetched
+	// title/state/home-repo — the load-bearing misattribution control.
+	if stub.Last.Title != "fix the flux capacitor" || stub.Last.State != "open" || stub.Last.IssueRepo != "owner/repo" {
+		t.Errorf("prompt request missing fetched snapshot: %+v", stub.Last)
+	}
+}
+
+func TestObtainIssueApproval_PopupApproved(t *testing.T) {
 	t.Setenv("TMUX", "/some/socket")
 	sess := sampleSession()
 	stateDir := t.TempDir()
 
 	// TmuxRunner stub: assert --run-id is threaded AND that the snapshot
-	// was written BEFORE the popup ran (so the real grant could resolve
-	// the session). Then simulate the popup minting the approval.
+	// (with PendingIssue) was written BEFORE the popup ran. Then simulate
+	// the popup's grant appending the confirmed issue.
 	tmuxCalled := false
 	var sawRunID bool
 	tmux := func(ctx context.Context, command []string) error {
@@ -181,16 +245,13 @@ func TestObtainApproval_Layer3_TmuxPopupApproved(t *testing.T) {
 		if strings.Contains(joined, "--run-id "+testRunID) {
 			sawRunID = true
 		}
-		if _, err := approvals.ReadRunContext(stateDir, testRunID); err != nil {
+		rc, err := approvals.ReadRunContext(stateDir, testRunID)
+		if err != nil {
 			t.Errorf("snapshot must be written before popup runs: %v", err)
+		} else if rc.PendingIssue == nil || rc.PendingIssue.Number != 73 {
+			t.Errorf("snapshot must carry PendingIssue for the popup to render: %+v", rc.PendingIssue)
 		}
-		rec := approvals.Record{
-			Signature:  approvals.SignatureOf(sess),
-			SessionID:  sess.ID,
-			ApprovedAt: time.Now(),
-			ExpiresAt:  time.Now().Add(time.Hour),
-		}
-		return approvals.WriteApproval(stateDir, testRunID, rec)
+		return approvals.AppendConfirmedIssue(stateDir, testRunID, approvals.SignatureOf(sess), sess.ID, sampleIssue(73), time.Hour)
 	}
 	cfg := Config{
 		StateDir:      stateDir,
@@ -202,19 +263,18 @@ func TestObtainApproval_Layer3_TmuxPopupApproved(t *testing.T) {
 		TmuxRunner:    tmux,
 		Logger:        discardLogger(),
 	}
-	approved := ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, cfg)
+	if !ObtainIssueApproval(context.Background(), req73(sess), cfg) {
+		t.Error("expected confirmed when popup appended the issue")
+	}
 	if !tmuxCalled {
 		t.Error("tmux runner should have been called when TMUX is set + tty unavailable")
 	}
 	if !sawRunID {
 		t.Error("popup command must carry --run-id")
 	}
-	if !approved {
-		t.Error("expected approved when popup wrote a valid record")
-	}
 }
 
-func TestObtainApproval_Layer3_TmuxPopupClosedWithoutApproval(t *testing.T) {
+func TestObtainIssueApproval_PopupClosedWithoutApproval(t *testing.T) {
 	t.Setenv("TMUX", "/some/socket")
 	sess := sampleSession()
 	stderr := &bytes.Buffer{}
@@ -229,21 +289,17 @@ func TestObtainApproval_Layer3_TmuxPopupClosedWithoutApproval(t *testing.T) {
 		TmuxRunner:    tmux,
 		Logger:        discardLogger(),
 	}
-	approved := ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, cfg)
-	if approved {
-		t.Error("tmux popup closed without record should fall through to layer 4")
+	if ObtainIssueApproval(context.Background(), req73(sess), cfg) {
+		t.Error("popup closed without record should deny")
 	}
 	if !strings.Contains(stderr.String(), "rein approval grant --run-id") {
-		t.Errorf("expected layer-4 stderr after tmux popup didn't approve\n%s", stderr.String())
+		t.Errorf("expected other-terminal stderr after popup didn't approve\n%s", stderr.String())
 	}
 }
 
 // --- PreferPopup: popup-first ordering (the agent-TUI collision fix) ---
 
-// spyPrompter records whether the inline /dev/tty prompter was consulted
-// and delegates to inner (nil inner => behaves like noTTYPrompter). Used to
-// assert the inline prompt is NOT touched when the popup is preferred — the
-// whole point of the fix is that it would corrupt a full-screen agent TUI.
+// spyPrompter records whether the inline /dev/tty prompter was consulted.
 type spyPrompter struct {
 	inner  prompt.Prompter
 	called bool
@@ -257,24 +313,16 @@ func (s *spyPrompter) Confirm(ctx context.Context, req prompt.Request) (bool, er
 	return s.inner.Confirm(ctx, req)
 }
 
-// PreferPopup + popup approves: the popup is tried FIRST and the inline
-// /dev/tty prompt is never consulted.
-func TestObtainApproval_PreferPopup_PopupFirstApproved(t *testing.T) {
+func TestObtainIssueApproval_PreferPopup_PopupFirstApproved(t *testing.T) {
 	t.Setenv("TMUX", "/some/socket")
 	sess := sampleSession()
 	stateDir := t.TempDir()
 	tmuxCalled := false
 	tmux := func(ctx context.Context, command []string) error {
 		tmuxCalled = true
-		rec := approvals.Record{
-			Signature:  approvals.SignatureOf(sess),
-			SessionID:  sess.ID,
-			ApprovedAt: time.Now(),
-			ExpiresAt:  time.Now().Add(time.Hour),
-		}
-		return approvals.WriteApproval(stateDir, testRunID, rec)
+		return approvals.AppendConfirmedIssue(stateDir, testRunID, approvals.SignatureOf(sess), sess.ID, sampleIssue(73), time.Hour)
 	}
-	spy := &spyPrompter{inner: matchingPrompter{Answer: 1}}
+	spy := &spyPrompter{inner: matchingPrompter{Answer: 73}}
 	cfg := Config{
 		StateDir:      stateDir,
 		RunID:         testRunID,
@@ -286,8 +334,8 @@ func TestObtainApproval_PreferPopup_PopupFirstApproved(t *testing.T) {
 		PreferPopup:   true,
 		Logger:        discardLogger(),
 	}
-	if !ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, cfg) {
-		t.Fatal("expected approval via popup-first path")
+	if !ObtainIssueApproval(context.Background(), req73(sess), cfg) {
+		t.Fatal("expected confirmation via popup-first path")
 	}
 	if !tmuxCalled {
 		t.Error("popup should have been tried first when PreferPopup is set")
@@ -297,14 +345,12 @@ func TestObtainApproval_PreferPopup_PopupFirstApproved(t *testing.T) {
 	}
 }
 
-// PreferPopup + popup closed without approval: DENY, and do NOT fall back to
-// the inline /dev/tty prompt (that fallback is the collision we're avoiding).
-func TestObtainApproval_PreferPopup_DeclinedDoesNotFallToTTY(t *testing.T) {
+func TestObtainIssueApproval_PreferPopup_DeclinedDoesNotFallToTTY(t *testing.T) {
 	t.Setenv("TMUX", "/some/socket")
 	sess := sampleSession()
 	stderr := &bytes.Buffer{}
-	tmux := func(ctx context.Context, command []string) error { return nil } // closed, wrote no record
-	spy := &spyPrompter{inner: matchingPrompter{Answer: 1}}                  // would approve if (wrongly) consulted
+	tmux := func(ctx context.Context, command []string) error { return nil } // closed, no record
+	spy := &spyPrompter{inner: matchingPrompter{Answer: 73}}                 // would approve if (wrongly) consulted
 	cfg := Config{
 		StateDir:      t.TempDir(),
 		RunID:         testRunID,
@@ -316,7 +362,7 @@ func TestObtainApproval_PreferPopup_DeclinedDoesNotFallToTTY(t *testing.T) {
 		PreferPopup:   true,
 		Logger:        discardLogger(),
 	}
-	if ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, cfg) {
+	if ObtainIssueApproval(context.Background(), req73(sess), cfg) {
 		t.Fatal("a declined popup must deny, not fall through to an auto-approving tty")
 	}
 	if spy.called {
@@ -327,13 +373,11 @@ func TestObtainApproval_PreferPopup_DeclinedDoesNotFallToTTY(t *testing.T) {
 	}
 }
 
-// PreferPopup but the popup can't launch (e.g. tmux too old): fall back to
-// the inline /dev/tty prompt as a best effort.
-func TestObtainApproval_PreferPopup_PopupUnavailableFallsToTTY(t *testing.T) {
+func TestObtainIssueApproval_PreferPopup_PopupUnavailableFallsToTTY(t *testing.T) {
 	t.Setenv("TMUX", "/some/socket")
 	sess := sampleSession()
 	tmux := func(ctx context.Context, command []string) error { return errors.New("tmux too old for display-popup") }
-	spy := &spyPrompter{inner: matchingPrompter{Answer: 1}}
+	spy := &spyPrompter{inner: matchingPrompter{Answer: 73}}
 	cfg := Config{
 		StateDir:      t.TempDir(),
 		RunID:         testRunID,
@@ -345,7 +389,7 @@ func TestObtainApproval_PreferPopup_PopupUnavailableFallsToTTY(t *testing.T) {
 		PreferPopup:   true,
 		Logger:        discardLogger(),
 	}
-	if !ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, cfg) {
+	if !ObtainIssueApproval(context.Background(), req73(sess), cfg) {
 		t.Fatal("expected fallback to inline /dev/tty when the popup can't launch")
 	}
 	if !spy.called {
@@ -378,13 +422,11 @@ func TestPopupPreferenceFromEnv(t *testing.T) {
 
 // --- Per-run isolation (the constraint-6 gate) ---
 
-// TestObtainApproval_NoCrossRunReuse: a valid approval for run A must NOT
-// satisfy run B (different run id), even for the same session.
-func TestObtainApproval_NoCrossRunReuse(t *testing.T) {
+func TestObtainIssueApproval_NoCrossRunReuse(t *testing.T) {
 	t.Setenv("TMUX", "")
 	stateDir := t.TempDir()
 	sess := sampleSession()
-	seedApproval(t, stateDir, "A", sess)
+	seedConfirmed(t, stateDir, "A", sess, sampleIssue(73))
 
 	cfgB := Config{
 		StateDir:      stateDir,
@@ -395,104 +437,21 @@ func TestObtainApproval_NoCrossRunReuse(t *testing.T) {
 		Prompter:      noTTYPrompter{}, // no auto-approve
 		Logger:        discardLogger(),
 	}
-	if ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, cfgB) {
-		t.Fatal("run B must NOT be approved by run A's record")
+	if ObtainIssueApproval(context.Background(), req73(sess), cfgB) {
+		t.Fatal("run B must NOT be satisfied by run A's confirmed set")
 	}
-	// Sanity: run A IS approved from its own file.
 	cfgA := cfgB
 	cfgA.RunID = "A"
-	if !ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, cfgA) {
-		t.Fatal("run A should be approved from its own seeded record")
+	if !ObtainIssueApproval(context.Background(), req73(sess), cfgA) {
+		t.Fatal("run A should be satisfied from its own seeded record")
 	}
 }
 
-// TestObtainApproval_ClearOneLeavesOther: clearing run A must not affect B.
-func TestObtainApproval_ClearOneLeavesOther(t *testing.T) {
-	t.Setenv("TMUX", "")
-	stateDir := t.TempDir()
-	sess := sampleSession()
-	seedApproval(t, stateDir, "A", sess)
-	seedApproval(t, stateDir, "B", sess)
-
-	if err := approvals.ClearRun(stateDir, "A"); err != nil {
-		t.Fatalf("ClearRun A: %v", err)
-	}
-	base := Config{
-		StateDir:      stateDir,
-		TTL:           time.Hour,
-		PromptTimeout: time.Second,
-		Stderr:        &bytes.Buffer{},
-		Prompter:      noTTYPrompter{},
-		Logger:        discardLogger(),
-	}
-	a := base
-	a.RunID = "A"
-	if ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, a) {
-		t.Error("cleared run A should re-prompt (not approved)")
-	}
-	b := base
-	b.RunID = "B"
-	if !ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, b) {
-		t.Error("run B should still be approved after clearing A")
-	}
-}
-
-// TestObtainApproval_FailClosedWithoutRunID: no RunID => interactive-only,
-// persists nothing.
-func TestObtainApproval_FailClosedWithoutRunID(t *testing.T) {
-	t.Setenv("TMUX", "")
-	sess := sampleSession()
-
-	t.Run("tty approves this op but persists nothing", func(t *testing.T) {
-		stateDir := t.TempDir()
-		cfg := Config{
-			StateDir:      stateDir,
-			RunID:         "", // no run id
-			TTL:           time.Hour,
-			PromptTimeout: time.Second,
-			Stderr:        &bytes.Buffer{},
-			Prompter:      matchingPrompter{Answer: 1},
-			Logger:        discardLogger(),
-		}
-		if !ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, cfg) {
-			t.Fatal("interactive approval should succeed even without run id")
-		}
-		// No file may be created under approvals/ or runs/.
-		for _, sub := range []string{"approvals", "runs"} {
-			if entries, err := os.ReadDir(stateDir + "/" + sub); err == nil && len(entries) > 0 {
-				t.Errorf("no-run-id path must persist nothing, found %d entries in %s", len(entries), sub)
-			}
-		}
-	})
-
-	t.Run("no tty denies", func(t *testing.T) {
-		stderr := &bytes.Buffer{}
-		cfg := Config{
-			StateDir:      t.TempDir(),
-			RunID:         "",
-			TTL:           time.Hour,
-			PromptTimeout: time.Second,
-			Stderr:        stderr,
-			Prompter:      noTTYPrompter{},
-			Logger:        discardLogger(),
-		}
-		if ObtainApproval(context.Background(), Request{Session: sess, Action: "git push", Repo: "owner/repo"}, cfg) {
-			t.Fatal("no tty + no run id must deny")
-		}
-		if !strings.Contains(stderr.String(), "OUTSIDE `rein run`") {
-			t.Errorf("expected fail-closed stderr explaining missing run context\n%s", stderr.String())
-		}
-	})
-}
-
-// TestObtainApproval_MidRunScopeEdit: a record from before a scope
-// expansion (extra repo added to the live session) must NOT cover the
-// expanded scope — live-vs-record signature check.
-func TestObtainApproval_MidRunScopeEdit(t *testing.T) {
+func TestObtainIssueApproval_MidRunScopeEdit(t *testing.T) {
 	t.Setenv("TMUX", "")
 	stateDir := t.TempDir()
 	orig := sampleSession()
-	seedApproval(t, stateDir, testRunID, orig)
+	seedConfirmed(t, stateDir, testRunID, orig, sampleIssue(73))
 
 	expanded := orig
 	expanded.Repos = []string{"owner/repo", "owner/extra"} // scope grew mid-run
@@ -506,38 +465,61 @@ func TestObtainApproval_MidRunScopeEdit(t *testing.T) {
 		Prompter:      noTTYPrompter{}, // no auto-approve, so we observe the miss
 		Logger:        discardLogger(),
 	}
-	if ObtainApproval(context.Background(), Request{Session: expanded, Action: "git push", Repo: "owner/extra"}, cfg) {
-		t.Fatal("expanded-scope session must NOT be covered by the pre-expansion approval")
+	if ObtainIssueApproval(context.Background(), req73(expanded), cfg) {
+		t.Fatal("expanded-scope session must NOT be covered by the pre-expansion record (issue set included)")
 	}
 }
 
-// --- Grant subcommand (loads session from snapshot by run-id) ---
+func TestObtainIssueApproval_NoRunIDFailsClosed(t *testing.T) {
+	t.Setenv("TMUX", "")
+	sess := sampleSession()
+	stderr := &bytes.Buffer{}
+	cfg := Config{
+		StateDir:      t.TempDir(),
+		RunID:         "", // outside any rein run
+		TTL:           time.Hour,
+		PromptTimeout: time.Second,
+		Stderr:        stderr,
+		Prompter:      matchingPrompter{Answer: 73}, // would approve if (wrongly) consulted
+		Logger:        discardLogger(),
+	}
+	if ObtainIssueApproval(context.Background(), req73(sess), cfg) {
+		t.Fatal("no run id must fail closed — a declare cannot be keyed to a run")
+	}
+	if !strings.Contains(stderr.String(), "rein run") {
+		t.Errorf("expected the launch instruction, got %q", stderr.String())
+	}
+}
 
-// TestGrant_LoadsSessionFromRunContext is the linchpin: Grant must read
-// the session from runs/<id>.json, NOT from REIN_SESSION_FILE. We set
-// REIN_SESSION_FILE to a DIFFERENT session and confirm the snapshot's
-// session is the one that gets approved.
-func TestGrant_LoadsSessionFromRunContext(t *testing.T) {
+// --- Grant subcommand (renders ONLY from the snapshot) ---
+
+func TestGrant_RendersPendingIssueFromSnapshot(t *testing.T) {
 	stateDir := t.TempDir()
-	snapSess := session.Session{ID: "sess_snapshot", Role: "implement", Repos: []string{"owner/snap"}, Issue: 42}
-	if err := approvals.WriteRunContext(stateDir, "X", approvals.RunContext{Session: snapSess, RunPID: os.Getpid(), WrittenAt: time.Now()}); err != nil {
+	snapSess := session.Session{ID: "sess_snapshot", Role: "implement", Repos: []string{"owner/snap"}}
+	pending := approvals.ConfirmedIssue{Number: 42, Repo: "owner/snap", Title: "the snapshot title", State: "open"}
+	if err := approvals.WriteRunContext(stateDir, "X", approvals.RunContext{Session: snapSess, RunPID: os.Getpid(), PendingIssue: &pending, WrittenAt: time.Now()}); err != nil {
 		t.Fatalf("seed snapshot: %v", err)
 	}
 	// Point the env at a DIFFERENT session file — Grant must ignore it.
-	other := session.Session{ID: "sess_other", Role: "implement", Repos: []string{"owner/other"}, Issue: 99}
-	t.Setenv("REIN_SESSION_FILE", writeSessionFile(t, other))
+	t.Setenv("REIN_SESSION_FILE", writeSessionFile(t, session.Session{ID: "sess_other", Role: "implement", Repos: []string{"owner/other"}}))
 
+	stub := &prompt.StubPrompter{Response: "42"}
 	cfg := Config{
 		StateDir:      stateDir,
 		RunID:         "X",
 		TTL:           time.Hour,
 		PromptTimeout: time.Second,
 		Stderr:        &bytes.Buffer{},
-		Prompter:      matchingPrompter{Answer: 42}, // matches the SNAPSHOT's issue, not 99
+		Prompter:      stub,
 		Logger:        discardLogger(),
 	}
 	if err := Grant(context.Background(), cfg); err != nil {
-		t.Fatalf("Grant should approve using snapshot session: %v", err)
+		t.Fatalf("Grant should confirm using snapshot: %v", err)
+	}
+	// The prompt must be rendered from the SNAPSHOT (the popup never
+	// fetches): title + home repo from PendingIssue, session from snapshot.
+	if stub.Last.Title != "the snapshot title" || stub.Last.IssueRepo != "owner/snap" || stub.Last.SessionID != "sess_snapshot" {
+		t.Errorf("Grant must render from the snapshot only: %+v", stub.Last)
 	}
 	rec, err := approvals.ReadApproval(stateDir, "X")
 	if err != nil {
@@ -546,8 +528,30 @@ func TestGrant_LoadsSessionFromRunContext(t *testing.T) {
 	if rec.Signature != approvals.SignatureOf(snapSess) {
 		t.Error("approval signature must match the SNAPSHOT session, not the env session")
 	}
-	if rec.SessionID != snapSess.ID {
-		t.Errorf("recorded SessionID = %q, want snapshot %q", rec.SessionID, snapSess.ID)
+	if !rec.HasIssue("owner/snap", 42) {
+		t.Errorf("confirmed issue must be recorded: %+v", rec.Issues)
+	}
+}
+
+func TestGrant_NothingPending(t *testing.T) {
+	stateDir := t.TempDir()
+	sess := sampleSession()
+	if err := approvals.WriteRunContext(stateDir, testRunID, approvals.RunContext{Session: sess, RunPID: os.Getpid(), WrittenAt: time.Now()}); err != nil {
+		t.Fatalf("seed snapshot: %v", err)
+	}
+	cfg := Config{
+		StateDir:      stateDir,
+		RunID:         testRunID,
+		PromptTimeout: time.Second,
+		Prompter:      matchingPrompter{Answer: 1},
+		Logger:        discardLogger(),
+	}
+	err := Grant(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("Grant with no PendingIssue must error")
+	}
+	if !strings.Contains(err.Error(), "rein declare") {
+		t.Errorf("error must name the declare command, got %v", err)
 	}
 }
 
@@ -578,7 +582,8 @@ func TestGrant_NoRunID(t *testing.T) {
 func TestGrant_Deny(t *testing.T) {
 	stateDir := t.TempDir()
 	sess := sampleSession()
-	if err := approvals.WriteRunContext(stateDir, testRunID, approvals.RunContext{Session: sess, RunPID: os.Getpid(), WrittenAt: time.Now()}); err != nil {
+	pending := sampleIssue(73)
+	if err := approvals.WriteRunContext(stateDir, testRunID, approvals.RunContext{Session: sess, RunPID: os.Getpid(), PendingIssue: &pending, WrittenAt: time.Now()}); err != nil {
 		t.Fatalf("seed snapshot: %v", err)
 	}
 	cfg := Config{
@@ -586,7 +591,7 @@ func TestGrant_Deny(t *testing.T) {
 		RunID:         testRunID,
 		PromptTimeout: time.Second,
 		Stderr:        &bytes.Buffer{},
-		Prompter:      matchingPrompter{Answer: 9}, // wrong answer (sess.Issue=1)
+		Prompter:      matchingPrompter{Answer: 9}, // wrong answer
 		Logger:        discardLogger(),
 	}
 	if err := Grant(context.Background(), cfg); err == nil {
@@ -597,11 +602,36 @@ func TestGrant_Deny(t *testing.T) {
 	}
 }
 
+func TestGrant_IdempotentWhenAlreadyConfirmed(t *testing.T) {
+	stateDir := t.TempDir()
+	sess := sampleSession()
+	pending := sampleIssue(73)
+	if err := approvals.WriteRunContext(stateDir, testRunID, approvals.RunContext{Session: sess, RunPID: os.Getpid(), PendingIssue: &pending, WrittenAt: time.Now()}); err != nil {
+		t.Fatalf("seed snapshot: %v", err)
+	}
+	seedConfirmed(t, stateDir, testRunID, sess, sampleIssue(73))
+	stub := &prompt.StubPrompter{Response: "wrong"}
+	cfg := Config{
+		StateDir:      stateDir,
+		RunID:         testRunID,
+		PromptTimeout: time.Second,
+		Stderr:        &bytes.Buffer{},
+		Prompter:      stub,
+		Logger:        discardLogger(),
+	}
+	if err := Grant(context.Background(), cfg); err != nil {
+		t.Fatalf("already-confirmed grant must succeed without prompting: %v", err)
+	}
+	if stub.Calls != 0 {
+		t.Error("already-confirmed grant must not re-prompt")
+	}
+}
+
 // writeSessionFile writes a minimal dev-session.yaml and returns its path.
 func writeSessionFile(t *testing.T, s session.Session) string {
 	t.Helper()
 	path := t.TempDir() + "/dev-session.yaml"
-	body := "id: " + s.ID + "\nrole: " + s.Role + "\nrepos:\n  - " + s.Repos[0] + "\nissue: " + strconv.Itoa(s.Issue) + "\n"
+	body := "id: " + s.ID + "\nrole: " + s.Role + "\nrepos:\n  - " + s.Repos[0] + "\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatalf("write session file: %v", err)
 	}

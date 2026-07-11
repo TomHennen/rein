@@ -216,8 +216,8 @@ func runWrapped(argv []string) (int, error) {
 	// Tell the operator what's about to happen so they know what to
 	// look for when their wrapped agent (claude, etc.) hits a write.
 	fmt.Fprintln(os.Stderr, "rein: launching wrapped process with:")
-	fmt.Fprintf(os.Stderr, "  session: %s (role=%s, repos=%v, issue=#%d) [source=%s]\n",
-		sess.ID, sess.Role, sess.Repos, sess.Issue, sessSource)
+	fmt.Fprintf(os.Stderr, "  session: %s (role=%s, repos=%v) [source=%s]\n",
+		sess.ID, sess.Role, sess.Repos, sessSource)
 	fmt.Fprintf(os.Stderr, "  PATH-front shim dir: %s\n", shimDir)
 	fmt.Fprintf(os.Stderr, "  per-process git config: %s\n", gitConfigPath)
 	fmt.Fprintln(os.Stderr, "  (your real ~/.gitconfig is layered in via include.path)")
@@ -225,17 +225,11 @@ func runWrapped(argv []string) (int, error) {
 		fmt.Fprintf(os.Stderr, "  scrubbed from child env: %s (agent uses rein-brokered creds only)\n", strings.Join(scrubbed, ", "))
 	}
 	fmt.Fprintln(os.Stderr)
-	if sess.Issue == 0 && isWriteCapableRole(sess.Role) {
-		fmt.Fprintln(os.Stderr, "  WARN: session has no `issue:` field — write ops will mint WITHOUT human confirmation.")
-		fmt.Fprintln(os.Stderr)
-	} else {
-		fmt.Fprintln(os.Stderr, "  First write op will trigger a confirmation prompt. Look for it in:")
-		fmt.Fprintln(os.Stderr, "    - your terminal (if the wrapped process inherits /dev/tty)")
-		fmt.Fprintln(os.Stderr, "    - a tmux popup (if you're in tmux and /dev/tty is detached)")
-		fmt.Fprintln(os.Stderr, "    - a 'rein: write blocked' message in the wrapped process's output")
-		fmt.Fprintln(os.Stderr, "      (run 'rein approval grant' in another terminal to approve, then retry)")
-		fmt.Fprintln(os.Stderr)
-	}
+	sess.WarnIgnoredIssue(os.Stderr)
+	fmt.Fprintln(os.Stderr, "  Writes are LOCKED until the agent declares its issue:  rein declare <n>")
+	fmt.Fprintln(os.Stderr, "  then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal")
+	fmt.Fprintln(os.Stderr, "  (or a tmux popup); approving covers all writes for this run.")
+	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "rein: running:", strings.Join(cmdline, " "))
 	fmt.Fprintln(os.Stderr, "---")
 

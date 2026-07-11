@@ -42,7 +42,6 @@ import (
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/srt"
 	"github.com/TomHennen/rein/internal/tokencache"
-	"github.com/TomHennen/rein/internal/ui/grant"
 )
 
 // stubGHToken is the non-secret placeholder GH_TOKEN inside the sandbox. gh
@@ -451,57 +450,39 @@ func runSandboxed(cmdline []string) (int, error) {
 	return 1, fmt.Errorf("wait srt: %w", waitErr)
 }
 
-// buildSandboxApprove returns the write-approval hook for sandboxed mode. Unlike
-// direct mode's buildConfirmWrite, it is NEVER nil — runbroker.Start fails
-// closed on a nil hook, and a nil hook would auto-approve every write. When the
-// session binds no issue, writes are DENIED (with a loud, actionable message)
-// rather than silently allowed: reads still flow; a push is blocked until the
-// session gets an `issue:`.
+// buildSandboxApprove returns the write-approval hook for sandboxed mode:
+// a pure READ of the run's confirmed-issue set (issue #35 §2/§7). It is
+// NEVER nil — runbroker.Start fails closed on a nil hook. It NEVER
+// prompts: prompts fire only at declare time (the declare.rein.internal
+// handler), never inside a relayed request (§3).
 //
-// CP4 approval invariants (an in-sandbox process cannot self-grant):
+// Approval invariants (an in-sandbox process cannot self-grant):
 //
-//   - This hook runs in rein's PARENT process, on its foreground /dev/tty, and
-//     the issue-number secret is read from that tty (internal/ui/grant). The
-//     sandboxed agent has no channel to rein's tty and does not know it will be
-//     asked — it cannot pre-answer or self-answer the prompt. Concretely: srt
-//     launches the child with bwrap `--new-session` (setsid), so the sandbox has
-//     NO controlling terminal — /dev/tty is unopenable (ENXIO) and TIOCSTI
-//     injection fails, independent of the host's dev.tty.legacy_tiocsti sysctl.
-//     VerifyConfigApplied re-checks this EVERY launch (ProbeControllingTTY: the
-//     in-sandbox probe opens /dev/tty and fails the launch closed if it
-//     succeeds), so a future srt that dropped --new-session can't silently
-//     reopen the channel (issue #32).
-//   - The on-disk approval RECORD the hook consults lives under stateDir, which
-//     is deny-read'd in-sandbox AND outside the sandbox's only writable mount
-//     (the working tree), so an in-sandbox process can neither read nor forge
-//     it. See TestInSandboxSelfGrantStructurallyFails.
+//   - The Form A prompt runs in rein's PARENT process at declare time, on
+//     its foreground /dev/tty (internal/ui/grant). The sandboxed agent has
+//     no channel to rein's tty: srt launches the child with bwrap
+//     `--new-session` (setsid), so the sandbox has NO controlling terminal
+//     — /dev/tty is unopenable (ENXIO) and TIOCSTI injection fails,
+//     independent of the host's dev.tty.legacy_tiocsti sysctl.
+//     VerifyConfigApplied re-checks this EVERY launch (ProbeControllingTTY),
+//     so a future srt that dropped --new-session can't silently reopen the
+//     channel (issue #32).
+//   - The on-disk approval RECORD this hook consults lives under stateDir,
+//     which is deny-read'd in-sandbox AND outside the sandbox's only
+//     writable mount (the working tree), so an in-sandbox process can
+//     neither read nor forge it. See TestInSandboxSelfGrantStructurallyFails.
 //   - There is NO control socket in the in-process model (runbroker package
-//     doc), so the daemon-era "#12 control socket reachable in-sandbox" vector
-//     is closed structurally: the only unix socket the sandbox can reach is the
-//     per-run PROXY socket, which speaks TLS/HTTP to GitHub, not approval verbs.
+//     doc); the only unix socket the sandbox can reach is the per-run PROXY
+//     socket, whose only local verbs are the declare virtual host — which
+//     always routes through the fetch + Form A human ceremony.
 func buildSandboxApprove(sess session.Session, stateDir, runID string, logger *log.Logger) func(repo string) bool {
-	if sess.Issue == 0 {
-		logger.Printf("sandbox: write-approval DENIES all writes (session has no `issue:`); reads still flow")
-		return func(repo string) bool {
-			fmt.Fprintf(os.Stderr, "rein: write to %s BLOCKED — session has no `issue:` field, so no approval channel is bound. Add `issue: <n>` to the session and re-run to enable write approval.\n", repo)
-			return false
-		}
-	}
-	cfg := grant.Config{
-		StateDir:      stateDir,
-		RunID:         runID,
-		RunPID:        os.Getpid(),
-		TTL:           approvalTTL,
-		PromptTimeout: 60 * time.Second,
-		PreferPopup:   grant.PopupPreferenceFromEnv(),
-		Logger:        logger,
-	}
+	sig := approvals.SignatureOf(sess)
 	return func(repo string) bool {
-		return grant.ObtainApproval(context.Background(), grant.Request{
-			Session: sess,
-			Action:  "git push / write (sandboxed run)",
-			Repo:    repo,
-		}, cfg)
+		if issues := approvals.ConfirmedIssues(stateDir, runID, sig); len(issues) > 0 {
+			return true
+		}
+		logger.Printf("sandbox write gate: no confirmed issue for run %s; denying write to %q (agent must run `rein declare <n>`)", runID, repo)
+		return false
 	}
 }
 
@@ -700,8 +681,8 @@ func printExpiryBanner(w io.Writer, reason string) {
 
 func printSandboxBanner(w io.Writer, sess session.Session, sessSource, socketPath, workTree string, extraDomains, cmdline []string) {
 	fmt.Fprintln(w, "rein: launching SANDBOXED (srt) run:")
-	fmt.Fprintf(w, "  session: %s (role=%s, repos=%v, issue=#%d) [source=%s]\n",
-		sess.ID, sess.Role, sess.Repos, sess.Issue, sessSource)
+	fmt.Fprintf(w, "  session: %s (role=%s, repos=%v) [source=%s]\n",
+		sess.ID, sess.Role, sess.Repos, sessSource)
 	fmt.Fprintf(w, "  proxy socket (out of sandbox): %s\n", socketPath)
 	fmt.Fprintf(w, "  working tree (writable in sandbox): %s\n", workTree)
 	fmt.Fprintln(w, "  the agent sees NO real token; git/gh are injected at the proxy.")
@@ -709,11 +690,9 @@ func printSandboxBanner(w io.Writer, sess session.Session, sessSource, socketPat
 	if len(extraDomains) > 0 {
 		fmt.Fprintf(w, "  extra egress ALLOWED (direct TLS, NOT injected, no rein token): %s\n", strings.Join(extraDomains, ", "))
 	}
-	if sess.Issue == 0 && isWriteCapableRole(sess.Role) {
-		fmt.Fprintln(w, "  WARN: session has no `issue:` — WRITES ARE BLOCKED (reads flow); add `issue:` to enable approvals.")
-	} else if sess.Issue != 0 {
-		fmt.Fprintln(w, "  first write triggers an approval prompt on THIS terminal (rein hosts the broker out of the sandbox).")
-	}
+	sess.WarnIgnoredIssue(w)
+	fmt.Fprintln(w, "  writes are LOCKED until the agent declares its issue:  rein declare <n>")
+	fmt.Fprintln(w, "  then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.")
 	if len(cmdline) > 0 {
 		agent := filepath.Base(cmdline[0])
 		fmt.Fprintf(w, "  to run %s WITHOUT rein for one command: `\\%s` (bash/zsh) or `command %s` (fish)\n", agent, agent, agent)
