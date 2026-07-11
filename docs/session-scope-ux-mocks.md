@@ -363,31 +363,31 @@ than hand-maintained.** Three layers, each owned by one artifact:
 
 ---
 
-## 6. Direct mode (`--direct`) — how each piece behaves (added on Tom's question)
+## 6. Direct mode (`--direct`) — REVISED: unified (Tom, 2026-07-11)
 
-Direct mode has no sandbox and no proxy, so the pieces split cleanly:
+*(This section's first draft said "sandboxed-only in v1"; Tom called that bad
+UX and asked whether support was hard. It isn't — it's easier: unsandboxed
+`rein declare` needs no proxy relay. The #35 design doc now specifies full
+unification; summary here for the scope flows.)*
 
-- **Scope expansion via `declare` (§1): sandboxed-only in v1.** The declare
-  channel is the proxy's local virtual host; direct mode has neither. Direct
-  mode keeps today's model: the session list is the standing ceiling, an
-  out-of-ceiling write fails loudly at the mint, and the remedy is
-  `rein session add-repo` + a new run. This is consistent with #35's C1
-  (Shape B can't see push refs) and with direct mode's generally thinner
-  boundary (same-uid agent, ambient filesystem — the loud `--direct` banner).
-  *Possible future unification:* `rein declare` is just a CLI writing
-  mode-independent approval records, so a direct-mode declare could work if
-  dogfood shows demand — deferred, not designed here.
-- **The in-prompt `[y/N]` persist question:** rides the expansion prompt, so
-  sandboxed-only in v1; `session add-repo` is the direct-mode equivalent.
+- **Scope expansion via `declare` (§1): works in BOTH modes.** Direct-mode
+  `rein declare 41 --repo o/r` runs as a plain CLI: fetches the title, fires
+  the same tty/tmux grant prompt (with the same in-prompt `[y/N]` persist
+  question), writes the same approval record; the credential helper then
+  mints against the run's confirmed union. Pre-declaration writes get the
+  placeholder credential + a stderr hint naming the declare command (the #45
+  deny channel — no proxy exists to synthesize richer errors).
 - **`rein session show|add-repo` and init/run cwd-autodetection (§2/§3):
-  mode-independent.** They read/write the yaml and probe installations on the
-  host; identical behavior in both modes.
-- **Issue binding (#35): direct mode keeps the static `sess.Issue`** for its
-  write-approval prompt (design C1; recorded in the #35 doc §7). The #45 fix
-  governs the failure path there: a broken/missing session file degrades to
-  the placeholder credential, never to git credential fallthrough.
+  mode-independent**, identical in both modes.
+- **Issue binding (#35): unified — `sess.Issue` retires in BOTH modes** (one
+  binding model; see the #35 doc §7). Direct-mode caveats, both pre-existing
+  Shape-B residuals: no push-ref cross-check (refs invisible outside the
+  proxy, C1), and the shared-terminal self-answer residual (#12) applies to
+  the declare prompt as to today's write prompt.
 - **deny-`$HOME` (#59): sandboxed-only by definition.** Direct mode sees the
-  full filesystem; that is exactly what the `--direct` banner warns about.
+  full filesystem — that's what the `--direct` banner warns about — which
+  also makes §7's clone-location question moot there (existing checkout
+  usable directly).
 
 ---
 
