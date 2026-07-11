@@ -197,6 +197,16 @@ type RunContext struct {
 	// Session is the resolved session for this run.
 	Session session.Session `json:"session"`
 
+	// Direct records whether the owning run is DIRECT mode (vs sandboxed).
+	// It exists for ONE purpose (issue #69): the out-of-process grant
+	// surface (`rein approval grant`, the tmux popup) must re-sign the
+	// approval record after an in-prompt persist ONLY for a direct run —
+	// whose credential helper reloads the widened session file and would
+	// otherwise re-lock the run. A sandboxed run must NOT be re-signed (its
+	// broker keeps the launch session and keys the write gate on it), so
+	// the grant subcommand reads this flag to decide. Never a write gate.
+	Direct bool `json:"direct,omitempty"`
+
 	// SessionFile is the PATH the session was loaded from, or "" when it
 	// came from the env fallback (no file). Transport, like PendingIssue:
 	// the out-of-process grant surfaces have no REIN_SESSION_FILE and must

@@ -142,13 +142,25 @@ type Config struct {
 	// asked at all rather than asked and silently ignored.
 	SessionFile string
 
+	// Direct marks the owning run as DIRECT mode (vs sandboxed). It is
+	// stamped into the run-context snapshot so the OUT-OF-PROCESS grant
+	// surface (`rein approval grant`, the tmux popup) can re-sign the
+	// approval after an in-prompt persist for a direct run — the common
+	// path, since a direct-mode agent's `rein declare` usually has no tty
+	// and approval arrives out-of-process. Sandboxed leaves it false.
+	Direct bool
+
 	// OnPersist, if set, runs after the repo was successfully appended to
 	// SessionFile. It is the mode-specific follow-up: DIRECT mode uses it
-	// to re-sign this run's approval record for the now-wider session (see
-	// cmd/rein), because its credential helper re-loads the session file on
-	// every invocation and would otherwise invalidate the very approval the
-	// human just gave. Sandboxed mode needs nothing (it holds the launch
-	// session in-process) and leaves this nil.
+	// to re-sign this run's approval record for the now-wider session
+	// (approvals.Resign), because its credential helper re-loads the session
+	// file on every invocation and would otherwise invalidate the very
+	// approval the human just gave. Sandboxed mode needs nothing (it holds
+	// the launch session in-process) and leaves this nil.
+	//
+	// The IN-PROCESS caller (cmd/rein declareDirect) sets this directly; the
+	// out-of-process Grant subcommand SYNTHESIZES it from RunContext.Direct
+	// (it has no caller to set it), so both approval surfaces re-sign.
 	OnPersist func(newSess session.Session)
 
 	// Logger receives forensic log lines.
@@ -263,6 +275,7 @@ func ObtainIssueApproval(ctx context.Context, req IssueRequest, cfg Config) bool
 	snap := approvals.RunContext{
 		Session:      req.Session,
 		SessionFile:  cfg.SessionFile,
+		Direct:       cfg.Direct,
 		RunPID:       cfg.RunPID,
 		PendingIssue: &req.Issue,
 		WrittenAt:    time.Now(),
@@ -421,7 +434,19 @@ func settleExpansion(cfg Config, sess session.Session, ci approvals.ConfirmedIss
 		cfg.Logger.Printf("grant: expansion to %s PERSISTED to %s", ci.Repo, cfg.SessionFile)
 		fmt.Fprintf(cfg.Stderr, "rein: saved to %s — future runs include %s without asking.\n", cfg.SessionFile, ci.Repo)
 		if cfg.OnPersist != nil {
-			cfg.OnPersist(newSess)
+			// Re-sign ONLY when the file is EXACTLY the launch session plus
+			// the one repo just approved. If a concurrent hand-edit widened
+			// it further in the persist window, the reloaded session differs
+			// — do NOT re-sign: the hand-edit invalidation must stand (fail
+			// closed; the human re-declares). This closes the "trust the
+			// reloaded file" gap (review FINDING 2).
+			expected := sess
+			expected.Repos = append(append([]string{}, sess.Repos...), ci.Repo)
+			if approvals.SignatureOf(newSess) == approvals.SignatureOf(expected) {
+				cfg.OnPersist(newSess)
+			} else {
+				cfg.Logger.Printf("grant: persisted session is not launch+%s (concurrent edit?); NOT re-signing — re-declare if writes lock", ci.Repo)
+			}
 		}
 	}
 }
@@ -507,22 +532,17 @@ func recordIssue(cfg Config, sig, sessionID string, ci approvals.ConfirmedIssue)
 // "the popup never fetches").
 //
 // PERSIST NOTE (issue #69): this out-of-process surface can persist an
-// approved expansion repo (settleExpansion writes the yaml), but it has NO
-// OnPersist hook — it cannot know whether the owning run is sandboxed or
-// direct, and re-signing is only correct for one of them (sandboxed mode's
-// broker keeps the LAUNCH session, so re-signing to the wider session would
-// break ITS gate; direct mode NEEDS the re-sign). So:
-//   - Sandboxed + popup persist: correct as-is — the record stays at the
-//     launch signature the broker checks; the yaml change only affects the
-//     NEXT run. (This is the common case: full-screen agent TUIs need the
-//     popup.)
-//   - Direct + popup persist: the run MAY re-lock on the next git op (the
-//     helper reloads the now-wider yaml, whose signature no longer matches
-//     the record). The agent simply re-declares (idempotent) and is
-//     re-confirmed. Narrow (direct mode is not the popup's primary home)
-//     and self-healing; the clean fix (a mode tag in the run context) is
-//     deferred with #64. The inline-tty direct path — what the demo drives
-//     — re-signs correctly via Config.OnPersist and has no such gap.
+// approved expansion repo (settleExpansion writes the yaml), and it MUST
+// re-sign the run's approval for a DIRECT run or the credential helper's
+// next reload of the widened file re-locks the run. It reads the mode from
+// the snapshot's RunContext.Direct flag (it has no caller to set OnPersist)
+// and synthesizes the Resign closure below:
+//   - Direct + out-of-process persist (the common case — a direct agent's
+//     `rein declare` usually has no tty, so approval arrives here or in
+//     another terminal): re-signs, so the run stays authorized.
+//   - Sandboxed + popup persist: Direct is false, OnPersist stays nil — the
+//     record correctly stays at the launch signature the broker's write
+//     gate checks; the yaml change only affects the NEXT run.
 //
 // It tries /dev/tty first (no CLI flag accepts the issue number — the
 // answer must arrive via /dev/tty so a confused or malicious agent can't
@@ -581,6 +601,22 @@ func Grant(ctx context.Context, cfg Config) error {
 	// declare wrote, exactly like the session itself does.
 	if cfg.SessionFile == "" {
 		cfg.SessionFile = rc.SessionFile
+	}
+	// A DIRECT run persisting a repo here must re-sign its own approval, or
+	// the credential helper's next reload of the widened file re-locks the
+	// run (issue #69). The in-process caller sets OnPersist itself; this
+	// subcommand has no caller, so synthesize it from the snapshot's Direct
+	// flag. Sandboxed runs (Direct=false) leave OnPersist nil — re-signing
+	// would break their launch-session-keyed write gate.
+	if rc.Direct && cfg.OnPersist == nil {
+		oldSig := sig
+		stateDir, runID := cfg.StateDir, cfg.RunID
+		logger := cfg.Logger
+		cfg.OnPersist = func(newSess session.Session) {
+			if err := approvals.Resign(stateDir, runID, oldSig, approvals.SignatureOf(newSess), newSess.ID); err != nil {
+				logger.Printf("grant subcommand: re-sign after persist failed: %v", err)
+			}
+		}
 	}
 
 	pr := formARequest(IssueRequest{Session: sess, Issue: pending}, expansion, cfg)

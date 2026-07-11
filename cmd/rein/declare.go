@@ -143,6 +143,11 @@ func declareDirect(number int, repoFlag, runID string) (int, error) {
 		RunID:         runID,
 		RunPID:        envInt("REIN_RUN_PID"),
 		SessionFile:   sessionFile,
+		// Direct mode: the credential helper reloads the session file every
+		// git op, so an in-prompt persist must re-sign this run's approval
+		// (below, and — for the out-of-process grant surface — via the
+		// snapshot's Direct flag). Sandboxed mode leaves this false.
+		Direct: true,
 		// DIRECT-MODE ONLY (issue #69): the credential helper re-loads the
 		// session file on EVERY git operation, so persisting the approved
 		// repo would change the session signature under the live run and
