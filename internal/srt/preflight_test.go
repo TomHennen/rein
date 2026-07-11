@@ -14,6 +14,7 @@ func stubEnv() Env {
 		PackageVersion: func(string) (string, error) { return PinnedVersion, nil },
 		BwrapUserns:    func() error { return nil },
 		SeccompPresent: func(string) (bool, error) { return true, nil },
+		SystemCA:       func() (string, error) { return "/etc/ssl/certs/ca-certificates.crt", nil },
 		Now:            time.Now,
 	}
 }
@@ -80,6 +81,18 @@ func TestPreflightSeccompMissingFailsClosed(t *testing.T) {
 	}
 	if !anyHardFail(checks) {
 		t.Error("missing seccomp must block the launch")
+	}
+}
+
+func TestPreflightSystemCABroken(t *testing.T) {
+	e := stubEnv()
+	e.SystemCA = func() (string, error) { return "", errors.New("no PEM certificates") }
+	checks := Preflight(e)
+	if statusOf(checks, "system CA bundle") != StatusFail {
+		t.Error("broken system trust store should fail")
+	}
+	if !anyHardFail(checks) {
+		t.Error("broken system trust store must block the launch (SSL_CERT_FILE replaces roots in-sandbox)")
 	}
 }
 
