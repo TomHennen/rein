@@ -373,7 +373,7 @@ func resolveAndCacheInstallID(ctx context.Context, sess session.Session, lookup 
 			// the rest — a definitive 404 on a later repo must still refuse
 			// the launch. Whether the launch can proceed at all is decided
 			// after the loop, based on what id (if any) we ended up with.
-			fmt.Fprintf(os.Stderr, "rein: warning: could not verify installation coverage of %s/%s (%v)\n", owner, repo, err)
+			fmt.Fprintf(os.Stderr, "rein: warning: could not verify installation coverage of %s/%s (%v); git operations on it may fail mid-session if the installation does not cover it\n", owner, repo, err)
 			lastErr = err
 			continue
 		}
