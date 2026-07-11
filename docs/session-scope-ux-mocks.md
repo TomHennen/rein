@@ -388,3 +388,40 @@ Direct mode has no sandbox and no proxy, so the pieces split cleanly:
   the placeholder credential, never to git credential fallthrough.
 - **deny-`$HOME` (#59): sandboxed-only by definition.** Direct mode sees the
   full filesystem; that is exactly what the `--direct` banner warns about.
+
+---
+
+## 7. Expansion × sandbox filesystem — where does the second repo's checkout live? (Tom, 2026-07-11)
+
+The scope-expansion prompt grows the **credential** ceiling; it cannot grow
+the **filesystem**: bwrap binds are fixed when the sandbox launches, so no
+mid-run approval can make a new path writable. That constraint sorts the
+question into two cases:
+
+**In-run (the expansion just approved):** the agent clones the new repo into
+an already-writable spot and the clone is *ephemeral*:
+
+- Under #59, denied `$HOME` is an empty **writable** tmpfs — a clone there
+  works fine and evaporates at run end. `/tmp` likewise.
+- Ephemeral is acceptable *by design*: in rein's model the durable artifact is
+  the **push** (`agent/<issue>/<nonce>` lands on GitHub), not the local tree.
+  The human `git fetch`es the branch into their own checkout afterward.
+- The approve message should therefore tell the agent where to go, e.g.:
+  `rein: clone it under $HOME/work/ (writable, discarded at run end)` — and
+  steer it AWAY from cloning inside the current workdir, where a nested repo
+  risks being committed into repo A's tree.
+
+**The user's existing local checkout of repo B:** deliberately NOT writable
+in-run — it is either hidden (under `$HOME`, #59) or read-only (other mounts,
+e.g. /mnt/dev). That's a feature: it may hold uncommitted human work, and an
+expansion approval shouldn't silently hand the agent a live working tree the
+human never staged for agent use. The next-run path: after
+`rein session add-repo` (or the in-prompt `y`), a future launch can bind the
+existing checkout writable — plumbing already exists (`ExtraAllowWrite`), what's
+missing is UX: plausibly a `worktrees:` map in the session yaml
+(repo → local path, validated at launch like everything else) or a
+`rein run --workdir-for owner/repo=PATH` flag. Deferred to dogfood; tracked in
+the follow-up issue.
+
+Related: the #59 "warm `go` builds may hit the module-cache lock" note is the
+same missing primitive (a scoped write-hatch) seen from the other side.
