@@ -140,7 +140,9 @@ environment (§4.2), and the proxy's CA certificate to trust (§5.4).
 > is egress-only and never injected (`srt.Build` appends extras to
 > `allowedDomains` only, never `mitmProxy.domains`; `Validate` rejects
 > wildcard/CDN injectors and inject-host/extra overlaps), so the claim
-> narrows to: **the proxy is the only route that carries credentials**,
+> narrows to: **the proxy is the only route that carries rein-injected
+> credentials** (the agent's own Anthropic credential rides the
+> api.anthropic.com extra-egress route),
 > and the extra-egress set is the operator's declared exfiltration
 > surface (loud EGRESS WARNING on wildcards / large sets).
 
