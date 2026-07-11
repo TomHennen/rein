@@ -506,6 +506,24 @@ func recordIssue(cfg Config, sig, sessionID string, ci approvals.ConfirmedIssue)
 // multiple runs are concurrent) and it never fetches (issue #35 §4:
 // "the popup never fetches").
 //
+// PERSIST NOTE (issue #69): this out-of-process surface can persist an
+// approved expansion repo (settleExpansion writes the yaml), but it has NO
+// OnPersist hook — it cannot know whether the owning run is sandboxed or
+// direct, and re-signing is only correct for one of them (sandboxed mode's
+// broker keeps the LAUNCH session, so re-signing to the wider session would
+// break ITS gate; direct mode NEEDS the re-sign). So:
+//   - Sandboxed + popup persist: correct as-is — the record stays at the
+//     launch signature the broker checks; the yaml change only affects the
+//     NEXT run. (This is the common case: full-screen agent TUIs need the
+//     popup.)
+//   - Direct + popup persist: the run MAY re-lock on the next git op (the
+//     helper reloads the now-wider yaml, whose signature no longer matches
+//     the record). The agent simply re-declares (idempotent) and is
+//     re-confirmed. Narrow (direct mode is not the popup's primary home)
+//     and self-healing; the clean fix (a mode tag in the run context) is
+//     deferred with #64. The inline-tty direct path — what the demo drives
+//     — re-signs correctly via Config.OnPersist and has no such gap.
+//
 // It tries /dev/tty first (no CLI flag accepts the issue number — the
 // answer must arrive via /dev/tty so a confused or malicious agent can't
 // supply it as an argument; --run-id is routing, not the secret). If
