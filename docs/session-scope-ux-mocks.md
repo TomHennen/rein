@@ -360,3 +360,31 @@ than hand-maintained.** Three layers, each owned by one artifact:
 6. **`session show` live-run view:** folded-in as mocked (orchestrator's call
    on Tom's "IDK" — it answers the question #53 actually raised, and
    unfolding it later is cheap).
+
+---
+
+## 6. Direct mode (`--direct`) — how each piece behaves (added on Tom's question)
+
+Direct mode has no sandbox and no proxy, so the pieces split cleanly:
+
+- **Scope expansion via `declare` (§1): sandboxed-only in v1.** The declare
+  channel is the proxy's local virtual host; direct mode has neither. Direct
+  mode keeps today's model: the session list is the standing ceiling, an
+  out-of-ceiling write fails loudly at the mint, and the remedy is
+  `rein session add-repo` + a new run. This is consistent with #35's C1
+  (Shape B can't see push refs) and with direct mode's generally thinner
+  boundary (same-uid agent, ambient filesystem — the loud `--direct` banner).
+  *Possible future unification:* `rein declare` is just a CLI writing
+  mode-independent approval records, so a direct-mode declare could work if
+  dogfood shows demand — deferred, not designed here.
+- **The in-prompt `[y/N]` persist question:** rides the expansion prompt, so
+  sandboxed-only in v1; `session add-repo` is the direct-mode equivalent.
+- **`rein session show|add-repo` and init/run cwd-autodetection (§2/§3):
+  mode-independent.** They read/write the yaml and probe installations on the
+  host; identical behavior in both modes.
+- **Issue binding (#35): direct mode keeps the static `sess.Issue`** for its
+  write-approval prompt (design C1; recorded in the #35 doc §7). The #45 fix
+  governs the failure path there: a broken/missing session file degrades to
+  the placeholder credential, never to git credential fallthrough.
+- **deny-`$HOME` (#59): sandboxed-only by definition.** Direct mode sees the
+  full filesystem; that is exactly what the `--direct` banner warns about.
