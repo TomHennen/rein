@@ -360,6 +360,65 @@ path.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-07-11 — **DESIGN CORRECTIONS RECORDED (audit issue #44 §3): five
+  deliberate implementation choices the design of record still contradicted.**
+  Dated correction notes added at each claim site in `docs/phase1-design.md`
+  (plus a summary banner at the top); `design.md` left untouched —
+  phase1-design is the phase design of record and its prose sweep stays
+  folded into #25. Each verified against current code before recording.
+  The five, with the audit matrix row ids:
+  1. **CDN hosts bypass the proxy entirely**
+     (`P-req-ALL-GH-TRAFFIC-VIA-REIN-PROXY`). `internal/srt` puts
+     `codeload`/`objects`/`raw.githubusercontent.com` in srt's
+     `allowedDomains` only, never `mitmProxy.domains`, so they get direct
+     srt TLS and never reach rein — never-inject enforced by routing, not
+     proxy classification. phase1-design §4.3's "redirects ... arrive at
+     the proxy as fresh connections" corrected in place. Consequence: the
+     proxy's `classPassthrough` relay arm (`internal/proxy`) is dead code
+     in sandboxed operation — RECORDED, deliberately NOT deleted
+     (defense-in-depth if a CDN host is ever routed to the socket).
+  2. **Operator extra egress** (`P-req-PROXY-ONLY-EGRESS-ROUTE`). CP4.5's
+     session `allow_domains:` + `REIN_ALLOW_DOMAINS` + built-in
+     `api.anthropic.com` default (this file, 2026-07-05 CP4.5 entries)
+     make §4's "the agent's only route out is the proxy" literally false;
+     corrected to "the only route that carries credentials" (extras are
+     egress-only, never in `mitmProxy.domains`; EGRESS WARNING on wide
+     sets).
+  3. **Env allowlist is a documented superset**
+     (`P-hide-ENV-ALLOWLIST-CONTENTS`). Beyond §4.2's "CA trust vars, stub
+     GH_TOKEN, PATH/locale": `HOME`/`TERM` passthrough (settled at CP3 —
+     "Env allowlist settled", 2026-07-05 below) plus rein-owned
+     `GIT_AUTHOR_*`/`GIT_COMMITTER_*`/`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`
+     (CP4 non-impersonating authorship) and `CLAUDE_CODE_TMPDIR`. The
+     strict-allowlist mechanism is intact (env_test.go); §4.2 note marks
+     `internal/srt/env.go` as the normative inventory.
+  4. **Plaintext write tokens on disk during a run**
+     (`P-dec-5.3-NO-EXFILTRATABLE-TOKEN-VALUE`). The issue-#20 exit-revoke
+     ledger (`writes/<run-id>.jsonl`, 0600 in 0700) persists raw write-token
+     values in BOTH modes (sandboxed parity = CP3 fix pass F2, 21b10bd)
+     because GitHub revoke is authenticated by the token itself — no
+     revoke-by-id (design.md gap C6) — so exit-revoke must cross processes
+     via disk. §5.3's "no token value to steal" and §6's "in daemon memory
+     (no disk)" now carry the caveat. Precision fix to the audit's wording:
+     "post-SIGKILL revoke" overstates — after SIGKILL of `rein run` the
+     launch `approvals.Sweep` only DELETES the orphaned ledger (ClearRun,
+     no revoke); those tokens live to the native ~1h TTL, the accepted
+     floor per the approvals package doc.
+  5. **Shape-B (direct-mode) read cache can cross sessions**
+     (`D-arch-4.2.5-READ-TOKEN-SESSION-TTL`). The read-token cache is a
+     global on-disk file (`stateDir/cache/read-token.json`; rein-gh:
+     `cache/gh-read-token.json`) whose entry is `{token, expires_at}` — no
+     session id in path or schema, and nothing clears it at session end —
+     so a token minted under one session is served to a later session until
+     expiry (up to ~1h). Scope IS re-checked per request against the
+     CURRENT session, but the cached token's mint-time repo scope may
+     differ (a mismatch fails at GitHub — the §5.1 scope backstop).
+     design.md §4.2.5's "served ... on demand for the session TTL"
+     overstates; design.md deliberately left untouched (this note + the
+     phase1-design banner are the record; fold into the #25 sweep).
+     Sandboxed mode is unaffected: `runbroker` uses a per-run `MemCache`,
+     never shared across sessions.
+
 - 2026-07-08 — **DESIGN CORRECTION NEEDED: Phase 1 issue-scoping diverged from
   design.md and was never flagged as a deliberate simplification.** design.md:12
   states the developer's role is "to approve scope expansions as the agent

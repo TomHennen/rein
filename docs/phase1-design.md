@@ -19,6 +19,20 @@ multi-lens review). Opens Phase 1.
 > gate). Full prose sweep folds into the #25 rename. See `PLAN-1.md`
 > Notes (2026-07-05) for the reasoning.
 
+> **2026-07-11 corrections (design-conformance audit, issue #44 §3).**
+> Five claims were overtaken by deliberate, recorded implementation
+> choices; dated correction notes now sit at each claim site below
+> rather than rewriting the prose: CDN hosts never reach the proxy
+> (§4.3); the proxy is not the only egress route (§4, "The sandbox");
+> the sandbox env allowlist contents are a superset of §4.2's
+> parenthetical (§4.2); write-token values do touch disk during a run
+> (§5.3 caveat + §6 table note). The fifth is direct-mode-only and its
+> stale claim lives in `design.md` §4.2.5 ("served ... on demand for
+> the session TTL"), left in place for the #25 sweep: the Shape-B
+> read-token cache is a global on-disk file with no session id and can
+> serve a later session until token expiry (~1h). Full rationale +
+> audit matrix row ids: `PLAN-1.md` Notes (2026-07-11).
+
 Self-contained: problem and requirements first, then the design. The
 integration spike (`docs/phase1-srt-spike-findings.md`) is referenced as
 evidence but not assumed read.
@@ -114,6 +128,24 @@ the agent's only route out is the proxy. `rein run` generates a per-run
 configuration: traffic routing, filesystem denials (§4.2), a scrubbed
 environment (§4.2), and the proxy's CA certificate to trust (§5.4).
 
+> **2026-07-11 correction (#44 §3, `P-req-PROXY-ONLY-EGRESS-ROUTE`).**
+> "The agent's only route out is the proxy" is no longer literally
+> true. Sandbox egress has three routes: the 3 credentialed hosts
+> through rein's injecting proxy; the 3 CDN hosts over direct srt TLS
+> (see the §4.3 correction); and an operator-widened extra-egress set —
+> session `allow_domains:`, `REIN_ALLOW_DOMAINS`, and a built-in
+> `api.anthropic.com` default — added in CP4.5 so a real agent can
+> reach its own API endpoint at all (decided and reviewed in
+> `PLAN-1.md` Notes, 2026-07-05 CP4.5 entries). Every non-proxy route
+> is egress-only and never injected (`srt.Build` appends extras to
+> `allowedDomains` only, never `mitmProxy.domains`; `Validate` rejects
+> wildcard/CDN injectors and inject-host/extra overlaps), so the claim
+> narrows to: **the proxy is the only route that carries rein-injected
+> credentials** (the agent's own Anthropic credential rides the
+> api.anthropic.com extra-egress route),
+> and the extra-egress set is the operator's declared exfiltration
+> surface (loud EGRESS WARNING on wildcards / large sets).
+
 ### 4.1 Injection invariants
 
 The proxy's safety rests on these; they are requirements, not
@@ -169,6 +201,19 @@ three channels, and all three must be closed:
   backend may be the Secret Service — reachable via that bus if left
   mounted.)
 
+> **2026-07-11 correction (#44 §3, `P-hide-ENV-ALLOWLIST-CONTENTS`).**
+> The strict-allowlist *mechanism* above holds (env_test.go pins that
+> no name outside the set survives), but the parenthetical contents
+> drifted: `internal/srt/env.go` also passes `HOME` and `TERM` from the
+> parent (usability, not secrets — settled at CP3, `PLAN-1.md` Notes
+> 2026-07-05 "Env allowlist settled") and sets rein-owned values for
+> `GIT_AUTHOR_*`/`GIT_COMMITTER_*` and
+> `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` (CP4 non-impersonating
+> authorship — these *hide* the developer's `~/.gitconfig` identity
+> rather than leak it) plus the per-run `CLAUDE_CODE_TMPDIR` scratch
+> pointer. `env.go`'s allowlist and doc comments are the normative
+> inventory; the parenthetical above is illustrative.
+
 ### 4.3 GitHub host classes
 
 GitHub operations span more hosts than `github.com`/`api.github.com`,
@@ -187,6 +232,20 @@ Auth scheme is **host-aware** (spike-verified: Bearer → 401 on the git
 transport; Basic → 200). Redirects from github.com to the CDN hosts
 arrive at the proxy as fresh connections and must classify into the
 never-inject class.
+
+> **2026-07-11 correction (#44 §3,
+> `P-req-ALL-GH-TRAFFIC-VIA-REIN-PROXY`).** The last sentence is
+> superseded: CDN redirects never arrive at the proxy. `internal/srt`
+> places the CDN hosts in srt's `allowedDomains` only — never in
+> `mitmProxy.domains` — so `codeload`/`objects`/`raw` traffic gets a
+> direct srt TLS tunnel and bypasses rein entirely. Never-inject is
+> enforced by *routing*, one layer earlier than this table assumed.
+> Deliberate: it keeps injection structurally impossible on pre-signed
+> URLs and keeps rein off the bulk-download path. Stated honestly:
+> those 3 hosts sit outside rein's audit/policy plane, and the proxy's
+> `classPassthrough` relay arm (`internal/proxy`) is dead code in
+> sandboxed operation — recorded and deliberately retained as
+> defense-in-depth should a CDN host ever be routed to the socket.
 
 ### 4.4 `srt` specifics (implementation detail; evidence in the spike)
 
@@ -299,6 +358,24 @@ direct-mode write token's ~1h TTL. So: direct mode leaks a short-lived
 token replayable anywhere; sandboxed mode leaks a machine-bound,
 run-lifetime capability you can't exfiltrate. A real improvement, not a
 clean dominance — worth stating honestly.
+
+> **2026-07-11 caveat (#44 §3,
+> `P-dec-5.3-NO-EXFILTRATABLE-TOKEN-VALUE`).** "There is no token value
+> to steal" holds for the proxy capability but is not absolute: the
+> issue-#20 exit-revoke ledger (`writes/<run-id>.jsonl`, mode 0600 in a
+> 0700 dir) persists each minted write token's raw value on disk for
+> the run's duration — in **both** modes (sandboxed parity added in the
+> CP3 fix pass F2; `PLAN-1.md` Notes 2026-07-05). The trade is
+> deliberate: GitHub revoke is authenticated by the token itself (no
+> revoke-by-id — design.md gap C6), so revoking at run exit, after the
+> short-lived minting process is gone, requires the value to cross
+> processes via disk. Same-uid host malware can therefore read a
+> replayable write token *during a run*; bounded by the file modes,
+> deletion at run exit (a SIGKILLed run's orphaned ledger is swept at
+> next launch without revoke — those tokens live to the native ~1h
+> TTL, the accepted floor), the session scope ceiling, and deny-read
+> from inside the sandbox. Read tokens in sandboxed mode stay in
+> per-run memory.
 
 ### 5.4 The proxy's certificate authority
 
@@ -423,6 +500,13 @@ minting, scoping, and approval logic carry over.
 | Token delivery | handed to git/`gh` (agent can read it) | **added at the proxy** (agent never sees it) |
 | Token storage | on-disk cache + write-token ledger | **in daemon memory** (no disk) |
 | Audit | `helper.log` | hash-chained audit log (redacted, deny-read) |
+
+> **2026-07-11 correction (#44 §3):** the "in daemon memory (no disk)"
+> cell is superseded twice over — there is no daemon (top banner,
+> 2026-07-05), and write-token values touch disk in the exit-revoke
+> ledger (§5.3 caveat). Sandboxed-mode read tokens are per-run
+> in-memory (`runbroker`'s `MemCache`); the ledger is the one
+> deliberate disk exposure.
 
 Direct mode keeps working throughout: its broker core becomes a client of
 the same daemon logic, and its tests stay green (PLAN-1 CP2).
