@@ -1,7 +1,8 @@
 # Issue #35 design — agent-declared, human-confirmed issue scoping (declaration-first)
 
-**Status:** restructured 2026-07-11 per Tom's PR review; **awaits Tom's final
-sign-off** before becoming design-of-record. No production code written.
+**Status:** design of record, approved by Tom (merged 2026-07-11, PR #56);
+**IMPLEMENTED 2026-07-11** on the issue-35 implementation branch (see
+PLAN-1.md Notes 2026-07-11 for the build record).
 
 **Settled by Tom (recorded, not revisited):**
 - 2026-07-08 — decisions A–F on issue #35: agent-declared at runtime, NOT

@@ -287,8 +287,8 @@ func runInit(args []string) error {
 				return fmt.Errorf("scaffold session file: %w", err)
 			}
 			fmt.Printf("  session:    scaffolded at %s (repos: [%s])\n", sessionPath, repo)
-			fmt.Println("              note: no issue bound — git push (writes) are BLOCKED until an issue is bound.")
-			fmt.Println("              agent-declared issue support is coming (#35); reads work without it. Uncomment `issue:` in the file to enable writes now.")
+			fmt.Println("              writes are agent-declared (#35): the agent runs `rein declare <n>`,")
+			fmt.Println("              you confirm on your terminal, then writes flow for that run. Reads work immediately.")
 		}
 	default:
 		return fmt.Errorf("stat %s: %w", sessionPath, err)
@@ -366,7 +366,7 @@ func runInit(args []string) error {
 	fmt.Println()
 	fmt.Println("rein init: done.")
 	fmt.Println("Next:")
-	fmt.Printf("  - %s is repo-scoped; reads work now. To enable writes (git push), uncomment `issue:` in it with a real issue number (agent-declared issues: #35)\n", sessionPath)
+	fmt.Printf("  - %s is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)\n", sessionPath)
 	if aliasActive {
 		fmt.Println("  - open a new shell (or `source` your rc) so the `claude` alias is live, then run `claude`")
 	} else {
@@ -578,11 +578,10 @@ var repoSlugRe = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
 // fresh random suffix in the session ID makes re-runs on different
 // machines produce different IDs.
 //
-// The scaffolded session is REPO-ONLY: it deliberately writes NO active
-// `issue:` field (decision A / #35 — the issue is agent-declared at
-// runtime, not pre-picked at init). A commented hint line records how to
-// opt in to writes manually until agent-declared support lands. Reads
-// work with no issue; writes (git push) are blocked until one is bound.
+// The scaffolded session is REPO-ONLY (decision A/F, #35): the issue is
+// agent-declared at runtime (`rein declare <n>`) and human-confirmed per
+// run — never pre-picked at init, and the retired `issue:` field is not
+// scaffolded at all (it is ignored, with a loud warning, if present).
 func scaffoldSessionFile(path, repo string) error {
 	if strings.TrimSpace(repo) == "" {
 		return fmt.Errorf("repo is empty; cannot scaffold a session without a repo")
@@ -608,7 +607,9 @@ id: %s
 role: implement
 repos:
   - %s
-# issue: <n>   # OPTIONAL: writes (git push) are BLOCKED until an issue is bound. Agent-declared issue support is coming (#35); until then, uncomment with a real issue number to enable writes. Reads work without it.
+# Writes are agent-declared (#35): the agent runs 'rein declare <n>' and you
+# confirm on your terminal; that unlocks writes for the run. There is no
+# 'issue:' field anymore -- if present it is IGNORED (with a warning).
 `, sessID, repo)
 
 	// Atomic write: temp file in same dir, then rename.

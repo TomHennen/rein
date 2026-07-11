@@ -360,6 +360,33 @@ path.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-07-11 — **#35 IMPLEMENTED (declaration-first issue scoping, both
+  modes).** Design of record `docs/35-design-proposal.md` built section by
+  section: `rein declare <n>` (direct CLI path + the
+  `declare.rein.internal` virtual host through the per-run proxy socket);
+  issue fetched (title/state/home-repo/PR-flag, no-redirect, TM-G6
+  canonical anchor) before the Form A prompt (type the displayed number);
+  confirmed-issue SET in the per-run approval record (`SignatureOf` drops
+  `issue=`; `sess.Issue` retired everywhere with a loud ignored-field
+  warning); proxy enforcement (pre-declaration ERR-pkt advertisement +
+  403 JSON; post-approval receive-pack parse → strict
+  `agent/{issue}/{nonce}` → confirmed-set cross-check → `ng`
+  report-status denies with capped drain; packfile streamed, never
+  buffered); direct-mode helper + rein-gh gates read the same record
+  (placeholder + `rein declare <n>` stderr hint); per-write-mint TM-G6
+  transfer re-check in both modes. §9 defaults honored (PR declarations
+  labeled; one issue per push; no expect_issue; ERR/ng synthesis in;
+  multi-repo declare deferred behind `--repo`). Interactive suite
+  reworked to the declare-first flow (`test_confirm_shows_title`
+  promoted from TDD-red to a real regression spec; declare-flow tests
+  gated on `REIN_ITEST_ISSUE` — the fetch needs a REAL issue). Live gate:
+  `docs/35-manual-test.sh` (the §5.3 ERR-pkt acceptance check is
+  live-gated). Implementation notes / small interpretations recorded in
+  the component commit messages (e.g. `refused-multi-issue` audit tag;
+  cannot-verify ≠ transferred on the re-check; `--append-system-prompt`
+  education layer NOT built — the doc marks it optional/revisit-on-
+  dogfood).
+
 - 2026-07-11 — **DESIGN CORRECTIONS RECORDED (audit issue #44 §3): five
   deliberate implementation choices the design of record still contradicted.**
   Dated correction notes added at each claim site in `docs/phase1-design.md`

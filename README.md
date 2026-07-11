@@ -117,18 +117,24 @@ id: my-session
 role: implement
 repos:
   - your-name/your-throwaway-repo   # the token is scoped to this whole set
-# issue: <n>   # OPTIONAL: writes are blocked until an issue is bound (see below)
 ```
 
-**Why no issue?** By design the issue is bound at *runtime*, not at setup: the
-agent declares which issue it's working on (via its push branch) and you confirm
-it at the approval prompt — rein doesn't ask you to pre-pick one during `init`
-(see [`docs/design.md`](docs/design.md) and issue
-[#35](https://github.com/TomHennen/rein/issues/35)). That runtime path isn't
-built yet, so **a repo-only session is effectively read-only**: clone / fetch /
-read flow, but `git push` is **blocked** until an issue is bound. To enable
-writes *today*, uncomment `issue:` with a real issue number on the repo — reads
-never need it.
+**Why no issue field?** The issue is bound at *runtime*, not at setup
+([#35](https://github.com/TomHennen/rein/issues/35)): the agent **declares**
+which issue its work is for (`rein declare <n>`), rein fetches that issue and
+shows you its **title, state, and home repo** on your terminal, and you confirm
+by typing the displayed number. That one ceremony unlocks writes for the run
+(git push, gh, API); every push is still verified against the
+`agent/<issue>/<nonce>` branch convention in sandboxed mode. A session file
+with a legacy `issue:` line still loads, but the field is **ignored** (with a
+loud warning) — remove it.
+
+**Direct mode (`--direct`) deltas, stated up front:** the same declare +
+confirm model applies, but (1) the credential helper never sees push refs, so
+the `agent/<issue>/<nonce>` cross-check is a sandboxed-only property — an
+approved direct-mode run can push any ref; and (2) pre-declaration write
+attempts do reach GitHub carrying a placeholder credential (GitHub rejects
+them) rather than being answered locally.
 
 ## Daily use
 
@@ -147,10 +153,13 @@ that sandbox:
 - Your **own credentials are hidden**: `~/.config/gh`, `~/.ssh`, `~/.netrc`,
   git-credentials, and the keyring/ssh-agent sockets are unreadable in the
   sandbox. The environment is a strict allowlist, not a passthrough.
-- The **first write triggers a confirmation prompt** in your terminal (the
-  agent cannot reach or forge it — it has no controlling terminal). One approval
-  covers the run's scope until the token expires; the session also expires on
-  idle (30m) or a hard cap (4h), revoking the write token.
+- **Writes are locked until the agent declares its issue** (`rein declare <n>`,
+  #35). The declaration triggers the confirmation prompt in your terminal (the
+  agent cannot reach or forge it — it has no controlling terminal), showing the
+  fetched issue title + home repo. One confirmation covers the run; pushes must
+  use `agent/<issue>/<nonce>` branches and are verified against what you
+  confirmed. The session also expires on idle (30m) or a hard cap (4h),
+  revoking the write token.
 - Commits the agent makes are authored as **`<your name> (via rein)`** with the
   App's identity, so a push is attributable to the rein App, not to you
   personally. (Configurable via `REIN_GIT_AUTHOR_TEMPLATE`.)
@@ -272,10 +281,11 @@ what's wrong.
 - **A git op fails, `rein doctor` mentioned on stderr** — rein refused rather
   than letting the agent silently re-auth. Usually the App isn't installed on
   that repo, or the repo is outside your session's scope ceiling.
-- **Write prompt never appears** — the session may have no `issue:` (writes are
-  denied by design), or you're using `--direct` from a shell with no tty; run
-  the agent from a real terminal, or approve from another with `rein approval
-  grant`.
+- **Write prompt never appears** — prompts fire at *declare* time now (#35):
+  the agent must run `rein declare <n>` first (every blocked write says so).
+  If the declare ran but no prompt reached you, you may be using `--direct`
+  from a shell with no tty; run from a real terminal, or approve from another
+  with `rein approval grant --run-id <id>`.
 - **Logs** — per-run audit log (token-redacted): `~/.local/state/rein/audit/`;
   direct-mode credential helper: `~/.local/state/rein/helper.log`.
 

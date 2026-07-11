@@ -46,49 +46,49 @@ suite stays untouched.
 
 ## What's covered
 
-### `test_write_approval.py` — the write-approval loop, LIVE and green
+### `test_write_approval.py` — the #35 declare-first write loop, LIVE
 
-Each test drives a write **initiated from inside the sandbox** and asserts
+Each test drives writes **initiated from inside the sandbox** and asserts
 **both sides** of the loop:
 
-- **HOST:** the `/dev/tty` prompt actually appeared, and the correct
-  `[approved]` / `[denied ...]` marker printed.
-- **SANDBOX:** the in-sandbox `git push`'s own outcome, captured via an explicit
-  `SBX_PUSH<n>_RC=<code>` sentinel — blocks-then-succeeds (RC 0) on approval,
-  fails cleanly (git fatal 403, RC 128) on denial, **never a hang**. (`rein
-  run`'s own exit code is *not* used: the in-sandbox script runs under `set +e`
-  so a denied push can't abort it, which means `rein run` exits 0 either way —
-  the sentinel is the ground truth for what the agent experienced.)
+- **HOST:** the Form A declaration prompt appeared (or, pre-declaration, did
+  NOT), and the correct `[approved]` / `[denied ...]` marker printed.
+- **SANDBOX:** the in-sandbox commands' own outcomes via explicit sentinels —
+  `SBX_DECLARE1_RC=<code>` for the `rein declare <n>` call and
+  `SBX_PUSH<n>_RC=<code>` per push — **never a hang**. (`rein run`'s own exit
+  code is *not* used: the in-sandbox script runs under `set +e`.)
 
 Cases:
 
-| test | asserts |
-|------|---------|
-| `correct_approval_completes_the_in_sandbox_push` | approve → host `[approved]`, in-sandbox push RC 0, exactly 1 prompt, branch appears on the throwaway |
-| `wrong_answer_denies_and_push_fails_cleanly` | wrong number → host `[denied]`, push RC≠0, **exactly 1 prompt** (git does not re-prompt on 403), agent sees a coherent `remote: … was not approved` message, no branch |
-| `run_scoped_approval_covers_a_second_write` | two in-sandbox pushes in **one** run → **exactly one** prompt (run-scoped record short-circuits the second), both branches land |
-| `no_issue_session_blocks_writes_without_prompting` | a session with **no** `issue:` → write denied with **no prompt**, reads still flow (`SBX_CLONE_OK`), the no-issue block message fires |
+| test | gate | asserts |
+|------|------|---------|
+| `push_without_declare_fails_with_remote_error` | always runs | pre-declaration push → `fatal: remote error: rein: writes are locked …` (the synthesized ERR advertisement), **no prompt**, reads still flow, no branch |
+| `declare_approve_then_push_succeeds` | `REIN_ITEST_ISSUE` | declare → Form A prompt → type the number → `[approved]` → push to `agent/<n>/<nonce>` RC 0, exactly 1 prompt, branch lands |
+| `wrong_answer_denies_declare_and_writes_stay_locked` | `REIN_ITEST_ISSUE` | wrong number → `[denied]`, declare RC≠0, the following push is still locked, no branch |
+| `one_declare_covers_a_second_push` | `REIN_ITEST_ISSUE` | one confirmation covers the run: two pushes, **exactly one** prompt, both branches land |
+| `nonmatching_ref_rejected_after_approval` | `REIN_ITEST_ISSUE` | a confirmed run pushing a non-`agent/<n>/<nonce>` ref sees `! [remote rejected] … refs must match agent/…` (decision C), no branch |
 
-Prompt counting is whole-transcript (`"write access requested"` occurrences), so
-a spurious re-prompt would be caught, not masked.
+Prompt counting is whole-transcript (`"agent declares work on an issue"`
+occurrences), so a spurious re-prompt would be caught, not masked.
 
-Each write test **pins its own session** (a temp `dev-session.yaml` selected via
-`REIN_SESSION_FILE`, binding the throwaway repo to a fixed issue number) and
-derives the typed answer from it — so the suite does **not** depend on the
-machine's ambient `~/.config/rein/dev-session.yaml`. That's why no session file
-is listed under prerequisites.
+The declare **fetches the real issue** before prompting (decision E), so the
+declare-flow tests need `REIN_ITEST_ISSUE` set to a real (open) issue number on
+the throwaway repo — create one once and export it. Each test still **pins its
+own session** (a temp repo-only `dev-session.yaml` via `REIN_SESSION_FILE`; the
+retired `issue:` field is never written).
 
 ### `test_init_interactive.py` — TDD-RED for the interactive `init`
 
 Encodes the **settled** parts of `docs/onboarding-ux-design.md` as executable
 specs for a build that does not exist yet. Today `rein init` is fully
-non-interactive (reads `REIN_TEST_REPO_A`, hardcodes `issue: 1`), so:
+non-interactive, so:
 
-- **Settled specs** → `unittest.expectedFailure` (== pytest xfail): init prompts
-  for the backing issue; init honors the answered issue number; headless init
-  prints a browser/install link and doesn't hang. These fail **cleanly** today
-  (short timeouts, no uncontrolled errors) and will flip to "unexpected success"
-  — turning the suite red as a promote-me signal — once the feature ships.
+- **Settled specs** → `unittest.expectedFailure` (== pytest xfail): headless
+  init prints a browser/install link and doesn't hang; (the two issue-prompt
+  specs that used to live here were REMOVED — decision A/#35 settled that init
+  must never ask for an issue). These fail **cleanly** today and will flip to
+  "unexpected success" — turning the suite red as a promote-me signal — once
+  the feature ships.
 - **Open decisions (§8)** → `unittest.skip`: machine-name prompt-vs-default,
   sandbox gating, multi-agent alias, `doctor --fix` scope. Not encoded — Tom
   hasn't decided them.
@@ -121,8 +121,8 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
 - `itest_base.py` — `ReinTestCase` (one-time build, env + throwaway repo,
   disposable-branch cleanup) and the unittest/xfail/skip rationale.
 - `test_write_approval.py`, `test_init_interactive.py`, `test_realagent_e2e.py`,
-  `test_confirm_shows_title.py` (gated + human-run, TDD-red for #35 — see its
-  docstring).
+  `test_confirm_shows_title.py` (gated + human-run; a real regression spec for
+  #35's Form A title display — see its docstring).
 - `recipes/` — per-test manual setup scripts for the gated, human-run tests
   (e.g. `confirm-shows-title.sh`).
 - `run.sh` — the gated runner.

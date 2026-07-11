@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Manual run recipe for tests/interactive/test_confirm_shows_title.py (GATED).
 #
-# This test is TDD-red and targets DEFERRED work (issue #35, the agent-declared
-# + human-confirmed issue-scoping model). It MUST fail today because the /dev/tty
-# approval prompt shows no issue title BY DESIGN for CP1-CP4.5 (static sess.Issue,
-# PLAN-1.md:363-379). It flips to an "unexpected success" once #35's fetch +
-# display issue title/home-repo at confirm time lands.
+# Since issue #35 landed this is a REAL regression test (the old
+# @unittest.expectedFailure is gone): the agent declares its issue
+# (`rein declare <n>`), rein FETCHES it, and the Form A confirmation prompt
+# must DISPLAY the fetched title + home repo (decision E — the load-bearing
+# misattribution control, probe S1/S4/S5).
 #
 # It needs a REAL environment a human must provide:
 #   - a working `rein init` App on this machine (see HANDOFF.md)
@@ -24,9 +24,9 @@
 #   cd tests/interactive
 #   python3 -m unittest test_confirm_shows_title -v
 #
-# EXPECTED TODAY: "expected failure" (green suite) — the prompt lacks the title.
-# AFTER THE FIX: "unexpected success" (red suite) — drop @unittest.expectedFailure
-# and promote it to a real regression test.
+# EXPECTED: PASS — the declare prompt shows the fetched title + home repo, you
+# type the displayed number, and the verified push to agent/<n>/<nonce> lands.
+# A FAILURE here is a regression in #35's Form A display.
 set -euo pipefail
 echo "This is a recipe, not an automated runner. Read the header and run the steps"
 echo "in your own terminal. See tests/interactive/test_confirm_shows_title.py."

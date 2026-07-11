@@ -1,33 +1,24 @@
-"""test_confirm_shows_title — GATED / HUMAN-RUN, TDD-red. FOR ISSUE #35.
+"""test_confirm_shows_title — GATED / HUMAN-RUN. Regression spec for issue #35.
 
-This is a PROPOSED test for DEFERRED work, not a current-phase failure. The
-agent-declared, human-confirmed issue-scoping model is tracked in issue #35 and
-is deliberately NOT built in CP1-CP4.5: today the bound issue is a static
-`sess.Issue` and the /dev/tty write-approval prompt only string-compares the
-typed number to it, printing that number back and doing no GitHub lookup
-(internal/ui/prompt/prompt.go:145-146,157-168). That is a documented, fail-
-closed simplification (PLAN-1.md:363-379), not a bug.
+Issue #35 landed the agent-declared, human-confirmed issue-scoping model: at
+declare time (`rein declare <n>`) rein FETCHES the declared issue and the
+Form A prompt DISPLAYS its title + state + home repo, so a human can tell a
+wrong-but-plausible number from the right one (decision E; misattribution
+probe S1/S4/S5). This file specifies that human-facing behavior END TO END,
+over a real /dev/tty prompt driven through `rein run`, because a Go unit test
+with a stub prompter CANNOT reproduce what the human sees on the terminal —
+the #36 lesson (a stubbed prompt passed its unit test but broke live).
 
-WHEN #35 lands, part of that model is: at confirm time rein FETCHES the bound
-issue and DISPLAYS its title + home repo (design-adjacent — design.md:281
-already lists "first word of title" as a valid confirmation token), so a human
-can tell a wrong-but-plausible binding from the right one (the misattribution
-probe's scenarios S1/S4/S5). This file specifies that human-facing behavior END
-TO END, over a real /dev/tty prompt driven through `rein run`, because a Go unit
-test with a stub prompter CANNOT reproduce what the human sees on the terminal
-— that is the #36 lesson (a stubbed prompt passed its unit test but broke live).
-It ships now as a ready spec so the behavior lands tested, not so it runs today.
-
-STATUS: @unittest.expectedFailure. The feature is intentionally unbuilt, so the
-prompt contains no title and this test MUST fail. When #35's model lands,
-unittest reports an "unexpected success" and the suite goes red — the signal to
-drop the decorator and promote this to a real regression test.
+Formerly TDD-red (@unittest.expectedFailure) while #35 was unbuilt; the
+decorator is dropped now that the behavior exists — this is a REAL regression
+test: if the prompt ever stops showing the fetched title/home-repo, this goes
+red.
 
 GATING: this is a live, human-run test. It needs a real srt sandbox, a real
 /dev/tty, a throwaway repo, a configured rein App, AND a real issue on that
 throwaway whose number + a distinctive title word the human supplies via env:
 
-    REIN_ITEST_TITLE_ISSUE   the issue number to bind the session to
+    REIN_ITEST_TITLE_ISSUE   the issue number the agent will declare
     REIN_ITEST_TITLE_WORD    a distinctive word that appears in that issue's title
 
 Without those it SKIPS. Do not run it in CI. Manual recipe:
@@ -51,41 +42,43 @@ _WORD_ENV = "REIN_ITEST_TITLE_WORD"
     f"gated: set {_ISSUE_ENV} and {_WORD_ENV} to a real throwaway issue + a word in its title",
 )
 class ConfirmShowsTitle(ReinTestCase):
-    @unittest.expectedFailure  # feature not implemented: prompt shows no title today
     def test_prompt_displays_issue_title_and_home_repo(self):
-        """The /dev/tty approval prompt must show the bound issue's TITLE and HOME repo."""
+        """The Form A declare prompt must show the FETCHED issue TITLE and HOME repo."""
         issue = int(os.environ[_ISSUE_ENV])
         title_word = os.environ[_WORD_ENV]
 
-        branch = self.new_branch("reintest-title")
+        branch = f"agent/{issue}/{H.unique_branch('title')}"
+        self._branches.append(branch)
         wd = H.make_workdir()
-        script = H.clone_and_push_script(self.repo, [branch])
+        script = H.clone_declare_push_script(self.repo, issue, [branch])
         run = H.spawn_rein_run(
             ["bash", "-c", script], workdir=wd, env=self.env,
-            extra_env=self.pinned_session_env(issue),
+            extra_env=self.pinned_session_env(),
         )
 
-        # The prompt must appear on the tty...
+        # The declare fires the prompt on the tty...
         run.expect_prompt(timeout=120)
         # ...and it must carry the issue TITLE fetched from GitHub, so the human
         # can tell this is the RIGHT issue and not a wrong-but-plausible number.
         prompt_text = H.strip_ansi(run.text())
         self.assertIn(
             title_word, prompt_text,
-            "approval prompt must display the bound issue's title (a distinctive "
+            "declare prompt must display the fetched issue title (a distinctive "
             "title word was expected but not shown) — misattribution S1/S5",
         )
         # And it must name the issue's HOME repo (not only the write target), so
         # a cross-repo binding (S4) is visible.
         self.assertIn(
             self.repo.split("/")[-1], prompt_text,
-            "approval prompt must display the issue's home repo",
+            "declare prompt must display the issue's home repo",
         )
 
-        # Complete the ceremony so we don't leave the run hanging on the tty.
+        # Complete the ceremony: confirm, then the verified push must land.
         run.answer(str(issue))
         run.expect_approved(timeout=60)
+        run.child.expect(r"SBX_PUSH1_RC=\d+", timeout=120)
         run.wait(timeout=90)
+        self.assertEqual(run.sentinel_rc(1), 0, "verified push should succeed after confirmation")
 
 
 if __name__ == "__main__":
