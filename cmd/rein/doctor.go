@@ -423,7 +423,8 @@ func checkApprovalCache() checkResult {
 // sandboxDoctorChecks runs the srt sandbox preflight and maps each result into
 // a doctor checkResult. These are the exact checks `rein run --sandbox`
 // hard-gates on (srt present + pinned version, seccomp availability, bwrap
-// userns health), so a green doctor here means sandboxed mode will launch.
+// userns health, system CA bundle), so a green doctor here means sandboxed
+// mode will launch.
 func sandboxDoctorChecks() []func() checkResult {
 	// Lazy like every other doctor check: srt.Preflight (which shells out to
 	// bwrap) runs when the FIRST sandbox check executes in runDoctor's loop, not
