@@ -471,7 +471,7 @@ func revokeRunWriteTokens(stateDir, runID string, revoke revokeTokenFunc, now ti
 		revoked++
 	}
 	if total > 0 {
-		fmt.Fprintf(os.Stderr, "rein: revoked %d of %d write token(s) on exit (issue #20)\n", revoked, total)
+		fmt.Fprintf(os.Stderr, "rein: revoked %d of %d write token(s) on exit\n", revoked, total)
 	}
 }
 
