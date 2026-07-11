@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 )
@@ -35,8 +36,18 @@ type AuditEntry struct {
 	Method   string
 	Path     string
 	Tier     string // "read" | "write" | "" (never-inject / refused)
-	Decision string // e.g. "inject", "passthrough", "refused-scope", "refused-host"
-	Status   int    // upstream HTTP status, or 0 when no upstream request was made
+	Decision string // e.g. "inject", "passthrough", "refused-scope", "refused-host",
+	// and the #35 declaration-gate decisions: "declared", "confirmed-issue",
+	// "expanded-issue", "refused-undeclared", "refused-ref-convention",
+	// "refused-multi-issue", "refused-issue-unconfirmed",
+	// "refused-issue-unverified", "refused-receivepack-malformed".
+	Status int // upstream HTTP status, or 0 when no upstream request was made
+
+	// Issue is the declared/verified issue this decision concerns (#35);
+	// 0 = not issue-scoped. Refs are the push refs of a receive-pack
+	// decision (client-sent values — redacted like every other field).
+	Issue int
+	Refs  []string
 }
 
 // Record appends one entry. Best-effort: a write error is swallowed (a broken
@@ -51,10 +62,18 @@ func (a *AuditLog) Record(e AuditEntry) {
 	if e.Status != 0 {
 		status = fmt.Sprintf("%d", e.Status)
 	}
-	fmt.Fprintf(a.w, "%s session=%s host=%s method=%s path=%s tier=%s decision=%s status=%s\n",
+	issue := "-"
+	if e.Issue != 0 {
+		issue = fmt.Sprintf("%d", e.Issue)
+	}
+	refs := "-"
+	if len(e.Refs) > 0 {
+		refs = strings.Join(e.Refs, ",")
+	}
+	fmt.Fprintf(a.w, "%s session=%s host=%s method=%s path=%s tier=%s decision=%s status=%s issue=%s refs=%s\n",
 		time.Now().UTC().Format(time.RFC3339), redactField(e.Session), redactField(e.Host),
 		redactField(e.Method), redactField(e.Path), fieldOrDash(e.Tier),
-		fieldOrDash(e.Decision), status)
+		fieldOrDash(e.Decision), status, issue, redactField(refs))
 }
 
 func fieldOrDash(s string) string {

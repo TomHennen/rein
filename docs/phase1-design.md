@@ -33,6 +33,20 @@ multi-lens review). Opens Phase 1.
 > serve a later session until token expiry (~1h). Full rationale +
 > audit matrix row ids: `PLAN-1.md` Notes (2026-07-11).
 
+> **2026-07-11 addition (issue #35 implemented).** Issue scoping is now
+> **agent-declared + human-confirmed, declaration-first, in BOTH modes**
+> per the dedicated design of record `docs/35-design-proposal.md`:
+> `rein declare <n>` fetches the issue and fires the Form A prompt
+> (fetched title/state/home-repo displayed; the human types the displayed
+> number); the run's approval record holds a confirmed-issue SET; no
+> write-capable token is minted before a confirmation; sandboxed pushes
+> are additionally ref-verified against the strict
+> `agent/{issue}/{nonce}` convention with synthesized ERR/`ng` denies.
+> The static `sess.Issue` field this document and design.md predate is
+> retired (ignored with a loud warning). Where §5's approval prose says
+> "first write prompts", read "the declare prompts; writes then flow
+> from the recorded confirmation".
+
 Self-contained: problem and requirements first, then the design. The
 integration spike (`docs/phase1-srt-spike-findings.md`) is referenced as
 evidence but not assumed read.

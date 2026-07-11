@@ -135,10 +135,12 @@ installs them on a throwaway repo), then `rein doctor`. Summary:
   `init`, **install the App on that repo** via the deep-link `init` prints, or
   `doctor` will note `install-id not cached` and the first `rein run` will fetch
   it.
-- The scaffolded session is **repo-only** (no `issue:`): reads work, but
-  `git push` is **blocked** until an issue is bound. This is deliberate —
-  runtime agent-declared/human-confirmed issues are the #35 follow-up. To do a
-  write test *today*, add `issue: <n>` (a real issue on the repo) to the session.
+- The scaffolded session is **repo-only**: reads work immediately; writes are
+  agent-declared per run (#35, built): no file edit at all — from inside the
+  wrapped run, `rein declare <n>` (a REAL issue on the repo), approve the Form A
+  prompt on your terminal, then push to `agent/<n>/<nonce>` (sandboxed mode
+  enforces that convention; direct mode cannot see refs — documented delta).
+  A leftover `issue:` field is IGNORED with a loud warning.
 - init now also **soft-blocks on an unhealthy sandbox**: it finishes but prints
   a loud per-check warning; `--require-sandbox` makes it hard-fail. Enforcement
   is still at `rein run` (fails closed).
@@ -151,9 +153,7 @@ installs them on a throwaway repo), then `rein doctor`. Summary:
 Before continuing CP2, confirm the machine can mint + push, reproducing the
 CP1 result (`docs/phase1-srt-spike-findings.md` → "CP1 results"):
 
-- Write a minimal **no-issue** session to `/tmp/cp1-session.yaml` (omitting
-  `issue:` is what disables the write-approval prompt — a session WITH an
-  `issue:` would prompt on `/dev/tty` and the mint below would hang):
+- Write a minimal session to `/tmp/cp1-session.yaml`:
 
   ```yaml
   id: cp1-check
@@ -161,11 +161,16 @@ CP1 result (`docs/phase1-srt-spike-findings.md` → "CP1 results"):
   repos:
     - <owner>/<your-throwaway-repo>
   ```
-- Mint a write token with no new code (the helper honors `REIN_GIT_OP=write`
-  + `REIN_SESSION_FILE`):
-  `printf 'protocol=https\nhost=github.com\npath=<owner>/<repo>.git\n\n' | REIN_SESSION_FILE=/tmp/cp1-session.yaml REIN_GIT_OP=write ./bin/rein credential-helper get`
-  → the `password=` line is the write token.
-- Isolation check: `curl -u "x-access-token:<tok>" 'https://github.com/<owner>/<repo>/info/refs?service=git-receive-pack'` → **200** means push perm.
+- Read-tier mint with no new code (the helper serves reads without any
+  ceremony):
+  `printf 'protocol=https\nhost=github.com\npath=<owner>/<repo>.git\n\n' | REIN_SESSION_FILE=/tmp/cp1-session.yaml ./bin/rein credential-helper get`
+  → the `password=` line is a READ token (a `rein-placeholder-*` value means
+  config/mint trouble — run `rein doctor`).
+- **Write mints are declaration-gated now (#35):** the helper returns the
+  fail-closed placeholder for any write until an issue is declared+confirmed
+  inside a `rein run` — there is deliberately no side-door write mint anymore.
+  To verify the full write path, run `docs/35-manual-test.sh <real-issue>` (a
+  guided live gate: declare, Form A confirm, verified push).
 
 If that works, your machine is fully set up.
 

@@ -25,12 +25,23 @@ import unittest
 
 import reinharness as H
 
-# The issue number the write tests pin their session to. It is ARBITRARY on
-# purpose: the /dev/tty prompt only string-compares the typed line to
-# `sess.Issue` (internal/ui/prompt — no GitHub lookup), and the minted token is
-# scoped by REPO, not issue. So a distinctive non-#1 value both works AND proves
-# the tests aren't secretly relying on the machine's default `issue: 1` session.
-BOUND_ISSUE = 4242
+# Issue #35: the issue is agent-declared at runtime (`rein declare <n>`) and
+# rein FETCHES it before prompting — so declare-flow tests need a REAL issue
+# on the throwaway repo, supplied by the human via env (an arbitrary number
+# would 404 at fetch time and the declare would fail closed, by design):
+#
+#   REIN_ITEST_ISSUE   the number of a real (open) issue on REIN_TEST_REPO_A
+#
+# Tests that need it skip when unset. Pre-declaration tests (writes locked,
+# synthesized denies) need no issue and always run.
+DECLARE_ISSUE_ENV = "REIN_ITEST_ISSUE"
+
+
+def declare_issue() -> int | None:
+    """The real throwaway-repo issue number for declare tests, or None."""
+    v = os.getenv(DECLARE_ISSUE_ENV)
+    return int(v) if v and v.isdigit() else None
+
 
 _ready: dict = {}
 
@@ -60,14 +71,13 @@ class ReinTestCase(unittest.TestCase):
         self._branches.append(b)
         return b
 
-    def pinned_session_env(self, issue: int = BOUND_ISSUE) -> dict:
-        """Write a temp session (throwaway repo + `issue`) and return the env that
-        selects it via REIN_SESSION_FILE.
+    def pinned_session_env(self) -> dict:
+        """Write a temp session (throwaway repo, NO issue field — issue #35
+        retired it) and return the env that selects it via REIN_SESSION_FILE.
 
-        This makes the write tests SELF-CONTAINED: they no longer depend on the
-        machine's ambient ~/.config/rein/dev-session.yaml happening to bind a
-        particular issue (which would otherwise ERROR on a machine without that
-        file, or deny on one with a different issue number).
+        This makes the write tests SELF-CONTAINED: they don't depend on the
+        machine's ambient ~/.config/rein/dev-session.yaml. The issue is
+        agent-declared at runtime (`rein declare <n>`), never configured here.
         """
         d = tempfile.mkdtemp(prefix="rein-itest-sess-")
         path = os.path.join(d, "session.yaml")
@@ -77,7 +87,6 @@ class ReinTestCase(unittest.TestCase):
                 "role: implement\n"
                 "repos:\n"
                 f"  - {self.repo}\n"
-                f"issue: {issue}\n"
             )
         return {"REIN_SESSION_FILE": path}
 

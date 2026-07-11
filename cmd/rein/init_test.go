@@ -33,19 +33,17 @@ func TestScaffoldSessionFile_RepoOnly(t *testing.T) {
 		t.Errorf("scaffolded file missing repo %q:\n%s", repo, body)
 	}
 
-	// No ACTIVE issue field. A commented hint (a line whose issue token is
-	// preceded by `#`) is fine; an uncommented `issue:` at the start of a
-	// (trimmed) line is not — that would bind the session to a bogus issue
-	// and change write-approval behavior.
+	// No `issue:` field AT ALL (issue #35 retired it — agent-declared,
+	// never pre-configured; even a commented opt-in hint would teach the
+	// wrong model now).
 	for _, ln := range strings.Split(body, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(ln), "issue:") {
-			t.Errorf("scaffolded file has an ACTIVE issue line (must be commented out):\n  %q", ln)
+			t.Errorf("scaffolded file has an ACTIVE issue line (the field is retired):\n  %q", ln)
 		}
 	}
-	// The commented hint should still be present so the manual opt-in path
-	// is discoverable.
-	if !strings.Contains(body, "# issue:") {
-		t.Errorf("scaffolded file missing the commented `# issue:` hint:\n%s", body)
+	// The scaffold should instead teach the declare flow.
+	if !strings.Contains(body, "rein declare") {
+		t.Errorf("scaffolded file should teach the `rein declare <n>` flow:\n%s", body)
 	}
 
 	// Must be loadable by the real session loader with the expected scope.

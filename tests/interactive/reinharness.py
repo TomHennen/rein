@@ -60,17 +60,21 @@ REIN_BIN = REPO_ROOT / "bin" / "rein"
 # "assert messages you observe, not ones you copied from source").
 # --------------------------------------------------------------------------
 
-# The distinctive first line of the /dev/tty approval prompt (internal/ui/prompt
-# writePrompt). Counting occurrences of this in a transcript == number of prompts.
-PROMPT_BANNER = "write access requested"
-# The line that tells the human what to type.
+# The distinctive first line of the Form A declaration prompt
+# (internal/ui/prompt writePrompt, issue #35). Counting occurrences of this in
+# a transcript == number of prompts.
+PROMPT_BANNER = "agent declares work on an issue"
+# The line that tells the human what to type (unchanged mechanism: type the
+# DISPLAYED issue number).
 PROMPT_HINT = "type the issue number"
 # TTYPrompter.Confirm outcome markers (host tty).
 APPROVED_MARK = "[approved]"
 DENIED_MARK = "[denied"  # "[denied: input did not match the issue number]"
-# buildSandboxApprove's no-issue hook message (cmd/rein/run_sandboxed.go).
-# The em-dash between BLOCKED and the reason is skipped so the match is robust.
-NO_ISSUE_BLOCKED = "no `issue:` field"
+# The pre-declaration deny git prints after `fatal: remote error: ` (the
+# proxy's synthesized pkt-line ERR advertisement, issue #35 §5.3).
+PRE_DECLARE_LOCKED = "writes are locked until you declare your issue"
+# The post-approval convention deny git prints as `! [remote rejected] ...`.
+REF_CONVENTION_DENY = "refs must match agent/"
 
 
 # --------------------------------------------------------------------------
@@ -217,8 +221,9 @@ echo "SBX_PUSH{n}_RC=$?"
 def clone_and_push_script(repo: str, branches: list[str]) -> str:
     """A bash -c body: clone the throwaway once, then push each branch in turn.
 
-    Multiple branches in ONE script == multiple writes in ONE `rein run` — the
-    fixture the run-scoped-approval test needs (second write must NOT re-prompt).
+    Multiple branches in ONE script == multiple writes in ONE `rein run`. With
+    NO preceding declare this is the PRE-DECLARATION fixture: every push must
+    fail with the proxy's synthesized `fatal: remote error: rein: ...` (#35).
     """
     body = [
         "set +e",  # capture push RC even on denial; never abort into a hang
@@ -227,6 +232,39 @@ def clone_and_push_script(repo: str, branches: list[str]) -> str:
         f"git clone --depth 1 https://github.com/{repo} repo",
         'cd repo || { echo "SBX_CLONE_FAIL"; exit 3; }',
         "echo SBX_CLONE_OK",
+    ]
+    for i, br in enumerate(branches, start=1):
+        body.append(_push_block(i, repo, br))
+    body.append("echo SBX_SCRIPT_DONE")
+    return "\n".join(body)
+
+
+def _declare_block(n: int, issue: int) -> str:
+    # `rein` resolves in-sandbox via the staged per-run binary on PATH
+    # (issue #35 §3). The call BLOCKS while the human (pexpect) decides.
+    return f"""
+echo "SBX_DECLARE{n}_START issue={issue}"
+rein declare {issue}
+echo "SBX_DECLARE{n}_RC=$?"
+"""
+
+
+def clone_declare_push_script(repo: str, issue: int, branches: list[str]) -> str:
+    """The #35 declare-first fixture: clone, `rein declare <issue>` (fires the
+    Form A prompt on the HOST tty), then push each branch in turn.
+
+    Branch names should follow agent/<issue>/<nonce> for pushes expected to
+    pass the ref cross-check; non-matching names exercise the deny path.
+    Sentinels: SBX_CLONE_OK, SBX_DECLARE1_RC=<code>, SBX_PUSH<n>_RC=<code>.
+    """
+    body = [
+        "set +e",
+        'cd "$0"',
+        "rm -rf repo",
+        f"git clone --depth 1 https://github.com/{repo} repo",
+        'cd repo || { echo "SBX_CLONE_FAIL"; exit 3; }',
+        "echo SBX_CLONE_OK",
+        _declare_block(1, issue),
     ]
     for i, br in enumerate(branches, start=1):
         body.append(_push_block(i, repo, br))
@@ -287,6 +325,11 @@ class ReinRun:
     def sentinel_rc(self, n: int) -> int | None:
         """Parse the SBX_PUSH<n>_RC=<code> sentinel from the transcript."""
         m = re.search(rf"SBX_PUSH{n}_RC=(\d+)", self.text())
+        return int(m.group(1)) if m else None
+
+    def declare_rc(self, n: int = 1) -> int | None:
+        """Parse the SBX_DECLARE<n>_RC=<code> sentinel from the transcript."""
+        m = re.search(rf"SBX_DECLARE{n}_RC=(\d+)", self.text())
         return int(m.group(1)) if m else None
 
     # -- interactive (TUI) helpers, for the real-agent e2e ------------------
@@ -361,12 +404,16 @@ def spawn_rein_run(
     env: dict | None = None,
     extra_env: dict | None = None,
     timeout: int = 120,
+    direct: bool = False,
 ) -> ReinRun:
-    """Spawn `rein run -- <inner_argv> <workdir>` under a pty.
+    """Spawn `rein run [--direct] -- <inner_argv> <workdir>` under a pty.
 
     - `workdir` is exported as REIN_SANDBOX_WORKDIR AND passed as the final arg
       to the inner command (so an in-sandbox `cd "$0"` lands in the writable
       mount, matching the manual-test convention).
+    - `direct=True` spawns the unsandboxed leg (`rein run --direct`) — the #35
+      unified model means the declare + confirm flow is drivable on the same
+      pty in both modes.
     - The transcript logfile captures EVERYTHING both sides print on the pty,
       so tests can count prompts and read the in-sandbox sentinels.
     - Wide cols (200) stop pexpect's default 80-col wrap from splitting the
@@ -377,7 +424,8 @@ def spawn_rein_run(
     if extra_env:
         env.update(extra_env)
 
-    args = ["run", "--", *inner_argv, workdir]
+    mode = ["--direct"] if direct else []
+    args = ["run", *mode, "--", *inner_argv, workdir]
     transcript = io.StringIO()
     child = pexpect.spawn(
         str(REIN_BIN),

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/TomHennen/rein/internal/keystore"
+	"github.com/TomHennen/rein/internal/proxy"
 )
 
 // fakeUpstream records the Authorization header the proxy forwarded upstream.
@@ -84,6 +85,13 @@ func startHost(t *testing.T, opts Config) (*Host, *fakeUpstream) {
 	}
 	if opts.Approve == nil {
 		opts.allowAutoApprove = true // test opt-in; production must wire Approve
+	} else if opts.Declaration == nil {
+		// Tests exercising Approve semantics get a permissive declaration
+		// gate (the gate's own behavior is covered in internal/proxy).
+		opts.Declaration = &proxy.DeclarationHooks{
+			WriteApproved:  func(string) bool { return true },
+			IssueConfirmed: func(string, int) bool { return true },
+		}
 	}
 
 	h, err := Start(opts)

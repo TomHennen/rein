@@ -19,6 +19,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,15 +55,13 @@ type Session struct {
 	// against it.
 	Created time.Time `yaml:"created_at,omitempty"`
 
-	// Issue is the bound GitHub issue number for human confirmation
-	// (CP5). When a write operation requires confirmation, the human
-	// types this number to approve. Different sessions bound to
-	// different issues have different correct answers — that's the
-	// non-replayability property per design §2.2.
-	//
-	// A zero value means "no confirmation required" — sessions
-	// authored before CP5 (env-fallback included) keep working without
-	// the prompt. The prompt is opt-in via the file's `issue:` field.
+	// Issue is IGNORED (issue #35): the issue is agent-declared at
+	// runtime via `rein declare <n>` and human-confirmed per run — never
+	// pre-configured in the session file. The field is still PARSED so a
+	// legacy file loads, but nothing gates on it; WarnIgnoredIssue prints
+	// a loud launch-time warning when it is set (silently ignoring a
+	// security-looking field is not acceptable). It will be removed once
+	// dogfood confirms no files still carry it.
 	Issue int `yaml:"issue,omitempty"`
 
 	// AllowDomains is the per-session EXTRA egress allowlist (CP4.5): hosts the
@@ -100,6 +99,21 @@ func (s *Session) BareRepoNames() []string {
 		}
 	}
 	return names
+}
+
+// WarnIgnoredIssue prints the loud, launch-time warning when a session
+// file still carries the retired `issue:` field (issue #35): the field
+// gates NOTHING anymore — the issue is agent-declared (`rein declare <n>`)
+// and human-confirmed per run. Callers (the `rein run` banners, both
+// modes) invoke this once at launch; per-op processes (credential helper,
+// rein-gh) do not, to avoid stderr spam.
+func (s *Session) WarnIgnoredIssue(w io.Writer) {
+	if s.Issue == 0 {
+		return
+	}
+	fmt.Fprintf(w, "rein: WARNING: session `issue: %d` is IGNORED — the issue is agent-declared now.\n", s.Issue)
+	fmt.Fprintln(w, "      Remove `issue:` from the session file. The agent runs `rein declare <n>`;")
+	fmt.Fprintln(w, "      you confirm on this terminal; then writes flow for this run.")
 }
 
 // Contains reports whether the given owner/name is within this

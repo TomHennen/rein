@@ -355,23 +355,19 @@ func checkAppMint() checkResult {
 	return checkResult{"app credentials", statusOK, fmt.Sprintf("mint ok (token expires %s)", expiresAt.Format(time.RFC3339))}
 }
 
-// checkSessionFile reports where the session is loaded from and whether
-// the silent-degradation case (write-capable role with no bound issue —
-// see buildConfirmWrite in main.go) is in effect. That case is the kind
-// of green-on-everything-else mask that doctor exists to surface.
+// checkSessionFile reports where the session is loaded from, and warns
+// when the file still carries the RETIRED `issue:` field (issue #35: the
+// issue is agent-declared via `rein declare <n>`, never pre-configured;
+// a security-looking field that silently gates nothing is exactly what
+// doctor exists to surface).
 func checkSessionFile() checkResult {
 	sess, source, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
 	if err != nil {
 		return checkResult{"session", statusFail, err.Error()}
 	}
-	desc := fmt.Sprintf("%s (id=%s role=%s repos=%v", source, sess.ID, sess.Role, sess.Repos)
+	desc := fmt.Sprintf("%s (id=%s role=%s repos=%v)", source, sess.ID, sess.Role, sess.Repos)
 	if sess.Issue != 0 {
-		desc += fmt.Sprintf(" issue=#%d)", sess.Issue)
-	} else {
-		desc += " issue=<none>)"
-	}
-	if sess.Issue == 0 && isWriteCapableRole(sess.Role) {
-		return checkResult{"session", statusWarn, desc + " — write-approval prompt is silently DISABLED for this write-capable role; add `issue:` to enable"}
+		return checkResult{"session", statusWarn, desc + fmt.Sprintf(" — `issue: %d` is IGNORED (issue is agent-declared now; run `rein declare <n>`); remove the field", sess.Issue)}
 	}
 	return checkResult{"session", statusOK, desc}
 }

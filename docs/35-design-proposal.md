@@ -1,7 +1,8 @@
 # Issue #35 design — agent-declared, human-confirmed issue scoping (declaration-first)
 
-**Status:** restructured 2026-07-11 per Tom's PR review; **awaits Tom's final
-sign-off** before becoming design-of-record. No production code written.
+**Status:** design of record, approved by Tom (merged 2026-07-11, PR #56);
+**IMPLEMENTED 2026-07-11** on the issue-35 implementation branch (see
+PLAN-1.md Notes 2026-07-11 for the build record).
 
 **Settled by Tom (recorded, not revisited):**
 - 2026-07-08 — decisions A–F on issue #35: agent-declared at runtime, NOT
@@ -368,7 +369,7 @@ sent — never a token.
 | Issue fetch fails at declare (network/5xx/rate limit) | Declare returns 403 "could not verify issue #N; retry". No prompt without a fetched title (decision E). Reads unaffected. |
 | Issue doesn't exist (404 in session/target repo) | Declare returns 403 "issue #N not found in o/r". |
 | Issue in a different repo (S4) | Structurally closed: N resolves only against the declared/push-target repo (404 ⇒ deny). Same-number coincidence across repos is caught by the displayed title + home repo. |
-| Issue transferred (301 on canonical URL) | Deny + surface loudly (TM-G6, design.md:753). On each write-token mint, re-check the canonical URL of the confirmed issue(s) involved; 301 ⇒ invalidate that confirmation, require re-declare. |
+| Issue transferred (301 on canonical URL) | Deny + surface loudly (TM-G6, design.md:753). On each write-token MINT, re-check the canonical URL of the confirmed issue(s); 301 ⇒ invalidate that confirmation, require re-declare. **Cadence, stated honestly (security review, 2026-07-11):** the write token is memoized for its ~1h lifetime, so "per mint" is roughly HOURLY, **not** per write — a transfer that 301s cleanly after the first mint keeps its binding until that token expires. That is acceptable **only** because of the impact ceiling, not because the check is prompt: per decision D the issue is **attribution, not capability** — the token stays repo-scoped, `session.Contains` gates every write, and the ref cross-check gates every push, so a stale binding smears an audit line and cannot widen access. A non-transfer verification failure (network/5xx) is **keep-and-log**, never a silent revocation of a confirmation the human gave. |
 | Push ref for an unconfirmed issue | `ng` rejection naming `rein declare <n>` (§5.3) — the expansion path, not an error state. |
 | Concurrent runs (S3) | Preserved unchanged: per-run crypto/rand run-id keying of approvals/run-context/ledger files (internal/approvals); each run's confirmed set is its own file; `grant --run-id X` reads only run X's snapshot. Probe verdict "prevented" — mechanism untouched. |
 | Mid-run session file edit | Signature (ID/Role/Repos) mismatch invalidates the whole record including its issue set. |
@@ -515,6 +516,14 @@ sandboxed-only plan). One checkpoint, live-gated per PLAN-1 discipline.
 inspection (design.md:590 full form); new-issue-creation flow
 (design.md:265–279 — keeps its first-word token when built); role catalog;
 rate limiting (design.md:747) unless dogfood demands it.
+
+**Implementation residual (recorded 2026-07-11):** sandboxed mode now
+persists an **issues:read** token to the cross-run on-disk cache
+(`ghsession.ReadCachePath`) to serve the declare fetch + the TM-G6
+re-check — new for sandboxed mode (direct mode always did this). It is
+read-tier, and the state dir is deny-read in-sandbox, so the exposure is
+the pre-existing same-uid HOST residual (issue #7), not a new sandbox
+hole.
 
 **Residuals, stated honestly:** S5 open (inherent ceiling of
 confirm-by-recognition; §8 writeback is the backstop). All Form A prompts

@@ -26,12 +26,19 @@
 // # Invalidation
 //
 // An approval invalidates whenever ANY of the session's identity-shaping
-// fields change: ID, Role, Repos, or Issue. SignatureOf hashes those
-// fields; on each ConfirmWrite the caller compares the stored signature
-// to the LIVE session's signature. A mismatch is treated as "no approval"
-// and forces a re-prompt — this catches a mid-run dev-session.yaml scope
-// edit (e.g. an added repo) so a carried approval can't silently cover
-// expanded scope.
+// fields change: ID, Role, or Repos. SignatureOf hashes those fields; on
+// each write-gate check the caller compares the stored signature to the
+// LIVE session's signature. A mismatch is treated as "no approval" — and
+// invalidates the whole record INCLUDING its confirmed-issue set — this
+// catches a mid-run dev-session.yaml scope edit (e.g. an added repo) so a
+// carried approval can't silently cover expanded scope.
+//
+// The bound ISSUE is deliberately NOT part of the signature (issue #35,
+// decision A in data form): the issue moved from the *identity* of the
+// approval to its *content* — the run's confirmed-issue SET
+// (Record.Issues), appended to by `rein declare <n>` + the human's Form A
+// confirmation. Validity = signature match AND (for pushes) the declared
+// issue ∈ Issues; for non-push writes, a non-empty set.
 //
 // # No security TTL
 //
@@ -94,27 +101,91 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/TomHennen/rein/internal/brokercore"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/tokencache"
 )
 
+// ConfirmedIssue is one human-confirmed issue in a run's confirmed set
+// (issue #35). The Title/State are a SNAPSHOT taken at confirm time (the
+// design.md:758 issue snapshot — they inform the human and the audit
+// trail but never authorize anything). CanonicalURL is the issue's
+// canonical REST URL — the TM-G6 transfer anchor (design.md:753): a 301
+// on it later means the issue was transferred and the confirmation must
+// be invalidated.
+type ConfirmedIssue struct {
+	Number       int       `json:"number"`
+	Repo         string    `json:"repo"`
+	Title        string    `json:"title"` // snapshot at confirm time
+	State        string    `json:"state"`
+	IsPR         bool      `json:"is_pr,omitempty"` // GitHub shares the number space
+	CanonicalURL string    `json:"canonical_url"`   // TM-G6 anchor
+	ConfirmedAt  time.Time `json:"confirmed_at"`
+}
+
 // Record is the on-disk shape of an approval.
 type Record struct {
-	// Signature is the hash of the session fields the approval covers.
-	// Mismatch with the current session's signature invalidates the
-	// approval — the operator changed scope and must re-approve.
+	// Signature is the hash of the session fields the approval covers
+	// (ID, Role, Repos — NOT the issue; see the package doc). Mismatch
+	// with the current session's signature invalidates the approval —
+	// the operator changed scope and must re-approve.
 	Signature string `json:"signature"`
 
 	// SessionID is recorded for log/audit clarity; the actual identity
 	// check is via Signature (which includes ID).
 	SessionID string `json:"session_id"`
 
-	// ApprovedAt is when the human typed the issue number.
+	// Issues is the run's confirmed-issue set (issue #35): each
+	// `rein declare <n>` the human approves appends here. Writes flow
+	// when the signature matches AND (push refs resolve to a confirmed
+	// issue | non-push write and the set is non-empty).
+	Issues []ConfirmedIssue `json:"issues,omitempty"`
+
+	// ApprovedAt is when the human confirmed the first issue.
 	ApprovedAt time.Time `json:"approved_at"`
 
 	// ExpiresAt is retained ONLY as a sweep heuristic + status display.
 	// It is NOT a re-prompt trigger: see package doc, "No security TTL".
 	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// HasIssue reports whether the record's confirmed set contains issue
+// `number` homed in `repo`.
+//
+// The repo comparison NORMALIZES both sides with the same semantics
+// session.Contains uses (brokercore.RepoFromPath: strip a leading slash, a
+// trailing slash, and a ".git" suffix; then case-fold — GitHub is
+// case-preserving but case-insensitive on path). Normalizing HERE, in the
+// comparator, is deliberate: this is the security-relevant check (the
+// push-ref cross-check calls it with a repo derived from the git
+// smart-HTTP URL, where `/o/r.git/git-receive-pack` yields "o/r.git",
+// while a declare records the bare "o/r" it resolved from the session).
+// A raw compare would deny a correctly declared, confirmed, correctly
+// named push — telling the human to redo a declare that IS recorded — for
+// every remote using GitHub's default `.git` clone URL. Correctness of the
+// gate must not depend on caller hygiene.
+//
+// An unparseable repo on either side normalizes to "" and never matches
+// (fail closed).
+func (r Record) HasIssue(repo string, number int) bool {
+	want := normalizeRepo(repo)
+	if want == "" {
+		return false
+	}
+	for _, ci := range r.Issues {
+		if ci.Number == number && normalizeRepo(ci.Repo) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeRepo canonicalizes an "owner/name" for comparison, delegating
+// the parse to the single canonical helper (brokercore.RepoFromPath — the
+// same one session.Contains and the proxy use) and lowercasing. Returns ""
+// if the input isn't owner/name-shaped.
+func normalizeRepo(s string) string {
+	return strings.ToLower(brokercore.RepoFromPath(s))
 }
 
 // RunContext is the just-in-time session snapshot the credential HELPER
@@ -129,6 +200,14 @@ type RunContext struct {
 	// RunPID is the pid of the owning `rein run` process (REIN_RUN_PID),
 	// used by Sweep's liveness probe. 0 means unknown.
 	RunPID int `json:"run_pid"`
+
+	// PendingIssue is the fetched-but-not-yet-confirmed issue a declare
+	// wrote before prompting (issue #35). It is TRANSPORT for the
+	// out-of-process grant surfaces (tmux popup / `rein approval grant
+	// --run-id X`): the popup renders the Form A prompt from this
+	// snapshot — it never fetches. Cleared/overwritten by the next
+	// declare; never consulted by any write gate.
+	PendingIssue *ConfirmedIssue `json:"pending_issue,omitempty"`
 
 	// WrittenAt is when the helper wrote this snapshot.
 	WrittenAt time.Time `json:"written_at"`
@@ -146,9 +225,14 @@ type RunStatus struct {
 }
 
 // SignatureOf computes the deterministic signature for a session. Any
-// change to ID, Role, Repos, or Issue produces a different signature.
-// Repo ordering is normalized via sort so a re-ordered list doesn't
+// change to ID, Role, or Repos produces a different signature. Repo
+// ordering is normalized via sort so a re-ordered list doesn't
 // invalidate an existing approval.
+//
+// The issue is deliberately NOT hashed (issue #35): it is CONTENT of the
+// approval (Record.Issues), not identity — the run's issues are declared
+// at runtime, not configured up front (decision A). A session file's
+// legacy `issue:` field is ignored everywhere.
 //
 // Created is intentionally NOT in the signature: the approval is keyed
 // to the SESSION (operator's intent), not to its file mtime.
@@ -159,7 +243,6 @@ func SignatureOf(s session.Session) string {
 	fmt.Fprintf(h, "id=%s\n", s.ID)
 	fmt.Fprintf(h, "role=%s\n", s.Role)
 	fmt.Fprintf(h, "repos=%s\n", strings.Join(repos, ","))
-	fmt.Fprintf(h, "issue=%d\n", s.Issue)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -278,6 +361,55 @@ func WriteApproval(stateDir, runID string, rec Record) error {
 		return fmt.Errorf("marshal approval: %w", err)
 	}
 	return writeAtomic(RunApprovalPath(stateDir, runID), body)
+}
+
+// AppendConfirmedIssue adds a freshly human-confirmed issue to the run's
+// approval record (issue #35): read-modify-write. If no record exists —
+// or the existing record's signature mismatches sig (a mid-run session
+// edit invalidated it, issue set included) — a FRESH record is written
+// carrying only the new issue. Idempotent: re-confirming an issue already
+// in the set rewrites nothing.
+//
+// ttl is stamped into ExpiresAt as a sweep/status heuristic only (see the
+// package doc; the run lifetime is the bound).
+//
+// Concurrency note: two prompts cannot race in practice — declares are
+// serialized through one human — and the write is atomic either way; a
+// theoretical lost append re-prompts on the next declare (fail closed).
+func AppendConfirmedIssue(stateDir, runID, sig, sessionID string, ci ConfirmedIssue, ttl time.Duration) error {
+	now := time.Now()
+	rec, err := ReadApproval(stateDir, runID)
+	if err != nil || !Valid(rec, sig) {
+		rec = Record{
+			Signature:  sig,
+			SessionID:  sessionID,
+			ApprovedAt: now,
+			ExpiresAt:  now.Add(ttl),
+		}
+	}
+	if rec.HasIssue(ci.Repo, ci.Number) {
+		return nil
+	}
+	rec.Issues = append(rec.Issues, ci)
+	return WriteApproval(stateDir, runID, rec)
+}
+
+// ConfirmedIssues returns the run's confirmed-issue set, or nil when the
+// run has no approval record or its signature doesn't match sig (a
+// mid-run session edit invalidates the whole record, issue set included —
+// fail closed). This is the single read every write gate consults: the
+// direct-mode credential helper and rein-gh shim (non-empty set ⇒ writes
+// flow), and the sandboxed proxy (non-empty for API writes; per-issue
+// membership for push refs).
+func ConfirmedIssues(stateDir, runID, sig string) []ConfirmedIssue {
+	if runID == "" {
+		return nil
+	}
+	rec, err := ReadApproval(stateDir, runID)
+	if err != nil || !Valid(rec, sig) {
+		return nil
+	}
+	return rec.Issues
 }
 
 // ReadRunContext reads runs/<run-id>.json. Missing-file is reported as

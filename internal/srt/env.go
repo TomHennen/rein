@@ -92,6 +92,14 @@ type EnvParams struct {
 	// passthrough of a parent var into the injected set.
 	DisableClaudeAIMCP bool
 
+	// ExtraPathDir, when non-empty, is PREPENDED to the child's PATH. Used
+	// to put the per-run staged rein binary (<runTmp>/rein, the probe
+	// copy) on the in-sandbox PATH so the agent can run `rein declare <n>`
+	// exactly as the deny messages instruct (issue #35 §3). The dir holds
+	// only non-secret, already-readable per-run artifacts (rein binary,
+	// CA bundle, settings.json, managed gitconfig).
+	ExtraPathDir string
+
 	// AgentTmpDir, when non-empty, is the per-run writable scratch dir rein
 	// created for the agent and added to srt's allowWrite. It is delivered to the
 	// sandboxed child as CLAUDE_CODE_TMPDIR — srt's OWN sanctioned override for
@@ -165,13 +173,19 @@ func BuildEnv(p EnvParams) []string {
 	out := make([]string, 0, len(passthroughExact)+len(caEnvVars)+3)
 
 	for _, kv := range p.Parent {
-		name, _, ok := strings.Cut(kv, "=")
+		name, value, ok := strings.Cut(kv, "=")
 		if !ok {
 			continue
 		}
-		if allowedEnvName(name) {
-			out = append(out, kv)
+		if !allowedEnvName(name) {
+			continue
 		}
+		// Prepend the staged-binary dir to PATH (issue #35: `rein declare`
+		// must resolve in-sandbox as the deny messages instruct).
+		if name == "PATH" && p.ExtraPathDir != "" {
+			kv = "PATH=" + p.ExtraPathDir + ":" + value
+		}
+		out = append(out, kv)
 	}
 	for _, name := range caEnvVars {
 		out = append(out, name+"="+p.CABundlePath)

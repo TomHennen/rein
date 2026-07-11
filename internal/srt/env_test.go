@@ -240,3 +240,28 @@ func TestBuildEnvGitIdentity(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildEnv_ExtraPathDirPrepended(t *testing.T) {
+	env := BuildEnv(EnvParams{
+		Parent:       []string{"PATH=/usr/bin:/bin", "HOME=/home/x"},
+		CABundlePath: "/tmp/bundle.pem",
+		StubGHToken:  "stub",
+		ExtraPathDir: "/tmp/rein-run",
+	})
+	var path string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			path = kv
+		}
+	}
+	if path != "PATH=/tmp/rein-run:/usr/bin:/bin" {
+		t.Errorf("PATH = %q, want the staged dir prepended (rein declare must resolve in-sandbox)", path)
+	}
+	// Without ExtraPathDir the PATH passes through untouched.
+	env = BuildEnv(EnvParams{Parent: []string{"PATH=/usr/bin"}, CABundlePath: "b", StubGHToken: "s"})
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") && kv != "PATH=/usr/bin" {
+			t.Errorf("PATH = %q, want untouched passthrough", kv)
+		}
+	}
+}

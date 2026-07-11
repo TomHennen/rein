@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -34,12 +35,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/TomHennen/rein/internal/approvals"
 	"github.com/TomHennen/rein/internal/config"
+	"github.com/TomHennen/rein/internal/declare"
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
 	"github.com/TomHennen/rein/internal/session"
-	"github.com/TomHennen/rein/internal/ui/grant"
 )
 
 const (
@@ -238,14 +240,21 @@ func argSummary(args []string) string {
 	return out
 }
 
-// isWriteCapableRole mirrors cmd/rein's helper; we copy to avoid a
-// cross-package dependency from a tiny CLI to another tiny CLI.
-func isWriteCapableRole(role string) bool {
-	switch role {
-	case "implement", "triage", "review", "release":
-		return true
+// printDeclareHint mirrors cmd/rein's helper (copied to avoid a
+// cross-binary dependency): the deny-channel instruction naming the
+// exact next step (issue #35 §2).
+func printDeclareHint(w io.Writer, runID string) {
+	fmt.Fprintln(w)
+	if runID == "" {
+		fmt.Fprintln(w, "rein: write blocked — this operation ran OUTSIDE `rein run` (no REIN_RUN_ID),")
+		fmt.Fprintln(w, "  so no issue can be declared for it. Launch your agent via `rein run -- <cmd>`,")
+		fmt.Fprintln(w, "  then run `rein declare <n>` and retry.")
+	} else {
+		fmt.Fprintln(w, "rein: no issue declared for this run — writes are locked.")
+		fmt.Fprintln(w, "  Run: rein declare <n>   (the issue number this work is for)")
+		fmt.Fprintln(w, "  approve on your terminal, then retry this operation.")
 	}
-	return false
+	fmt.Fprintln(w)
 }
 
 // envInt parses a non-negative integer env var, returning 0 on unset or
@@ -273,39 +282,42 @@ func runWrite(realGh string, args []string, stateDir string, logger *log.Logger)
 	var token string
 	var client *githubapp.Client
 
-	// Gate write mints behind the human-in-the-loop approval flow, the
-	// same gate the credential helper uses for git writes. Closes the
-	// CP5 hole where gh writes minted without prompting.
+	// Gate write mints on the run's CONFIRMED-ISSUE set (issue #35 §2) —
+	// the same gate the credential helper uses for git writes, reading
+	// the same per-run approval record `rein declare <n>` populates. The
+	// shim never prompts: the prompt lives at declare time. Empty set (or
+	// no REIN_RUN_ID, or a mid-run session edit) ⇒ deny with the
+	// placeholder GH_TOKEN (blocks the hosts.yml fallback) + the stderr
+	// hint naming the exact next step.
 	//
 	// Reuse the session loadAppCfgWithSession already resolved — exactly
 	// one session per invocation — so there is no second read of
-	// dev-session.yaml that could fail or diverge and let a write token
-	// mint without prompting (fail-closed on the approval gate).
+	// dev-session.yaml that could diverge and let a write token mint
+	// without a confirmed issue (fail-closed on the gate).
 	if cfgErr == nil {
-		if sess.Issue != 0 {
-			cfg := grant.Config{
-				StateDir:      stateDir,
-				RunID:         os.Getenv("REIN_RUN_ID"),
-				RunPID:        envInt("REIN_RUN_PID"),
-				TTL:           approvalTTL,
-				PromptTimeout: 60 * time.Second,
-				PreferPopup:   grant.PopupPreferenceFromEnv(),
-				Logger:        logger,
+		runID := os.Getenv("REIN_RUN_ID")
+		sig := approvals.SignatureOf(sess)
+		if issues := approvals.ConfirmedIssues(stateDir, runID, sig); len(issues) == 0 {
+			printDeclareHint(os.Stderr, runID)
+			logger.Printf("write tier: no confirmed issue for run %q (gh %s); execing gh with placeholder GH_TOKEN", runID, argSummary(args))
+			return execGhWithoutToken(realGh, args)
+		}
+		// TM-G6 re-check on every write mint (#35 §6): invalidate
+		// transferred-issue confirmations; an emptied set denies the write.
+		ghReadToken := func(ctx context.Context) (string, error) {
+			client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
+			if err != nil {
+				return "", err
 			}
-			req := grant.Request{
-				Session: sess,
-				Action:  fmt.Sprintf("gh %s (write)", argSummary(args)),
-				// Name the FULL session scope: after #10 the minted write token
-				// covers every repo in the session, so the human's consent must
-				// reflect that, not just the first repo (issue #30 / F8).
-				Repo: strings.Join(sess.Repos, ", "),
-			}
-			if !grant.ObtainApproval(context.Background(), req, cfg) {
-				logger.Printf("write tier: human approval denied; execing gh without GH_TOKEN")
-				return execGhWithoutToken(realGh, args)
-			}
-		} else if isWriteCapableRole(sess.Role) {
-			logger.Printf("WARN: write tier proceeding without confirmation (session %q has no `issue:` field)", sess.ID)
+			tok, _, err := ghsession.EnsureFresh(ghsession.ReadCachePath(stateDir), client.MintGhReadOnlyToken, client.RevokeToken, refreshSkew, mintTimeout, logger)
+			return tok, err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		rerr := declare.InvalidateTransferred(ctx, stateDir, runID, sess, ghReadToken, logger, os.Stderr)
+		cancel()
+		if rerr != nil {
+			logger.Printf("write tier: transfer re-check emptied the confirmed set (%v); execing gh with placeholder GH_TOKEN", rerr)
+			return execGhWithoutToken(realGh, args)
 		}
 	}
 

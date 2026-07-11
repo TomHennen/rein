@@ -1,44 +1,41 @@
 // Package prompt implements rein's human-in-the-loop confirmation
-// ceremony for write operations.
+// ceremony: the Form A issue-declaration prompt (issue #35 §4).
 //
 // # Mechanism
 //
-// The credential helper's stdout is reserved for git (it carries the
-// credential block git is waiting on). Stderr may be captured. The
-// prompt therefore opens /dev/tty directly — the special device that
-// refers to the process's controlling terminal — and uses that for
-// both displaying the prompt and reading the human's response. The
-// agent (running as a child of the helper's caller, but without a
-// controlling terminal of its own) has no path to /dev/tty: the
-// kernel hands the file to a process based on the process's session,
-// and the agent's session is separate.
+// The prompt opens /dev/tty directly — the special device that refers
+// to the process's controlling terminal — and uses that for both
+// displaying the prompt and reading the human's response. A sandboxed
+// agent has no /dev/tty at all (bwrap --new-session, re-verified every
+// launch), and a direct-mode agent subprocess typically has no
+// controlling terminal either (a useful accident, not an airtight gate
+// — issue #12; design.md:749).
 //
 // Standard Unix assumption that this rests on: any co-resident
 // process under the same user that shares the controlling terminal
 // could write to /dev/tty too. The non-replayability property
 // presumes the human's tty isn't shared with hostile processes on
-// the same machine. Shape A's sandbox (Phase 1) tightens this by
-// running the agent without a tty at all.
+// the same machine.
 //
-// # TM-G5 framing (non-replayable input)
+// # Form A (issue #35, settled)
 //
-// The design's "non-replayable input" language (design §2.2) means
-// the answer to a prompt for session S would not approve a request
-// for session S'. The bound issue number serves as that discriminator
-// — a different session is bound to a different issue and has a
-// different correct answer. It does NOT mean the issue number must
-// be hidden from the prompt: the agent already knows the session's
-// scope (it requested it). What the agent cannot do is supply the
-// answer itself, because the answer must arrive via /dev/tty, which
-// only the human at the terminal can write to.
+// The agent declared issue N; rein fetched N's title, state, and home
+// repo (internal/issuemeta — no prompt ever fires without a fetched
+// title, decision E); the human approves by typing the DISPLAYED
+// number. The answer differs per issue, so a prompt-injected agent
+// cannot pre-construct a "yes" (design.md:245-246, 281) — and cannot
+// deliver one, lacking the tty. The displayed fetched title + state +
+// home repo is the load-bearing misattribution control (decision E;
+// probe S1/S4/S5): a wrong-but-plausible issue shows the wrong title.
+// Titles are agent-editable in-scope (TM-G7), so the title informs the
+// human but never authorizes — the number the human types is
+// GitHub-assigned and unforgeable.
 //
 // # No-tty behavior
 //
-// If /dev/tty cannot be opened (no controlling terminal, e.g. the
-// helper was invoked from a non-interactive context like CI or from
-// inside an agent that has no terminal of its own), Confirm returns
-// ErrNoTTY. The caller treats this as "denied" — fail-closed,
-// consistent with the rest of the helper's invariants.
+// If /dev/tty cannot be opened, Confirm returns ErrNoTTY. The caller
+// treats this as "denied" — fail-closed — and falls back to the
+// out-of-process grant surfaces (tmux popup / another terminal).
 package prompt
 
 import (
@@ -62,32 +59,38 @@ var ErrNoTTY = errors.New("no controlling terminal (/dev/tty unavailable)")
 // or a context cancellation fired before the human responded.
 var ErrCancelled = errors.New("confirmation cancelled")
 
-// Request describes one confirmation request. Fields are formatted
-// into a human-readable prompt block; the human types Expected to
-// approve.
+// Request describes one Form A confirmation request (issue #35 §4). The
+// fields are formatted into the human-readable prompt block; the human
+// types Issue (the displayed number) to approve.
 type Request struct {
-	// SessionID is the broker's session identifier (e.g.
-	// "sess_dev_001"). Surfaced for human context.
+	// SessionID / Role / Repos describe the session, for human context
+	// ("session: sess_dev_001 (role=implement, repos=[o/r])").
 	SessionID string
+	Role      string
+	Repos     []string
 
-	// Role is the design's role name (implement, scan, ...). Surfaced
-	// for human context.
-	Role string
-
-	// Repo is "owner/name" — the repository the write operation
-	// targets. The most-load-bearing piece of context for the human.
-	Repo string
-
-	// Action is a short verb describing what's being approved
-	// ("git push", "gh issue create", etc.). Surfaced for human
-	// context.
-	Action string
-
-	// Issue is the numeric GitHub issue the session is bound to. The
-	// human types this number to approve. Different sessions bound to
-	// different issues have different correct answers — that's the
-	// non-replayability property (design §2.2).
+	// Issue is the number the agent declared — the human types this
+	// displayed number to approve (Form A). GitHub-assigned, unforgeable.
 	Issue int
+
+	// IssueRepo is the declared issue's HOME repo (owner/name) — shown so
+	// a cross-repo binding is visible (misattribution S4).
+	IssueRepo string
+
+	// Title and State are the FETCHED snapshot (never agent-supplied
+	// directly; sanitized for terminal display by internal/issuemeta).
+	// The load-bearing misattribution control (decision E).
+	Title string
+	State string
+
+	// IsPR labels the declaration `[pull request]` — GitHub shares the
+	// number space and PR declarations are valid (§9).
+	IsPR bool
+
+	// Expansion marks a second (or later) issue declared mid-run: the
+	// design's scope-expansion prompt (design.md:254-263) — same
+	// ceremony, distinct header, appends to the run's confirmed set.
+	Expansion bool
 
 	// Timeout caps how long Confirm waits for the human. A zero value
 	// means "no timeout" — Confirm blocks until input or signal.
@@ -100,7 +103,6 @@ type Request struct {
 // Implementations:
 //   - TTYPrompter: opens /dev/tty for production use.
 //   - Tests provide a stub that returns canned responses.
-//   - Phase 1 (sandbox-composed) may add NotificationPrompter, etc.
 type Prompter interface {
 	Confirm(ctx context.Context, req Request) (approved bool, err error)
 }
@@ -151,20 +153,36 @@ func (TTYPrompter) Confirm(ctx context.Context, req Request) (bool, error) {
 	return false, nil
 }
 
-// writePrompt renders the human-facing prompt block. Format is
-// deliberately compact — git users see this in their terminal and
-// want to act fast.
+// writePrompt renders the Form A prompt block (issue #35 §4). Format is
+// deliberately compact — a developer sees this mid-flow and wants to
+// read the title, check it is the RIGHT issue, and act.
 func writePrompt(w io.Writer, req Request) error {
+	header := "=== rein: agent declares work on an issue ==="
+	if req.Expansion {
+		header = "=== rein: agent wants to ALSO work on an issue (scope expansion) ==="
+	}
+	kind := ""
+	if req.IsPR {
+		kind = "  [pull request]"
+	}
+	state := req.State
+	if state == "" {
+		state = "unknown"
+	}
 	_, err := fmt.Fprintf(w, "\n"+
-		"=== rein: write access requested ===\n"+
-		"   action:  %s\n"+
-		"   repo:    %s\n"+
-		"   session: %s (role=%s, issue=#%d)\n"+
+		"%s\n"+
+		"   issue:    #%d %q  [%s]%s\n"+
+		"             in %s\n"+
+		"   session:  %s (role=%s, repos=[%s])\n"+
+		"   approving covers ALL writes for this run (git push, gh, API).\n"+
 		"\n"+
 		"To approve, type the issue number (%d) and press enter.\n"+
 		"To deny, press Ctrl-C or type anything else.\n"+
 		"> ",
-		req.Action, req.Repo, req.SessionID, req.Role, req.Issue, req.Issue,
+		header, req.Issue, req.Title, state, kind,
+		req.IssueRepo,
+		req.SessionID, req.Role, strings.Join(req.Repos, ", "),
+		req.Issue,
 	)
 	return err
 }
@@ -214,11 +232,16 @@ type StubPrompter struct {
 
 	// Calls counts invocations for test assertions.
 	Calls int
+
+	// Last records the most recent request, so tests can assert what the
+	// human WOULD have seen (title, repo, expansion header).
+	Last Request
 }
 
 // Confirm satisfies Prompter.
 func (s *StubPrompter) Confirm(ctx context.Context, req Request) (bool, error) {
 	s.Calls++
+	s.Last = req
 	if s.ForceErr != nil {
 		return false, s.ForceErr
 	}
