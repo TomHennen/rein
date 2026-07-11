@@ -642,28 +642,80 @@ def normalize_transcript(text: str, subs: list[tuple[str, str]] | None = None) -
     for old, new in subs or []:
         if old:
             text = text.replace(old, new)
-    rules = [
-        # our disposable branch suffix: <8-digit date>-<6-digit time>-<hex6>
-        (r"\d{8}-\d{6}-[0-9a-f]{6}", "<NONCE>"),
-        # ISO-ish timestamps the probe writes (2026-07-11T18:17:26Z)
-        (r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", "<TS>"),
-        # per-run proxy socket + run id
-        (r"/run/user/\d+/rein/run-[A-Za-z0-9_-]+/proxy\.sock", "<PROXY_SOCK>"),
-        (r"run-[A-Za-z0-9_-]{16,}", "run-<RUNID>"),
-        # scratch dirs
-        (r"/tmp/rein-[A-Za-z0-9_.-]+", "<TMP>"),
-        # git plumbing: object counts and short/long hashes
-        (r"\b[0-9a-f]{7,40}\b", "<HASH>"),
-        (r"\((?:delta|deltas) \d+\)", "(delta <N>)"),
-        (r"\b(reused|pack-reused|Total|Enumerating objects:|Counting objects:|"
-         r"Compressing objects:|Receiving objects:|Resolving deltas:|Writing objects:|"
-         r"Unpacking objects:|up to) \d+", r"\1 <N>"),
-        (r"\d+ bytes", "<N> bytes"),
-        (r"\d+(\.\d+)? [KMG]iB/s", "<RATE>"),
-    ]
-    for pat, repl in rules:
+    for pat, repl in _NORMALIZE_RULES:
         text = re.sub(pat, repl, text)
     return text
+
+
+# The KNOWN volatile-token rules. Order matters (nonce/timestamp before the
+# generic count/hash rules). Anything a rule does NOT recognize is left VERBATIM
+# — that is the point of the default-keep golden: a brand-new rein line survives
+# into the diff and trips drift. Extend this list (not a per-journey whitelist)
+# when a genuinely new volatile token appears.
+_NORMALIZE_RULES = [
+    # our disposable branch suffix: <8-digit date>-<6-digit time>-<hex6>
+    (r"\d{8}-\d{6}-[0-9a-f]{6}", "<NONCE>"),
+    # ISO-ish timestamps the probe writes (2026-07-11T18:17:26Z)
+    (r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", "<TS>"),
+    # per-run proxy socket + run id
+    (r"/run/user/\d+/rein/run-[A-Za-z0-9_-]+/proxy\.sock", "<PROXY_SOCK>"),
+    (r"run-[A-Za-z0-9_-]{16,}", "run-<RUNID>"),
+    # scratch dirs (the trailing char class excludes '/', so a suffix like
+    # /session.yaml is preserved: <TMP>/session.yaml)
+    (r"/tmp/rein-[A-Za-z0-9_.-]+", "<TMP>"),
+    # git plumbing: object counts, ratios, percentages, short/long hashes
+    (r"\b[0-9a-f]{7,40}\b", "<HASH>"),
+    (r"\((?:delta|deltas) \d+\)", "(delta <N>)"),
+    (r"\b(reused|pack-reused|Total|Enumerating objects:|Counting objects:|"
+     r"Compressing objects:|Receiving objects:|Resolving deltas:|Writing objects:|"
+     r"Unpacking objects:|up to) \d+", r"\1 <N>"),
+    (r"\(\d+/\d+\)", "(<N>/<N>)"),
+    (r"\d+%", "<N>%"),
+    (r"\d+ bytes", "<N> bytes"),
+    (r"\d+(\.\d+)? [KMG]iB/s", "<RATE>"),
+]
+
+# The ONE narrow progress-meter rule (Tom's ruling): drop the intermediate `%`
+# ticks a git operation redraws, but KEEP every terminal `done.` line and every
+# error/reject line. Everything not matched here stays in the golden verbatim.
+_PROGRESS_RE = re.compile(
+    r"(remote:\s*)?(Counting|Compressing|Receiving|Resolving|Writing|Enumerating|Unpacking)"
+    r"\s+(objects|deltas):\s+\d+%"
+)
+
+
+def is_progress_tick(line: str) -> bool:
+    """A mid-progress redraw (drop it); a terminal `done.` line is NOT (keep it)."""
+    return bool(_PROGRESS_RE.search(line)) and "done." not in line
+
+
+def build_golden_transcript(text: str, subs: list[tuple[str, str]] | None = None) -> str:
+    """The FULL terminal transcript, DEFAULT-KEEP + normalize-known-noise.
+
+    Tom's model (PR #72 ruling): keep EVERY line verbatim except (a) normalized
+    volatile tokens and (b) the one progress-tick rule. So anything rein starts
+    printing that is NOT a recognized volatile survives into the golden and trips
+    drift on re-review — including new security-relevant lines. This replaces the
+    earlier curated whitelist, whose blind spot was exactly a brand-new line.
+
+    Runs of blank lines are collapsed to one (pty spacing/`tr` CRLF artifacts are
+    the only source of consecutive blanks, and their count is timing-flaky).
+    """
+    out: list[str] = []
+    prev_blank = False
+    for ln in _pty_lines(text):
+        ln = ln.rstrip()
+        if is_progress_tick(ln):
+            continue
+        if ln == "":
+            if prev_blank:
+                continue
+            prev_blank = True
+        else:
+            prev_blank = False
+        out.append(ln)
+    body = "\n".join(out).strip("\n") + "\n"
+    return normalize_transcript(body, subs)
 
 
 def read_golden(name: str) -> str | None:

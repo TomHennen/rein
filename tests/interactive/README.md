@@ -186,19 +186,21 @@ gap *is* the security argument — the **agent** in-sandbox (pre-declaration pus
 denied → `rein declare <n>` → verified push succeeds → non-convention ref
 rejected) and the **human** on the tty (the Form A prompt carrying the fetched
 title/state/home-repo, then `[approved]`). It asserts the ceremony held (rc per
-phase, exactly one prompt, the right branch landed), then builds a normalized
-transcript and compares it to **`golden/write_ceremony.txt`**.
+phase, exactly one prompt, the right branch landed), then builds the
+**full-normalized transcript** and compares it to **`golden/write_ceremony.txt`**.
 
 - Exit **0** = ceremony held AND transcript matches the golden.
 - Exit **1** = golden drift (re-review the journey). `REIN_UPDATE_GOLDEN=1` regenerates.
 - Exit **2** = the ceremony itself broke (a phase rc/prompt/branch was wrong).
 
-The two views are split by **exact tagging**, not heuristics: the in-sandbox
-script prefixes every line it emits with `SBX| ` (piping git through
-`tr '\r' '\n'` so even progress redraws stay tagged), and `reinharness.get_views`
-splits by the tag alone. The steps run in an **expect→act→expect** sequence —
-each emits an `@PHASE..` sentinel the test waits on in order, and the declare's
-host prompt is answered live between them.
+The golden is **default-keep**: every terminal line survives except normalized
+volatiles and dropped progress ticks, so a brand-new `rein:` line trips drift (it
+caught the exit-time token-revoke lines a whitelist had dropped). The two views
+appear inline — the in-sandbox script prefixes every line with `SBX| ` (git piped
+through `tr '\r' '\n'` so even progress redraws stay tagged), so agent vs host is
+visible without splitting. The steps run **expect→act→expect** — each emits an
+`@PHASE..` sentinel the test waits on in order, and the declare's host prompt is
+answered live between them.
 
 **Self-contained:** creates its own throwaway issue via `gh`, deletes both
 branches and closes the issue in a `finally`. Reuse an issue with
@@ -206,10 +208,11 @@ branches and closes the issue in a `finally`. Reuse an issue with
 `resolve_throwaway_repo` (rein-init way first; #40).
 
 **Out of the `run.sh` sweep** (slow — a full sandboxed clone + four round-trips).
-`run.sh` discovers `test_*.py`; journeys are `journey_*.py`:
+`run.sh` discovers `test_*.py`; journeys are `journey_*.py`, run on demand:
 
 ```sh
-python3 tests/interactive/journey_write_ceremony.py
+python3 tests/interactive/journey_write_ceremony.py    # one journey
+tests/interactive/run-journeys.sh                      # ALL journeys: regenerate goldens + report drift
 ```
 
 ## Disposable branches & cleanup
@@ -225,15 +228,18 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
 - `reinharness.py` — binary build/locate, env loading, the `ReinRun` pexpect
   wrapper (transcript capture, prompt matchers, sentinel parsing), in-sandbox
   script generation, host-side branch verify/delete, isolated-HOME init helpers,
-  and the shared **journey** API (`SBX_TAG`, `get_views`, `normalize_transcript`,
+  and the shared **journey** API (`SBX_TAG`, `get_views`, `build_golden_transcript`,
   the golden IO, `create_issue`/`close_issue`, `resolve_throwaway_repo`).
 - `itest_base.py` — `ReinTestCase` (one-time build, env + throwaway repo,
   disposable-branch cleanup) and the unittest/xfail/skip rationale.
 - `test_write_approval.py`, `test_init_interactive.py`, `test_realagent_e2e.py`,
   `test_confirm_shows_title.py` (gated on a real issue + a title word; a real
   regression spec for #35's Form A title display — see its docstring).
+- `test_golden_shape.py` — stack-free lint: every journey has a golden; no golden
+  leaked a raw volatile. Runs in the `run.sh` sweep and standalone.
 - `journey_write_ceremony.py` + `golden/write_ceremony.txt` — journey #2 and its
   checked-in golden transcript (not swept by `run.sh`).
+- `run-journeys.sh` — the on-demand runner: regenerate every golden live + report drift.
 - `recipes/` — per-test setup scripts for the gated tests (e.g.
   `confirm-shows-title.sh`).
 - `run.sh` — the gated runner.

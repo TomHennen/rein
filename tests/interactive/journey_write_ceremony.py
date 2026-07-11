@@ -43,25 +43,12 @@ dev-session, else the legacy REIN_TEST_REPO_A shortcut.
 from __future__ import annotations
 
 import os
-import re
 import sys
 
 import reinharness as H
 
 GOLDEN_NAME = "write_ceremony.txt"
 ISSUE_ENV = "REIN_DEMO_ISSUE"
-
-# Lines the agent emits that are NOT @-sentinels but ARE meaningful enough to
-# belong in the reviewable golden. Everything else the agent prints (git object
-# counts, clone chatter, progress) is elided from the golden as noise.
-AGENT_KEEP = (
-    "writes are locked",
-    "confirmed",
-    "[new branch]",
-    "remote rejected",
-    "refs must match",
-)
-
 
 # --------------------------------------------------------------------------
 # The in-sandbox agent script — every step emits a tagged sentinel
@@ -115,65 +102,16 @@ emit "@SCRIPT_DONE"
 
 
 # --------------------------------------------------------------------------
-# Golden transcript assembly
+# Golden transcript assembly (FULL-NORMALIZED, default-keep — PR #72 ruling)
 # --------------------------------------------------------------------------
 
 
-def _form_a_block(host_lines: list[str]) -> list[str]:
-    """The Form A prompt block from the host view: header .. [approved]."""
-    out: list[str] = []
-    inside = False
-    for ln in host_lines:
-        if H.PROMPT_BANNER in ln:
-            inside = True
-        if inside:
-            out.append(ln)
-            if H.APPROVED_MARK in ln or H.DENIED_MARK in ln:
-                break
-    return out
-
-
-def _agent_narrative(agent_lines: list[str]) -> list[str]:
-    """The agent view, curated to sentinels + the meaningful result lines."""
-    out: list[str] = []
-    for ln in agent_lines:
-        s = ln.strip()
-        if not s:
-            continue
-        if s.startswith("@") or any(k in s for k in AGENT_KEEP):
-            out.append(ln)
-    return out
-
-
-def build_transcript(text: str, *, repo: str, issue: int, title: str,
-                     rcs: dict, prompts: int, landed: dict) -> str:
-    """Assemble the reviewable transcript, pre-normalization."""
-    host, agent = H.get_views(text)
-    L: list[str] = []
-    L.append("=== JOURNEY: the write ceremony (declare -> confirm -> verified push) ===")
-    L.append(f"repo   : {repo}  (throwaway)")
-    L.append(f"issue  : #{issue} {title!r}")
-    L.append("")
-    L.append("--- (a) WHAT THE AGENT SEES  (in-sandbox: no tty, no token, no prompt) ---")
-    L += [f"SBX| {ln}" for ln in _agent_narrative(agent)]
-    L.append("")
-    L.append("--- (b) WHAT THE HUMAN SEES  (host tty: the Form A prompt) ---")
-    L += _form_a_block(host)
-    L.append("")
-    L.append("--- outcomes: in-sandbox exit codes, then GitHub ground truth ---")
-    L.append(f"phase 1  push before declare        rc={rcs[1]}   (nonzero: writes locked)")
-    L.append(f"phase 2  rein declare               rc={rcs[2]}     (zero: human confirmed)")
-    L.append(f"phase 3  push agent/<issue>/<nonce> rc={rcs[3]}     (zero: verified push)")
-    L.append(f"phase 4  push non-convention ref    rc={rcs[4]}     (nonzero: ref cross-check)")
-    L.append(f"Form A prompts fired this run: {prompts}  (one confirmation covers the run)")
-    for br, ok in landed.items():
-        L.append(f"branch {br}: {'LANDED' if ok else 'ABSENT'}")
-    return "\n".join(L) + "\n"
-
-
-def normalize(text: str, *, repo: str, issue: int, title: str) -> str:
-    """Volatile bits -> stable placeholders, so two runs yield an identical golden."""
-    subs = [
+def journey_subs(repo: str, issue: int, title: str) -> list[tuple[str, str]]:
+    """Exact-string swaps for THIS run's known volatiles, applied before the
+    generic rules. Every issue rule is BOUNDED (#, agent/, declare, (), > ) so
+    there is deliberately no bare `{issue}` swap — `rc=128` etc. are never hit.
+    """
+    return [
         (title, "<TITLE>"),
         (repo, "<REPO>"),
         (f"agent/{issue}/", "agent/<ISSUE>/"),
@@ -181,10 +119,19 @@ def normalize(text: str, *, repo: str, issue: int, title: str) -> str:
         (f"declare {issue}", "declare <ISSUE>"),
         (f"({issue})", "(<ISSUE>)"),
         (f"> {issue}", "> <ISSUE>"),
-        # NB: every issue rule above is BOUNDED (#, agent/, declare, (), > ); there
-        # is deliberately no bare `{issue}` swap, so `rc=128` etc. are never touched.
     ]
-    return H.normalize_transcript(text, subs)
+
+
+def build_transcript(text: str, *, repo: str, issue: int, title: str) -> str:
+    """The golden: the FULL terminal transcript, default-keep + normalize-noise.
+
+    Every line that appeared on the pty survives EXCEPT normalized volatile
+    tokens and dropped progress ticks (H.build_golden_transcript). So a brand-new
+    rein line — e.g. a new `rein: …` security notice — lands in the diff and
+    trips drift on re-review. The interleaved `SBX| `-tagged agent output and
+    rein's untagged host prompt ARE the two views, inline; no separate curation.
+    """
+    return H.build_golden_transcript(text, journey_subs(repo, issue, title))
 
 
 # --------------------------------------------------------------------------
@@ -295,14 +242,19 @@ def main() -> int:
             print(f"  rcs={rcs} prompts={prompts} landed={landed}", flush=True)
             return 2
 
-        # 2) Build + normalize the reviewable transcript; compare to the golden.
-        transcript = normalize(
-            build_transcript(text, repo=repo, issue=issue, title=title,
-                             rcs=rcs, prompts=prompts, landed=landed),
-            repo=repo, issue=issue, title=title,
-        )
+        # 2) Build the full-normalized transcript (the golden) + compare.
+        transcript = build_transcript(text, repo=repo, issue=issue, title=title)
         print()
         print(transcript, flush=True)
+        # The GitHub ground truth is asserted above (exit 2) and echoed here for
+        # the human; it is NOT part of the golden, which is the terminal capture.
+        print("--- outcomes (asserted; not in the golden) ---", flush=True)
+        for ph, meaning in ((1, "writes locked"), (2, "human confirmed"),
+                            (3, "verified push"), (4, "ref cross-check")):
+            print(f"  phase {ph}  rc={rcs[ph]}  ({meaning})", flush=True)
+        print(f"  Form A prompts fired: {prompts}", flush=True)
+        for br, ok in landed.items():
+            print(f"  branch {br}: {'LANDED' if ok else 'ABSENT'}", flush=True)
 
         if os.getenv("REIN_UPDATE_GOLDEN"):
             p = H.update_golden(GOLDEN_NAME, transcript)
