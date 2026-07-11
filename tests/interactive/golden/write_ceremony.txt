@@ -25,7 +25,7 @@ runtagged() {
 }
 cd "$0"
 rm -rf repo
-runtagged git clone --no-progress --depth 1 https://github.com/<REPO> repo
+runtagged git clone --progress https://github.com/<REPO> repo
 cd repo || { emit "@CLONE_FAIL"; exit 3; }
 emit "@CLONE_OK  (reads flow with no declaration at all)"
 
@@ -33,7 +33,7 @@ emit "@PHASE1_START  push BEFORE declare (expect: locked, no prompt)"
 echo "phase 1" >> probe-1.txt
 runtagged git add -A
 runtagged git commit -q -m "ceremony: pre-declaration write attempt"
-runtagged git push --no-progress origin HEAD:refs/heads/agent/<ISSUE>/cerem-<NONCE>
+runtagged git push --progress origin HEAD:refs/heads/agent/<ISSUE>/cerem-<NONCE>
 emit "@PHASE1_RC=$?"
 
 emit "@PHASE2_START  rein declare <ISSUE> (blocks for the human)"
@@ -41,16 +41,22 @@ runtagged rein declare <ISSUE>
 emit "@PHASE2_RC=$?"
 
 emit "@PHASE3_START  push agent/<ISSUE>/<nonce> (expect: lands)"
-runtagged git push --no-progress origin HEAD:refs/heads/agent/<ISSUE>/cerem-<NONCE>
+runtagged git push --progress origin HEAD:refs/heads/agent/<ISSUE>/cerem-<NONCE>
 emit "@PHASE3_RC=$?"
 
 emit "@PHASE4_START  push a non-convention ref (expect: rejected)"
-runtagged git push --no-progress origin HEAD:refs/heads/cerem-nonconvention-<NONCE>
+runtagged git push --progress origin HEAD:refs/heads/cerem-nonconvention-<NONCE>
 emit "@PHASE4_RC=$?"
 emit "@SCRIPT_DONE"
  <TMP>
 ---
 SBX| Cloning into 'repo'...
+SBX| remote: Enumerating objects: <N>, done.
+SBX| remote: Counting objects: <N>% (<N>/<N>), done.
+SBX| remote: Compressing objects: <N>% (<N>/<N>), done.
+SBX| remote: Total <N> (delta <N>), reused <N> (delta <N>), pack-reused <N> (from <N>)
+SBX| Receiving objects: <N>% (<N>/<N>), <SIZE> | <RATE>, done.
+SBX| Resolving deltas: <N>% (<N>/<N>), done.
 SBX| @CLONE_OK  (reads flow with no declaration at all)
 SBX| @PHASE1_START  push BEFORE declare (expect: locked, no prompt)
 SBX| fatal: remote error: rein: writes are locked until you declare your issue. Run: rein declare <n> (then push to agent/<n>/<nonce>)
@@ -70,6 +76,12 @@ To deny, press Ctrl-C or type anything else.
 SBX| issue #<ISSUE> in <REPO> confirmed — writes are unlocked for this run (push to agent/<ISSUE>/<nonce>)
 SBX| @PHASE2_RC=0
 SBX| @PHASE3_START  push agent/<ISSUE>/<nonce> (expect: lands)
+SBX| Enumerating objects: <N>, done.
+SBX| Counting objects: <N>% (<N>/<N>), done.
+SBX| Delta compression using up to <N> threads
+SBX| Compressing objects: <N>% (<N>/<N>), done.
+SBX| Writing objects: <N>% (<N>/<N>), <N> bytes | <RATE>, done.
+SBX| Total <N> (delta <N>), reused <N> (delta <N>), pack-reused <N>
 SBX| remote:
 SBX| remote: Create a pull request for 'agent/<ISSUE>/cerem-<NONCE>' on GitHub by visiting:
 SBX| remote:      https://github.com/<REPO>/pull/new/agent/<ISSUE>/cerem-<NONCE>
@@ -78,6 +90,7 @@ SBX| To https://github.com/<REPO>
 SBX|  * [new branch]      HEAD -> agent/<ISSUE>/cerem-<NONCE>
 SBX| @PHASE3_RC=0
 SBX| @PHASE4_START  push a non-convention ref (expect: rejected)
+SBX| Total <N> (delta <N>), reused <N> (delta <N>), pack-reused <N>
 SBX| To https://github.com/<REPO>
 SBX|  ! [remote rejected] HEAD -> cerem-nonconvention-<NONCE> (rein: refs must match agent/<issue>/<nonce> (e.g. agent/73/kx3q))
 SBX| error: failed to push some refs to 'https://github.com/<REPO>'

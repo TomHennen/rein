@@ -663,16 +663,21 @@ _NORMALIZE_RULES = [
     # scratch dirs (the trailing char class excludes '/', so a suffix like
     # /session.yaml is preserved: <TMP>/session.yaml)
     (r"/tmp/rein-[A-Za-z0-9_.-]+", "<TMP>"),
-    # git plumbing: object counts, ratios, percentages, short/long hashes
+    # git transfer chatter: keep the line, normalize every volatile number so the
+    # golden is identical whatever the repo's object count / network speed is.
     (r"\b[0-9a-f]{7,40}\b", "<HASH>"),
     (r"\((?:delta|deltas) \d+\)", "(delta <N>)"),
+    (r"\(from \d+\)", "(from <N>)"),
     (r"\b(reused|pack-reused|Total|Enumerating objects:|Counting objects:|"
      r"Compressing objects:|Receiving objects:|Resolving deltas:|Writing objects:|"
      r"Unpacking objects:|up to) \d+", r"\1 <N>"),
     (r"\(\d+/\d+\)", "(<N>/<N>)"),
     (r"\d+%", "<N>%"),
     (r"\d+ bytes", "<N> bytes"),
+    # transfer RATE (with /s) BEFORE plain SIZE, so "MiB/s" is consumed first and
+    # the bare "MiB" size that remains is not mis-normalized.
     (r"\d+(\.\d+)? [KMG]iB/s", "<RATE>"),
+    (r"\d+(\.\d+)? [KMG]iB\b", "<SIZE>"),
 ]
 
 # The ONE narrow progress-meter rule (Tom's ruling): drop the intermediate `%`
