@@ -261,8 +261,27 @@ into the plan when it reports. One divergence is already tracked:
    a few sessions, then on `wrangle`, testing the design.md §7.2 hypothesis. Before
    dogfood: durable VM time-sync (#23) and re-verify the srt pin.
 
-**The write path needs a human tty** — verify with `docs/cp3-manual-test.sh`
-(read path is autonomous) and the CP4 identity/push check `docs/cp4-manual-test.sh`.
+**The write path needs a tty — but NOT a human.** (This used to say "needs a human
+tty"; that was stale and it cost us: agents kept parking write-path verification
+for Tom.) The pexpect suite in `tests/interactive/` hands `rein` a real pty and
+**is** the human stand-in — it answers the Form A prompt just as a developer
+would. So an agent can and **should** self-verify the whole ceremony, autonomously:
+
+```sh
+source ./dev-env                                        # this box only (a FRESH machine: see the env prereqs above)
+gh issue create --repo "$REIN_TEST_REPO_A" --title "..." --body "..."   # declare FETCHES a real issue
+REIN_ITEST_ISSUE=<n> REIN_ITEST_TITLE_ISSUE=<n> REIN_ITEST_TITLE_WORD=<word-in-title> \
+  tests/interactive/run.sh                              # write_approval + confirm_shows_title + init + realagent
+python3 tests/interactive/journey_write_ceremony.py     # the ceremony journey (creates + closes its own issue)
+```
+
+The security model is untouched: the **sandboxed** agent has no tty at all and
+still cannot self-approve; pexpect drives only the **host-side** prompt. The
+`docs/cp*-manual-test.sh` scripts remain as human walkthroughs, but they are no
+longer the *only* way to verify writes. A manual script is genuinely required for
+exactly one thing: the **browser** flow (GitHub App *creation* via the manifest —
+`scripts/cp5-manifest-manual-test.sh`).
+
 Read `PLAN-1.md` Notes tail for the full live status + every design decision.
 
 Three prior open questions are CLOSED (Tom, 2026-07-05; see PLAN-1 Notes):

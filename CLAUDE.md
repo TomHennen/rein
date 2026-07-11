@@ -58,7 +58,20 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 - File GitHub issues for deferred items via `gh issue create`. Don't bury followups in commit messages alone — they get lost.
 - **Fix smells now, don't defer.** When you notice a fixable code smell during work — formatting inconsistency, hand-counted spacing, a missing escape-hatch env var, a cleanup the reviewer flagged as a nit — fix it in the same pass. Don't ask "fix or defer?"; don't surface it as a deferred item; don't leave it for someone else. Only surface for decision when the fix changes behavior in a way the human should weigh in on (security, API shape, user-visible UX). Pure source-cleanliness fixes are decisions you should already be making. Bias: prefer fixing slightly more than feels necessary over asking.
 - No emojis in files unless explicitly requested.
-- For interactive tests (anything needing `/dev/tty`, browser, or tmux popup), write a manual script the human runs in their real terminal. Phase 0 used `/tmp/cp*-manual-test.sh`; same pattern.
+- **You can drive the tty yourself — the write path does NOT need a human present.** The pexpect suite in `tests/interactive/` gives `rein` a real pty, so it IS the human stand-in: it answers the Form A prompt exactly as a developer would. An agent can self-verify the whole write ceremony (declare → confirm → push lands) with nobody at the keyboard, and **should** — don't park verification for the human. This does not weaken the model: the *sandboxed* agent has no tty at all and still cannot self-approve; what pexpect drives is the host-side prompt. Recipe:
+  ```sh
+  source ./dev-env                                    # this box only; a fresh machine follows HANDOFF instead
+  gh issue create --repo "$REIN_TEST_REPO_A" --title "..." --body "..."   # declare needs a REAL issue (it fetches it)
+  REIN_ITEST_ISSUE=<n> REIN_ITEST_TITLE_ISSUE=<n> REIN_ITEST_TITLE_WORD=<word-in-title> \
+    tests/interactive/run.sh                          # whole suite, or one module
+  python3 tests/interactive/journey_write_ceremony.py # the ceremony journey; creates + closes its own issue
+  ```
+  A **manual script** is only for what pexpect genuinely cannot drive: a **real browser** — i.e. the GitHub App *creation* (manifest) flow. Nothing else.
+- **Every PR moves a JOURNEY, and journeys are demoed — not just unit-tested.** `tests/interactive/` is a catalogue of rein's user journeys (the table in its README); the set of them is the behavioral spec.
+  - Changing an existing journey → **update that journey's demo and paste its real output into the PR.** Adding a new one → **add it to the catalogue.** Touching no journey (pure refactor, docs, internal) → **say so explicitly in the PR.**
+  - The demo must be **run against reality** (real srt, real GitHub throwaway, real tty) before the PR goes up. "Tests pass" is not a demo. For non-interactive surfaces a gated live test (`REIN_LIVE` / `REIN_SANDBOX_E2E` tier) or a scripted walkthrough in the same style counts.
+  - **Why:** green suites hid both of these. (1) PR #53's D4 install-coverage check passed its unit tests while its entire verification was silently skipped on the env-App path (#68) — the unit tests only drove one path; a 60-second live run found it. (2) The #35 push cross-check would have denied *every* push from a `.git` remote (GitHub's own default clone URL) — the test fake ignored the repo field and the manual script cloned without `.git`; only a real-git wire test caught it.
+  - **Exceptions, narrowly:** pure refactors with no behavior change, docs-only PRs, and anything genuinely undriveable (the browser/manifest App-creation flow). If a demo is impossible, the PR says so and says why.
 
 ## When something surprises you
 

@@ -1,23 +1,81 @@
-# rein interactive (pexpect) test suite
+# rein interactive (pexpect) suite — the journey catalogue
 
-Automates the tty-requiring flows that unit tests can't reach — chiefly the
-**write-approval loop** — by driving the real `rein` binary through a
-pseudo-terminal with [pexpect](https://pexpect.readthedocs.io/). pexpect stands
-in for the human at the keyboard.
+Drives the real `rein` binary through a pseudo-terminal with
+[pexpect](https://pexpect.readthedocs.io/), against a **live** throwaway repo and
+a real srt sandbox. Two kinds of file live here:
 
-## Why a pty is required (and why this is legitimate)
+| kind | naming | swept by `run.sh`? | job |
+|------|--------|--------------------|-----|
+| **assertion tests** | `test_*.py` | yes | fail when behavior regresses |
+| **journeys** | `journey_*.py` | no (run deliberately) | **show** a user journey end to end; output is pasteable into a PR |
 
-rein's write-approval prompt opens **`/dev/tty` directly** (`internal/ui/prompt`)
-and reads one line; it approves iff the trimmed line equals the session's issue
-number. It does **not** read stdin. So the only way to drive it is to give
-`rein run` a *controlling terminal* — exactly what a pty provides.
+## The doctrine: pexpect IS the human. No human is required.
 
-This does not weaken the security model. The **sandboxed** agent (srt
-`--new-session`) has no tty at all, so it still cannot self-answer. What pexpect
-drives is the **host-side** prompt on the terminal where `rein run` was launched
-— the same terminal a real developer types into. The sandbox side is exercised
-end-to-end (a real `git push` from inside srt) and its outcome is asserted
-independently.
+**The write path needs a tty — it does not need a person.** The docs used to say
+"the write path needs a human tty" and "write a manual script the human runs".
+That was **stale**, and it cost us: agents kept parking write-path verification
+for Tom. pexpect gives `rein run` a genuine controlling terminal and answers the
+Form A prompt exactly as a developer would, so **an agent can self-verify the
+entire write ceremony autonomously** — and should.
+
+Why a pty at all: rein's approval prompt opens **`/dev/tty` directly**
+(`internal/ui/prompt`) and reads one line; it approves iff the trimmed line equals
+the declared issue number. It never reads stdin. Only a controlling terminal can
+drive it.
+
+**This does not weaken the security model.** The **sandboxed** agent (srt
+`--new-session`) has no tty *at all*, so it still cannot self-answer — that
+boundary is exactly what `journey_write_ceremony.py` puts on screen (the agent's
+view and the human's view, side by side). What pexpect drives is the **host-side**
+prompt, on the same terminal a real developer types into. The sandbox side is
+exercised for real (a live `git push` from inside srt) and asserted independently.
+
+The **only** thing pexpect genuinely cannot drive is a **real browser** — i.e.
+GitHub App *creation* via the manifest flow. That, and only that, still needs a
+human script (`scripts/cp5-manifest-manual-test.sh`).
+
+### The recipe (copy this)
+
+The declare **fetches the real issue** before prompting (#35 decision E), so the
+write journeys need a REAL open issue on the throwaway — an invented number 404s
+and fails closed, by design.
+
+```sh
+source ./dev-env                                       # this box; a fresh machine follows HANDOFF.md instead
+gh issue create --repo "$REIN_TEST_REPO_A" \
+  --title "itest: scratch issue for the write ceremony" --body "throwaway"
+
+REIN_ITEST_ISSUE=<n> \
+REIN_ITEST_TITLE_ISSUE=<n> \
+REIN_ITEST_TITLE_WORD=<a-word-in-that-title> \
+  tests/interactive/run.sh                             # the whole assertion suite
+
+python3 tests/interactive/journey_write_ceremony.py    # the journey; makes + closes its OWN issue
+```
+
+## The journey catalogue
+
+`tests/interactive/` is the living catalogue of rein's user journeys; the set of
+them **is** the behavioral spec. A PR either changes an existing journey (update
+its demo, paste the output in the PR) or introduces a new one (add it here). See
+the working-style rule in `CLAUDE.md`.
+
+| # | journey | status | where |
+|---|---------|--------|-------|
+| 1 | **First-time setup** — `rein init`: repo prompt, opt-in `claude` alias, sandbox-health soft-block, shim/symlink | **PARTIAL** | `test_init_interactive.py` (8 live specs). The App-*creation* half is **UNDRIVEABLE** (browser/manifest) → `scripts/cp5-manifest-manual-test.sh`. Machine-label prompt: decided, unbuilt (xfail) |
+| 2 | **The write ceremony** — agent declares an issue → human confirms on the terminal → verified push to `agent/<n>/<nonce>` lands | **COVERED** | `journey_write_ceremony.py` (the demo) + `test_write_approval.py::DeclareConfirmPush` + `test_confirm_shows_title.py` (the prompt shows the *fetched* title/state/home-repo) |
+| 3 | **The pre-declaration lock** — agent pushes before declaring; the proxy denies with a synthesized `fatal: remote error`, no prompt ever fires | **COVERED** | `test_write_approval.py::PreDeclarationLock` + phase 1 of the journey |
+| 4 | **The denial path** — human types the wrong number; the declare fails and writes stay locked | **COVERED** | `test_write_approval.py::test_wrong_answer_denies_and_writes_stay_locked` |
+| 5 | **Ref cross-check** — after approval, a non-`agent/<n>/<nonce>` ref is still rejected (#35 decision C) | **COVERED** | `test_write_approval.py::nonmatching_ref_rejected_after_approval` + phase 4 of the journey |
+| 6 | **Scope expansion** — agent declares a SECOND issue mid-run; the prompt re-fires with the expansion header | **GAP** — the code ships (`ui/prompt` `Expansion`, `internal/declare`), nothing drives it interactively. Next journey to write. *(Note: expansion is per-ISSUE. A second **repo** mid-run is not a journey — the session's `repos:` is a hard ceiling.)* | — |
+| 7 | **Real agent in the sandbox** — interactive `claude` under `rein run`, reaching `api.anthropic.com` | **COVERED** | `test_realagent_e2e.py` (live since CP4.5 landed egress) |
+| 8 | **Sandbox hiding** — the agent cannot read credential stores, `~/.ssh`, keyrings | **COVERED, not a journey** — enforced by `rein run`'s own startup self-test + Go tests; there is no human in this loop to demo |
+| 9 | **Direct mode (`--direct`)** — the same ceremony without srt | **GAP** — `reinharness.spawn_rein_run(direct=True)` exists and is unused. Cheap journey to add |
+| 10 | **Misconfig: App not installed on a session repo** | **GAP** — this is issue **#68** (the D4 install-coverage check is skipped entirely on the env-App path). A live journey here would have caught it; the unit tests didn't |
+| 11 | **Misconfig: broken / expired session file** | **GAP** | — |
+
+Statuses: **COVERED** (a file drives it), **PARTIAL** (some of it), **GAP** (real
+journey, no demo yet), **UNDRIVEABLE** (needs a browser — say so and move on).
 
 ## Prerequisites
 
@@ -77,33 +135,58 @@ the throwaway repo — create one once and export it. Each test still **pins its
 own session** (a temp repo-only `dev-session.yaml` via `REIN_SESSION_FILE`; the
 retired `issue:` field is never written).
 
-### `test_init_interactive.py` — TDD-RED for the interactive `init`
+### `test_init_interactive.py` — the interactive `init`, LIVE (was TDD-red)
 
-Encodes the **settled** parts of `docs/onboarding-ux-design.md` as executable
-specs for a build that does not exist yet. Today `rein init` is fully
-non-interactive, so:
+Drives real `rein init` runs under a pty. **Updated 2026-07-11:** this file used
+to skip four "open decision §8.x" specs; two of those decisions shipped in CP4.6
+(PR #42), so they are now REAL tests, verified against the binary:
 
-- **Settled specs** → `unittest.expectedFailure` (== pytest xfail): headless
-  init prints a browser/install link and doesn't hang; (the two issue-prompt
-  specs that used to live here were REMOVED — decision A/#35 settled that init
-  must never ask for an issue). These fail **cleanly** today and will flip to
-  "unexpected success" — turning the suite red as a promote-me signal — once
-  the feature ships.
-- **Open decisions (§8)** → `unittest.skip`: machine-name prompt-vs-default,
-  sandbox gating, multi-agent alias, `doctor --fix` scope. Not encoded — Tom
-  hasn't decided them.
+| §  | decision | status | encoded as |
+|----|----------|--------|-----------|
+| 8.2 | sandbox gating | **SHIPPED** — SOFT-block: an unhealthy stack warns loudly, init still exits 0; `--require-sandbox` makes it a hard gate | 3 passing tests (incl. a healthy-stack control). The unhealthy stack is induced by running init with `srt` off `PATH` |
+| 8.3 | agent alias | **SHIPPED** — OPT-IN, default OFF: `--alias` installs, `--no-alias` wins over it, and a real tty with neither gets `[y/N]` defaulting to N | 5 passing tests, incl. the tty prompt genuinely firing and being answered |
+| 8.1 | machine label | **DECIDED, NOT BUILT** — prompt pre-filled with the detected hostname, editable (design §4). Today the App is `rein-<role>-<random10>` and init never asks | `expectedFailure` (TDD-red), *not* a skip — it flips to "unexpected success" when CP4.7 lands |
+| 8.4 | `doctor --fix` scope | **GENUINELY OPEN** | still `skip` — we must not encode a decision Tom hasn't made |
+
+Plus one `expectedFailure` for the headless install-link (design §5, unbuilt).
+
+**On a real tty, init asks TWO questions in order** — "Which repo…?" then the
+alias `[y/N]`. A test that drives the pty without `--yes` **must** answer the
+first or it hangs on it. `--yes` suppresses both (that's the headless/CI path).
 
 **Safety:** every init run is confined to a throwaway `HOME` + XDG tempdir and
 keeps `REIN_APP_*` present, so it can never mutate the real environment nor trip
-the ~25-minute manifest/browser flow. All runs pass
-`--no-alias --no-symlink --skip-mint-check`.
+the ~25-minute manifest/browser flow. Runs pass `--no-symlink --skip-mint-check`.
+The alias tests deliberately DROP `--no-alias` (it would suppress the very
+behavior under test); the isolated `HOME` is what keeps them safe — the rc file
+they write is the tempdir's.
 
-### `test_realagent_e2e.py` — the real-agent loop, SKIPPED (blocked on CP4.5)
+### `test_realagent_e2e.py` — the real-agent loop, LIVE
 
-The aspirational end state: a real `claude -p` agent inside the sandbox whose
-push trips the same host prompt. **Skipped** because CP4.5 (sandbox egress) has
-not landed — `claude` can't reach `api.anthropic.com` yet. Unskip and fill in
-after CP4.5; the harness already has everything the flow needs.
+A real `claude` running interactively inside the sandbox under `rein run`. Was
+skipped while CP4.5 (sandbox egress) was outstanding; CP4.5 landed, so it runs.
+
+### `journey_write_ceremony.py` — the write ceremony, as a NARRATIVE
+
+Not an assertion test: the ceremony's **showcase**, and journey #2 of the
+catalogue. One real `rein run`, replayed as the two views whose gap *is* the
+security argument — what the **agent** sees in-sandbox (pre-declaration push
+denied → `rein declare <n>` → verified push succeeds → non-convention ref
+rejected) and what the **human** sees on the tty (the Form A prompt carrying the
+fetched title/state/home-repo, then `[approved]`). It then checks GitHub for which
+branches actually landed.
+
+**Self-contained:** creates its own throwaway issue via `gh`, deletes both
+branches and closes the issue in a `finally`. Reuse an existing issue with
+`REIN_DEMO_ISSUE=<n>` (then it is left open). Git's progress meter is elided so
+the output works as a doc/screenshot source; `REIN_DEMO_RAW=1` keeps it.
+
+**Out of the `run.sh` sweep** (it's slow — a full sandboxed clone + four network
+round-trips). `run.sh` discovers `test_*.py`; journeys are `journey_*.py`:
+
+```sh
+python3 tests/interactive/journey_write_ceremony.py
+```
 
 ## Disposable branches & cleanup
 
@@ -121,8 +204,9 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
 - `itest_base.py` — `ReinTestCase` (one-time build, env + throwaway repo,
   disposable-branch cleanup) and the unittest/xfail/skip rationale.
 - `test_write_approval.py`, `test_init_interactive.py`, `test_realagent_e2e.py`,
-  `test_confirm_shows_title.py` (gated + human-run; a real regression spec for
-  #35's Form A title display — see its docstring).
-- `recipes/` — per-test manual setup scripts for the gated, human-run tests
-  (e.g. `confirm-shows-title.sh`).
+  `test_confirm_shows_title.py` (gated on a real issue + a title word; a real
+  regression spec for #35's Form A title display — see its docstring).
+- `journey_write_ceremony.py` — journey #2, the narrative demo (not swept).
+- `recipes/` — per-test setup scripts for the gated tests (e.g.
+  `confirm-shows-title.sh`).
 - `run.sh` — the gated runner.
