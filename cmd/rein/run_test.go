@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -380,25 +381,99 @@ func TestResolveAndCacheInstallID_TransientErrorNoCacheFailsLoud(t *testing.T) {
 	}
 }
 
-func TestResolveAndCacheInstallID_EnvPathSkips(t *testing.T) {
-	// Env path: all four vars set -> ResolveApp returns SourceEnv ->
-	// no GET, no error.
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+// eagerEnvPath sets all four REIN_APP_* vars so ResolveApp takes the env path,
+// and points XDG_CONFIG_HOME at an empty dir (no state.json — the env path must
+// neither need one nor create one). The env id is 99. The PEM path is never
+// stat'd: LoadAppConfig doesn't touch it, and the keystore is only read inside
+// the injected lookup, which the tests stub.
+//
+// Issue #68: the env path used to early-return before probing, so an
+// installation that did not COVER a session repo produced a successful launch
+// and a TM-G8 placeholder inside the agent. It now runs the same per-repo
+// verification as the state path; only the state.json caching is state-only.
+func eagerEnvPath(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("REIN_APP_CLIENT_ID", "Iv23li-env")
 	t.Setenv("REIN_APP_PRIVATE_KEY_PATH", "/x.pem")
 	t.Setenv("REIN_APP_INSTALLATION_ID", "99")
 	t.Setenv("REIN_TEST_REPO_A", "owner/name")
+	return filepath.Join(dir, "rein")
+}
 
-	called := false
+func TestResolveAndCacheInstallID_EnvPathUncoveredRepoRefused(t *testing.T) {
+	eagerEnvPath(t)
+
+	// The env config carries an installation id — but the installation does
+	// not cover Repos[1]. Presence of an id is NOT coverage: refuse.
 	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
-		called = true
-		return 0, errors.New("should not be called on env path")
+		if repo == "other" {
+			return 0, githubapp.ErrAppNotInstalled
+		}
+		return 99, nil
 	}
+	err := resolveAndCacheInstallID(context.Background(), multiRepoSession(), lookup)
+	if err == nil {
+		t.Fatal("env path with an uncovered session repo must be refused (issue #68)")
+	}
+	if !strings.Contains(err.Error(), "owner/other") {
+		t.Errorf("error should name the uncovered repo owner/other: %v", err)
+	}
+	if !strings.Contains(err.Error(), "installations") {
+		t.Errorf("error should carry an install deep-link: %v", err)
+	}
+}
+
+func TestResolveAndCacheInstallID_EnvPathAllCoveredProceedsNoStateWrite(t *testing.T) {
+	configDir := eagerEnvPath(t)
+
+	var probed []string
+	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+		probed = append(probed, owner+"/"+repo)
+		return 99, nil // agrees with REIN_APP_INSTALLATION_ID
+	}
+	if err := resolveAndCacheInstallID(context.Background(), multiRepoSession(), lookup); err != nil {
+		t.Fatalf("all-covered env-path session should proceed: %v", err)
+	}
+	if len(probed) != 2 || probed[0] != "owner/name" || probed[1] != "owner/other" {
+		t.Errorf("every session repo must be probed on the env path too, got %v", probed)
+	}
+	// The env path owns no state.json and must not create one.
+	if _, err := os.Stat(appsetup.StatePath(configDir)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("env path must not write state.json (stat err = %v)", err)
+	}
+}
+
+func TestResolveAndCacheInstallID_EnvPathIDMismatchFailsLoud(t *testing.T) {
+	eagerEnvPath(t)
+
+	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+		return 12345, nil // GitHub disagrees with REIN_APP_INSTALLATION_ID=99
+	}
+	err := resolveAndCacheInstallID(context.Background(), testSession(), lookup)
+	if err == nil {
+		t.Fatal("env id contradicting GitHub's id must fail loud")
+	}
+	if !strings.Contains(err.Error(), "99") || !strings.Contains(err.Error(), "12345") {
+		t.Errorf("mismatch error should carry both the env id and the probed id: %v", err)
+	}
+	if !strings.Contains(err.Error(), "REIN_APP_INSTALLATION_ID") {
+		t.Errorf("mismatch error should name the offending env var: %v", err)
+	}
+}
+
+func TestResolveAndCacheInstallID_EnvPathTransientProceeds(t *testing.T) {
+	eagerEnvPath(t)
+
+	lookup := func(ctx context.Context, clientID string, ks keystore.Keystore, role, owner, repo string) (int64, error) {
+		return 0, errors.New("github 503 transient")
+	}
+	// Transient (non-404) failure with an id in hand (the env var) -> warn and
+	// proceed, exactly as the state path does with a cached id. A GitHub blip
+	// must not ground a session the env id would have served.
 	if err := resolveAndCacheInstallID(context.Background(), testSession(), lookup); err != nil {
-		t.Fatalf("env path should be a no-op, got: %v", err)
-	}
-	if called {
-		t.Error("lookup must not be called on the env path")
+		t.Fatalf("env path should proceed on a transient probe error: %v", err)
 	}
 }
 

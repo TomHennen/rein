@@ -125,13 +125,15 @@ func runWrapped(argv []string) (int, error) {
 	// than from the per-git-op credential helper, which would spam stderr.
 	config.WarnPartialAppEnv(os.Stderr)
 
-	// Eagerly resolve + cache the installation id for EVERY session repo on
-	// the manifest-flow (state.json) path, BEFORE the child starts, so a 404
-	// (App not installed / repo not in the installation) fails loud here
-	// instead of degrading to a TM-G8 placeholder inside the child's first
-	// git op (issue #44 D4). No-op on the env path.
-	// This single cache write covers every later helper / rein-gh invocation
-	// (shims only run inside the PATH this wrapper sets up — single writer).
+	// Eagerly verify that the App's installation COVERS every session repo,
+	// BEFORE the child starts, so a 404 (App not installed / repo not in the
+	// installation) fails loud here instead of degrading to a TM-G8 placeholder
+	// inside the child's first git op (issue #44 D4). This runs on BOTH config
+	// sources — an installation id being present in the env is not evidence the
+	// installation covers these repos (issue #68). Only the resulting state.json
+	// cache write is state-path-only; that single write covers every later
+	// helper / rein-gh invocation (shims only run inside the PATH this wrapper
+	// sets up — single writer).
 	ctx, cancel := context.WithTimeout(context.Background(), installIDTimeout)
 	err = resolveAndCacheInstallID(ctx, sess, fetchRepoInstallationID)
 	cancel()
@@ -295,47 +297,81 @@ func fetchRepoInstallationID(ctx context.Context, clientID string, ks keystore.K
 	return c.RepoInstallationID(ctx, owner, repo)
 }
 
-// resolveAndCacheInstallID ensures state.json carries a fresh installation id
-// for the session repos when running off the manifest-flow state path.
+// resolveAndCacheInstallID verifies that the App's installation actually COVERS
+// every repo in the session, on BOTH config sources, and — on the manifest-flow
+// state path only — caches the resolved id in state.json.
 //
-// No-op on the env path (id already present in the env config). On the state
-// path it ALWAYS performs one App-JWT GET per session repo and rewrites
-// state.json only when the id changed — this one rule covers both first-fetch
-// and stale-id refresh (uninstall/reinstall rotates the id).
+// The verification is the point (issue #44 D4); the caching is a state-path
+// side effect. An installation id merely being PRESENT (which is always true on
+// the env path, where REIN_APP_INSTALLATION_ID supplies it) says nothing about
+// whether that installation's selected-repo list includes the session's repos.
+// Skipping the probes on the env path was issue #68: launch succeeded and the
+// uncovered repo surfaced only as a TM-G8 placeholder inside the agent — the
+// outcome design.md §4.2.4 / design.md:581 requires we refuse at launch instead.
 //
-// EVERY repo in sess.Repos is probed, not just the first: mints are lazy
-// closures scoped to all session repos, so a repo the installation's
-// selected-repo list excludes would otherwise surface only as a TM-G8
-// placeholder inside the agent — design.md §4.2.4 requires a loud
-// launch-time error instead (issue #44 D4). 404 on ANY repo -> fail loud
-// naming that repo, with the install deep-link, and DO NOT launch. The
-// session is single-owner (session.Validate) and an installation is
-// single-owner, so all lookups must agree on one id; a mismatch is also a
-// loud error. Transient (non-404) lookup errors degrade to a warning as
-// long as SOME id is available (resolved from another repo, or cached) —
-// a GitHub blip must not ground a session a cached id would have served.
+// So: ALWAYS one App-JWT GET per session repo, whatever the source.
+//
+//   - 404 on ANY repo -> fail loud naming that repo, with an install
+//     deep-link, and DO NOT launch.
+//   - Repos resolving to DIFFERENT ids -> fail loud. The session is
+//     single-owner (session.Validate) and an installation is single-owner,
+//     so all lookups must agree on one id.
+//   - Transient (non-404) lookup errors degrade to a warning as long as SOME
+//     id is available (resolved from another repo, or already known) — a
+//     GitHub blip must not ground a session a known id would have served.
+//     All-transient with NO id at all -> fail closed.
+//
+// The two sources then differ in exactly one place, the id we already hold:
+//
+//   - State path: the known id is state.json's cached one. A probed id that
+//     differs is a REFRESH (uninstall/reinstall rotates the id) — rewrite
+//     state.json, don't error.
+//   - Env path: the known id is REIN_APP_INSTALLATION_ID, which the operator
+//     asserted explicitly. A probed id that differs means the env var
+//     CONTRADICTS GitHub — mints would be scoped to an installation that is
+//     not the one covering these repos. Fail loud; there is no state.json to
+//     own and env is not ours to rewrite.
 func resolveAndCacheInstallID(ctx context.Context, sess session.Session, lookup installIDLookup) error {
 	appCfg, ks, source, err := config.ResolveApp()
 	if err != nil {
 		// No env AND no state -> genuine config error; don't launch.
 		return fmt.Errorf("resolve App config: %w", err)
 	}
-	if source == config.SourceEnv {
-		// Env path: installation id is already present and authoritative;
-		// there is no state.json to own. Skip the GETs entirely.
-		return nil
-	}
 
-	configDir, err := config.ConfigDir()
-	if err != nil {
-		return err
-	}
-	s, err := appsetup.ReadState(configDir)
-	if err != nil {
-		return fmt.Errorf("read state.json: %w", err)
-	}
-	if s.Primary == nil {
-		return fmt.Errorf("state.json has no primary App record; run `rein init`")
+	// Source-specific inputs: the id we already hold, how we name the App in a
+	// refusal, and where we point the operator to fix coverage. On the env path
+	// there is no state.json (and none to read a slug from), so the App is named
+	// by its client id and the deep-link is the generic installations page.
+	var (
+		configDir  string         // state path only (WriteState target)
+		s          appsetup.State // state path only
+		knownID    int64          // id already in hand (env var, or cached state)
+		appLabel   string         // how we name the App in errors
+		installURL string         // where the operator fixes coverage
+	)
+	if source == config.SourceEnv {
+		knownID = appCfg.InstallationID // non-zero by construction (LoadAppConfig)
+		appLabel = "the App (client id " + appCfg.ClientID + ")"
+		installURL = "https://github.com/settings/installations"
+	} else {
+		configDir, err = config.ConfigDir()
+		if err != nil {
+			return err
+		}
+		s, err = appsetup.ReadState(configDir)
+		if err != nil {
+			return fmt.Errorf("read state.json: %w", err)
+		}
+		if s.Primary == nil {
+			return fmt.Errorf("state.json has no primary App record; run `rein init`")
+		}
+		knownID = s.Primary.InstallationID
+		appLabel = "App " + s.Primary.Slug
+		htmlURL := s.Primary.HTMLURL
+		if htmlURL == "" {
+			htmlURL = "https://github.com/apps/" + s.Primary.Slug
+		}
+		installURL = htmlURL + "/installations/new"
 	}
 
 	var (
@@ -356,12 +392,8 @@ func resolveAndCacheInstallID(ctx context.Context, sess session.Session, lookup 
 				// 404 is definitive: the App is not installed on this repo (or
 				// the repo is not in the installation's selected-repo list).
 				// Fail loud with the deep-link; don't launch.
-				htmlURL := s.Primary.HTMLURL
-				if htmlURL == "" {
-					htmlURL = "https://github.com/apps/" + s.Primary.Slug
-				}
-				return fmt.Errorf("App %s is not installed on %s/%s; install it (or add the repo to the installation) at %s/installations/new, then re-run",
-					s.Primary.Slug, owner, repo, htmlURL)
+				return fmt.Errorf("%s is not installed on %s/%s; install it (or add the repo to the installation) at %s, then re-run",
+					appLabel, owner, repo, installURL)
 			}
 			// Transient (non-404) error for THIS repo: warn and keep probing
 			// the rest — a definitive 404 on a later repo must still refuse
@@ -383,19 +415,33 @@ func resolveAndCacheInstallID(ctx context.Context, sess session.Session, lookup 
 	}
 
 	if resolvedID == 0 {
-		// Every lookup failed transiently. If we already have a cached id,
-		// the session can run from it — degrade to a warning and proceed
-		// rather than blocking launch on a hiccup. Only when we have NO id
-		// to fall back to (first fetch) do we fail closed.
-		if s.Primary.InstallationID != 0 {
-			fmt.Fprintf(os.Stderr, "rein: warning: could not refresh installation id (%v); proceeding with cached id %d\n",
-				lastErr, s.Primary.InstallationID)
+		// Every lookup failed transiently. If we already have an id, the
+		// session can run from it — degrade to a warning and proceed rather
+		// than blocking launch on a hiccup. Only when we have NO id to fall
+		// back to (state path, first fetch) do we fail closed. On the env path
+		// knownID is always non-zero, so this is always the warn-and-proceed.
+		if knownID != 0 {
+			fmt.Fprintf(os.Stderr, "rein: warning: could not verify installation coverage of session repos (%v); proceeding with installation id %d\n",
+				lastErr, knownID)
 			return nil
 		}
 		return fmt.Errorf("fetch installation id for session repos %v: %w", sess.Repos, lastErr)
 	}
 
-	if resolvedID != s.Primary.InstallationID {
+	if source == config.SourceEnv {
+		// Env path: nothing to cache. The only thing left to check is that the
+		// operator's asserted id agrees with GitHub — if it doesn't, every mint
+		// this session makes would target the WRONG installation. Fail loud.
+		if resolvedID != knownID {
+			return fmt.Errorf("REIN_APP_INSTALLATION_ID=%d contradicts GitHub: %s resolves to installation %d; fix REIN_APP_INSTALLATION_ID (or your dev-env), then re-run",
+				knownID, resolvedRepo, resolvedID)
+		}
+		return nil
+	}
+
+	// State path: a changed id is a refresh, not an error (uninstall/reinstall
+	// rotates it). Rewrite state.json only when it actually changed.
+	if resolvedID != knownID {
 		s.Primary.InstallationID = resolvedID
 		if err := appsetup.WriteState(configDir, s); err != nil {
 			return fmt.Errorf("cache installation id: %w", err)
