@@ -179,9 +179,11 @@ func readPktLine(r io.Reader) (payload, raw []byte, err error) {
 
 // agentRefPattern is the strict push-ref convention: the agent encodes
 // its issue in the branch (design.md:521). Anchored; leading zeros
-// rejected; nonce is agent-chosen and format-checked only (branch
-// uniqueness — the security nonce is the unrelated REIN_RUN_ID).
-var agentRefPattern = regexp.MustCompile(`^refs/heads/agent/(0|[1-9][0-9]{0,9})/([A-Za-z0-9][A-Za-z0-9._-]{0,63})$`)
+// rejected; issue 0 rejected (GitHub numbers issues from 1, and `rein
+// declare 0` is refused everywhere — so a matching ref could never be
+// confirmed anyway); nonce is agent-chosen and format-checked only
+// (branch uniqueness — the security nonce is the unrelated REIN_RUN_ID).
+var agentRefPattern = regexp.MustCompile(`^refs/heads/agent/([1-9][0-9]{0,9})/([A-Za-z0-9][A-Za-z0-9._-]{0,63})$`)
 
 // IssueFromRef extracts the issue number a ref claims under the
 // agent/{issue}/{nonce} convention. ok=false when the ref does not

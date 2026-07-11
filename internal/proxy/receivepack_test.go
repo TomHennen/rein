@@ -158,7 +158,7 @@ func TestIssueFromRef(t *testing.T) {
 		ok   bool
 	}{
 		{"refs/heads/agent/73/kx3q", 73, true},
-		{"refs/heads/agent/0/x", 0, true}, // grammar-valid; can never be confirmed (declare rejects 0)
+		{"refs/heads/agent/0/x", 0, false}, // issue 0 does not exist; declare rejects it too
 		{"refs/heads/agent/9999999999/n", 9999999999 % (1 << 62), true},
 		{"refs/heads/agent/73/a.b-c_d", 73, true},
 		{"refs/heads/agent/73/" + strings.Repeat("n", 64), 73, true},

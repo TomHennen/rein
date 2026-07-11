@@ -242,10 +242,9 @@ func (p *Proxy) serveReceivePack(conn net.Conn, req *http.Request, sni, repo str
 			"rein: this repository is out of the session's scope, or a write was not approved. Run `rein doctor`.")
 		return false
 	case brokercore.PlaceholderMintFailed:
-		p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Tier: tier, Issue: issue, Refs: refs, Decision: "mint-failed"})
-		p.writeLocalError(conn, http.StatusBadGateway,
-			"rein: could not mint a GitHub token for this request. Run `rein doctor`.")
-		return false
+		// May be a genuine mint failure OR the TM-G6 re-check emptying the
+		// confirmed set mid-push — mintFailedResponse picks the remedy.
+		return p.mintFailedResponse(conn, req, sni, repo, tier, issue, refs)
 	}
 
 	// Re-assemble the body byte-identically: the parsed command section
@@ -273,6 +272,31 @@ func (p *Proxy) denyPush(conn net.Conn, req *http.Request, sni, tier string, cmd
 	p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Tier: tier, Issue: issue, Refs: refs, Decision: decision})
 	p.writeLocalRaw(conn, http.StatusOK, "application/x-git-receive-pack-result",
 		SynthesizeNgReport(cmds.Commands, cmds.SideBand(), reason))
+	return false
+}
+
+// mintFailedResponse answers a write whose mint FAILED. Two very
+// different remedies hide behind one placeholder, so we disambiguate by
+// re-reading the gate (issue #35 §6): if the run's confirmed set is now
+// EMPTY, the mint failed because the TM-G6 re-check invalidated the
+// confirmation mid-flight (the issue was transferred) — the fix is to
+// RE-DECLARE, not to run `rein doctor`. Otherwise it is a genuine mint
+// failure (App/network/config) and doctor is the right pointer.
+//
+// The host terminal already got the loud invalidation notice; this makes
+// the IN-SANDBOX error point at the right action too.
+func (p *Proxy) mintFailedResponse(conn net.Conn, req *http.Request, sni, repo, tier string, issue int, refs []string) bool {
+	if p.decl != nil && p.decl.WriteApproved != nil && !p.decl.WriteApproved(repo) {
+		p.logger.Printf("mint failed with an EMPTY confirmed set (issue transferred?): telling the agent to re-declare")
+		p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Tier: tier, Issue: issue, Refs: refs, Decision: "refused-issue-unverified"})
+		p.writeLocalJSON(conn, http.StatusForbidden,
+			"rein: this run's issue confirmation is no longer valid (the issue was transferred or its confirmation was invalidated). Run: rein declare <n> (against the issue's current home repo), approve on your terminal, then retry.")
+		return false
+	}
+	p.logger.Printf("mint failed: sni=%q repo=%q tier=%s", sni, repo, tier)
+	p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Tier: tier, Issue: issue, Refs: refs, Decision: "mint-failed"})
+	p.writeLocalError(conn, http.StatusBadGateway,
+		"rein: could not mint a GitHub token for this request. Run `rein doctor`.")
 	return false
 }
 

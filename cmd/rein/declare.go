@@ -58,10 +58,12 @@ const declareRequestTimeout = 5 * time.Minute
 var issueArgPattern = regexp.MustCompile(`^[1-9][0-9]{0,9}$`)
 
 // runDeclare is the `rein declare` entry point. args is os.Args[2:].
-func runDeclare(args []string) error {
+// Returns (exitCode, error) so the caller owns process exit — no
+// os.Exit() inside, which would skip the deferred log close.
+func runDeclare(args []string) (int, error) {
 	number, repoFlag, err := parseDeclareArgs(args)
 	if err != nil {
-		return err
+		return 2, err
 	}
 	if runID := os.Getenv("REIN_RUN_ID"); runID != "" {
 		return declareDirect(number, repoFlag, runID)
@@ -105,26 +107,26 @@ func parseDeclareArgs(args []string) (number int, repoFlag string, err error) {
 }
 
 // declareDirect runs the declaration fully in-process (direct mode).
-func declareDirect(number int, repoFlag, runID string) error {
+func declareDirect(number int, repoFlag, runID string) (int, error) {
 	logger, closeLog, err := openLog()
 	if err != nil {
-		return err
+		return 1, err
 	}
 	defer closeLog()
 
 	stateDir, err := config.StateDir()
 	if err != nil {
-		return err
+		return 1, err
 	}
 	sess, sessSource, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
 	if err != nil {
-		return fmt.Errorf("load session: %w", err)
+		return 1, fmt.Errorf("load session: %w", err)
 	}
 	logger.Printf("declare (direct): issue=%d repo=%q run=%s session=%s source=%s", number, repoFlag, runID, sess.ID, sessSource)
 
 	appCfg, ks, _, err := config.ResolveApp()
 	if err != nil {
-		return fmt.Errorf("resolve App config: %w (run `rein init` / `rein doctor`)", err)
+		return 1, fmt.Errorf("resolve App config: %w (run `rein init` / `rein doctor`)", err)
 	}
 	appCfg.RepoNames = sess.BareRepoNames()
 
@@ -158,19 +160,19 @@ func declareDirect(number int, repoFlag, runID string) error {
 	out := declare.Run(context.Background(), deps, number, repoFlag)
 	fmt.Println(out.Message)
 	if !out.Confirmed {
-		os.Exit(1)
+		return 1, nil // message already printed; not an internal error
 	}
-	return nil
+	return 0, nil
 }
 
 // declareViaProxy sends the declaration to the declare.rein.internal
 // virtual host through the sandbox's proxy (srt routes the CONNECT to
 // rein's per-run socket; SSL_CERT_FILE already trusts rein's CA — both
 // are set by the sandbox launch). Blocks while the human decides.
-func declareViaProxy(number int, repoFlag string) error {
+func declareViaProxy(number int, repoFlag string) (int, error) {
 	u, err := url.Parse(declareHostURL)
 	if err != nil {
-		return err
+		return 1, err
 	}
 	q := u.Query()
 	q.Set("issue", strconv.Itoa(number))
@@ -191,7 +193,7 @@ func declareViaProxy(number int, repoFlag string) error {
 	}
 	resp, err := client.Get(u.String())
 	if err != nil {
-		return fmt.Errorf("rein declare: not inside a rein run (no REIN_RUN_ID and the declare endpoint is unreachable: %v). Launch your agent via `rein run -- <cmd>` and declare from within it", err)
+		return 1, fmt.Errorf("not inside a rein run (no REIN_RUN_ID and the declare endpoint is unreachable: %v). Launch your agent via `rein run -- <cmd>` and declare from within it", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
@@ -209,13 +211,12 @@ func declareViaProxy(number int, repoFlag string) error {
 		} else {
 			fmt.Printf("issue #%d confirmed — writes are unlocked for this run (push to agent/%d/<nonce>)\n", number, number)
 		}
-		return nil
+		return 0, nil
 	case parsed.Message != "":
 		fmt.Fprintln(os.Stderr, parsed.Message)
-		os.Exit(1)
+		return 1, nil // the broker already explained why; not an internal error
 	default:
 		fmt.Fprintf(os.Stderr, "rein declare: denied (status %d)\n", resp.StatusCode)
-		os.Exit(1)
+		return 1, nil
 	}
-	return nil
 }

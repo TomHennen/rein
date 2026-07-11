@@ -444,11 +444,10 @@ func (p *Proxy) serveInject(conn net.Conn, req *http.Request, sni string, class 
 			"rein: this repository is out of the session's scope, or a write was not approved. Run `rein doctor`.")
 		return false
 	case brokercore.PlaceholderMintFailed:
-		p.logger.Printf("mint failed: sni=%q repo=%q tier=%s", sni, repo, tier)
-		p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Tier: tier.String(), Decision: "mint-failed"})
-		p.writeLocalError(conn, http.StatusBadGateway,
-			"rein: could not mint a GitHub token for this request. Run `rein doctor`.")
-		return false
+		// A write mint can also fail because the #35 TM-G6 re-check just
+		// invalidated this run's issue confirmation (transferred issue) —
+		// then the remedy is `rein declare`, not `rein doctor`.
+		return p.mintFailedResponse(conn, req, sni, repo, tier.String(), 0, nil)
 	}
 
 	// Decision is "relay". For a non-graphql request the body has NOT been

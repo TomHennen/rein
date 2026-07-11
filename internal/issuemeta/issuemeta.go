@@ -149,9 +149,16 @@ func Fetch(ctx context.Context, apiBase, token, repo string, number int) (Meta, 
 
 // CheckCanonical re-GETs a confirmed issue's canonical URL and reports
 // whether it still answers 200 in place (TM-G6 re-check, §6: performed on
-// each write-token mint). Any 3xx ⇒ ErrTransferred: the confirmation must
-// be invalidated and the issue re-declared. Other failures return an
-// error the caller treats as "could not verify" (fail closed for mints).
+// each write-token mint). Any 3xx ⇒ ErrTransferred: the confirmation MUST
+// be invalidated and the issue re-declared.
+//
+// Any OTHER failure (network blip, 5xx, rate limit) is returned as a plain
+// error meaning "could not verify" — which is NOT "transferred". The
+// caller's policy (declare.InvalidateTransferred) is therefore
+// keep-and-log: a transient verification failure must not silently revoke
+// a confirmation the human already gave, and the write mint immediately
+// after would surface a real outage anyway. Only ErrTransferred
+// invalidates.
 func CheckCanonical(ctx context.Context, token, canonicalURL string) error {
 	if canonicalURL == "" {
 		return errors.New("issuemeta: confirmed issue has no canonical URL")

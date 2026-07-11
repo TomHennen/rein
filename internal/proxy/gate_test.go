@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -449,3 +450,48 @@ func min(a, b int) int {
 
 // fmt is used by pushBody helpers indirectly; keep the import stable.
 var _ = fmt.Sprintf
+
+// TestGate_MintFailedWithEmptiedSetTellsAgentToReDeclare pins the review's
+// S1: when the TM-G6 re-check invalidates this run's confirmation mid-push
+// (the mint fails AND the confirmed set is now empty), the in-sandbox error
+// must name the RIGHT remedy — re-declare — not "run `rein doctor`".
+func TestGate_MintFailedWithEmptiedSetTellsAgentToReDeclare(t *testing.T) {
+	// The gate passes when the request arrives (the set is still confirmed),
+	// then the TM-G6 re-check inside the mint invalidates it: the mint fails
+	// AND every later read of the gate reports EMPTY. That is exactly the
+	// live sequence InvalidateTransferred produces.
+	g := approvedGate(73)
+	hooks := g.hooks()
+	var gateCalls atomic.Int32
+	hooks.WriteApproved = func(string) bool { return gateCalls.Add(1) == 1 }
+	h := newHarness(t, harnessOpts{decl: hooks, mintWErr: errors.New("all confirmed issues were transferred")})
+	c := h.httpClient(false)
+
+	resp, body := doGET(t, c, "https://github.com/o/r.git/info/refs?service=git-receive-pack")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (a declaration problem, not a mint outage)", resp.StatusCode)
+	}
+	if !strings.Contains(body, "rein declare") {
+		t.Errorf("the agent must be told to RE-DECLARE:\n%s", body)
+	}
+	if strings.Contains(body, "rein doctor") {
+		t.Errorf("must NOT point at rein doctor (wrong remedy):\n%s", body)
+	}
+}
+
+// TestGate_GenuineMintFailureStillPointsAtDoctor: the ordinary mint failure
+// (App/network/config) keeps its 502 + doctor pointer.
+func TestGate_GenuineMintFailureStillPointsAtDoctor(t *testing.T) {
+	g := approvedGate(73) // set stays non-empty
+	h := newHarness(t, harnessOpts{decl: g.hooks(), mintWErr: errors.New("github 500")})
+	c := h.httpClient(false)
+
+	resp, body := doGET(t, c, "https://github.com/o/r.git/info/refs?service=git-receive-pack")
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 for a genuine mint failure", resp.StatusCode)
+	}
+	if !strings.Contains(body, "rein doctor") {
+		t.Errorf("a genuine mint failure must keep the doctor pointer:\n%s", body)
+	}
+	_ = h
+}

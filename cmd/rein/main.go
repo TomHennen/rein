@@ -184,10 +184,11 @@ func main() {
 		}
 		os.Exit(code)
 	case "declare":
-		if err := runDeclare(os.Args[2:]); err != nil {
+		code, err := runDeclare(os.Args[2:])
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "rein declare: %v\n", err)
-			os.Exit(1)
 		}
+		os.Exit(code)
 	case "__sandbox-probe":
 		// Hidden subcommand: runs INSIDE srt during VerifyConfigApplied to
 		// prove the deny-read + seccomp protections took effect. Exits with a
@@ -342,7 +343,7 @@ func runCredentialHelperWithConfig(action string, in io.Reader, out, diag io.Wri
 		// without useHttpPath=true continue to work. install-shim's
 		// instructions recommend setting useHttpPath for strict
 		// enforcement.
-		ConfirmWrite: buildConfirmWrite(sess, stateDir, logger),
+		ConfirmWrite: buildConfirmWrite(sess, stateDir, diag, logger),
 	}
 
 	// Ledger minted write tokens for exit-time revocation (issue #20), but
@@ -374,7 +375,11 @@ func runCredentialHelperWithConfig(action string, in io.Reader, out, diag io.Wri
 // Never nil: EVERY direct-mode write is gated on a confirmed issue now
 // (one model, both modes — the old issue-less "mint without
 // confirmation" direct path is retired with sess.Issue).
-func buildConfirmWrite(sess session.Session, stateDir string, logger *log.Logger) func(repo string) bool {
+//
+// diag is the helper's user-facing stderr-like sink (the same seam the
+// broker's mint-failed diagnostic uses; git forwards it to the caller).
+// It must never be stdout — that is the credential protocol.
+func buildConfirmWrite(sess session.Session, stateDir string, diag io.Writer, logger *log.Logger) func(repo string) bool {
 	runID := os.Getenv("REIN_RUN_ID")
 	sig := approvals.SignatureOf(sess)
 	return func(repo string) bool {
@@ -382,7 +387,7 @@ func buildConfirmWrite(sess session.Session, stateDir string, logger *log.Logger
 			logger.Printf("write gate: run %s has %d confirmed issue(s); allowing write to %q", runID, len(issues), repo)
 			return true
 		}
-		printDeclareHint(os.Stderr, runID)
+		printDeclareHint(diag, runID)
 		logger.Printf("write gate: no confirmed issue for run %q; returning placeholder (repo=%q)", runID, repo)
 		return false
 	}
@@ -392,6 +397,9 @@ func buildConfirmWrite(sess session.Session, stateDir string, logger *log.Logger
 // #35 §2): git forwards helper stderr to the caller, so a cooperative
 // agent learns the exact next step instead of guessing.
 func printDeclareHint(w io.Writer, runID string) {
+	if w == nil {
+		return // nil Diag discards, same contract as broker.Config.Diag
+	}
 	fmt.Fprintln(w)
 	if runID == "" {
 		fmt.Fprintln(w, "rein: write blocked — this operation ran OUTSIDE `rein run` (no REIN_RUN_ID),")

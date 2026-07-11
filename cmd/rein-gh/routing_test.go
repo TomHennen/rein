@@ -99,8 +99,11 @@ func genTestPEM(t *testing.T) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 }
 
-// setupAppEnv points the REIN_APP_* env at a session bound to issue 123 on
+// setupAppEnv points the REIN_APP_* env at a repo-only session on
 // owner/alpha, with the App PEM at pemPath. Returns the loaded session.
+// (The session carries no `issue:`: since issue #35 that field is retired
+// — the issue is agent-declared at runtime and lives in the run's
+// approval record, not the session file.)
 func setupAppEnv(t *testing.T, pemPath string) session.Session {
 	t.Helper()
 	t.Setenv("REIN_APP_CLIENT_ID", "Iv23li-test")
@@ -113,7 +116,6 @@ func setupAppEnv(t *testing.T, pemPath string) session.Session {
 role: implement
 repos:
   - owner/alpha
-issue: 123
 `
 	if err := os.WriteFile(sessPath, []byte(yaml), 0o600); err != nil {
 		t.Fatalf("write session file: %v", err)
@@ -207,9 +209,11 @@ func TestReadTierToken_NoConfigReturnsEmpty(t *testing.T) {
 }
 
 // TestRunWrite_MintFailureNeverFallsBackToReadCacheOrPAT pins the write
-// tier's routing invariants with the approval gate satisfied by a real
-// on-disk per-run approval record (grant Layer 1 — the same record `rein
-// run`'s ceremony writes), so no tty is involved:
+// tier's routing invariants with the write gate satisfied by a real
+// on-disk per-run approval record carrying a CONFIRMED ISSUE (issue #35:
+// the gate is a read of the run's confirmed-issue set — the same record
+// `rein declare <n>` + the human's confirmation writes), so no tty is
+// involved:
 //
 //   - the write path attempts a FRESH mint (which fails fast at PEM parse
 //     here — no network) and on failure execs gh with NO token: it must
@@ -217,6 +221,12 @@ func TestReadTierToken_NoConfigReturnsEmpty(t *testing.T) {
 //     there in stateDir, and never leak an inherited user credential;
 //   - gh still runs and its exit code passes through (documented
 //     degradation: gh surfaces its own auth error).
+//
+// The #35 TM-G6 transfer re-check runs before the mint and is a no-op
+// here: the confirmed issue has no canonical URL, so CheckCanonical fails
+// LOCALLY (no network) with a "cannot verify" error, which is keep-and-log
+// — the confirmation survives and control reaches the mint failure this
+// test exists to pin.
 func TestRunWrite_MintFailureNeverFallsBackToReadCacheOrPAT(t *testing.T) {
 	// Garbage PEM: the write-tier mint dies at key parse, before any HTTP.
 	pemPath := filepath.Join(t.TempDir(), "app.pem")
@@ -233,13 +243,16 @@ func TestRunWrite_MintFailureNeverFallsBackToReadCacheOrPAT(t *testing.T) {
 		t.Fatalf("seed read cache: %v", err)
 	}
 
-	// Satisfy the approval gate the way a live run does: a valid per-run
-	// approval record keyed to this session's signature.
+	// Satisfy the write gate the way a live run does: a valid per-run
+	// approval record keyed to this session's signature AND carrying a
+	// confirmed issue (an empty Issues set is a DENY under #35 — the shim
+	// would serve the placeholder and never reach the mint path below).
 	const runID = "run-routing-test"
 	t.Setenv("REIN_RUN_ID", runID)
 	rec := approvals.Record{
 		Signature:  approvals.SignatureOf(sess),
 		SessionID:  sess.ID,
+		Issues:     []approvals.ConfirmedIssue{{Number: 123, Repo: "owner/alpha", Title: "t", State: "open", ConfirmedAt: time.Now()}},
 		ApprovedAt: time.Now(),
 		ExpiresAt:  time.Now().Add(time.Hour),
 	}
