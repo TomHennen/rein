@@ -439,3 +439,36 @@ func TestParseRunModeRouting(t *testing.T) {
 		})
 	}
 }
+
+// TestAuditLogPathIsUnderDenyReadSet pins the containment relationship the
+// audit trail's integrity rests on (design §6, audit #44 §2): the per-run
+// audit log must live UNDER a path that credentialDenyReadPaths puts in the
+// sandbox deny-read set. Existing tests pin "stateDir is denied" and the
+// code puts the log under stateDir, but nothing tied the two together — a
+// future "move the audit log to ~/.rein-audit" refactor would leave the
+// agent able to read (and groom against) its own audit trail with every
+// test green.
+func TestAuditLogPathIsUnderDenyReadSet(t *testing.T) {
+	t.Setenv("HOME", "/home/someone")
+
+	stateDir := filepath.Join(t.TempDir(), "state", "rein")
+	denies, err := credentialDenyReadPaths(stateDir)
+	if err != nil {
+		t.Fatalf("credentialDenyReadPaths: %v", err)
+	}
+
+	p := auditLogPath(stateDir, "run-abc123")
+	if !filepath.IsAbs(p) {
+		t.Fatalf("auditLogPath returned a relative path %q; stateDir was absolute", p)
+	}
+	under := false
+	for _, d := range denies {
+		if p == d || strings.HasPrefix(p, d+string(filepath.Separator)) {
+			under = true
+			break
+		}
+	}
+	if !under {
+		t.Errorf("audit log path %q is not under any deny-read path; the sandboxed agent could read its own audit trail.\ndeny-read set: %v", p, denies)
+	}
+}
