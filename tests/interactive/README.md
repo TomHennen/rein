@@ -120,5 +120,9 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
   helpers.
 - `itest_base.py` — `ReinTestCase` (one-time build, env + throwaway repo,
   disposable-branch cleanup) and the unittest/xfail/skip rationale.
-- `test_write_approval.py`, `test_init_interactive.py`, `test_realagent_e2e.py`.
+- `test_write_approval.py`, `test_init_interactive.py`, `test_realagent_e2e.py`,
+  `test_confirm_shows_title.py` (gated + human-run, TDD-red for #35 — see its
+  docstring).
+- `recipes/` — per-test manual setup scripts for the gated, human-run tests
+  (e.g. `confirm-shows-title.sh`).
 - `run.sh` — the gated runner.

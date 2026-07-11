@@ -31,15 +31,13 @@ throwaway whose number + a distinctive title word the human supplies via env:
     REIN_ITEST_TITLE_WORD    a distinctive word that appears in that issue's title
 
 Without those it SKIPS. Do not run it in CI. Manual recipe:
-tests/interactive/recipes/confirm-shows-title.sh (printed by run.sh --list).
+tests/interactive/recipes/confirm-shows-title.sh.
 """
 
 from __future__ import annotations
 
 import os
-import tempfile
 import unittest
-from pathlib import Path
 
 import reinharness as H
 from itest_base import ReinTestCase
@@ -53,19 +51,6 @@ _WORD_ENV = "REIN_ITEST_TITLE_WORD"
     f"gated: set {_ISSUE_ENV} and {_WORD_ENV} to a real throwaway issue + a word in its title",
 )
 class ConfirmShowsTitle(ReinTestCase):
-    def _pinned_env(self, issue: int) -> dict:
-        """A temp session pinned to the given real issue number."""
-        d = tempfile.mkdtemp(prefix="rein-itest-title-")
-        path = Path(d) / "session.yaml"
-        path.write_text(
-            "id: sess_itest_title\n"
-            "role: implement\n"
-            "repos:\n"
-            f"  - {self.repo}\n"
-            f"issue: {issue}\n"
-        )
-        return {"REIN_SESSION_FILE": str(path)}
-
     @unittest.expectedFailure  # feature not implemented: prompt shows no title today
     def test_prompt_displays_issue_title_and_home_repo(self):
         """The /dev/tty approval prompt must show the bound issue's TITLE and HOME repo."""
@@ -77,7 +62,7 @@ class ConfirmShowsTitle(ReinTestCase):
         script = H.clone_and_push_script(self.repo, [branch])
         run = H.spawn_rein_run(
             ["bash", "-c", script], workdir=wd, env=self.env,
-            extra_env=self._pinned_env(issue),
+            extra_env=self.pinned_session_env(issue),
         )
 
         # The prompt must appear on the tty...
