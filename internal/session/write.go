@@ -51,12 +51,19 @@ import (
 var ErrRepoAlreadyInSession = errors.New("repo is already in the session")
 
 // OwnerOf returns the session's single owner (sessions are single-owner by
-// Validate). Empty for an empty/invalid session.
+// Validate), in the ORIGINAL case the session file used — it is a display
+// string (deny messages, `session show`), and callers that compare owners
+// do so case-insensitively (strings.EqualFold). Empty for an empty/invalid
+// session.
 func OwnerOf(s Session) string {
 	for _, r := range s.Repos {
-		if n := normalizeRepo(r); n != "" {
+		// Parse (strip .git / slashes) but do NOT lowercase: preserve
+		// "TomHennen" rather than showing "tomhennen".
+		if n := brokercore.RepoFromPath(r); n != "" {
 			owner, _, _ := strings.Cut(n, "/")
-			return owner
+			if owner != "" {
+				return owner
+			}
 		}
 	}
 	return ""
