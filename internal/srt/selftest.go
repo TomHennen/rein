@@ -143,7 +143,7 @@ func VerifyConfigApplied(vp VerifyParams) error {
 	case ProbeDenyReadFailOpen:
 		return fmt.Errorf("srt verify: CONFIG FAIL-OPEN — the credential sentinel was READABLE inside the sandbox; srt did not apply rein's denyRead (likely null-fallback to the default config with empty denyRead). Refusing to launch (gap #3). output: %s", trim(out))
 	case ProbeControllingTTY:
-		return fmt.Errorf("srt verify: CONTROLLING-TTY PRESENT — /dev/tty was OPENABLE inside the sandbox, so the child has a controlling terminal. The write-approval channel could be reachable from in-sandbox (an in-sandbox process could inject the approval). This means srt no longer launches the child with --new-session (setsid). Refusing to launch (issue #32). output: %s", trim(out))
+		return fmt.Errorf("srt verify: CONTROLLING-TTY PRESENT — /dev/tty was OPENABLE inside the sandbox, so the child has a controlling terminal. The write-approval channel could be reachable from in-sandbox (an in-sandbox process could inject the approval). This means srt no longer launches the child with --new-session (setsid). Refusing to launch (see rein issue #32). output: %s", trim(out))
 	case ProbeError:
 		return fmt.Errorf("srt verify: probe reported an internal error; failing closed. output: %s", trim(out))
 	default:
