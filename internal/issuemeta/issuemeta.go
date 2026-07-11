@@ -37,6 +37,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // ErrNotFound: the issue does not exist in the declared repo (404/410).
@@ -189,13 +190,24 @@ func CheckCanonical(ctx context.Context, token, canonicalURL string) error {
 	}
 }
 
-// SanitizeTitle makes an agent-editable string safe for terminal display:
-// every C0 control character and DEL becomes a space (no ANSI escapes, no
-// forged prompt lines), and the result is truncated to maxTitleRunes.
+// SanitizeTitle makes an agent-editable string safe for terminal display.
+// Replaced with a space:
+//
+//   - C0 controls + DEL (ANSI escapes, CR/LF-forged prompt lines, NUL);
+//   - every FORMAT (unicode Cf) rune — RTL/LTR overrides (U+202A-202E),
+//     bidi isolates (U+2066-2069), zero-width space/joiner, BOM. Those
+//     re-order or hide text without producing a control character, so a
+//     hostile issue title could otherwise render as a DIFFERENT title
+//     than the bytes say (title-spoofing the human's Form A check —
+//     exactly the control decision E made load-bearing). Stripping them
+//     HERE means the guarantee holds at every render site, not just the
+//     ones that happen to use %q (which escapes Cf runes today).
+//
+// The result is truncated to maxTitleRunes.
 func SanitizeTitle(s string) string {
 	out := make([]rune, 0, len(s))
 	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
+		if r < 0x20 || r == 0x7f || unicode.Is(unicode.Cf, r) {
 			r = ' '
 		}
 		out = append(out, r)

@@ -14,6 +14,8 @@ package proxy
 // Skipped when git isn't installed.
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -22,6 +24,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/TomHennen/rein/internal/approvals"
+	"github.com/TomHennen/rein/internal/declare"
+	"github.com/TomHennen/rein/internal/issuemeta"
+	"github.com/TomHennen/rein/internal/session"
+	"github.com/TomHennen/rein/internal/ui/grant"
+	"github.com/TomHennen/rein/internal/ui/prompt"
 )
 
 // newGitWireHarness builds a proxy like newHarness but ALSO serving on TCP,
@@ -189,5 +199,92 @@ func TestGitWire_UnconfirmedIssueSeesRemoteRejected(t *testing.T) {
 	}
 	if h.gh.count() != 1 || h.gh.last().Method != http.MethodGet {
 		t.Errorf("denied push must never reach the upstream (count=%d last=%+v)", h.gh.count(), h.gh.last())
+	}
+}
+
+// fakeReceivePackUpstream serves the advertisement AND accepts the push
+// POST with a real report-status "ok" — so a RELAYED (verified) push is
+// seen end-to-end by real git as a success.
+func fakeReceivePackUpstream(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/info/refs") {
+		w.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
+		io.WriteString(w, pkt("# service=git-receive-pack\n")+"0000"+
+			pkt(zeroOID+" capabilities^{}\x00report-status delete-refs ofs-delta agent=fake\n")+"0000")
+		return
+	}
+	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git-receive-pack") {
+		// The harness's fakeGitHub already drained + counted the body
+		// (capturedReq.BodyN — asserted by the caller: the relayed pack
+		// must arrive whole). Accept every ref.
+		w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
+		io.WriteString(w, pkt("unpack ok\n")+pkt("ok refs/heads/agent/73/kx3q\n")+"0000")
+		return
+	}
+	http.Error(w, "unexpected upstream request", http.StatusTeapot)
+}
+
+// TestGitWire_ConfirmedPushSucceedsOverDotGitURL is the HIGH-2b happy-path
+// wire test (and the HIGH-1 end-to-end regression): REAL git pushes to the
+// `.git` remote URL — GitHub's default clone shape — after a REAL declare
+// ceremony recorded the bare "o/r" through the production machinery
+// (internal/declare.Run + internal/ui/grant with a stub prompter standing
+// in for the human's /dev/tty). The push must be VERIFIED and RELAYED, and
+// git must report success.
+//
+// Mutation check: revert HasIssue to a raw strings.EqualFold and this test
+// fails with `! [remote rejected] … issue #73 is not confirmed for this run`.
+func TestGitWire_ConfirmedPushSucceedsOverDotGitURL(t *testing.T) {
+	t.Setenv("TMUX", "")
+	stateDir := t.TempDir()
+	const runID = "run-wire"
+	sess := session.Session{ID: "s_wire", Role: "implement", Repos: []string{"o/r"}}
+
+	// The production declare path: fetch (stubbed — no network), Form A
+	// confirmation (stub prompter types the displayed number), record.
+	out := declare.Run(context.Background(), declare.Deps{
+		StateDir: stateDir,
+		RunID:    runID,
+		Session:  sess,
+		Fetch: func(_ context.Context, repo string, n int) (issuemeta.Meta, error) {
+			return issuemeta.Meta{Number: n, Repo: repo, Title: "wire title", State: "open"}, nil
+		},
+		Grant: grant.Config{
+			TTL:           time.Hour,
+			PromptTimeout: time.Second,
+			Prompter:      &prompt.StubPrompter{Response: "73"},
+			Stderr:        io.Discard,
+			TmuxRunner:    func(context.Context, []string) error { return errors.New("no tmux") },
+		},
+	}, 73, "")
+	if !out.Confirmed {
+		t.Fatalf("declare should confirm: %+v", out)
+	}
+
+	// The gate hooks exactly as cmd/rein wires them for a sandboxed run.
+	sig := approvals.SignatureOf(sess)
+	hooks := &DeclarationHooks{
+		WriteApproved: func(string) bool {
+			return len(approvals.ConfirmedIssues(stateDir, runID, sig)) > 0
+		},
+		IssueConfirmed: func(repo string, n int) bool {
+			rec, err := approvals.ReadApproval(stateDir, runID)
+			return err == nil && approvals.Valid(rec, sig) && rec.HasIssue(repo, n)
+		},
+	}
+	h, proxyURL, caFile := newGitWireHarness(t, harnessOpts{decl: hooks, respond: fakeReceivePackUpstream})
+
+	gitOut, code := gitPush(t, proxyURL, caFile, "HEAD:refs/heads/agent/73/kx3q")
+	if code != 0 {
+		t.Fatalf("confirmed push over the .git URL must SUCCEED (HIGH-1), git said:\n%s", gitOut)
+	}
+	if strings.Contains(gitOut, "remote rejected") || strings.Contains(gitOut, "not confirmed") {
+		t.Errorf("git reported a rejection for a confirmed push:\n%s", gitOut)
+	}
+	// Upstream saw the advertisement GET and the relayed POST with a pack.
+	if h.gh.count() != 2 {
+		t.Errorf("upstream requests = %d, want 2 (advertisement + relayed push)", h.gh.count())
+	}
+	if last := h.gh.last(); last.Method != http.MethodPost || last.BodyN == 0 {
+		t.Errorf("the verified push must be relayed with its pack: %+v", last)
 	}
 }

@@ -502,3 +502,38 @@ func TestRunContext_PendingIssueRoundTrip(t *testing.T) {
 		t.Errorf("PendingIssue did not round-trip: %+v", got.PendingIssue)
 	}
 }
+
+// TestRecord_HasIssue_NormalizesRepo is the HIGH-1 regression (security
+// review round 2): the proxy derives the push-target repo from the git
+// smart-HTTP URL, so `/o/r.git/git-receive-pack` yields "o/r.git", while a
+// declare records the bare "o/r" it resolved from the session. A raw
+// compare denied a correctly declared+confirmed push on GitHub's DEFAULT
+// clone URL shape. The comparator must normalize both sides.
+func TestRecord_HasIssue_NormalizesRepo(t *testing.T) {
+	// Recorded bare (what declare stores); queried with .git (what the
+	// proxy derives from the real remote URL).
+	bare := Record{Issues: []ConfirmedIssue{ci("o/r", 73)}}
+	if !bare.HasIssue("o/r.git", 73) {
+		t.Error("a push to https://github.com/o/r.git must match the confirmed bare o/r (HIGH-1)")
+	}
+	// And the reverse (a session/declare that recorded a .git-suffixed repo).
+	dotgit := Record{Issues: []ConfirmedIssue{ci("o/r.git", 73)}}
+	if !dotgit.HasIssue("o/r", 73) {
+		t.Error("normalization must be symmetric")
+	}
+	// Case + trailing slash + leading slash, per brokercore.RepoFromPath.
+	for _, q := range []string{"O/R.GIT", "o/r/", "/o/r", "/o/r.git/"} {
+		if !bare.HasIssue(q, 73) {
+			t.Errorf("query %q should normalize to o/r and match", q)
+		}
+	}
+	// Still fails closed on genuinely different repos / numbers / garbage.
+	for _, q := range []string{"o/other", "other/r", "notarepo", ""} {
+		if bare.HasIssue(q, 73) {
+			t.Errorf("query %q must NOT match o/r (fail closed)", q)
+		}
+	}
+	if bare.HasIssue("o/r.git", 74) {
+		t.Error("a different issue number must never match")
+	}
+}

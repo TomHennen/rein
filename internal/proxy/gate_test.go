@@ -4,16 +4,25 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/TomHennen/rein/internal/approvals"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
 )
 
-// gateHooks builds DeclarationHooks around a mutable confirmed set.
+// gateState is a fake confirmed-issue set. It is REPO-AWARE on purpose
+// (security review round 2, HIGH-2a): a repo-agnostic fake was what let
+// HIGH-1 through — the real IssueConfirmed hook cross-checks the
+// push-TARGET repo against the repo the declare recorded, and the proxy
+// derives that target from the git URL (so it arrives as "o/r.git" while a
+// declare records the bare "o/r"). The fake therefore mirrors production:
+// it stores (repo, number) and compares through the SAME normalizing
+// comparator the real hook uses, approvals.Record.HasIssue.
 type gateState struct {
 	approved atomic.Bool
-	issues   map[int]bool // confirmed issue numbers (repo-agnostic for tests)
+	rec      approvals.Record // the confirmed set, as recorded by a declare
 	declared []int
 	declOut  DeclareOutcome
 }
@@ -21,7 +30,7 @@ type gateState struct {
 func (g *gateState) hooks() *DeclarationHooks {
 	return &DeclarationHooks{
 		WriteApproved:  func(string) bool { return g.approved.Load() },
-		IssueConfirmed: func(_ string, n int) bool { return g.issues[n] },
+		IssueConfirmed: func(repo string, n int) bool { return g.rec.HasIssue(repo, n) },
 		Declare: func(n int, repo string) DeclareOutcome {
 			g.declared = append(g.declared, n)
 			return g.declOut
@@ -248,12 +257,27 @@ func postPush(t *testing.T, c *http.Client, body string) (*http.Response, string
 	return resp, string(b)
 }
 
+// approvedGate confirms the given issues on the harness repo, recorded the
+// way a real declare records them: the BARE "o/r" resolved from the
+// session (NOT the ".git"-suffixed form the proxy derives from the push
+// URL). The cross-check must bridge that difference (HIGH-1).
 func approvedGate(issues ...int) *gateState {
-	g := &gateState{issues: map[int]bool{}}
+	g := &gateState{}
 	g.approved.Store(true)
 	for _, n := range issues {
-		g.issues[n] = true
+		g.rec.Issues = append(g.rec.Issues, approvals.ConfirmedIssue{
+			Number: n, Repo: "o/r", Title: "t", State: "open",
+		})
 	}
+	return g
+}
+
+// approvedGateForRepo confirms one issue against an explicit repo, for the
+// cross-repo (S4) assertions.
+func approvedGateForRepo(repo string, n int) *gateState {
+	g := &gateState{}
+	g.approved.Store(true)
+	g.rec.Issues = append(g.rec.Issues, approvals.ConfirmedIssue{Number: n, Repo: repo, Title: "t", State: "open"})
 	return g
 }
 
@@ -494,4 +518,42 @@ func TestGate_GenuineMintFailureStillPointsAtDoctor(t *testing.T) {
 		t.Errorf("a genuine mint failure must keep the doctor pointer:\n%s", body)
 	}
 	_ = h
+}
+
+// TestGate_ConfirmedIssueInAnotherRepoDenied is the S4 dimension the old
+// repo-agnostic fake could not see: issue #73 is confirmed for a DIFFERENT
+// repo, so a push to o/r must still be denied.
+func TestGate_ConfirmedIssueInAnotherRepoDenied(t *testing.T) {
+	g := approvedGateForRepo("o/elsewhere", 73)
+	h := newHarness(t, harnessOpts{decl: g.hooks()})
+	c := h.httpClient(false)
+
+	resp, body := postPush(t, c, pushBody("report-status", "refs/heads/agent/73/x"))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want a 200 report-status deny", resp.StatusCode)
+	}
+	if !strings.Contains(body, "ng refs/heads/agent/73/x") {
+		t.Errorf("a confirmation homed in another repo must NOT authorize a push here (S4): %q", body)
+	}
+	if h.gh.count() != 0 {
+		t.Error("cross-repo push must not relay")
+	}
+}
+
+// TestGate_DotGitPushMatchesBareConfirmation is the HIGH-1 wire-level
+// regression: the proxy derives "o/r.git" from the real remote URL while
+// the declare recorded the bare "o/r". A correctly declared, confirmed,
+// correctly named push MUST relay.
+func TestGate_DotGitPushMatchesBareConfirmation(t *testing.T) {
+	g := approvedGate(73) // recorded bare: "o/r"
+	h := newHarness(t, harnessOpts{decl: g.hooks()})
+	c := h.httpClient(false)
+
+	resp, body := postPush(t, c, pushBody("report-status", "refs/heads/agent/73/kx3q"))
+	if resp.StatusCode != http.StatusOK || h.gh.count() != 1 {
+		t.Fatalf("confirmed push over the .git URL must relay (status=%d upstream=%d body=%q)", resp.StatusCode, h.gh.count(), body)
+	}
+	if strings.Contains(body, "not confirmed") {
+		t.Errorf("HIGH-1: push denied despite a recorded confirmation: %q", body)
+	}
 }

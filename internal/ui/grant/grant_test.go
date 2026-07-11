@@ -8,6 +8,8 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -636,4 +638,54 @@ func writeSessionFile(t *testing.T, s session.Session) string {
 		t.Fatalf("write session file: %v", err)
 	}
 	return path
+}
+
+// TestObtainIssueApproval_CeremonySerialized pins MEDIUM-1 (security review
+// round 2): concurrent declares must NOT interleave Form A prompts on the
+// one /dev/tty. The prompter asserts it is never re-entered, and a queued
+// declare for an issue confirmed while it waited must not re-prompt.
+func TestObtainIssueApproval_CeremonySerialized(t *testing.T) {
+	t.Setenv("TMUX", "")
+	sess := sampleSession()
+	cfg := defaultCfg(t, nil, io.Discard, nil)
+
+	var live atomic.Int32
+	var prompts atomic.Int32
+	cfg.Prompter = promptFunc(func(_ context.Context, req prompt.Request) (bool, error) {
+		if live.Add(1) != 1 {
+			t.Error("two Form A ceremonies were live at once — prompt blocks would interleave on the tty")
+		}
+		prompts.Add(1)
+		time.Sleep(20 * time.Millisecond) // hold the "tty"
+		live.Add(-1)
+		return true, nil // the human types the displayed number
+	})
+
+	// Ten concurrent declares of the SAME issue (a prompt storm).
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if !ObtainIssueApproval(context.Background(), req73(sess), cfg) {
+				t.Error("declare should confirm")
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := prompts.Load(); got != 1 {
+		t.Errorf("prompts = %d, want exactly 1 (the rest must see the confirmation and not re-prompt)", got)
+	}
+	rec, err := approvals.ReadApproval(cfg.StateDir, cfg.RunID)
+	if err != nil || len(rec.Issues) != 1 {
+		t.Errorf("the confirmed set must hold exactly one entry, got %+v (err=%v)", rec.Issues, err)
+	}
+}
+
+// promptFunc adapts a func to prompt.Prompter.
+type promptFunc func(context.Context, prompt.Request) (bool, error)
+
+func (f promptFunc) Confirm(ctx context.Context, req prompt.Request) (bool, error) {
+	return f(ctx, req)
 }

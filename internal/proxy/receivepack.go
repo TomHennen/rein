@@ -36,6 +36,12 @@ import (
 // maxCommandSection caps the bytes we are willing to buffer for the
 // command section (issue #35 §5.2). Real pushes carry a handful of
 // commands; 64 KiB is ~450 refs — far beyond any agent workflow.
+//
+// The cap is checked BEFORE each pkt is read, so the true memory bound is
+// maxCommandSection + one maximum pkt-line (65520 B) ≈ 128 KiB — stated
+// honestly rather than pretended exact (security review round 2, LOW-2).
+// That is the bound that matters: it is constant, small, and independent
+// of how many commands the client sends.
 const maxCommandSection = 64 * 1024
 
 // ErrCommandSectionTooLarge: the command section exceeded the cap.

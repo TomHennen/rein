@@ -101,6 +101,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/TomHennen/rein/internal/brokercore"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/tokencache"
 )
@@ -149,15 +150,42 @@ type Record struct {
 }
 
 // HasIssue reports whether the record's confirmed set contains issue
-// `number` homed in `repo` (case-insensitive owner/name compare — GitHub
-// is case-insensitive on path).
+// `number` homed in `repo`.
+//
+// The repo comparison NORMALIZES both sides with the same semantics
+// session.Contains uses (brokercore.RepoFromPath: strip a leading slash, a
+// trailing slash, and a ".git" suffix; then case-fold — GitHub is
+// case-preserving but case-insensitive on path). Normalizing HERE, in the
+// comparator, is deliberate: this is the security-relevant check (the
+// push-ref cross-check calls it with a repo derived from the git
+// smart-HTTP URL, where `/o/r.git/git-receive-pack` yields "o/r.git",
+// while a declare records the bare "o/r" it resolved from the session).
+// A raw compare would deny a correctly declared, confirmed, correctly
+// named push — telling the human to redo a declare that IS recorded — for
+// every remote using GitHub's default `.git` clone URL. Correctness of the
+// gate must not depend on caller hygiene.
+//
+// An unparseable repo on either side normalizes to "" and never matches
+// (fail closed).
 func (r Record) HasIssue(repo string, number int) bool {
+	want := normalizeRepo(repo)
+	if want == "" {
+		return false
+	}
 	for _, ci := range r.Issues {
-		if ci.Number == number && strings.EqualFold(ci.Repo, repo) {
+		if ci.Number == number && normalizeRepo(ci.Repo) == want {
 			return true
 		}
 	}
 	return false
+}
+
+// normalizeRepo canonicalizes an "owner/name" for comparison, delegating
+// the parse to the single canonical helper (brokercore.RepoFromPath — the
+// same one session.Contains and the proxy use) and lowercasing. Returns ""
+// if the input isn't owner/name-shaped.
+func normalizeRepo(s string) string {
+	return strings.ToLower(brokercore.RepoFromPath(s))
 }
 
 // RunContext is the just-in-time session snapshot the credential HELPER

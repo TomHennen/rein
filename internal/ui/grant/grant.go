@@ -56,12 +56,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/TomHennen/rein/internal/approvals"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/ui/prompt"
 )
+
+// ceremonyMu serializes the interactive Form A ceremony: at most ONE live
+// prompt at a time in this process (see the lock site in
+// ObtainIssueApproval for the full rationale — interleaved prompt blocks
+// on one /dev/tty would corrupt the human's read-the-title-then-type-the-
+// number decision, and racing tty readers eat keystrokes).
+var ceremonyMu sync.Mutex
 
 // IssueRequest describes a declared issue awaiting the human's Form A
 // confirmation.
@@ -242,6 +250,36 @@ func ObtainIssueApproval(ctx context.Context, req IssueRequest, cfg Config) bool
 		// Continue: the in-process tty prompt still works; layer 3 still
 		// prints a command (the grant subcommand errors helpfully if the
 		// snapshot is absent).
+	}
+
+	// SERIALIZE the ceremony (security review round 2, MEDIUM-1). Only ONE
+	// live Form A ceremony at a time in this process: concurrent declares
+	// would otherwise interleave their prompt blocks on the single
+	// /dev/tty (the human could read a title from prompt A and type a
+	// number answering prompt B — degrading exactly the display control
+	// decision E made load-bearing) and race the reader goroutines
+	// (prompt.readLineCtx leaks its scanner until the next newline, so a
+	// prompt storm leaves goroutines eating the human's keystrokes). It
+	// also makes the 60s prompt timeout a real spam bound: declares queue
+	// instead of piling onto the tty.
+	//
+	// Scope note: this is a per-PROCESS lock. It covers every declare that
+	// rides this run's broker (the sandboxed relay and the direct CLI both
+	// funnel through one process per run). The out-of-process grant surface
+	// (`rein approval grant --run-id X`, the tmux popup) is a separate
+	// process by construction and is serialized by the human instead.
+	ceremonyMu.Lock()
+	defer ceremonyMu.Unlock()
+
+	// Re-check under the lock: a ceremony we queued behind may have already
+	// confirmed this very issue (two identical declares racing) — don't
+	// prompt the human twice for the same thing.
+	if rec, err := approvals.ReadApproval(cfg.StateDir, cfg.RunID); err == nil && approvals.Valid(rec, sig) {
+		if rec.HasIssue(req.Issue.Repo, req.Issue.Number) {
+			cfg.Logger.Printf("grant: issue #%d (%s) confirmed while this declare waited; not re-prompting", req.Issue.Number, req.Issue.Repo)
+			return true
+		}
+		expansion = len(rec.Issues) > 0
 	}
 
 	// Interactive confirmation. When PreferPopup is set (default inside

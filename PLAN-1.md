@@ -387,6 +387,46 @@ path.
   education layer NOT built — the doc marks it optional/revisit-on-
   dogfood).
 
+- 2026-07-11 — **#35 review rounds (code + security), fixes applied.**
+  Code review: APPROVE-AFTER-FIXES (spec-conformant §2-§10; all six
+  deviations ruled justified). Security review: APPROVE-AFTER-FIXES — the
+  boundary holds (no pre-declaration write reaches GitHub; the declare
+  channel is the agent's one lever; TM-G8 + decision-D scope ceiling
+  intact; probe S1 and S4 genuinely closed), but it found one real bug:
+  **the push cross-check compared repo strings RAW** while everything else
+  normalizes, so a push over GitHub's DEFAULT `.git` clone URL (proxy
+  derives `o/r.git`) never matched the bare `o/r` a declare records —
+  denying a correctly declared, confirmed, correctly named push with
+  "issue #N is not confirmed" (fail-closed, no false accept, but an
+  unrecoverable loop on the common case). Fixed IN the comparator
+  (`approvals.Record.HasIssue` now normalizes both sides via
+  `brokercore.RepoFromPath` + case-fold, same semantics as
+  `session.Contains`), so the gate cannot depend on caller hygiene; the
+  test fakes that hid it are now repo-aware and a real-git happy-path wire
+  test covers the `.git` shape (mutation-checked: it fails without the
+  fix). Also: the Form A ceremony is now SERIALIZED (one live prompt per
+  process — interleaved prompt blocks on one /dev/tty could make the human
+  read a title from prompt A and answer prompt B, degrading decision E's
+  control); `issuemeta.SanitizeTitle` strips Cf/bidi runes (RTL override,
+  isolates, ZWSP) so the no-spoofing guarantee lives where its doc claims
+  it does rather than depending on every render site using `%q`; the
+  emptied-set case now tells the agent to RE-DECLARE instead of "run rein
+  doctor".
+
+  **Recorded, not fixed:** (a) the receive-pack command-section cap is
+  soft — checked before each pkt, so the true bound is 64 KiB + one max
+  pkt (~128 KiB); the comment now says so. (b) Sandboxed mode persists an
+  **issues:read** token to the cross-run on-disk cache
+  (`ghsession.ReadCachePath`) for the declare fetch + TM-G6 re-check — new
+  for sandboxed (direct always did it); read-tier, state dir is deny-read
+  in-sandbox, so it is the pre-existing same-uid HOST residual (#7), not a
+  sandbox hole. (c) The TM-G6 re-check runs per write-token MINT (~hourly,
+  because the token is memoized), NOT per write; the honest justification
+  is the impact ceiling (decision D: the issue is attribution, not
+  capability — repo scope + ref cross-check gate access regardless), and
+  `docs/35-design-proposal.md` §6 now states this rather than the earlier
+  "the next mint would surface it" hand-wave.
+
 - 2026-07-11 — **DESIGN CORRECTIONS RECORDED (audit issue #44 §3): five
   deliberate implementation choices the design of record still contradicted.**
   Dated correction notes added at each claim site in `docs/phase1-design.md`

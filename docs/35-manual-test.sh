@@ -52,8 +52,14 @@ echo
   ISSUE="$1"; GOOD_BRANCH="$2"; BAD_BRANCH="$3"; REPO="$4"
 
   echo "=== [1] reads flow pre-declaration ==="
-  git clone --depth 1 "https://github.com/$REPO" repo || { echo "CLONE FAILED (BUG)"; exit 3; }
+  # Clone via the .git URL — GitHub's DEFAULT clone shape (what `gh repo
+  # clone` and the web UI hand you), so the live gate exercises the repo
+  # string the proxy actually derives from a real remote ("o/r.git"), not
+  # the tidy bare form. (Security review round 2, HIGH-1/HIGH-2c: a raw
+  # comparison in the cross-check broke exactly this default case.)
+  git clone --depth 1 "https://github.com/$REPO.git" repo || { echo "CLONE FAILED (BUG)"; exit 3; }
   cd repo
+  echo "remote: $(git remote get-url origin)   (must end in .git)"
 
   echo
   echo "=== [2] pre-declaration push -> expect: fatal: remote error: rein: writes are locked ... ==="
@@ -109,7 +115,7 @@ DIRECT_WORK=$(mktemp -d /tmp/35-manual-direct.XXXXXX)
   set +e
   cd "$0"
   ISSUE="$1"; REPO="$2"; NONCE="$3"
-  git clone --depth 1 "https://github.com/$REPO" repo && cd repo
+  git clone --depth 1 "https://github.com/$REPO.git" repo && cd repo
   echo probe-direct > probe.txt; git add -A; git commit -qm "35 direct probe"
   echo "=== direct pre-declaration push -> expect failure + stderr hint naming rein declare ==="
   git push origin "HEAD:refs/heads/agent/$ISSUE/direct-$NONCE"
@@ -136,5 +142,6 @@ echo "  [2] clean 'fatal: remote error: rein: writes are locked' (ERR-pkt accept
 echo "  [3] 403 naming rein declare;  [4] bogus declare 404s with no prompt"
 echo "  [5] Form A shows the REAL fetched title + repo"
 echo "  [6]/[7] '! [remote rejected]' with instructive reasons; no second prompt"
-echo "  [8] verified push succeeds; [9] gh write passes rein's gate after ONE ceremony"
+echo "  [8] verified push succeeds OVER THE .git REMOTE (the default clone shape);"
+echo "      [9] gh write passes rein's gate after ONE ceremony"
 echo "  [10] direct mode: same declare model (no ref check — documented delta)"
