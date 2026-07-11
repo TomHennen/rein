@@ -182,7 +182,10 @@ func isFileReadCall(call *ast.CallExpr) bool {
 	return false
 }
 
-// isKeyParseCall matches pem.Decode and the x509 private-key parsers.
+// isKeyParseCall matches pem.Decode, the x509 private-key parsers, and
+// githubauth.NewApplicationTokenSource (which parses the PEM internally,
+// so raw-read + that call would otherwise slip past rule B's
+// stdlib-parser signal).
 func isKeyParseCall(call *ast.CallExpr) bool {
 	pkg, sel, ok := selector(call)
 	if !ok {
@@ -193,6 +196,8 @@ func isKeyParseCall(call *ast.CallExpr) bool {
 		return sel == "Decode"
 	case "x509":
 		return sel == "ParsePKCS1PrivateKey" || sel == "ParsePKCS8PrivateKey" || sel == "ParseECPrivateKey"
+	case "githubauth":
+		return sel == "NewApplicationTokenSource"
 	}
 	return false
 }

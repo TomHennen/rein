@@ -78,8 +78,11 @@ func TestDetectFromProcTree_FindsGitPushAncestor(t *testing.T) {
 		t.Fatalf("os.Executable: %v", err)
 	}
 	// $0 inside the script is "push" (sh consumes it as the $0 operand);
-	// the script itself just runs the probe test in this same binary.
-	script := fmt.Sprintf("%q -test.run '^TestProcTreeHelperProbe$' -test.v", exe)
+	// the script itself just runs the probe test in this same binary. The
+	// trailing no-op (`:`) forces the shell to FORK the probe rather than
+	// exec-optimize a single-command script — an exec would replace the
+	// spoofed-argv sh, collapsing the ancestor the walk must find.
+	script := fmt.Sprintf("%q -test.run '^TestProcTreeHelperProbe$' -test.v; :", exe)
 	cmd := &exec.Cmd{
 		Path: "/bin/sh",
 		// /proc/<pid>/cmdline of this sh: git\0-c\0<script>\0push\0 —
