@@ -276,6 +276,89 @@ func TestCredentialDenyReadHidesClaudeWorkArtifacts(t *testing.T) {
 	}
 }
 
+// TestCredentialDenyReadHidesOnDiskKeyringStore is the #46 regression: the
+// Secret Service keyring DATABASE ($XDG_DATA_HOME/keyrings, default
+// ~/.local/share/keyrings) must be hidden, not just the live D-Bus socket —
+// srt's read-only root bind would otherwise leave it readable, and git's
+// libsecret credential helper keeps GitHub tokens in it. KWallet's store is
+// the same class. Covers both the default and the XDG_DATA_HOME-relocated
+// resolution (mirroring the gh/gpg relocation tests).
+func TestCredentialDenyReadHidesOnDiskKeyringStore(t *testing.T) {
+	t.Setenv("HOME", "/home/someone")
+	t.Setenv("XDG_CONFIG_HOME", "/home/someone/.config")
+	t.Setenv("XDG_DATA_HOME", "") // unset: default resolution
+
+	paths, err := credentialDenyReadPaths(t.TempDir())
+	if err != nil {
+		t.Fatalf("credentialDenyReadPaths: %v", err)
+	}
+	set := map[string]bool{}
+	for _, p := range paths {
+		set[p] = true
+	}
+	for _, want := range []string{
+		"/home/someone/.local/share/keyrings",
+		"/home/someone/.local/share/kwalletd",
+	} {
+		if !set[want] {
+			t.Errorf("on-disk keyring store %q missing from deny-read set: %v", want, paths)
+		}
+	}
+
+	// Relocated XDG_DATA_HOME: the relocated store must be hidden AND the
+	// default must stay hidden (belt-and-suspenders, like gh/gpg).
+	t.Setenv("XDG_DATA_HOME", "/home/someone/dotfiles/xdgdata")
+	paths2, err := credentialDenyReadPaths(t.TempDir())
+	if err != nil {
+		t.Fatalf("credentialDenyReadPaths: %v", err)
+	}
+	set2 := map[string]bool{}
+	for _, p := range paths2 {
+		set2[p] = true
+	}
+	for _, want := range []string{
+		"/home/someone/dotfiles/xdgdata/keyrings", // relocated
+		"/home/someone/.local/share/keyrings",     // default still hidden
+		"/home/someone/dotfiles/xdgdata/kwalletd",
+	} {
+		if !set2[want] {
+			t.Errorf("keyring store %q missing when XDG_DATA_HOME set: %v", want, paths2)
+		}
+	}
+}
+
+// TestCredentialDenyReadHidesReinOwnArtifacts covers the #46 follow-up
+// comment: rein's OWN on-disk credential artifacts — the PEM keystore, CA,
+// and state.json under ConfigDir; the read-token cache, write-token ledger,
+// approvals, and audit log under StateDir — must be hidden even when the
+// XDG dirs are relocated, and the plain ~/.config/rein and
+// ~/.local/state/rein defaults must stay hidden too (a dev who set XDG_*
+// after first use could have legacy token files in the default dirs).
+func TestCredentialDenyReadHidesReinOwnArtifacts(t *testing.T) {
+	t.Setenv("HOME", "/home/someone")
+	t.Setenv("XDG_CONFIG_HOME", "/home/someone/dotfiles/xdg")
+	stateDir := "/home/someone/dotfiles/state/rein" // env-resolved by the caller
+
+	paths, err := credentialDenyReadPaths(stateDir)
+	if err != nil {
+		t.Fatalf("credentialDenyReadPaths: %v", err)
+	}
+	set := map[string]bool{}
+	for _, p := range paths {
+		set[p] = true
+	}
+	for _, want := range []string{
+		"/home/someone/dotfiles/xdg/rein", // ConfigDir (env-resolved): PEM keystore, CA, state.json
+		stateDir,                          // StateDir (caller-resolved): token cache + ledgers + audit
+		"/home/someone/.config/rein",      // ConfigDir default (belt-and-suspenders)
+		"/home/someone/.local/state/rein", // StateDir default (belt-and-suspenders)
+	} {
+		if !set[want] {
+			t.Errorf("rein-own artifact dir %q missing from deny-read set: %v", want, paths)
+		}
+	}
+}
+
 // TestSandboxBannerHintsAndEgress asserts the CP4.5 banner additions: the extra
 // egress hosts are surfaced, and the one-line "run without rein" bypass hint is
 // present (\claude for bash/zsh, command claude for fish).

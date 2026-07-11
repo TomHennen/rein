@@ -545,6 +545,17 @@ func credentialDenyReadPaths(stateDir string) ([]string, error) {
 	if gpgDir == "" {
 		gpgDir = filepath.Join(home, ".gnupg")
 	}
+	// Secret Service on-disk keyring DATABASE (#46): the live D-Bus socket is
+	// already unreachable (seccomp AF_UNIX block + /run/user denyRead), but the
+	// store file itself — $XDG_DATA_HOME/keyrings, default ~/.local/share/keyrings,
+	// where git's libsecret credential helper keeps GitHub tokens — sits under
+	// srt's read-only root bind and would stay readable. A passwordless
+	// auto-unlock keyring is offline-decryptable, so hide the DB too. KWallet's
+	// store (~/.local/share/kwalletd) is the same leak class on KDE.
+	xdgData := os.Getenv("XDG_DATA_HOME")
+	if xdgData == "" {
+		xdgData = filepath.Join(home, ".local", "share")
+	}
 
 	out := []string{
 		ghDir,                                              // gh login (env-resolved)
@@ -557,6 +568,10 @@ func credentialDenyReadPaths(stateDir string) ([]string, error) {
 		filepath.Join(home, ".ssh"),                        // ssh keys + agent socket dir
 		filepath.Join(home, ".netrc"),                      // curl/git netrc
 		filepath.Join(home, ".git-credentials"),            // git store helper
+		filepath.Join(xdgData, "keyrings"),                 // Secret Service keyring DB (env-resolved)
+		filepath.Join(home, ".local", "share", "keyrings"), // Secret Service keyring DB default
+		filepath.Join(xdgData, "kwalletd"),                 // KWallet store (env-resolved)
+		filepath.Join(home, ".local", "share", "kwalletd"), // KWallet store default
 		filepath.Join(xdgConfig, "rein-credentials"),       // App private key (env-resolved)
 		filepath.Join(home, ".config", "rein-credentials"), // App private key default
 	}
@@ -569,8 +584,14 @@ func credentialDenyReadPaths(stateDir string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot resolve rein config dir to hide its key+CA material (%w)", err)
 	}
+	// Keep the plain ~/.config/rein and ~/.local/state/rein defaults alongside
+	// the env-resolved dirs (belt-and-suspenders, mirroring gh/gpg above): a dev
+	// who set XDG_* after first use could have a legacy default dir still
+	// holding a PEM keystore, state.json, or token ledgers.
 	out = append(out, cfgDir)
+	out = append(out, filepath.Join(home, ".config", "rein"))
 	out = append(out, stateDir)
+	out = append(out, filepath.Join(home, ".local", "state", "rein"))
 
 	// The wrapped agent (Claude Code) authenticates from ~/.claude/.credentials.json,
 	// which stays READABLE (the agent needs it — see CP4.5). But ~/.claude ALSO
@@ -683,7 +704,7 @@ func printSandboxBanner(w io.Writer, sess session.Session, sessSource, socketPat
 	fmt.Fprintf(w, "  proxy socket (out of sandbox): %s\n", socketPath)
 	fmt.Fprintf(w, "  working tree (writable in sandbox): %s\n", workTree)
 	fmt.Fprintln(w, "  the agent sees NO real token; git/gh are injected at the proxy.")
-	fmt.Fprintln(w, "  credential stores, ~/.ssh, keyring/agent sockets are hidden.")
+	fmt.Fprintln(w, "  credential stores, ~/.ssh, on-disk keyrings, and keyring/agent sockets are hidden.")
 	if len(extraDomains) > 0 {
 		fmt.Fprintf(w, "  extra egress ALLOWED (direct TLS, NOT injected, no rein token): %s\n", strings.Join(extraDomains, ", "))
 	}
