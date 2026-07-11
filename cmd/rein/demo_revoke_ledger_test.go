@@ -110,7 +110,9 @@ func TestDemo_RevokeLedgerDedupe(t *testing.T) {
 	if summary != "rein: revoked 1 of 1 write token(s) on exit" {
 		t.Errorf("exit summary = %q; want the deduped 'revoked 1 of 1' line", summary)
 	}
-	if strings.Contains(summary, "warning") {
-		t.Errorf("exit summary must carry no per-duplicate warnings, got:\n%s", summary)
-	}
+	// NOTE: no "summary must not contain 'warning'" assertion — with a
+	// nil-returning fake revoke the warning branch (run.go:570) can't fire
+	// regardless of the dedupe fix, so such a check would be tautological. The
+	// two assertions above (revoke called once, exact 'revoked 1 of 1' string)
+	// are what actually catch a dedupe regression.
 }

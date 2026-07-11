@@ -1,5 +1,6 @@
 # GOLDEN TRANSCRIPT — demo_pat_leak.sh (issue #57)
-# Captured live. /tmp paths normalized to <TMP>. Regenerate:
+# Captured live. /tmp paths normalized to <TMP>. The script self-asserts (12
+# checks) and exits non-zero on any regression. Regenerate:
 #   source ./dev-env && tests/interactive/demo_pat_leak.sh
 building rein-gh -> <TMP>
 ==============================================================================
@@ -27,6 +28,10 @@ building rein-gh -> <TMP>
     GITHUB_ENTERPRISE_TOKEN=<unset>
   ^ GH_TOKEN=rein-placeholder-denied, GITHUB_TOKEN stripped. gh fails to
     auth rather than silently using the developer's PAT.
+    [PASS] fake gh ran (deny leg execs gh with a placeholder)
+    [PASS] GH_TOKEN is the fail-closed placeholder
+    [PASS] GITHUB_TOKEN stripped (not the ambient value)
+    [PASS] the ambient PAT reached gh NOWHERE (no leak)
 ==============================================================================
   (b) HUMAN recovery — `gh auth login` (no REIN_RUN_ID -> local tier)
 ==============================================================================
@@ -41,6 +46,10 @@ building rein-gh -> <TMP>
   ^ gh RAN with NO GH_TOKEN at all (not even the placeholder — gh 2.67
     refuses `auth login` if GH_TOKEN is set). The ambient PAT is still
     stripped, so the human's login flow is unblocked but nothing leaks.
+    [PASS] rein-gh exits 0 (human's auth login is not blocked)
+    [PASS] fake gh ran (local tier execs gh for the human)
+    [PASS] no GH_TOKEN at all (so gh auth login is not refused by gh)
+    [PASS] the ambient PAT reached gh NOWHERE (no leak)
 ==============================================================================
   (c) AGENT — `gh auth ...` REFUSED inside a rein run (REIN_RUN_ID set)
 ==============================================================================
@@ -52,7 +61,8 @@ building rein-gh -> <TMP>
              rein. An agent has no business doing any of that — your credentials are brokered
              by rein and scoped to this session's issue and repos.
              If you need different access, ask the human to change the session.
-    fake gh did NOT run (refused before exec) — correct
+    [PASS] rein-gh refused `auth login` (non-zero exit)
+    [PASS] fake gh did NOT run for `auth login` (refused before exec)
 
   $ REIN_RUN_ID=demo-run  rein-gh auth token
   rein-gh exit: 1  (want non-zero: refused)
@@ -62,8 +72,9 @@ building rein-gh -> <TMP>
              rein. An agent has no business doing any of that — your credentials are brokered
              by rein and scoped to this session's issue and repos.
              If you need different access, ask the human to change the session.
-    fake gh did NOT run (refused before exec) — correct
+    [PASS] rein-gh refused `auth token` (non-zero exit)
+    [PASS] fake gh did NOT run for `auth token` (refused before exec)
 
 ==============================================================================
-  DONE — (a) PAT stripped on write, (b) human auth unblocked, (c) agent auth refused.
+  DONE — ALL CHECKS PASS: (a) PAT stripped on write, (b) human auth unblocked, (c) agent auth refused.
 ==============================================================================
