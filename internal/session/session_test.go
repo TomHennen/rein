@@ -246,3 +246,19 @@ func TestLoadOrFallback_DefaultMissingFallsBackToEnv(t *testing.T) {
 		t.Errorf("fallback repos = %v, want [owner/repo]", s.Repos)
 	}
 }
+
+func TestWarnIgnoredIssue(t *testing.T) {
+	var buf strings.Builder
+	s := Session{ID: "x", Role: "implement", Repos: []string{"o/a"}, Issue: 73}
+	s.WarnIgnoredIssue(&buf)
+	out := buf.String()
+	if !strings.Contains(out, "IGNORED") || !strings.Contains(out, "rein declare") {
+		t.Errorf("warning must be loud and name the declare command, got: %q", out)
+	}
+	buf.Reset()
+	s.Issue = 0
+	s.WarnIgnoredIssue(&buf)
+	if buf.Len() != 0 {
+		t.Errorf("no warning expected when issue is unset, got: %q", buf.String())
+	}
+}

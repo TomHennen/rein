@@ -2,6 +2,7 @@ package approvals
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,7 +38,6 @@ func TestSignatureOf_ChangesPerField(t *testing.T) {
 		{"role changes", func(s *session.Session) { s.Role = "scan" }},
 		{"repos add", func(s *session.Session) { s.Repos = []string{"o/a", "o/b"} }},
 		{"repos different", func(s *session.Session) { s.Repos = []string{"o/c"} }},
-		{"issue changes", func(s *session.Session) { s.Issue = 2 }},
 	}
 	baseSig := SignatureOf(base)
 	for _, tc := range cases {
@@ -48,6 +48,19 @@ func TestSignatureOf_ChangesPerField(t *testing.T) {
 				t.Errorf("expected signature change, got identical")
 			}
 		})
+	}
+}
+
+// TestSignatureOf_IssueIgnored pins issue #35's decision A in data form:
+// the legacy `issue:` field moved from approval IDENTITY to approval
+// CONTENT (Record.Issues), so two sessions differing only in Issue have
+// the SAME signature — a leftover `issue:` in a session file can neither
+// create nor invalidate an approval.
+func TestSignatureOf_IssueIgnored(t *testing.T) {
+	a := SignatureOf(session.Session{ID: "x", Role: "r", Repos: []string{"o/a"}, Issue: 1})
+	b := SignatureOf(session.Session{ID: "x", Role: "r", Repos: []string{"o/a"}, Issue: 2})
+	if a != b {
+		t.Errorf("Issue must not affect signature (issue #35 decision A): %q vs %q", a, b)
 	}
 }
 
@@ -357,4 +370,135 @@ func findDeadPID(t *testing.T) int {
 	}
 	t.Skip("could not find a dead pid to test with")
 	return 0
+}
+
+// ---- issue #35: confirmed-issue set ----
+
+func ci(repo string, n int) ConfirmedIssue {
+	return ConfirmedIssue{
+		Number:       n,
+		Repo:         repo,
+		Title:        "a title",
+		State:        "open",
+		CanonicalURL: "https://api.github.com/repos/" + repo + "/issues/" + fmt.Sprint(n),
+		ConfirmedAt:  time.Now(),
+	}
+}
+
+func TestRecord_HasIssue(t *testing.T) {
+	r := Record{Issues: []ConfirmedIssue{ci("o/a", 73)}}
+	if !r.HasIssue("o/a", 73) {
+		t.Error("HasIssue should find the confirmed issue")
+	}
+	if !r.HasIssue("O/A", 73) {
+		t.Error("HasIssue must compare repo case-insensitively (GitHub path semantics)")
+	}
+	if r.HasIssue("o/a", 74) {
+		t.Error("HasIssue must not match a different number")
+	}
+	if r.HasIssue("o/b", 73) {
+		t.Error("HasIssue must not match the same number in a different repo (S4)")
+	}
+}
+
+func TestAppendConfirmedIssue_FreshAppendIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	sig := "sig1"
+
+	// Fresh: no record exists yet.
+	if err := AppendConfirmedIssue(dir, "run1", sig, "sess", ci("o/a", 73), time.Hour); err != nil {
+		t.Fatalf("append (fresh): %v", err)
+	}
+	rec, err := ReadApproval(dir, "run1")
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if rec.Signature != sig || rec.SessionID != "sess" || len(rec.Issues) != 1 {
+		t.Fatalf("unexpected fresh record: %+v", rec)
+	}
+	if rec.ApprovedAt.IsZero() || rec.ExpiresAt.IsZero() {
+		t.Error("fresh record should stamp ApprovedAt/ExpiresAt")
+	}
+
+	// Append a second issue (the expansion path).
+	if err := AppendConfirmedIssue(dir, "run1", sig, "sess", ci("o/a", 99), time.Hour); err != nil {
+		t.Fatalf("append (expand): %v", err)
+	}
+	rec, _ = ReadApproval(dir, "run1")
+	if len(rec.Issues) != 2 || !rec.HasIssue("o/a", 73) || !rec.HasIssue("o/a", 99) {
+		t.Fatalf("expected both issues in the set, got %+v", rec.Issues)
+	}
+
+	// Idempotent: re-confirming an issue already in the set adds nothing.
+	if err := AppendConfirmedIssue(dir, "run1", sig, "sess", ci("o/a", 73), time.Hour); err != nil {
+		t.Fatalf("append (idempotent): %v", err)
+	}
+	rec, _ = ReadApproval(dir, "run1")
+	if len(rec.Issues) != 2 {
+		t.Fatalf("idempotent re-confirm must not grow the set: %+v", rec.Issues)
+	}
+}
+
+func TestAppendConfirmedIssue_SignatureMismatchResetsSet(t *testing.T) {
+	dir := t.TempDir()
+	if err := AppendConfirmedIssue(dir, "run1", "oldsig", "sess", ci("o/a", 73), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	// A mid-run session edit changed the signature: the whole record —
+	// including its issue set — is invalid. The next confirm starts fresh.
+	if err := AppendConfirmedIssue(dir, "run1", "newsig", "sess", ci("o/a", 99), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := ReadApproval(dir, "run1")
+	if rec.Signature != "newsig" {
+		t.Errorf("record should carry the new signature, got %q", rec.Signature)
+	}
+	if rec.HasIssue("o/a", 73) {
+		t.Error("stale issue confirmed under the old signature must NOT survive (mid-run edit invalidates the whole record)")
+	}
+	if !rec.HasIssue("o/a", 99) {
+		t.Error("fresh issue must be present")
+	}
+}
+
+func TestConfirmedIssues_FailClosedPaths(t *testing.T) {
+	dir := t.TempDir()
+
+	if got := ConfirmedIssues(dir, "", "sig"); got != nil {
+		t.Error("empty run id must yield nil (outside rein run — fail closed)")
+	}
+	if got := ConfirmedIssues(dir, "run1", "sig"); got != nil {
+		t.Error("missing record must yield nil")
+	}
+	if err := AppendConfirmedIssue(dir, "run1", "sig", "sess", ci("o/a", 73), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if got := ConfirmedIssues(dir, "run1", "othersig"); got != nil {
+		t.Error("signature mismatch must yield nil (mid-run edit fail-closed)")
+	}
+	got := ConfirmedIssues(dir, "run1", "sig")
+	if len(got) != 1 || got[0].Number != 73 {
+		t.Errorf("expected the confirmed set, got %+v", got)
+	}
+}
+
+func TestRunContext_PendingIssueRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	pi := ci("o/a", 73)
+	rc := RunContext{
+		Session:      session.Session{ID: "s", Role: "implement", Repos: []string{"o/a"}},
+		RunPID:       123,
+		PendingIssue: &pi,
+		WrittenAt:    time.Now(),
+	}
+	if err := WriteRunContext(dir, "run1", rc); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadRunContext(dir, "run1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PendingIssue == nil || got.PendingIssue.Number != 73 || got.PendingIssue.Title != "a title" {
+		t.Errorf("PendingIssue did not round-trip: %+v", got.PendingIssue)
+	}
 }
