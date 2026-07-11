@@ -159,3 +159,35 @@ func TestSystemCAProbe(t *testing.T) {
 		}
 	})
 }
+
+func TestSystemCAPathSetButInvalidSSLCertFileFailsLoud(t *testing.T) {
+	// A set-but-invalid $SSL_CERT_FILE must be a loud error, not a silent
+	// fall-through to the system candidates: the operator pinned their trust
+	// source, and widening it on error would be fail-open (security review of
+	// #47). The valid system store here proves the fall-through is NOT taken.
+	sys := writeFixture(t, "sys.crt", genTestCertPEM(t, "system root"))
+	useSystemStore(t, sys)
+	bad := writeFixture(t, "bad.crt", []byte("not a certificate"))
+	t.Setenv("SSL_CERT_FILE", bad)
+	_, err := SystemCAPath()
+	if err == nil {
+		t.Fatal("set-but-invalid SSL_CERT_FILE must fail loud, got nil error")
+	}
+	if !strings.Contains(err.Error(), "SSL_CERT_FILE") || !strings.Contains(err.Error(), bad) {
+		t.Errorf("error should name SSL_CERT_FILE and the bad path %s: %v", bad, err)
+	}
+}
+
+func TestSystemCAPathValidSSLCertFileWins(t *testing.T) {
+	sys := writeFixture(t, "sys.crt", genTestCertPEM(t, "system root"))
+	useSystemStore(t, sys)
+	pinned := writeFixture(t, "pinned.crt", genTestCertPEM(t, "pinned root"))
+	t.Setenv("SSL_CERT_FILE", pinned)
+	got, err := SystemCAPath()
+	if err != nil {
+		t.Fatalf("SystemCAPath: %v", err)
+	}
+	if got != pinned {
+		t.Errorf("SystemCAPath = %s, want the pinned SSL_CERT_FILE %s", got, pinned)
+	}
+}

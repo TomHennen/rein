@@ -26,14 +26,16 @@ var systemCABundleCandidates = []string{
 // it. Fails closed (error) if none is found — a bundle without system roots
 // would break the CDN passthrough path, so guessing is not acceptable.
 func SystemCAPath() (string, error) {
-	// $SSL_CERT_FILE wins — but only if it actually holds CA material. An empty
-	// or garbage file that merely Stats would produce a bundle with no system
-	// roots (breaking CDN passthrough) or no CA at all; validate it holds at
-	// least one PEM CERTIFICATE block before trusting it, else fall through.
+	// $SSL_CERT_FILE wins — but only if it actually holds CA material. An
+	// operator who sets it has pinned their trust source; silently falling
+	// through to the system store on an empty/garbage file would WIDEN trust
+	// on error (and make the "point $SSL_CERT_FILE at a valid bundle" remedy
+	// silently ignored). Set-but-invalid is therefore a loud error.
 	if p := os.Getenv("SSL_CERT_FILE"); p != "" {
-		if containsPEMCertificate(p) {
-			return p, nil
+		if !containsPEMCertificate(p) {
+			return "", fmt.Errorf("$SSL_CERT_FILE is set to %q but it holds no PEM certificates (empty, unreadable, or not CA material); fix or unset it", p)
 		}
+		return p, nil
 	}
 	for _, p := range systemCABundleCandidates {
 		if _, err := os.Stat(p); err == nil {
