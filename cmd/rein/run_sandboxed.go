@@ -8,8 +8,9 @@
 // sandbox's env, filesystem, or memory.
 //
 // Fail-closed spine (the CP3 crux):
-//   - Preflight hard-gates srt presence+version, bwrap userns, and seccomp.
-//     Any hard failure refuses to launch (no silent drop to unsandboxed mode).
+//   - Preflight hard-gates srt presence+version, bwrap userns, seccomp, and a
+//     valid system CA bundle (SSL_CERT_FILE replaces roots in-sandbox). Any
+//     hard failure refuses to launch (no silent drop to unsandboxed mode).
 //   - VerifyConfigApplied actually launches srt with a probe and proves BOTH
 //     srt fail-opens are closed (denyRead applied via a content-sentinel;
 //     AF_UNIX socket creation blocked) BEFORE the agent runs.

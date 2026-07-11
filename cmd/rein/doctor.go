@@ -455,6 +455,7 @@ func sandboxDoctorChecks() []func() checkResult {
 	}
 	return []func() checkResult{
 		mk("srt present"), mk("srt version"), mk("seccomp"), mk("bwrap userns"),
+		mk("system CA bundle"),
 	}
 }
 

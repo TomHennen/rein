@@ -59,6 +59,10 @@ type Env struct {
 	// SeccompPresent reports whether srt's vendored apply-seccomp for this arch
 	// exists (the unix-socket block that stops keyring/ssh-agent reach).
 	SeccompPresent func(srtPath string) (bool, error)
+	// SystemCA resolves the system CA bundle path and validates it holds at
+	// least one PEM certificate (systemCAProbe in production). BuildCABundle
+	// enforces the same gate at launch; this surfaces it in preflight/doctor.
+	SystemCA func() (string, error)
 	// Now is the local wall clock (time.Now in production).
 	Now func() time.Time
 }
@@ -70,6 +74,7 @@ func DefaultEnv() Env {
 		PackageVersion: packageVersionOf,
 		BwrapUserns:    bwrapUsernsProbe,
 		SeccompPresent: seccompPresentFor,
+		SystemCA:       systemCAProbe,
 		Now:            time.Now,
 	}
 }
@@ -91,7 +96,7 @@ func Preflight(env Env) []Check {
 	} else {
 		checks = append(checks, checkSrtVersion(env, srtPath), checkSeccomp(env, srtPath))
 	}
-	checks = append(checks, checkBwrapUserns(env))
+	checks = append(checks, checkBwrapUserns(env), checkSystemCA(env))
 	return checks
 }
 
@@ -139,6 +144,14 @@ func checkBwrapUserns(env Env) Check {
 				"  (persist in /etc/sysctl.d/), or install a bwrap AppArmor profile. srt cannot sandbox without this.", err)}
 	}
 	return Check{"bwrap userns", StatusOK, "unprivileged user namespace works"}
+}
+
+func checkSystemCA(env Env) Check {
+	path, err := env.SystemCA()
+	if err != nil {
+		return Check{"system CA bundle", StatusFail, err.Error()}
+	}
+	return Check{"system CA bundle", StatusOK, path}
 }
 
 // Clock skew (#22) is NOT a dedicated srt-preflight check: rein's App-JWT mint

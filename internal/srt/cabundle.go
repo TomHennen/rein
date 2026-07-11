@@ -51,6 +51,12 @@ func containsPEMCertificate(path string) bool {
 	if err != nil {
 		return false
 	}
+	return pemHasCertificate(data)
+}
+
+// pemHasCertificate reports whether data holds at least one PEM "CERTIFICATE"
+// block.
+func pemHasCertificate(data []byte) bool {
 	for len(data) > 0 {
 		var block *pem.Block
 		block, data = pem.Decode(data)
@@ -62,6 +68,31 @@ func containsPEMCertificate(path string) bool {
 		}
 	}
 	return false
+}
+
+// errNoSystemCerts is the fail-closed verdict for a system trust store that
+// exists but holds no PEM certificates (real failure modes: broken container
+// image, botched update-ca-certificates). Shared by BuildCABundle (launch
+// path) and systemCAProbe (preflight/doctor) so both name the same fix.
+func errNoSystemCerts(path string) error {
+	return fmt.Errorf("system CA bundle %s contains no PEM certificates (empty or corrupt trust store). "+
+		"Refusing to build the sandbox bundle: SSL_CERT_FILE REPLACES the default roots in-sandbox, so a bundle "+
+		"without system roots would break every allowed non-GitHub HTTPS host (including the agent's own API endpoint). "+
+		"Repair the system store (Debian/Ubuntu: `sudo update-ca-certificates`) or point $SSL_CERT_FILE at a valid bundle", path)
+}
+
+// systemCAProbe resolves the system CA bundle path AND validates it holds at
+// least one PEM certificate. This is the preflight/doctor view of the same
+// fail-closed gate BuildCABundle enforces at launch.
+func systemCAProbe() (string, error) {
+	path, err := SystemCAPath()
+	if err != nil {
+		return "", err
+	}
+	if !containsPEMCertificate(path) {
+		return "", errNoSystemCerts(path)
+	}
+	return path, nil
 }
 
 // BuildCABundle returns system roots concatenated with reinCAPEM, ready to write
@@ -78,6 +109,12 @@ func BuildCABundle(reinCAPEM []byte) ([]byte, error) {
 	sys, err := os.ReadFile(sysPath)
 	if err != nil {
 		return nil, fmt.Errorf("read system CA bundle %s: %w", sysPath, err)
+	}
+	// Fail closed on an existing-but-empty or garbage system store (#47): a
+	// bundle holding only the rein CA would silently break the CDN passthrough
+	// path and the agent's own API endpoint in-sandbox.
+	if !pemHasCertificate(sys) {
+		return nil, errNoSystemCerts(sysPath)
 	}
 	var buf bytes.Buffer
 	buf.Write(sys)
