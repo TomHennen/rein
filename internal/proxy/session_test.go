@@ -80,6 +80,65 @@ func TestWriteMintCachedAcrossRequests(t *testing.T) {
 	}
 }
 
+// TestRecordWriteIsAtLeastOncePerServedToken pins the ledger invariant the
+// issue-#67 fix DEPENDS on: every write token actually served is recorded at
+// least once, even though mintWrite memoizes.
+//
+// The memoized token is re-recorded on each write-serving request, so the
+// ledger holds duplicates (a 3-push run ledgers one token 6 times). That is
+// deliberate — the duplicates are deduped at the CONSUMER
+// (cmd/rein.revokeRunWriteTokens), not suppressed here. Suppressing them here
+// would couple the ledger to in-memory session state and create a fail-OPEN
+// path: AppendWriteToken is best-effort and swallows its error (TM-G8), so a
+// single failed append would leave a LIVE token out of the ledger forever and
+// hence never revoked. Unconditional recording is what lets a later request
+// heal a transient append failure.
+//
+// So: DO NOT "optimize" this into once-per-token. The duplicate entries are the
+// safety margin.
+func TestRecordWriteIsAtLeastOncePerServedToken(t *testing.T) {
+	var mints int32
+	var recorded []string
+	core := NewSessionCore(SessionConfig{
+		MintWrite: func(ctx context.Context) (string, time.Time, error) {
+			// Token 1 expires inside the cache skew, so serve 2 re-mints; every
+			// later serve is a cache hit on token 2.
+			if atomic.AddInt32(&mints, 1) == 1 {
+				return "wtok-1", time.Now().Add(time.Second), nil
+			}
+			return "wtok-2", time.Now().Add(time.Hour), nil
+		},
+		RecordWrite: func(tok string, _ time.Time) { recorded = append(recorded, tok) },
+	})
+
+	served := make([]string, 0, 6)
+	for i := 0; i < 6; i++ {
+		cred := core.Serve(context.Background(), brokercore.Request{Repo: "o/r", WriteIntent: true})
+		if cred.Password == "" {
+			t.Fatalf("write %d: served an empty credential", i)
+		}
+		served = append(served, cred.Password)
+	}
+
+	// THE invariant: every token handed to a client reached the ledger.
+	for i, tok := range served {
+		found := false
+		for _, r := range recorded {
+			if r == tok {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("serve %d handed out token %q that was never recorded — a live token would escape exit-revoke", i, tok)
+		}
+	}
+	// And both the original and the re-minted token are in there.
+	if len(recorded) != 6 {
+		t.Errorf("RecordWrite called %d times, want 6 (once per write serve — the at-least-once margin; the consumer dedupes)", len(recorded))
+	}
+}
+
 // TestMintBackoffAfterRateLimit verifies a rate-limited mint opens a backoff
 // window so the proxy stops hammering the API.
 func TestMintBackoffAfterRateLimit(t *testing.T) {

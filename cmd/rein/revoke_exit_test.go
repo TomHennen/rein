@@ -109,6 +109,62 @@ func TestExpiryClearsLedgerSoExitRevokeIsNoop(t *testing.T) {
 	}
 }
 
+// TestRevokeRunWriteTokens_DedupesRepeatedToken is the issue #67 regression.
+// The proxy memoizes ONE write token for the whole run, but brokercore appends
+// a ledger entry on every write-serving request (cache hit included) — a run
+// with 3 pushes ledgers the same token 6 times (info/refs + receive-pack each).
+// Revoking it 6 times means one 204 and five 404s: five scary warnings and a
+// nonsense "revoked 1 of 6". The ledger must be deduped by token value, so the
+// token is revoked exactly ONCE and the counters read "revoked 1 of 1".
+func TestRevokeRunWriteTokens_DedupesRepeatedToken(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-dupes"
+	now := time.Now()
+	exp := now.Add(time.Hour)
+
+	// Exactly what the live run produced: the same token, six times.
+	for i := 0; i < 6; i++ {
+		mustAppend(t, dir, runID, "ghs_thesamememoizedtoken", exp)
+	}
+
+	rev := &recordingRevoke{}
+	revokeRunWriteTokens(dir, runID, rev.fn, now)
+
+	if len(rev.tokens) != 1 {
+		t.Fatalf("revoke called %d times (%v); want exactly 1 — the memoized token is one token, not six", len(rev.tokens), rev.tokens)
+	}
+	if rev.tokens[0] != "ghs_thesamememoizedtoken" {
+		t.Errorf("revoked %q, want the memoized token", rev.tokens[0])
+	}
+}
+
+// A genuinely-distinct second token (a post-expiry or post-backoff re-mint)
+// must still be revoked — dedupe must key on the token VALUE, not collapse the
+// ledger to a single entry.
+func TestRevokeRunWriteTokens_DedupeKeepsDistinctTokens(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-mixed"
+	now := time.Now()
+	exp := now.Add(time.Hour)
+
+	mustAppend(t, dir, runID, "tok-A", exp)
+	mustAppend(t, dir, runID, "tok-A", exp) // duplicate of A (cache hit)
+	mustAppend(t, dir, runID, "tok-B", exp) // a real re-mint
+	mustAppend(t, dir, runID, "tok-A", exp) // duplicate of A again
+	mustAppend(t, dir, runID, "tok-B", exp) // duplicate of B
+
+	rev := &recordingRevoke{}
+	revokeRunWriteTokens(dir, runID, rev.fn, now)
+
+	if len(rev.tokens) != 2 {
+		t.Fatalf("revoked %v; want exactly the 2 DISTINCT tokens", rev.tokens)
+	}
+	got := map[string]bool{rev.tokens[0]: true, rev.tokens[1]: true}
+	if !got["tok-A"] || !got["tok-B"] {
+		t.Errorf("revoked %v; want both tok-A and tok-B exactly once each", rev.tokens)
+	}
+}
+
 func mustAppend(t *testing.T, dir, runID, token string, exp time.Time) {
 	t.Helper()
 	if err := approvals.AppendWriteToken(dir, runID, tokencache.Entry{Token: token, ExpiresAt: exp}); err != nil {

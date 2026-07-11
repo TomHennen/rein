@@ -142,6 +142,18 @@ func NewSessionCore(cfg SessionConfig) *brokercore.Core {
 		return token, expiresAt, nil
 	}
 
+	// NOTE (issue #67): because mintWrite memoizes, brokercore calls RecordWrite
+	// with the SAME token on every write-serving request (it cannot see that the
+	// mint was a cache hit), so the ledger gets one entry per write REQUEST, not
+	// per minted TOKEN — a 3-push run ledgers one token 6 times. That is
+	// deliberately NOT suppressed here. Keeping the append unconditional makes it
+	// AT-LEAST-ONCE: AppendWriteToken is best-effort and its error is swallowed
+	// (TM-G8 — the token must reach the client regardless), so a later request
+	// re-appending is what heals a transient append failure. Suppressing repeats
+	// would mean one failed append silently leaves a LIVE token out of the ledger
+	// and thus never revoked — the fail-OPEN direction. The duplicates are
+	// deduped by token value at the consumer instead (revokeRunWriteTokens), which
+	// keys on what the ledger actually contains.
 	return &brokercore.Core{
 		MintRead:       cfg.MintRead,
 		MintWrite:      mintWrite,

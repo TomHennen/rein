@@ -450,6 +450,20 @@ closes that gap.
   `docs/35-design-proposal.md` §6 now states this rather than the earlier
   "the next mint would surface it" hand-wave.
 
+- 2026-07-11 — **Token revocation is EVENTUALLY CONSISTENT (~2-5s), measured
+  live while fixing #67.** `DELETE /installation/token` returns 204, but the
+  revoked token KEEPS AUTHENTICATING for a few seconds afterwards: a live probe
+  saw `GET /repos/<slug>` return 200 at t+0.3s and t+2.5s, then 401 at t+4.9s.
+  Revoke DOES work (verified: token 200 before, 401 after), but it is not an
+  instantaneous kill. Consequence for the design's §4.2.5 "~5min effective TTL"
+  claim: exit-revoke shrinks the exposure window from GitHub's 1h floor to
+  roughly the revoke RTT plus this propagation delay — seconds, not zero. Any
+  future control that assumes a token is dead the instant revoke returns 204
+  (e.g. "revoke, then immediately hand the sandbox back") would be wrong.
+  Regression-guarded by `TestLiveRevokeTokenKillsTheToken` (REIN_LIVE=1), which
+  polls rather than sampling once — a single immediate check lands inside the
+  stale-accept window and looks like "revoke is broken."
+
 - 2026-07-11 — **DESIGN CORRECTIONS RECORDED (audit issue #44 §3): five
   deliberate implementation choices the design of record still contradicted.**
   Dated correction notes added at each claim site in `docs/phase1-design.md`

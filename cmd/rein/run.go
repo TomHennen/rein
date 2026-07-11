@@ -520,18 +520,45 @@ func productionRevoke(sess session.Session) revokeTokenFunc {
 // skipped (revoke is pointless). The ledger FILE is left for the caller's
 // deferred approvals.ClearRun to remove — the single per-run-file lifecycle
 // owner. Best-effort throughout: a missing/empty ledger, a client-build or
-// network failure, or a non-204 revoke all degrade to "token lives to its
-// native TTL," never a user-facing error.
+// network failure, or an unexpected revoke status all degrade to "token lives
+// to its native TTL," never a user-facing error.
+//
+// The ledger is DEDUPED BY TOKEN VALUE first (issue #67). The proxy memoizes
+// one write token for the whole run, but brokercore appends a ledger entry on
+// every write-serving request (cache hit or fresh mint), so a run with 3 pushes
+// ledgers the SAME token 6 times (info/refs + receive-pack per push). Revoking
+// it once succeeds and the rest 404 ("already gone"), which used to print a
+// warning per duplicate and a nonsense "revoked 1 of 6".
+//
+// Deduping at the CONSUMER is the deliberate layer choice. The two alternatives
+// are both worse:
+//   - At append time: AppendWriteToken would have to read-modify-write the
+//     ledger, losing the single atomic O_APPEND that lets concurrent helper
+//     invocations (parallel pushes) append without clobbering each other.
+//   - At record time (suppressing the repeat RecordWrite in internal/proxy):
+//     that couples the ledger to in-memory session state. AppendWriteToken is
+//     best-effort and its error is swallowed (TM-G8 — the token must reach the
+//     client regardless), so if the FIRST append failed, every later one would
+//     be suppressed as a duplicate and a LIVE token would never be ledgered,
+//     hence never revoked. Fail-open. The repeated appends are the at-least-once
+//     margin that heals a transient append failure; the duplicates are cheap.
+//
+// Deduping here instead keys on what the ledger ACTUALLY contains, covers BOTH
+// callers (exit-revoke and the OnExpire path), is robust to duplicates from any
+// other source, and still revokes a legitimately-distinct second token (a
+// post-expiry or post-backoff re-mint).
 func revokeRunWriteTokens(stateDir, runID string, revoke revokeTokenFunc, now time.Time) {
 	entries, err := approvals.ReadWriteTokens(stateDir, runID)
 	if err != nil || len(entries) == 0 {
 		return
 	}
 	var revoked, total int
+	seen := make(map[string]bool, len(entries))
 	for _, e := range entries {
-		if e.Token == "" {
+		if e.Token == "" || seen[e.Token] {
 			continue
 		}
+		seen[e.Token] = true
 		total++
 		if !e.ExpiresAt.IsZero() && !now.Before(e.ExpiresAt) {
 			continue // already expired; nothing to revoke
