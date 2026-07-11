@@ -78,7 +78,7 @@ a new `golden/*.txt`). See `tests/interactive/CLAUDE.md` for the authoring rules
 | 3 | **The pre-declaration lock** — agent pushes before declaring; the proxy denies with a synthesized `fatal: remote error`, no prompt ever fires | **COVERED** | `test_write_approval.py::PreDeclarationLock` + phase 1 of the ceremony golden |
 | 4 | **The denial path** — human types the wrong number; the declare fails and writes stay locked | **COVERED** | `test_write_approval.py::test_wrong_answer_denies_and_writes_stay_locked` (edge case — a plain test, no golden) |
 | 5 | **Ref cross-check** — after approval, a non-`agent/<n>/<nonce>` ref is still rejected (#35 decision C) | **COVERED** | `test_write_approval.py::nonmatching_ref_rejected_after_approval` + phase 4 of the ceremony golden |
-| 6 | **Scope expansion** — agent declares a SECOND issue mid-run; the prompt re-fires with the expansion header | **GAP** — the code ships (`ui/prompt` `Expansion`, `internal/declare`), nothing drives it interactively. *(Expansion is per-ISSUE. A second **repo** mid-run is not a journey — the session's `repos:` is a hard ceiling.)* | — |
+| 6 | **Scope expansion** — agent (scoped to repo A) declares an issue that lives in repo B, OUTSIDE scope (`rein declare <n> --repo B`); the SCOPE EXPANSION prompt fires with its distinct "this ADDS a repo to the scope ceiling" header, the human approves + answers the persist `[y/N]`, and the widened token lets the agent clone + push to repo B | **COVERED** | `journey_scope_expansion.py` → **`golden/scope_expansion.txt`** (approve → run-only → push-to-B, ONE story) + `test_scope_expansion.py` (the DENY leg + the CROSS-OWNER structural rejection, as plain assertions — no golden) |
 | 7 | **Real agent in the sandbox** — interactive `claude` under `rein run`, reaching `api.anthropic.com` | **COVERED** | `test_realagent_e2e.py` (live since CP4.5 landed egress) |
 | 8 | **tmux-popup grant** — the DEFAULT TUI path (#37): the confirm prompt fires in a tmux popup, not inline; the operator answers there | **GAP** — pexpect can drive it (spawn inside a `tmux` session, assert the popup fires, `send-keys` the answer), gated on `$TMUX`. Its own journey (`journey_tmux_popup.py`), not yet built. The popup is the default for a TUI agent, so it must not stay untested | — |
 | 9 | **Sandbox filesystem boundary** — from INSIDE (#59/#63/#64): credential stores + `~/.ssh` + `~/.aws` + rein's own app key read as *absent*; `$HOME` is ephemeral (a write succeeds into tmpfs, then never persists on the host); the `.git` host-exec escape is CLOSED (`mv .git`→"Device or resource busy", `.git/hooks` + `.git/config` read-only); ordinary edits still `add`/`commit`; and the injected agent contract is shown *verbatim* | **COVERED** | `journey_sandbox_filesystem.py` → **`golden/sandbox_filesystem.txt`** (a deterministic bash "agent" — reproducible, unlike real claude) + gated `test_git_hardening.py` (the `.git` escape, incl. the `config.worktree` edge) + `test_agent_contract.py` (real-claude contract read-back — LLM phrasing varies, so NOT golden material) |
@@ -251,6 +251,50 @@ golden capture lives at `golden/app_not_installed.txt`.
 > the PR body). When #72's golden-transcript helpers land, this journey should
 > adopt them (its normalization is deliberately simple and local until then).
 
+### `journey_scope_expansion.py` — journey #6, with a GOLDEN
+
+The scope-expansion journey. One real `rein run` whose session is scoped to **repo
+A only**; the in-sandbox agent runs `rein declare <issueB> --repo B` for an issue
+that lives in **repo B, OUTSIDE that scope**. That fires the **SCOPE EXPANSION**
+prompt on the host tty (the distinct "this ADDS a repo to the scope ceiling"
+header, carrying the fetched title/state/home-repo). pexpect approves with the
+issue number, then answers the persist `[y/N]` with **N** — the run-only path (a
+`y` would mutate the session file; that leg is the plain test). The widened token
+then lets the agent clone repo B into its writable `$TMPDIR` (binds are fixed at
+launch, so B can't nest in A's working tree — #64) and push `agent/<issueB>/<nonce>`
+onto B. It asserts the expansion held (rc per phase, exactly one expansion prompt
+and zero plain prompts, the branch landed on B, persist=N left the session file
+unchanged), then builds the **raw** transcript and compares it — **normalizing both
+sides** — to **`golden/scope_expansion.txt`**.
+
+- Exit **0** = expansion held AND the normalized fresh run matches the golden.
+- Exit **1** = drift (normalized diff printed; raw fresh transcript dropped to a
+  scratch path; `REIN_UPDATE_GOLDEN=1` adopts the new raw golden).
+- Exit **2** = the expansion itself broke (a phase rc / prompt-count / branch /
+  persist invariant was wrong).
+
+The **DENY** leg and the **CROSS-OWNER** structural rejection are deliberately NOT
+in this golden — they are edge-case invariants with no reviewable narrative, so
+they live as plain assertions in `test_scope_expansion.py` (`ScopeExpansionDeny`,
+`ScopeExpansionCrossOwner`). The golden stays the single approve→push-to-B story.
+
+**The fixture issue is LONG-LIVED, not per-run.** The golden bakes repo B's issue
+number + title RAW and un-normalized, so they must be stable-real. `ensure_fixture_issue`
+finds (or reopens, or creates) an OPEN issue titled *"rein journey: scope-expansion
+fixture (safe to close)"* on repo B and leaves it open — so `[open]` in the prompt
+is stable too. Override with `REIN_ITEST_ISSUE_B=<n>`.
+
+**Self-contained writes:** the only durable side effect is the agent's branch on
+repo B, deleted in a `finally`; the fixture issue is left OPEN for reuse. Touches
+only the two throwaways (hard-constraint #1): repo A via `resolve_throwaway_repo`
+(#40), repo B via `REIN_TEST_REPO_B` (same owner — the App installation is
+single-owner).
+
+```sh
+python3 tests/interactive/journey_scope_expansion.py   # one journey; exit 0 == matches golden
+REIN_UPDATE_GOLDEN=1 python3 tests/interactive/journey_scope_expansion.py   # regenerate the golden
+```
+
 ## Disposable branches & cleanup
 
 Each write test creates a clearly-timestamped `reintest-<UTC>-<rand>` branch on
@@ -283,6 +327,9 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
 - `demo-transcripts/` — reference captures for the non-journey demos
   (`demo_pat_leak.sh` and the `cmd/rein` Go demos). These are static docs, not
   normalize-on-compare goldens, so they live OUTSIDE `golden/`.
+- `journey_scope_expansion.py` + `golden/scope_expansion.txt` — journey #6 (scope
+  expansion: declare a repo OUTSIDE scope → approve → push to it) and its RAW
+  golden. `test_scope_expansion.py` carries the deny + cross-owner edge cases.
 - `run-journeys.sh` — the on-demand runner: compare each journey to its golden
   (normalized); `REIN_UPDATE_GOLDEN=1` to adopt, `--normalized` to view the lens.
 - `recipes/` — per-test setup scripts for the gated tests (e.g.
