@@ -699,13 +699,33 @@ func resolveRepoForSession(repoFlag string, stdin *os.File, assumeYes bool) stri
 	if r := strings.TrimSpace(repoFlag); r != "" {
 		return r
 	}
-	// No --repo: prompt only if we can, else fall back to "".
+	// The DEFAULT is autodetected from the cwd's git remote (issue #69,
+	// mocks §3: "detect the repo the user is standing in and make it the
+	// default everywhere a repo must be named"). It is only ever a default:
+	// the human still confirms it, and outside a GitHub checkout it is
+	// simply absent.
+	detected := ""
+	if cwd, err := os.Getwd(); err == nil {
+		detected = detectRepoFromGit(cwd)
+	}
+	// No --repo and no human to ask: return "" (init leaves the session
+	// unscaffolded with a graceful note). Detection is deliberately NOT used
+	// as a headless fallback — scaffolding a scope ceiling from whatever
+	// directory a CI job happened to run in would be a scope decision made
+	// with no human in the loop. It is a prompt DEFAULT, nothing more.
 	if assumeYes || !stdinIsTerminal(stdin) {
 		return ""
 	}
-	// Enter-accepts-default; default here is "" (skip scaffolding), so a
-	// bare Enter is a graceful no-op rather than an error.
-	return strings.TrimSpace(promptWithDefault(os.Stdout, stdin, "Which repo should the agent work on? (owner/name, Enter to skip)", ""))
+	question := "Which repo should the agent work on? (owner/name, Enter to skip)"
+	if detected != "" {
+		question = "Which repo should the agent work on? (default detected from this dir)"
+		fmt.Println("  (add more later with `rein session add-repo`, or approve the agent's")
+		fmt.Println("   expansion requests as it encounters work)")
+	}
+	// Enter-accepts-default; with no detection the default is "" (skip
+	// scaffolding), so a bare Enter stays a graceful no-op.
+	answer := strings.TrimSpace(promptWithDefault(os.Stdout, stdin, question, detected))
+	return answer
 }
 
 // stdinIsTerminal reports whether f is a real interactive terminal. Used

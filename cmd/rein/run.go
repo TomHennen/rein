@@ -117,7 +117,8 @@ func runWrapped(argv []string) (int, error) {
 	// REIN_SESSION_FILE override and env-fallback rules apply.
 	sess, sessSource, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
 	if err != nil {
-		return 1, fmt.Errorf("load session: %w (see README for dev-session.yaml format)", err)
+		cwd, _ := os.Getwd()
+		return 1, fmt.Errorf("load session: %w (see README for dev-session.yaml format)\n      %s", err, noSessionHint(cwd))
 	}
 
 	// One-time, user-facing note if the env App identity is half-configured

@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/TomHennen/rein/internal/approvals"
+	"github.com/TomHennen/rein/internal/appsetup"
 	"github.com/TomHennen/rein/internal/brokercore"
 	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/declare"
@@ -43,6 +44,7 @@ import (
 	"github.com/TomHennen/rein/internal/keystore"
 	"github.com/TomHennen/rein/internal/proxy"
 	"github.com/TomHennen/rein/internal/runbroker"
+	"github.com/TomHennen/rein/internal/runscope"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/srt"
 	"github.com/TomHennen/rein/internal/tokencache"
@@ -428,8 +430,23 @@ func runSandboxed(cmdline []string) (int, error) {
 	// (9) Start the in-process broker/proxy. runbroker.Listen placement-checks
 	// the socket against the bind-mounts (working tree) and fails closed if it
 	// would land inside one.
+	// The run's EFFECTIVE scope ceiling (issue #69): the session's standing
+	// repos UNION the repos the human approves as expansions during this
+	// run. Every scope-sensitive surface below reads through it — the scope
+	// check, BOTH mints (a token is minted AT a scope), and the token caches
+	// (via ScopeKey). A launch-time snapshot of sess.Repos in any one of
+	// them would make an approved expansion silently fail to arrive.
+	rscope := runscope.New(sess, stateDir, runID)
+	// scopedAppCfg re-scopes the App config to the ceiling AS OF THIS MINT.
+	// appCfg.RepoNames was set at launch from the standing repos; a mint
+	// after an approved expansion must cover the wider set.
+	scopedAppCfg := func() githubapp.Config {
+		c := appCfg
+		c.RepoNames = rscope.BareNames()
+		return c
+	}
 	mintRead := brokercore.MintFunc(func(ctx context.Context) (string, time.Time, error) {
-		c, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
+		c, err := githubapp.NewClient(scopedAppCfg(), ks, config.AppKeystoreRole)
 		if err != nil {
 			return "", time.Time{}, err
 		}
@@ -440,7 +457,7 @@ func runSandboxed(cmdline []string) (int, error) {
 	// shape — the plain read mint lacks issues:read). Cached on disk via
 	// ghsession so repeated declares/re-checks don't burn mints.
 	ghReadToken := func(ctx context.Context) (string, error) {
-		c, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
+		c, err := githubapp.NewClient(scopedAppCfg(), ks, config.AppKeystoreRole)
 		if err != nil {
 			return "", err
 		}
@@ -455,7 +472,7 @@ func runSandboxed(cmdline []string) (int, error) {
 		if err := declare.InvalidateTransferred(ctx, stateDir, runID, sess, ghReadToken, logger, os.Stderr); err != nil {
 			return "", time.Time{}, err
 		}
-		c, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
+		c, err := githubapp.NewClient(scopedAppCfg(), ks, config.AppKeystoreRole)
 		if err != nil {
 			return "", time.Time{}, err
 		}
@@ -469,9 +486,21 @@ func runSandboxed(cmdline []string) (int, error) {
 		ForbiddenDirs: append([]string{workTree}, baseParams.ExtraAllowWrite...),
 		MintRead:      mintRead,
 		MintWrite:     mintWrite,
-		InScope:       sess.Contains,
+		InScope:       rscope.Contains,
+		ScopeKey:      rscope.Key,
 		Approve:       approve,
-		Declaration:   buildDeclarationHooks(sess, stateDir, runID, approve, ghReadToken, logger),
+		Declaration: buildDeclarationHooks(declareEnv{
+			sess:        sess,
+			sessionFile: session.SourceFilePath(sessSource),
+			stateDir:    stateDir,
+			runID:       runID,
+			approve:     approve,
+			ghReadToken: ghReadToken,
+			appCfg:      appCfg,
+			scopedCfg:   scopedAppCfg,
+			ks:          ks,
+			logger:      logger,
+		}),
 		RecordWrite: func(token string, expiresAt time.Time) {
 			if err := approvals.AppendWriteToken(stateDir, runID, tokencache.Entry{Token: token, ExpiresAt: expiresAt}); err != nil {
 				logger.Printf("write-token ledger append failed (best-effort): %v", err)
@@ -741,44 +770,141 @@ func buildSandboxApprove(sess session.Session, stateDir, runID string, logger *l
 	}
 }
 
+// declareEnv is everything one run's declare handler needs. Grouped into a
+// struct because the #69 scope-expansion path added enough dependencies
+// (install probe, deep-link, persist target) that a positional arg list
+// stopped being readable.
+type declareEnv struct {
+	sess        session.Session
+	sessionFile string // "" when the session came from the env fallback
+	stateDir    string
+	runID       string
+	approve     func(string) bool
+	ghReadToken func(context.Context) (string, error)
+	appCfg      githubapp.Config
+	scopedCfg   func() githubapp.Config
+	ks          keystore.Keystore
+	logger      *log.Logger
+}
+
 // buildDeclarationHooks wires the proxy's #35 declaration gate for a
 // sandboxed run: WriteApproved shares the exact gate closure the broker
 // core uses; IssueConfirmed is the push-ref cross-check against the
 // run's confirmed set; Declare runs the full fetch + Form A + record
 // ceremony OUT of the sandbox (internal/declare), blocking while the
 // human decides.
-func buildDeclarationHooks(sess session.Session, stateDir, runID string, approve func(string) bool, ghReadToken func(context.Context) (string, error), logger *log.Logger) *proxy.DeclarationHooks {
-	sig := approvals.SignatureOf(sess)
+//
+// Since issue #69 the Declare hook also carries the SCOPE-EXPANSION path:
+// the install-coverage probe (a 404 becomes a notice, never a prompt), the
+// deep-link, and the session file an approved-and-persisted repo is written
+// to. The same-owner rule is enforced inside internal/declare, before any
+// of this.
+func buildDeclarationHooks(env declareEnv) *proxy.DeclarationHooks {
+	sig := approvals.SignatureOf(env.sess)
+	appName, installURL := appInstallHints(env.appCfg)
 	return &proxy.DeclarationHooks{
-		WriteApproved: approve,
+		WriteApproved: env.approve,
 		IssueConfirmed: func(repo string, n int) bool {
-			rec, err := approvals.ReadApproval(stateDir, runID)
+			rec, err := approvals.ReadApproval(env.stateDir, env.runID)
 			return err == nil && approvals.Valid(rec, sig) && rec.HasIssue(repo, n)
 		},
 		Declare: func(issue int, repoArg string) proxy.DeclareOutcome {
+			gcfg := grant.Config{
+				TTL:           approvalTTL,
+				PromptTimeout: 60 * time.Second,
+				PreferPopup:   grant.PopupPreferenceFromEnv(),
+				StateDir:      env.stateDir,
+				RunID:         env.runID,
+				SessionFile:   env.sessionFile,
+				Logger:        env.logger,
+			}
 			out := declare.Run(context.Background(), declare.Deps{
-				StateDir: stateDir,
-				RunID:    runID,
-				RunPID:   os.Getpid(),
-				Session:  sess,
-				Fetch: func(ctx context.Context, repo string, n int) (issuemeta.Meta, error) {
-					tok, err := ghReadToken(ctx)
-					if err != nil {
-						return issuemeta.Meta{}, fmt.Errorf("obtain read token for issue fetch: %w", err)
-					}
-					return issuemeta.Fetch(ctx, os.Getenv("REIN_GITHUB_API_BASE"), tok, repo, n)
+				StateDir:   env.stateDir,
+				RunID:      env.runID,
+				RunPID:     os.Getpid(),
+				Session:    env.sess,
+				InstallURL: installURL,
+				AppName:    appName,
+				Fetch:      env.fetchIssue,
+				ProbeInstall: func(ctx context.Context, repo string) error {
+					owner, name, _ := strings.Cut(repo, "/")
+					_, err := fetchRepoInstallationID(ctx, env.appCfg.ClientID, env.ks, config.AppKeystoreRole, owner, name)
+					return err
 				},
-				Grant: grant.Config{
-					TTL:           approvalTTL,
-					PromptTimeout: 60 * time.Second,
-					PreferPopup:   grant.PopupPreferenceFromEnv(),
-					Logger:        logger,
+				Notice: func(ctx context.Context, n declare.Notice) {
+					grant.ShowInstallNotice(ctx, gcfg, grant.InstallNotice{
+						Repo: n.Repo, Issue: n.Issue, InstallURL: n.InstallURL, AppName: n.AppName,
+					})
 				},
-				Logger: logger,
+				Grant:  gcfg,
+				Logger: env.logger,
 			}, issue, repoArg)
 			return proxy.DeclareOutcome{OK: out.Confirmed, Issue: out.Issue, Message: out.Message, Audit: out.Audit}
 		},
 	}
+}
+
+// fetchIssue reads one issue's metadata for the declare prompt.
+//
+// For a repo already inside the run's ceiling it uses the run's CACHED
+// gh-read token (ghsession). For a SCOPE EXPANSION — a repo the human has
+// not approved yet — it mints a SEPARATE, short-lived token scoped to the
+// session repos PLUS the candidate, uses it for exactly this one GET, and
+// revokes it. It is deliberately NOT written to the run's shared read cache:
+// if the human then DENIES the expansion, no credential covering the
+// candidate repo outlives the prompt, and the agent's own read path (which
+// serves from that cache) never widened. See the Deps.Fetch security note.
+func (env declareEnv) fetchIssue(ctx context.Context, repo string, number int) (issuemeta.Meta, error) {
+	apiBase := os.Getenv("REIN_GITHUB_API_BASE")
+	if env.sess.Contains(repo) {
+		tok, err := env.ghReadToken(ctx)
+		if err != nil {
+			return issuemeta.Meta{}, fmt.Errorf("obtain read token for issue fetch: %w", err)
+		}
+		return issuemeta.Fetch(ctx, apiBase, tok, repo, number)
+	}
+
+	cfg := env.appCfg
+	cfg.RepoNames = append(env.sess.BareRepoNames(), bareRepoName(repo))
+	c, err := githubapp.NewClient(cfg, env.ks, config.AppKeystoreRole)
+	if err != nil {
+		return issuemeta.Meta{}, err
+	}
+	mctx, cancel := context.WithTimeout(ctx, mintTimeout)
+	tok, _, err := c.MintGhReadOnlyToken(mctx)
+	cancel()
+	if err != nil {
+		return issuemeta.Meta{}, fmt.Errorf("mint candidate-scoped read token for issue fetch: %w", err)
+	}
+	defer func() {
+		rctx, rcancel := context.WithTimeout(context.Background(), mintTimeout)
+		defer rcancel()
+		if rerr := c.RevokeToken(rctx, tok); rerr != nil {
+			env.logger.Printf("declare: revoke of the candidate-scoped read token failed (it expires on its own): %v", rerr)
+		}
+	}()
+	return issuemeta.Fetch(ctx, apiBase, tok, repo, number)
+}
+
+// appInstallHints returns the App's display name and installation
+// deep-link, best-effort, for the #69 not-installed notice. The
+// manifest-flow state path knows both; the env path (REIN_APP_*) knows
+// neither, so it falls back to GitHub's installations page.
+func appInstallHints(appCfg githubapp.Config) (name, installURL string) {
+	configDir, err := config.ConfigDir()
+	if err == nil {
+		if st, serr := appsetup.ReadState(configDir); serr == nil && st.Primary != nil {
+			name = st.Primary.Slug
+			installURL = st.Primary.HTMLURL
+			if installURL == "" && name != "" {
+				installURL = "https://github.com/apps/" + name
+			}
+			if installURL != "" {
+				return name, installURL + "/installations/new"
+			}
+		}
+	}
+	return "", "https://github.com/settings/installations"
 }
 
 // auditLogPath returns the per-run audit log path: stateDir/audit/sandbox-<runID>.log.

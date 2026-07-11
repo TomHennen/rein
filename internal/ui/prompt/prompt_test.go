@@ -12,30 +12,30 @@ import (
 
 func TestStubPrompter_MatchingResponseApproves(t *testing.T) {
 	p := &StubPrompter{Response: "42"}
-	ok, err := p.Confirm(context.Background(), Request{Issue: 42})
+	res, err := p.Confirm(context.Background(), Request{Issue: 42})
 	if err != nil {
 		t.Fatalf("Confirm err: %v", err)
 	}
-	if !ok {
+	if !res.Approved {
 		t.Error("expected approved=true for matching response")
 	}
 }
 
 func TestStubPrompter_NonMatchingResponseDenies(t *testing.T) {
 	p := &StubPrompter{Response: "99"}
-	ok, err := p.Confirm(context.Background(), Request{Issue: 42})
+	res, err := p.Confirm(context.Background(), Request{Issue: 42})
 	if err != nil {
 		t.Fatalf("Confirm err: %v", err)
 	}
-	if ok {
+	if res.Approved {
 		t.Error("expected approved=false for wrong response")
 	}
 }
 
 func TestStubPrompter_TrimsWhitespace(t *testing.T) {
 	p := &StubPrompter{Response: "  42  \n"}
-	ok, _ := p.Confirm(context.Background(), Request{Issue: 42})
-	if !ok {
+	res, _ := p.Confirm(context.Background(), Request{Issue: 42})
+	if !res.Approved {
 		t.Error("expected approved=true for whitespace-padded response")
 	}
 }
@@ -43,11 +43,11 @@ func TestStubPrompter_TrimsWhitespace(t *testing.T) {
 func TestStubPrompter_ForceErr(t *testing.T) {
 	want := errors.New("simulated tty failure")
 	p := &StubPrompter{ForceErr: want}
-	ok, err := p.Confirm(context.Background(), Request{Issue: 1})
+	res, err := p.Confirm(context.Background(), Request{Issue: 1})
 	if err != want {
 		t.Errorf("err = %v, want %v", err, want)
 	}
-	if ok {
+	if res.Approved {
 		t.Error("approved must be false on forced error")
 	}
 }
@@ -152,11 +152,11 @@ func TestTTYPrompter_NoTTY(t *testing.T) {
 		t.Skip("running in a context where /dev/tty IS reachable; nothing to assert")
 	}
 	p := TTYPrompter{}
-	ok, err := p.Confirm(context.Background(), Request{Issue: 1})
+	res, err := p.Confirm(context.Background(), Request{Issue: 1})
 	if !errors.Is(err, ErrNoTTY) {
 		t.Errorf("expected ErrNoTTY, got %v", err)
 	}
-	if ok {
+	if res.Approved {
 		t.Error("approved must be false when /dev/tty is unavailable")
 	}
 }

@@ -74,16 +74,16 @@ func seedConfirmed(t *testing.T, stateDir, runID string, sess session.Session, i
 // noTTYPrompter simulates the no-controlling-terminal case.
 type noTTYPrompter struct{}
 
-func (noTTYPrompter) Confirm(ctx context.Context, _ prompt.Request) (bool, error) {
-	return false, prompt.ErrNoTTY
+func (noTTYPrompter) Confirm(ctx context.Context, _ prompt.Request) (prompt.Result, error) {
+	return prompt.Result{}, prompt.ErrNoTTY
 }
 
 // matchingPrompter approves iff the request's Issue matches Answer —
 // i.e. the "human" types the displayed number of the RIGHT issue.
 type matchingPrompter struct{ Answer int }
 
-func (m matchingPrompter) Confirm(ctx context.Context, req prompt.Request) (bool, error) {
-	return req.Issue == m.Answer, nil
+func (m matchingPrompter) Confirm(ctx context.Context, req prompt.Request) (prompt.Result, error) {
+	return prompt.Result{Approved: req.Issue == m.Answer}, nil
 }
 
 func req73(sess session.Session) IssueRequest {
@@ -154,8 +154,8 @@ func TestObtainIssueApproval_TTYDenied(t *testing.T) {
 // cancellingPrompter simulates Ctrl-C or prompt-timeout.
 type cancellingPrompter struct{}
 
-func (cancellingPrompter) Confirm(ctx context.Context, _ prompt.Request) (bool, error) {
-	return false, prompt.ErrCancelled
+func (cancellingPrompter) Confirm(ctx context.Context, _ prompt.Request) (prompt.Result, error) {
+	return prompt.Result{}, prompt.ErrCancelled
 }
 
 func TestObtainIssueApproval_TTYCancelled(t *testing.T) {
@@ -307,10 +307,10 @@ type spyPrompter struct {
 	called bool
 }
 
-func (s *spyPrompter) Confirm(ctx context.Context, req prompt.Request) (bool, error) {
+func (s *spyPrompter) Confirm(ctx context.Context, req prompt.Request) (prompt.Result, error) {
 	s.called = true
 	if s.inner == nil {
-		return false, prompt.ErrNoTTY
+		return prompt.Result{}, prompt.ErrNoTTY
 	}
 	return s.inner.Confirm(ctx, req)
 }
@@ -651,14 +651,14 @@ func TestObtainIssueApproval_CeremonySerialized(t *testing.T) {
 
 	var live atomic.Int32
 	var prompts atomic.Int32
-	cfg.Prompter = promptFunc(func(_ context.Context, req prompt.Request) (bool, error) {
+	cfg.Prompter = promptFunc(func(_ context.Context, req prompt.Request) (prompt.Result, error) {
 		if live.Add(1) != 1 {
 			t.Error("two Form A ceremonies were live at once — prompt blocks would interleave on the tty")
 		}
 		prompts.Add(1)
 		time.Sleep(20 * time.Millisecond) // hold the "tty"
 		live.Add(-1)
-		return true, nil // the human types the displayed number
+		return prompt.Result{Approved: true}, nil // the human types the displayed number
 	})
 
 	// Ten concurrent declares of the SAME issue (a prompt storm).
@@ -684,8 +684,8 @@ func TestObtainIssueApproval_CeremonySerialized(t *testing.T) {
 }
 
 // promptFunc adapts a func to prompt.Prompter.
-type promptFunc func(context.Context, prompt.Request) (bool, error)
+type promptFunc func(context.Context, prompt.Request) (prompt.Result, error)
 
-func (f promptFunc) Confirm(ctx context.Context, req prompt.Request) (bool, error) {
+func (f promptFunc) Confirm(ctx context.Context, req prompt.Request) (prompt.Result, error) {
 	return f(ctx, req)
 }
