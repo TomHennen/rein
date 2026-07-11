@@ -4,6 +4,23 @@
 Tom's decisions A–F (issue #35 comments, 2026-07-08) on the Phase 1 sandboxed
 spine (in-process per run, no daemon — PLAN-1 notes 2026-07-05).
 
+> **Settled decisions (Tom, 2026-07-11) — recorded, not revisited:**
+> - **OQ-1 → Form A everywhere.** The human types the **displayed** issue
+>   number; fetched title + state + home repo are always shown (decision E).
+>   Rationale: per decision D the issue is the audit anchor, not the
+>   credential boundary, so wrong-issue attribution today has mild
+>   consequences; the load-bearing control is the displayed fetched title.
+>   Form C (number withheld) stays on file as a one-line future option if
+>   attribution gains teeth (§8 writeback). §2.2's first-of-run vs expansion
+>   split is moot — one prompt form everywhere.
+> - **SJ-1 is superseded by the Addendum** (end of this document): the
+>   recommendation is now **declaration-first** — no write-capable token is
+>   minted before human approval at all. §0's advertisement-GET mint, SJ-1,
+>   SJ-3's drain scope, OQ-2, OQ-3, and part of OQ-7 are superseded as
+>   listed in the Addendum's final section. Sections §0–§7 are otherwise
+>   unchanged and still apply (parser, convention, prompt content, failure
+>   modes, record/audit shapes).
+
 **One-sentence model:** the agent declares the issue by pushing to
 `agent/{{issue}}/{{nonce}}` (design.md:521); rein extracts the issue from the
 receive-pack command list at the proxy, fetches the issue's title + home repo
@@ -539,3 +556,189 @@ touch the default branch (SJ-2). Detection latency for anything the human
 waves through remains "until someone reads the audit trail." The run-scoped
 approval breadth (phase1-design.md §5.3's same-uid residual) is unchanged by
 this proposal.
+
+---
+
+## Addendum: declaration channel (Tom's counter-proposal to SJ-1, 2026-07-11)
+
+Question: instead of accepting SJ-1 (unprompted write-capable mint on the
+receive-pack advertisement GET), use a **declaration-first** shape — first
+write attempt denied with an instructive error; agent declares its issue; the
+human prompt fires at declaration time; only after approval is any
+write-capable token minted; push refs are still cross-checked against the
+confirmed binding (decision C intact).
+
+### A.1 Does declaration-first eliminate SJ-1? Yes — with the right deny response
+
+Pre-approval, the proxy answers the receive-pack advertisement GET **locally,
+never contacting GitHub and never minting anything**. GitHub's 403-without-
+push-perm (design.md:595 C2) is irrelevant here because GitHub is never
+asked — the deny is synthesized by rein. What the proxy returns, exactly:
+
+```
+HTTP/1.1 200 OK
+Content-Type: application/x-git-receive-pack-advertisement
+
+001f# service=git-receive-pack\n
+0000
+<pkt> ERR rein: writes are locked until you declare your issue.
+      Run: rein declare <issue-number>   (then retry this push,
+      to a branch named agent/<issue>/<nonce>)
+```
+
+The smart-HTTP client requires a 200 + that content-type + the `# service=`
+header pkt; an `ERR` pkt in place of the ref advertisement is part of the
+pkt-line protocol, and git dies with `fatal: remote error: rein: writes are
+locked until…` — printed verbatim to the agent. Recovery is clean: git exits
+nonzero before any pack negotiation; nothing is half-pushed; a retry after
+declaring works from scratch. This is the same "instructive error at the
+moment of need" pattern TM-G8's diag already proved on agents
+(design.md:766). (One CP task: verify git's remote-curl accepts the ERR pkt
+after the service header against a live git — flagged in tests below.)
+Fallback if a client mishandles ERR: plain 403 — fail closed either way.
+
+Same treatment pre-approval for `gh`/REST/GraphQL writes: local 403 with a
+JSON body whose `message` is the same instruction — `gh` prints API error
+messages, so the agent sees it. **This makes OQ-2 disappear**: API-first
+writes get the identical "declare first" path instead of "push something
+first".
+
+Result: **no write-capable token exists anywhere — memory or `writes/`
+ledger — before a human has approved.** `git ls-remote`/`push --dry-run`
+pre-approval now hit the local ERR, mint nothing, ledger nothing.
+phase1-design §5.3's "the first write of a run is still approval-gated"
+stays true as written, and strengthens: the first write-capable *mint* is
+approval-gated too.
+
+### A.2 Declaration mechanism: (a) is structurally broken, (b) works
+
+**(a) Push-ref-on-retry — rejected.** The ref exists only in the receive-pack
+POST body (§0), and git never sends that POST without a successful
+advertisement first. So the "retry after deny" hits the advertisement GET
+again, where the ref is still invisible — either rein mints unprompted to
+let the handshake proceed (SJ-1 reintroduced, exactly), or it denies again
+(livelock: the agent is told "declare via branch name" but rein can never see
+the branch name). The only escape is synthesizing a fake ref advertisement so
+git proceeds to the POST — rejected as fragile: fabricated old-OIDs break
+updates/force-pushes to existing `agent/N/*` branches (stale-info failures
+after approval), zero-"haves" bloats every pack to a full pack, and rein
+would have to guess a capability set compatible with what GitHub later
+accepts on the relayed POST. Not a coherent cheaper stage; a trap.
+
+**(b) Explicit declare — recommended.** The sandbox's only channel to rein is
+the per-run proxy socket (phase1-design §5.3), so the declaration rides it as
+a **virtual host**: rein adds `declare.rein.internal` to the srt
+matched-domain list (routing is by CONNECT host — no DNS involved), the
+proxy terminates it with its CA (already trusted in-sandbox via
+`SSL_CERT_FILE`), and handles it locally — it is a new `hostClass` alongside
+inject/passthrough, **never relayed upstream**. Agent-facing shape:
+
+- `rein declare 73` — the rein binary already staged readable in-sandbox at
+  `<runTmp>/rein` (the probe copy, run_sandboxed.go step 12) gains a small
+  subcommand that calls `https://declare.rein.internal/v1/declare?issue=73`
+  and prints the outcome; the deny messages name the exact command. (Plain
+  `curl` to the same URL also works — the shim is ergonomics, not surface.)
+- On a declare call the broker: resolves the repo (single-repo sessions:
+  the session repo; multi-repo: `?repo=owner/name` required — deny with
+  instruction if ambiguous), fetches title/state/canonical-URL (§2.1,
+  unchanged — issues:read via the `MintGhReadOnlyToken`-shaped read mint),
+  writes `PendingIssue` to the run context, and fires the **same Form A
+  prompt** (§2.2, settled). The declare HTTP call blocks until the human
+  answers (same unbounded-approval-pause discipline the proxy already has);
+  approve → `ConfirmedIssue` appended to the run's approval record, agent
+  gets `200 {"confirmed": 73}`; deny/timeout → `403 {"message": "…denied…"}`.
+- Post-approval the flow is the original proposal unchanged: advertisement
+  GET mints the write token (now *after* approval — clean), receive-pack POST
+  parsed, refs cross-checked against the confirmed set. **Decision C keeps
+  its verification role**: the agent states the issue twice (declare + ref)
+  and both must agree with each other and with what the human confirmed.
+  Mismatch or unconfirmed issue in a ref ⇒ deny via the §1.4 `ng` report
+  (which now also says "run `rein declare <n>` to expand"); expansion prompts
+  fire at the subsequent declare call — **prompts never fire inside the push
+  relay at all.**
+
+**Agent education, thinnest-first:** (1) the synthesized errors themselves —
+ERR pkt on git, JSON message on gh/REST — are the primary teacher, delivered
+exactly at the moment of need (the proven TM-G8 pattern); (2) the launch
+banner already prints to the shared terminal — add the two-line convention;
+(3) optional, per-agent: when the wrapped argv is `claude`, append
+`--append-system-prompt "rein: declare your GitHub issue with rein declare
+<n>; push only to agent/<n>/<nonce>"` (feasible today for Claude Code;
+other CLIs vary — do NOT build a general mechanism, revisit if dogfood shows
+agents ignoring the errors).
+
+### A.3 Complexity and flow deltas vs the original plan
+
+Removed: the mid-relay prompt wiring (the trickiest ordering code — approval
+pause inside a half-read POST), brokercore's no-confirm advertisement path
+(§6 row 4's SJ-1 arm), and the §0 SJ-1 disclosure burden. SJ-3 shrinks: the
+8 MiB/10 s drain now applies **only** to post-approval ref-mismatch denies
+(rare, adversarial/confused) — every pre-approval deny happens at the GET or
+a bodiless REST call with **zero upload**. Added: the declare host class +
+handler (~100 loc), ERR-pkt advertisement synthesis (~30 loc), `rein declare`
+subcommand + staging (~40 loc), instructive pre-approval deny bodies
+(~20 loc), srt domain-list entry (~5 loc). The receive-pack parser, `ng`
+synthesis, prompt/grant/approvals/audit changes all carry over unchanged.
+**Net: roughly +100–150 loc over the original ~1,000, with strictly simpler
+proxy control flow** (the proxy decides from state — confirmed set — and
+never blocks a relayed request on a human). Approval-record shape (§5) is
+untouched; the only flow change is *where* `PendingIssue` gets written
+(declare handler instead of push handler) — the popup/other-terminal grant
+path is byte-identical.
+
+### A.4 Abuse surface: agent-controlled declare vs agent-controlled push ref
+
+Equivalent, as suspected. Both are an agent-chosen integer naming a real
+issue; both are checked by the same fetch + Form A human prompt; neither
+lets the agent answer its own prompt (tty channel property, unchanged). The
+declare endpoint adds no new capability: an agent could always trigger a
+prompt by attempting a push. Prompt-spam (repeated declares of junk numbers)
+is bounded the same way push-triggered prompts are today — the human denies,
+and the existing 60 s prompt timeout + Ctrl-C apply; if dogfood shows spam,
+the design's optional per-repo rate limit (design.md:747) attaches naturally
+at the declare handler, a better chokepoint than the push path. One genuine
+*improvement*: pre-approval, the agent can no longer cause any GitHub-bound
+side effects (no advertisement reaches GitHub), shrinking pre-approval
+observable behavior to zero.
+
+### A.5 Staging ("simple now, better later")
+
+The honest staging is **not** (a)-then-(b) — (a) is broken, not simple
+(A.2). It is **minimal-(b) now, polish later**: ship the virtual host, the
+declare subcommand, the ERR/403 instructive denies, and single-repo
+`rein declare <n>` in this checkpoint; defer `?repo=` multi-repo ergonomics
+polish, `--append-system-prompt` seeding, and rate limiting until dogfood
+demands them. Tests add: declare-handler units (confirm/deny/fetch-fail/
+double-declare idempotence), an ERR-pkt live check (git remote-curl accepts
+the synthesized advertisement error — CP live gate), and the pexpect flow
+gains one line (`rein declare N` before the push) in
+test_confirm_shows_title.py.
+
+### A.6 Recommendation and supersessions
+
+**Recommendation: adopt declaration-first via the explicit in-sandbox
+`rein declare` channel (A.2-b), staged minimal per A.5.** It eliminates
+SJ-1 outright rather than disclosing it, uniformly handles API-first writes,
+moves every human prompt out of the relay path, and costs ~100–150 loc over
+the accepted plan. The push-ref convention remains the verification anchor
+per decision C; it stops being the *prompt trigger*.
+
+Supersessions against the original proposal:
+- **§0 / SJ-1** — superseded. No unprompted write-capable mint exists; the
+  pre-approval advertisement is answered locally (A.1). phase1-design §5.3
+  needs no amendment.
+- **SJ-3** — narrowed: capped drain applies only to post-approval mismatch
+  denies; pre-approval denies upload nothing.
+- **OQ-2** — closed: non-push writes before declaration get the same
+  "run `rein declare <n>`" instruction; no push-first requirement.
+- **OQ-3** — superseded: the explicit declare command is the additional
+  declaration channel; REST-path derivation is dropped.
+- **OQ-7** — split: ERR-pkt advertisement synthesis is new, trivial, and
+  definitely in; report-status `ng` synthesis is retained (recommended) but
+  only for post-approval ref-mismatch/convention denies.
+- **OQ-1** — settled by Tom: Form A everywhere (see the settled-decisions
+  note at top).
+- New surface to review in implementation: the declare host class must be
+  local-only (never relayed), its responses token-free (response-path
+  hygiene, phase1-design §4.1), and the domain excluded from the
+  never-inject/passthrough classes' assumptions (hosts.go tests).
