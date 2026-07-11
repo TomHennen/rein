@@ -98,7 +98,9 @@ func TestDemo_RevokeLedgerDedupe(t *testing.T) {
 	t.Logf("  revoke() calls made             : %d", len(rev.tokens))
 	t.Log("")
 	t.Logf("  BEFORE #67 : revoked 1 of 6 write token(s) on exit   (+5 '404 already gone' warnings)")
-	t.Logf("  AFTER  #67 : %s", summary)
+	t.Logf("               ^ RECORDED pre-fix observation from the live run (not re-executed here;")
+	t.Logf("                 reconstructing the old no-dedup loop would be over-building)")
+	t.Logf("  AFTER  #67 : %s   <- LIVE, captured from this run's stderr", summary)
 	t.Log("")
 
 	// --- assertions --------------------------------------------------------

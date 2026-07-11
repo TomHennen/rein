@@ -13,11 +13,13 @@
     demo_revoke_ledger_test.go:   revoke() calls made             : 1
     demo_revoke_ledger_test.go: 
     demo_revoke_ledger_test.go:   BEFORE #67 : revoked 1 of 6 write token(s) on exit   (+5 '404 already gone' warnings)
-    demo_revoke_ledger_test.go:   AFTER  #67 : rein: revoked 1 of 1 write token(s) on exit
+    demo_revoke_ledger_test.go:                ^ RECORDED pre-fix observation from the live run (not re-executed here;
+    demo_revoke_ledger_test.go:                  reconstructing the old no-dedup loop would be over-building)
+    demo_revoke_ledger_test.go:   AFTER  #67 : rein: revoked 1 of 1 write token(s) on exit   <- LIVE, captured from this run's stderr
     demo_revoke_ledger_test.go: 
 --- PASS: TestDemo_RevokeLedgerDedupe (0.00s)
 PASS
-ok  	github.com/TomHennen/rein/cmd/rein	(cached)
+ok  	github.com/TomHennen/rein/cmd/rein	0.002s
 
 ## (B) eventual-consistency: revoke WORKS but is not synchronous (poll, not sample-once)
 ##     REIN_LIVE=1 go test ./internal/githubapp -run TestLiveRevokeTokenKillsTheToken -v
