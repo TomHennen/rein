@@ -4,12 +4,25 @@
 allowlist what the agent may read (project dir, /tmp, system paths), accepting that it
 "might be too difficult for users" in exchange for safety?
 
-**TL;DR recommendation:** yes — but as the **middle path the design already prescribes**
-(phase1-design.md:145-158): deny-read `$HOME` wholesale, allow back an enumerable set of
-safe subpaths, keep `/` readable, and **keep the existing targeted cred-store denials as
-belt-and-suspenders**. Do NOT attempt a full root-level allowlist now. srt 0.0.63 supports
-the middle path natively today (no upstream changes). Roll out as env-var opt-in, dogfood
-in CP6, then flip the default. Effort: ~1-2 days of code + dogfood burn-in.
+## Recommendation
+
+**Do this: deny-read `$HOME` wholesale; allow back a short, justified list of safe
+subpaths; keep `/` readable; keep the existing targeted cred-store denials layered on
+top as belt-and-suspenders.** This is the middle path phase1-design.md:145-158 already
+prescribes, and srt 0.0.63 supports it natively today (§1 — no upstream changes).
+
+**Do NOT do: a full root-level allowlist.** srt could express it, but enumerating every
+system path per distro (/opt, /snap, /nix, brew) is the version of this idea that is
+genuinely "too difficult for users," for little extra credential-side gain (§3).
+
+**When something the agent needs is missing: it breaks loudly; there are NO
+interactive allow prompts** — see §2a for exactly what the user experiences and why
+prompts are deliberately excluded.
+
+> **Status (2026-07-11, post-study):** Tom decided **default-ON from the start** (not
+> the opt-in-first rollout in §5 — superseded), with `REIN_SANDBOX_ALLOW_READ` +
+> a loud kill switch as the escape hatches and no interactive prompt. Decisions
+> recorded on issue #59; implementation is on the #59 branch, in review.
 
 ---
 
@@ -55,7 +68,9 @@ Hiding `$HOME` breaks, in rough order of severity:
 2. **Agent config/credentials.** `~/.claude/.credentials.json` + settings must stay
    readable (CP4.5 already curates this set in run_sandboxed.go:576-606); invert it into
    allow-backs while keeping the history/projects sub-denies (srt ordering makes that
-   composition work, §1).
+   composition work, §1). *Brokering these agent/tool credentials through rein itself —
+   so the agent's own API key gets the same short-lived-injected treatment as GitHub
+   creds — is the post-Phase-1 non-GitHub-adapter track, tracked as issue #4.*
 3. **Toolchains and caches:** `~/.nvm`, `~/.cargo`/`~/.rustup`, `~/go`, `~/.local/bin`,
    `~/.local/share`, `~/.pyenv`, `~/.npm`, `~/.cache` (go-build/pip/uv). Losing caches
    isn't just slow — package registries are egress-denied by default, so a cold cache
@@ -70,10 +85,46 @@ The papercut stream is real but bounded and one-time-per-machine: failures are l
 distro variance (/opt, /snap, /nix, linuxbrew, /var oddities) for little credential-side
 gain — that is the model that is genuinely "too difficult for users."
 
+### 2a. What a miss looks like to the user — and why there are NO allow prompts
+
+Concretely, when the allowlist misses something the agent needs:
+
+1. The agent's tool fails **inside the sandbox** — a denied dir reads as an empty
+   (writable) tmpfs, so the tool reports "config not found" / ENOENT and the agent says
+   so in its transcript. Nothing hangs, nothing is silently degraded.
+2. The human recognizes it from the **run banner**, which states up front that `$HOME`
+   is hidden and prints the exact remediation to copy-paste:
+   `REIN_SANDBOX_ALLOW_READ=/abs/path rein run --sandbox -- ...` (or the loud
+   `SHOW_HOME` kill switch for "just make it work while I file the gap").
+3. The operator adds the path once; recurring gaps graduate into the shipped
+   auto-derived defaults. Discovery is one-time per machine/tool, not per run.
+
+**Deliberately NOT built: an interactive "agent wants to read X — allow? [y/N]"
+prompt.** Exactly for the failure mode Tom predicted: under a papercut stream, humans
+train themselves to answer y, and the prompt becomes a rubber stamp that launders
+credential reads through the same reflex ("~/.aws? y"). A prompt would also hand the
+agent an active social-engineering channel (it can *cause* the prompt at a moment of
+its choosing). Loud failure + out-of-band, human-initiated widening keeps the human
+decision slow and the default closed. Revisit only with dogfood friction data, per
+issue #59.
+
 ## 3. Security gain vs the maintained denylist
 
 The #46 class is exactly "unknown-unknown same-uid credential stores," and those land in
-`$HOME`/`$XDG_*` with near-certainty. Currently readable in-sandbox and closed wholesale
+`$HOME`/`$XDG_*` with near-certainty.
+
+> **Why do they all wind up under `$HOME`? (ELI5)** A per-user credential has to live
+> somewhere that (a) the program can write without root, (b) survives reboot, and
+> (c) other users can't read. On Linux the only directory that ships with all three
+> properties is your home directory — everything else is root-owned (`/etc`, `/opt`),
+> shared (`/tmp`), or wiped (`/run`). So every tool either uses an old-style dotfile
+> (`~/.aws`, `~/.npmrc`) or follows the XDG Base Directory spec, which is just the
+> modern convention for *where under `$HOME`* to put things (`~/.config` for config,
+> `~/.local/share` for data — keyrings live there, `~/.cache` for caches; each
+> overridable by an `$XDG_*` env var, which is why rein resolves those too). "Near-"
+> certainty because exceptions exist — system-wide creds in `/etc` (root-owned, already
+> unreadable to our uid) and secrets on other mounts (the `/mnt/dev` residual, §3) —
+> which is why `/` staying readable is listed as a residual, not declared safe. Currently readable in-sandbox and closed wholesale
 by deny-$HOME: `~/.local/share/keyrings` (#46 itself), `~/.aws`, `~/.azure`,
 `~/.kube/config`, `~/.docker/config.json`, `~/.npmrc` (publish tokens), `~/.pypirc`,
 `~/.cargo/credentials.toml`, `~/.gem/credentials`, `~/.terraform.d`, browser
@@ -107,7 +158,12 @@ root-deny expansion keeps that door open without upstream work.
 - **Self-test:** extend `VerifyConfigApplied` with a `$HOME`-side sentinel so the flip is
   proven applied every launch, same pattern as today.
 
-## 5. Rollout
+## 5. Rollout — SUPERSEDED (kept for the record)
+
+> Tom decided (2026-07-11, issue #59) to skip step 1's opt-in phase and ship
+> **default-ON immediately**, given the current single-developer/throwaway-repo user
+> base: discovery-by-dogfood beats an opt-in ceremony. The escape hatches and the
+> no-prompt rule stand as written below.
 
 1. **Now (with the #46 targeted fix already landing):** plumb `Params.AllowRead`,
    Validate rework, D6 EvalSymlinks, auto-derived allow-backs (agent install chain,
