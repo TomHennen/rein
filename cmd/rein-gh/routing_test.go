@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +60,8 @@ func writeFakeGh(t *testing.T, exitCode int) (ghPath, envOutPath string) {
 {
   printf 'GH_TOKEN=%%s\n' "$GH_TOKEN"
   printf 'GITHUB_TOKEN=%%s\n' "$GITHUB_TOKEN"
+  printf 'GH_ENTERPRISE_TOKEN=%%s\n' "$GH_ENTERPRISE_TOKEN"
+  printf 'GITHUB_ENTERPRISE_TOKEN=%%s\n' "$GITHUB_ENTERPRISE_TOKEN"
   printf 'REIN_GH_SHIM_ACTIVE=%%s\n' "$REIN_GH_SHIM_ACTIVE"
 } > "$REIN_TEST_GH_ENVOUT"
 exit %d
@@ -162,6 +165,7 @@ func TestExecGhWithoutToken_DenialEnv(t *testing.T) {
 	if got := env["GITHUB_TOKEN"]; got != "" {
 		t.Errorf("GITHUB_TOKEN = %q, want empty (must not leak the inherited value)", got)
 	}
+	assertNoInheritedPAT(t, env)
 	if got := env["REIN_GH_SHIM_ACTIVE"]; got != "1" {
 		t.Errorf("REIN_GH_SHIM_ACTIVE = %q, want %q (re-entry guard on the denial path)", got, "1")
 	}
@@ -260,6 +264,17 @@ func TestRunWrite_MintFailureNeverFallsBackToReadCacheOrPAT(t *testing.T) {
 		t.Fatalf("seed approval record: %v", err)
 	}
 
+	// Poison the inherited environment the way a real developer shell does
+	// (issue #57). setupAppEnv blanks these, which is exactly why the
+	// original version of this test could not see the leak: with no ambient
+	// PAT to inherit, "GH_TOKEN is empty at gh" looked like a pass. Set them
+	// AFTER setupAppEnv so gh would receive them if the shim passed the
+	// environment through untouched.
+	t.Setenv("GH_TOKEN", "ghp_users_real_full_scope_pat")
+	t.Setenv("GITHUB_TOKEN", "ghp_users_real_full_scope_pat")
+	t.Setenv("GH_ENTERPRISE_TOKEN", "ghp_users_real_full_scope_pat")
+	t.Setenv("GITHUB_ENTERPRISE_TOKEN", "ghp_users_real_full_scope_pat")
+
 	ghPath, envOut := writeFakeGh(t, 3)
 	rc := runWrite(ghPath, []string{"issue", "comment", "1", "-b", "x"}, stateDir, testLogger(t))
 
@@ -267,11 +282,16 @@ func TestRunWrite_MintFailureNeverFallsBackToReadCacheOrPAT(t *testing.T) {
 		t.Errorf("exit code = %d, want 3 (gh's exit code passed through)", rc)
 	}
 	env := readEnvOut(t, envOut)
-	if got := env["GH_TOKEN"]; got != "" {
-		t.Errorf("GH_TOKEN = %q after write-tier mint failure, want empty — the write path must not fall back to the cached read token or an ambient credential", got)
+	// Fail-closed: gh gets the deliberately-invalid placeholder, NOT the
+	// cached read token, NOT the inherited PAT, and NOT an empty GH_TOKEN
+	// (empty would let gh fall back to the user's hosts.yml login).
+	if got := env["GH_TOKEN"]; got != placeholderToken {
+		t.Errorf("GH_TOKEN = %q after write-tier mint failure, want %q — the write path must not serve the cached read token, an inherited PAT, or an empty value that lets gh fall back to hosts.yml",
+			got, placeholderToken)
 	}
-	if got := env["REIN_GH_SHIM_ACTIVE"]; got != "" {
-		t.Errorf("REIN_GH_SHIM_ACTIVE = %q, want unset when no token was minted", got)
+	assertNoInheritedPAT(t, env)
+	if got := env["REIN_GH_SHIM_ACTIVE"]; got != "1" {
+		t.Errorf("REIN_GH_SHIM_ACTIVE = %q, want \"1\" (re-entry guard set on the denial path)", got)
 	}
 
 	// The read cache must be untouched by the write path (writes are never
@@ -279,5 +299,71 @@ func TestRunWrite_MintFailureNeverFallsBackToReadCacheOrPAT(t *testing.T) {
 	after, err := tokencache.Read(ghsession.ReadCachePath(stateDir))
 	if err != nil || after.Token != "cached-read-token" {
 		t.Errorf("read cache after write attempt = (%+v, %v), want the seeded entry untouched", after, err)
+	}
+}
+
+// assertNoInheritedPAT fails if any ambient GitHub credential env var
+// survived into gh's environment. This is the core issue-#57 assertion: the
+// shim must strip every var in tokenEnvVars, not just overwrite GH_TOKEN.
+func assertNoInheritedPAT(t *testing.T, env map[string]string) {
+	t.Helper()
+	for _, name := range tokenEnvVars {
+		got := env[name]
+		if got == placeholderToken {
+			continue // our own deliberately-invalid value, not an inherited one
+		}
+		if got != "" {
+			t.Errorf("%s = %q reached gh — an ambient credential from the developer's shell leaked past the scope ceiling (#57)", name, got)
+		}
+	}
+}
+
+// TestBaseEnv_StripsEveryAmbientToken pins the scrub itself: baseEnv must
+// remove every var in tokenEnvVars (the same list `rein run` scrubs) and
+// leave everything else alone.
+func TestBaseEnv_StripsEveryAmbientToken(t *testing.T) {
+	for _, name := range tokenEnvVars {
+		t.Setenv(name, "ghp_users_real_full_scope_pat")
+	}
+	t.Setenv("PATH_LIKE_UNRELATED_VAR", "keep-me")
+
+	got := baseEnv()
+
+	for _, kv := range got {
+		name, _, _ := strings.Cut(kv, "=")
+		for _, banned := range tokenEnvVars {
+			if name == banned {
+				t.Errorf("baseEnv() still carries %q", kv)
+			}
+		}
+	}
+	if !slices.Contains(got, "PATH_LIKE_UNRELATED_VAR=keep-me") {
+		t.Errorf("baseEnv() dropped an unrelated var; want it preserved")
+	}
+}
+
+// TestDenyEnv_FailsClosedOverInheritedPAT pins the environment the READ-tier
+// degraded leg now hands gh (issue #57, read-tier half). runReadAndExec
+// syscall.Execs and so cannot be driven in-process; denyEnv is exactly the
+// environment it passes, and the end-to-end read leg is covered by the
+// manual demo.
+func TestDenyEnv_FailsClosedOverInheritedPAT(t *testing.T) {
+	for _, name := range tokenEnvVars {
+		t.Setenv(name, "ghp_users_real_full_scope_pat")
+	}
+
+	env := map[string]string{}
+	for _, kv := range denyEnv() {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			env[k] = v
+		}
+	}
+
+	if got := env["GH_TOKEN"]; got != placeholderToken {
+		t.Errorf("GH_TOKEN = %q, want the deliberately-invalid placeholder %q", got, placeholderToken)
+	}
+	assertNoInheritedPAT(t, env)
+	if got := env["REIN_GH_SHIM_ACTIVE"]; got != "1" {
+		t.Errorf("REIN_GH_SHIM_ACTIVE = %q, want \"1\"", got)
 	}
 }
