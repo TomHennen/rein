@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -178,4 +179,93 @@ func TestCredentialHelper_TMG8_OnStateDirFailure(t *testing.T) {
 
 	err, out, diag := driveHelperGet(t)
 	assertPlaceholderServed(t, err, out, diag, "state dir unavailable", "without logging")
+}
+
+// --- issue #61: panic recovery in the credential-helper dispatch ---
+
+// setTestPanicHook installs a panic on the broker path for the duration of one
+// test and guarantees removal afterwards, so the seam can never leak into
+// another test in this package.
+func setTestPanicHook(t *testing.T, panicValue string) {
+	t.Helper()
+	testPanicHook = func(io.Writer) { panic(panicValue) }
+	t.Cleanup(func() { testPanicHook = nil })
+}
+
+// TestCredentialHelper_TMG8_OnPanic is the issue-#61 regression test. A panic
+// anywhere on the broker path used to crash the process: Go prints a stack and
+// exits 2 with EMPTY STDOUT, which git reads as "no answer" and answers by
+// falling through to the next credential source — the developer's ambient PAT.
+// That is the same TM-G8 outcome #45 closed for error returns, reached by a
+// different route.
+//
+// guardHelperPanic must recover, drop any partial output, and answer the
+// github.com get with the placeholder credential and exit 0.
+func TestCredentialHelper_TMG8_OnPanic(t *testing.T) {
+	setupHelperTestEnv(t)
+	setTestPanicHook(t, "boom: simulated broker-path crash")
+
+	in := strings.NewReader("protocol=https\nhost=github.com\n\n")
+	var out, diag strings.Builder
+
+	err := guardHelperPanic("get", in, &out, &diag)
+
+	assertPlaceholderServed(t, err, out.String(), diag.String(), "panic")
+	if !strings.Contains(diag.String(), "boom: simulated broker-path crash") {
+		t.Errorf("stderr must name the panic value for the operator, got:\n%s", diag.String())
+	}
+}
+
+// TestCredentialHelper_PanicOnNonGithubHostStaysSilent: a panic on a request
+// for a host rein does not broker must NOT invent a credential for it. The
+// recovery replays the buffered request through the real broker, so a
+// non-github host still gets the protocol's empty "not my host" block and
+// exit 0 — byte-identical to a healthy helper.
+func TestCredentialHelper_PanicOnNonGithubHostStaysSilent(t *testing.T) {
+	setupHelperTestEnv(t)
+	setTestPanicHook(t, "boom")
+
+	in := strings.NewReader("protocol=https\nhost=gitlab.com\n\n")
+	var out, diag strings.Builder
+
+	err := guardHelperPanic("get", in, &out, &diag)
+	if err != nil {
+		t.Fatalf("helper must not error even on panic: %v", err)
+	}
+	if strings.Contains(out.String(), "password=") {
+		t.Errorf("a panic must not fabricate a credential for a non-github host, got stdout:\n%q", out.String())
+	}
+}
+
+// TestCredentialHelper_PanicDropsPartialStdout: stdout is buffered, so bytes a
+// panicking run had already written must NOT reach git. A truncated credential
+// block followed by the placeholder would be a double-keyed block whose meaning
+// depends on git's last-key-wins parse; the recovery must serve a clean one.
+func TestCredentialHelper_PanicDropsPartialStdout(t *testing.T) {
+	setupHelperTestEnv(t)
+	// Write a partial credential block, THEN panic — the shape of a crash
+	// midway through emitting a real credential.
+	testPanicHook = func(out io.Writer) {
+		fmt.Fprint(out, "username=x-access-token\npassword=ghs_real_token_half_writ")
+		panic("boom after partial write")
+	}
+	t.Cleanup(func() { testPanicHook = nil })
+
+	in := strings.NewReader("protocol=https\nhost=github.com\n\n")
+	var out, diag strings.Builder
+
+	err := guardHelperPanic("get", in, &out, &diag)
+	if err != nil {
+		t.Fatalf("helper must not error even on panic: %v", err)
+	}
+	got := out.String()
+	if strings.Contains(got, "ghs_real_token_half_writ") {
+		t.Errorf("partial bytes written before the panic reached git's stdin; they must be dropped:\n%q", got)
+	}
+	if strings.Count(got, "password=") != 1 {
+		t.Errorf("stdout must carry exactly one credential block after a panic, got:\n%q", got)
+	}
+	if !strings.Contains(got, "password=rein-placeholder-mint-failed") {
+		t.Errorf("expected the TM-G8 placeholder on stdout, got:\n%q", got)
+	}
 }
