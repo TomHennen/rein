@@ -129,8 +129,8 @@ def normalize(text: str, uncovered_repo: str) -> str:
     m = re.search(r"App (\S+) is not installed", out)
     if m:
         out = out.replace(m.group(1), "<APP-SLUG>")
-    # tmp paths
-    out = re.sub(r"/tmp/[^\s,)]+", "<TMP>", out)
+    # tmp paths (stop at whitespace or a closing bracket/paren/comma)
+    out = re.sub(r"/tmp/[^\s,)\]]+", "<TMP>", out)
     return out
 
 

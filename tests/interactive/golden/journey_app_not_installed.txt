@@ -52,7 +52,7 @@
 ==============================================================================
   (direct-mode warning header elided; showing from the launch)
   | rein: launching wrapped process with:
-  |   session: sess_journey_control (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:<TMP>
+  |   session: sess_journey_control (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:<TMP>]
   |   PATH-front shim dir: /home/admin/.local/state/rein/shim
   |   per-process git config: <TMP>
   |   (your real ~/.gitconfig is layered in via include.path)
