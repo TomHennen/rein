@@ -304,6 +304,26 @@ acceptable. Bundle the outstanding direct-mode macOS e2e verification
 **Success:** CP3 e2e passes on macOS, including gh via the keychain-trust
 path.
 
+### CP5.5 — Scope expansion (session UX) — NEXT, tracked in #69
+
+Added 2026-07-11, after #35 (declare-first issue scoping) landed. The issue is
+now agent-declared at runtime, but the REPO set is still hand-edited YAML —
+the same "configure up front" model design.md:12 rejects. This checkpoint
+closes that gap.
+
+- **Design of record:** `docs/session-scope-ux-mocks.md` (merged in PR #56;
+  Tom's decisions recorded inline).
+- **Scope:** multi-repo declare prompting (`rein declare <n> --repo o/r` fires
+  the scope-expansion prompt — deferred by #35's build), the in-prompt `[y/N]`
+  persist choice, `rein session show|add-repo`, cwd autodetection, and binding
+  the developer's existing local checkout (#64 — same journey).
+- **Open question (Tom):** 404-at-expansion surfacing — an interactive notice
+  carrying the install deep-link but NO approval authority, vs deny-and-instruct.
+- **Constraint:** sandbox binds are fixed at launch, so a mid-run expansion can
+  grant credentials for a new repo but cannot make a new path writable (#64).
+- **Demo:** this journey is a documented GAP in the `tests/interactive/`
+  catalogue; the checkpoint closes it.
+
 ### CP6 — Dogfood
 
 - Tom runs sandboxed mode on a throwaway for a few sessions, then on `wrangle`.
