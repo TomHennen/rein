@@ -210,60 +210,130 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  rein run --direct -- <cmd> [args...]       (unsandboxed; throwaway repos only)")
 }
 
-// runCredentialHelper wires env-derived config to the broker. All errors
-// returned here are programming/config errors — credential-mint failures
-// are handled inside the broker per TM-G8.
+// runCredentialHelper wires env-derived config to the broker using the
+// process's real stdio. runCredentialHelperEnv is the testable seam.
 func runCredentialHelper(action string) error {
-	// ResolveApp is the read-only resolver: env -> state.json+keystore ->
-	// fail. It NEVER touches the network — rein run's eager step owns the
-	// install-id fetch. On the state path InstallationID may be 0 (uncached);
-	// that is NOT an error here. The only error case is "no config at all"
-	// (no env AND no state), which is a genuine config error with no
-	// github.com host yet known — same shape as today's LoadAppConfig error.
+	return runCredentialHelperEnv(action, os.Stdin, os.Stdout, os.Stderr)
+}
+
+// runCredentialHelperEnv is the env-driven helper core.
+//
+// TM-G8 / hard-constraint #2: on the github.com `get` path this function must
+// NEVER return an error (main turns that into exit 1 with EMPTY stdout). When
+// a credential helper errors or answers empty, git treats it as "no answer"
+// and FALLS THROUGH to the next credential source — the next configured
+// helper, the OS keychain, or a terminal prompt. A corrupted session file or
+// a missing state dir could then let a push silently succeed with the
+// developer's ambient PAT: exactly the broker displacement TM-G8 exists to
+// prevent (design §5.3, validated §12.1). So every environmental pre-broker
+// failure is routed THROUGH the broker via serveHelperPlaceholder (loud
+// placeholder credential on stdout, real diagnosis on stderr), and
+// observability-only failures (the helper log) degrade with a warning. The
+// only error returns left are broker-level programming bugs (nil
+// Logger/MintRead), never environmental failures.
+func runCredentialHelperEnv(action string, in io.Reader, out, diag io.Writer) error {
 	logger, closeLog, err := openLog()
 	if err != nil {
-		return err
+		// Fail-open on observability: a helper that can't open its own log
+		// must still answer git (TM-G8). Warn on stderr and run unlogged.
+		fmt.Fprintf(diag, "rein: warning: helper log unavailable (%v); continuing without logging\n", err)
+		logger = log.New(io.Discard, "", 0)
+		closeLog = func() {}
 	}
 	defer closeLog()
 
 	stateDir, err := config.StateDir()
 	if err != nil {
-		return err
+		// Without a state dir the broker's bookkeeping (read cache, approval
+		// records, write-token ledger) has nowhere to live — running the full
+		// broker would scatter relative paths. Fail closed on the credential
+		// (placeholder, never a real token) but never empty/exit 1.
+		return serveHelperPlaceholder(action, in, out, diag, logger,
+			fmt.Errorf("state dir unavailable: %w", err),
+			fmt.Sprintf("rein: state dir unavailable (%v).\n      Check $HOME / $XDG_STATE_HOME and directory permissions, then retry.", err))
 	}
 
+	// ResolveApp is the read-only resolver: env -> state.json+keystore ->
+	// fail. It NEVER touches the network — rein run's eager step owns the
+	// install-id fetch. On the state path InstallationID may be 0 (uncached);
+	// that is NOT an error here. The only error case is "no config at all"
+	// (no env AND no state).
 	appCfg, ks, _, rerr := config.ResolveApp()
 	if rerr != nil {
-		// No config at all (no env AND no state.json). TM-G8: do NOT exit
-		// with empty stdout — an empty credential invites git/tooling to
-		// run `gh auth setup-git` and silently displace the broker
-		// (validated finding §12.1). Route through the broker with a
-		// failing minter so a github.com get yields the placeholder plus
-		// an actionable stderr diagnostic; non-github hosts still get an
-		// empty block (correct). ReadCachePath is intentionally empty so
-		// an unconfigured rein never serves a stale cached token.
-		logger.Printf("ResolveApp failed: %v; serving TM-G8 placeholder for github.com get", rerr)
-		failMint := broker.MintFunc(func(ctx context.Context) (string, time.Time, error) {
-			return "", time.Time{}, rerr
-		})
-		return broker.RunCredentialHelper(action, os.Stdin, os.Stdout, broker.Config{
-			MintRead:    failMint,
-			MintWrite:   failMint,
-			MintTimeout: mintTimeout,
-			Logger:      logger,
-			Diag:        os.Stderr,
-		})
+		return serveHelperPlaceholder(action, in, out, diag, logger,
+			fmt.Errorf("ResolveApp failed: %w", rerr),
+			fmt.Sprintf("rein: not configured (%v).", rerr))
 	}
 
 	sess, sessSource, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
 	if err != nil {
-		return err
+		// Malformed/invalid dev-session.yaml, REIN_SESSION_FILE naming a
+		// missing file, or no session file + no fallback repo: the "no
+		// session is active" state. Refuse to mint (no scope ceiling exists)
+		// but keep the refusal inside rein's domain via the placeholder —
+		// an error return here would hand the push to the developer's
+		// ambient credentials instead (issue #45). The error text carries
+		// the session file path and parse/read detail.
+		return serveHelperPlaceholder(action, in, out, diag, logger,
+			fmt.Errorf("session load failed: %w", err),
+			fmt.Sprintf("rein: cannot load the active session (%v).\n      Fix or remove the session file, or run `rein init` to set up; `rein doctor` diagnoses.", err))
 	}
 	// Scope the App config to the session's FULL repo set so the minted token
 	// covers every repo the scope check accepts (issue #10).
 	appCfg.RepoNames = sess.BareRepoNames()
 	logger.Printf("session: id=%q role=%q repos=%v source=%s", sess.ID, sess.Role, sess.Repos, sessSource)
 
-	return runCredentialHelperWithConfig(action, os.Stdin, os.Stdout, os.Stderr, appCfg, ks, sess, stateDir, logger)
+	return runCredentialHelperWithConfig(action, in, out, diag, appCfg, ks, sess, stateDir, logger)
+}
+
+// serveHelperPlaceholder answers a helper invocation whose pre-broker setup
+// failed (no state dir, no App config, no loadable session). It routes the
+// request through the REAL broker with a minter that fails with cause, so:
+//
+//   - a github.com `get` yields the TM-G8 placeholder credential
+//     (rein-placeholder-mint-failed) on stdout with exit 0 — never empty
+//     stdout, never exit 1. git treats an erroring/empty helper as "no
+//     answer" and falls through to other credential sources, so an error
+//     here could silently ride the developer's ambient PAT; the placeholder
+//     keeps the failure loud and inside rein's domain, and stderr carries
+//     the helpful part.
+//   - non-github.com hosts still get the protocol's empty "not my host"
+//     block, and store/erase remain no-ops — identical to a healthy helper.
+//
+// hint is printed to diag only when the broker actually falls back to the
+// placeholder (github.com get), so non-github invocations stay byte-identical
+// on stderr too. ReadCachePath is intentionally unset: a helper in a failed
+// state must never serve a stale cached token.
+func serveHelperPlaceholder(action string, in io.Reader, out, diag io.Writer, logger *log.Logger, cause error, hint string) error {
+	logger.Printf("%v; serving TM-G8 placeholder for github.com get", cause)
+	failMint := broker.MintFunc(func(ctx context.Context) (string, time.Time, error) {
+		return "", time.Time{}, cause
+	})
+	return broker.RunCredentialHelper(action, in, out, broker.Config{
+		MintRead:    failMint,
+		MintWrite:   failMint,
+		MintTimeout: mintTimeout,
+		Logger:      logger,
+		Diag:        &hintFirstWriter{w: diag, hint: hint},
+	})
+}
+
+// hintFirstWriter prepends a failure-specific hint line before the first
+// write. The broker writes to Diag only when a github.com get actually falls
+// back to the placeholder, which scopes the hint to exactly the invocations
+// where the failure is user-visible.
+type hintFirstWriter struct {
+	w       io.Writer
+	hint    string
+	printed bool
+}
+
+func (h *hintFirstWriter) Write(p []byte) (int, error) {
+	if !h.printed {
+		h.printed = true
+		fmt.Fprintln(h.w, h.hint)
+	}
+	return h.w.Write(p)
 }
 
 // runCredentialHelperWithConfig is the testable core of the credential
