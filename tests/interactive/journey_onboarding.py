@@ -55,7 +55,9 @@ import reinharness as H
 GOLDEN_NAME = "onboarding.txt"
 
 # Fixed, illustrative inputs so the golden is deterministic and portable.
-DEMO_HOSTNAME = "demo-laptop"          # pins the pre-filled "Name this machine" default
+# DEMO_HOSTNAME stays within the ~10-char App-name label budget so it is shown
+# verbatim (a longer hostname would be truncated — see appsetup.maxLabelLen).
+DEMO_HOSTNAME = "demo-box"             # pins the pre-filled "Name this machine" default
 DEMO_REPO = "octo-example/demo-repo"   # the repo the user "picks"; scaffolds the session
 
 # init flags that keep the run inert (no ~/.local/bin symlink, no network mint).

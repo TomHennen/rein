@@ -171,11 +171,16 @@ remediation path.
 ### Built in this pass (§4 machine label, §5 install-on-repo, §6 no-priv `doctor --fix`)
 
 - **§4/§8.1 machine label → prompt:** BUILT (see decision 1 above).
-- **§5 install-on-repo:** BUILT. After the session scaffold, init prints the
-  install deep-link (`https://github.com/apps/<slug>/installations/new` when the
-  slug is known; the generic installations URL otherwise). No `ssh -L` — a plain
-  URL visit grants the install. Auto-open only when a local display exists AND
-  the App isn't installed yet; headless/`--yes` print the link, never block.
+- **§5 install-on-repo:** BUILT (print-only). After the session scaffold, init
+  prints the install deep-link (`https://github.com/apps/<slug>/installations/new`
+  when the slug is known; the generic installations URL otherwise). No `ssh -L` —
+  a plain URL visit grants the install. **NOT auto-opened here:** init reaches
+  this step only on paths where the App is already installed (App creation
+  already opened its own browser; the fresh-manifest path is handled by
+  `printPostFlowSummary` and skipped), and rein can't cheaply tell whether the
+  App is installed on THIS session's specific repo without a network call — so
+  auto-opening on every local init would be noise. The printed link is the safe
+  default; headless sessions get an extra "open on any machine" hint.
   Impl: `internal/appsetup/installrepo.go`, wired in `cmd/rein/init.go`.
 - **§6 `doctor --fix` no-privilege tier:** BUILT (see decision 4 above). The
   consented-privileged tier is deliberately NOT built (open per decision 4).

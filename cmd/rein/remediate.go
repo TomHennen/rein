@@ -52,6 +52,12 @@ type remediation struct {
 	guide string       // exact command / guidance for the privileged & guide tiers (may be multi-line)
 }
 
+// remediationForFunc is the seam the driver calls, so tests can inject fake
+// remedies (with spy apply funcs) and exercise applyRemediations' consent
+// branches without real filesystem side effects. Production points at
+// remediationFor.
+var remediationForFunc = remediationFor
+
 // remediationFor maps a non-OK check to its remedy. ok=false when the check
 // is green or has no defined remediation (e.g. an informational warn).
 func remediationFor(r checkResult) (remediation, bool) {
@@ -185,14 +191,24 @@ func countNoPrivFixes(results []checkResult) int {
 // steps are ALWAYS printed and NEVER run, regardless of consent.
 func applyRemediations(results []checkResult, in *os.File, w io.Writer) (applied int) {
 	interactive := stdinIsTerminal(in)
+	confirm := func(q string) bool { return promptYesNo(w, in, q, true) }
+	return applyRemediationsCore(results, interactive, confirm, w)
+}
+
+// applyRemediationsCore is the I/O-free driver (the tty probe and the concrete
+// prompt are lifted out as `interactive` + `confirm`), so every consent branch
+// is unit-testable: --fix non-tty applies without prompting; interactive +
+// decline skips; a privileged remedy is print-only and its apply is never
+// invoked (it is nil — the switch never reaches it).
+func applyRemediationsCore(results []checkResult, interactive bool, confirm func(string) bool, w io.Writer) (applied int) {
 	for _, r := range results {
-		rem, ok := remediationFor(r)
+		rem, ok := remediationForFunc(r)
 		if !ok {
 			continue
 		}
 		switch rem.tier {
 		case remedyNoPriv:
-			if interactive && !promptYesNo(w, in, fmt.Sprintf("  apply fix — %s?", rem.what), true) {
+			if interactive && !confirm(fmt.Sprintf("  apply fix — %s?", rem.what)) {
 				fmt.Fprintf(w, "  [skip]   %s (declined)\n", r.name)
 				continue
 			}

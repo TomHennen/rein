@@ -1,8 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/TomHennen/rein/internal/config"
+	"github.com/TomHennen/rein/internal/ghsession"
+	"github.com/TomHennen/rein/internal/tokencache"
 )
 
 // TestRemediationTiers is the security-critical invariant for `doctor --fix`:
@@ -84,6 +92,114 @@ func TestSessionRemediationBranchesOnStatus(t *testing.T) {
 	}
 	if !strings.Contains(retired.guide, "issue:") {
 		t.Errorf("retired-field guide should tell the user to remove the issue: line, got %q", retired.guide)
+	}
+}
+
+// TestApplyRemediationsCore_Consent exercises the consent-sensitive driver
+// directly (the tty probe + concrete prompt are lifted out): --fix non-tty
+// applies the no-priv action WITHOUT prompting; a privileged remedy is
+// print-only and its apply is never invoked; the interactive-decline path
+// skips the action. These are the security-relevant branches.
+func TestApplyRemediationsCore_Consent(t *testing.T) {
+	prev := remediationForFunc
+	t.Cleanup(func() { remediationForFunc = prev })
+
+	var noPrivCalls int
+	remediationForFunc = func(r checkResult) (remediation, bool) {
+		switch r.name {
+		case "noPriv":
+			return remediation{tier: remedyNoPriv, what: "do safe thing",
+				apply: func() error { noPrivCalls++; return nil }}, true
+		case "priv":
+			// A privileged remedy carries NO apply func — the switch can
+			// never run it. guide is print-only.
+			return remediation{tier: remedyPrivileged, what: "sandbox", guide: "sudo do-it"}, true
+		}
+		return remediation{}, false
+	}
+	results := []checkResult{{"noPriv", statusFail, ""}, {"priv", statusFail, ""}}
+
+	// 1) NON-interactive (--fix, no tty): applies no-priv without prompting;
+	//    privileged is [manual] print-only; confirm is never consulted.
+	noPrivCalls = 0
+	var buf bytes.Buffer
+	confirmCalled := false
+	applied := applyRemediationsCore(results, false, func(string) bool { confirmCalled = true; return false }, &buf)
+	if confirmCalled {
+		t.Error("non-interactive run must NOT prompt (the flag is the consent; blocking would violate §7)")
+	}
+	if noPrivCalls != 1 {
+		t.Errorf("no-priv apply calls = %d, want 1", noPrivCalls)
+	}
+	if applied != 1 {
+		t.Errorf("applied = %d, want 1", applied)
+	}
+	if !strings.Contains(buf.String(), "[manual]") {
+		t.Errorf("privileged remedy must be [manual] print-only:\n%s", buf.String())
+	}
+
+	// 2) interactive + confirm YES: applies.
+	noPrivCalls = 0
+	buf.Reset()
+	if applied = applyRemediationsCore(results, true, func(string) bool { return true }, &buf); applied != 1 || noPrivCalls != 1 {
+		t.Errorf("interactive-yes: applied=%d calls=%d, want 1/1", applied, noPrivCalls)
+	}
+
+	// 3) interactive + DECLINE: the action is skipped, nothing runs.
+	noPrivCalls = 0
+	buf.Reset()
+	applied = applyRemediationsCore(results, true, func(string) bool { return false }, &buf)
+	if noPrivCalls != 0 {
+		t.Errorf("a declined fix must NOT run: apply calls = %d", noPrivCalls)
+	}
+	if applied != 0 {
+		t.Errorf("declined: applied = %d, want 0", applied)
+	}
+	if !strings.Contains(buf.String(), "[skip]") {
+		t.Errorf("a declined fix must print [skip]:\n%s", buf.String())
+	}
+}
+
+// TestClearStaleGhCache checks the "refresh a stale cache" no-priv remedy is
+// scoped so it can NEVER discard a usable token: it refuses a VALID cache,
+// removes a stale/expired one, and no-ops on an absent one.
+func TestClearStaleGhCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	stateDir, err := config.StateDir()
+	if err != nil {
+		t.Fatalf("state dir: %v", err)
+	}
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatalf("mkdir state: %v", err)
+	}
+	path := ghsession.ReadCachePath(stateDir)
+
+	// absent -> no-op, no error.
+	if err := clearStaleGhCache(); err != nil {
+		t.Errorf("absent cache: clearStaleGhCache err = %v, want nil", err)
+	}
+
+	// VALID -> must be preserved.
+	if err := tokencache.Write(path, tokencache.Entry{Token: "tok", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatalf("write valid: %v", err)
+	}
+	if err := clearStaleGhCache(); err != nil {
+		t.Errorf("valid cache: err = %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("a VALID cache must NOT be deleted, but it's gone: %v", err)
+	}
+
+	// STALE (expired) -> removed.
+	if err := tokencache.Write(path, tokencache.Entry{Token: "tok", ExpiresAt: time.Now().Add(-time.Hour)}); err != nil {
+		t.Fatalf("write stale: %v", err)
+	}
+	if err := clearStaleGhCache(); err != nil {
+		t.Errorf("stale cache: err = %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("a STALE cache must be removed, stat err = %v (want not-exist)", err)
 	}
 }
 

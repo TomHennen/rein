@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -30,14 +31,28 @@ func TestResolveMachineLabel_FlagWins(t *testing.T) {
 
 func TestResolveMachineLabel_NonInteractiveUsesHostname(t *testing.T) {
 	// No flag, no tty (or --yes): fall back to the sanitized hostname without
-	// prompting — never block (guardrail §7).
-	t.Setenv("REIN_MACHINE_HOSTNAME", "Toms-Laptop")
-	if got := resolveMachineLabel("", nonTTY(t), false); got != "toms-laptop" {
-		t.Errorf("hostname fallback = %q, want toms-laptop", got)
+	// prompting — never block (guardrail §7). Fixture kept within the label
+	// budget so it isn't truncated (the cap is exercised separately below).
+	t.Setenv("REIN_MACHINE_HOSTNAME", "Toms-Box")
+	if got := resolveMachineLabel("", nonTTY(t), false); got != "toms-box" {
+		t.Errorf("hostname fallback = %q, want toms-box", got)
 	}
 	// --yes also forces the non-interactive fallback even on a tty.
-	if got := resolveMachineLabel("", nonTTY(t), true); got != "toms-laptop" {
-		t.Errorf("--yes fallback = %q, want toms-laptop", got)
+	if got := resolveMachineLabel("", nonTTY(t), true); got != "toms-box" {
+		t.Errorf("--yes fallback = %q, want toms-box", got)
+	}
+}
+
+func TestResolveMachineLabel_LongHostnameTruncated(t *testing.T) {
+	// A long distinctive hostname is sanitized AND capped, so the eventual App
+	// name stays within GitHub's limit (the cap lives in appsetup, shared).
+	t.Setenv("REIN_MACHINE_HOSTNAME", "toms-really-long-macbook-pro")
+	got := resolveMachineLabel("", nonTTY(t), false)
+	if len(got) > 10 { // == appsetup.maxLabelLen (label budget)
+		t.Errorf("hostname label not capped: %q (len %d)", got, len(got))
+	}
+	if strings.HasSuffix(got, "-") {
+		t.Errorf("capped label ends in a hyphen: %q", got)
 	}
 }
 

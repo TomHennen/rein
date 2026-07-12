@@ -93,15 +93,15 @@ func TestBuildManifest_LabelWovenIntoName(t *testing.T) {
 	// A machine label lands between the role and the random guard:
 	// rein-<role>-<label>-<shortrand>. The guard is still present (global
 	// uniqueness), and the label is sanitized (onboarding-ux-design.md §4).
-	m, err := BuildManifest(RolePrimary, 1, "Tom's Laptop!")
+	m, err := BuildManifest(RolePrimary, 1, "Tom's PC!")
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
-	if !strings.HasPrefix(m.Name, "rein-primary-toms-laptop-") {
-		t.Errorf("name = %q, want rein-primary-toms-laptop-<rand> prefix", m.Name)
+	if !strings.HasPrefix(m.Name, "rein-primary-toms-pc-") {
+		t.Errorf("name = %q, want rein-primary-toms-pc-<rand> prefix", m.Name)
 	}
 	// The trailing guard is still 10 hex chars (40-bit uniqueness).
-	guard := strings.TrimPrefix(m.Name, "rein-primary-toms-laptop-")
+	guard := strings.TrimPrefix(m.Name, "rein-primary-toms-pc-")
 	if len(guard) != 10 {
 		t.Errorf("guard = %q (len %d), want 10 hex chars", guard, len(guard))
 	}
@@ -125,16 +125,49 @@ func TestBuildManifest_EmptyLabelKeepsLabellessShape(t *testing.T) {
 	}
 }
 
+func TestBuildManifest_NameWithinGitHubLimit(t *testing.T) {
+	// A long distinctive hostname must be truncated so the FULL App name
+	// (rein-<role>-<label>-<10hex>) stays within GitHub's 34-char cap for
+	// BOTH roles — otherwise GitHub rejects it browser-side at App creation.
+	long := "toms-really-long-macbook-pro-hostname-2024"
+	for _, r := range []Role{RolePrimary, RoleAudit} {
+		m, err := BuildManifest(r, 1, long)
+		if err != nil {
+			t.Fatalf("build(%s): %v", r, err)
+		}
+		if len(m.Name) > githubAppNameMaxLen {
+			t.Errorf("role %s: name %q is %d chars, exceeds GitHub's %d-char cap",
+				r, m.Name, len(m.Name), githubAppNameMaxLen)
+		}
+	}
+	// A label within the (small) budget survives intact — no truncation.
+	// The budget is only ~10 chars (GitHub's 34-cap minus the fixed parts),
+	// so `toms-macbook` (12) truncates but a shorter `toms-mbp` (8) does not.
+	if maxLabelLen < len("toms-mbp") {
+		t.Fatalf("budget shrank below the intact-case fixture (%d)", maxLabelLen)
+	}
+	m, err := BuildManifest(RolePrimary, 1, "toms-mbp")
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if !strings.HasPrefix(m.Name, "rein-primary-toms-mbp-") {
+		t.Errorf("a within-budget label was altered: %q", m.Name)
+	}
+}
+
 func TestSanitizeMachineLabel(t *testing.T) {
+	// Short fixtures so these exercise the sanitization RULES (lowercase,
+	// apostrophe-drop, separator collapse) without tripping the length cap,
+	// which is asserted separately below and in the manifest name test.
 	cases := map[string]string{
-		"Tom's Laptop":     "toms-laptop",
-		"ubuntu":           "ubuntu",
-		"  MyBox  ":        "mybox",
-		"a__b--c":          "a-b-c",
-		"!!!":              "",
-		"":                 "",
-		"UPPER":            "upper",
-		"work.vm.internal": "work-vm-internal",
+		"Tom's PC":  "toms-pc",
+		"ubuntu":    "ubuntu",
+		"  MyBox  ": "mybox",
+		"a__b--c":   "a-b-c",
+		"!!!":       "",
+		"":          "",
+		"UPPER":     "upper",
+		"work.vm":   "work-vm",
 	}
 	for in, want := range cases {
 		if got := SanitizeMachineLabel(in); got != want {

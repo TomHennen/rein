@@ -47,19 +47,22 @@ func InstallOnRepoURL(configDir string) (url string, haveSlug bool) {
 	return strings.TrimRight(base, "/") + "/installations/new", true
 }
 
-// OfferInstallOnRepo prints the install-on-repo step to w and, when
-// allowAutoOpen is set AND a local browser is available (not a headless SSH
-// session), best-effort auto-opens the link. It NEVER blocks: on a headless
-// session or when auto-open is disallowed it prints the link and returns.
+// OfferInstallOnRepo PRINTS the install-on-repo step to w. It is print-only
+// by design — it does NOT auto-open a browser.
 //
-// allowAutoOpen lets the caller suppress the browser launch when it would be
-// noise — e.g. on the env-managed path the App is already installed, so init
-// prints the link as an informational "install on more repos" pointer rather
-// than popping a browser on every run.
+// Why no auto-open: the App-creation step already auto-opens its own browser
+// (runOneStep), and init only reaches THIS step on paths where the App is
+// already installed (the env/state path resolves an installation id, and the
+// fresh-manifest path is handled by printPostFlowSummary and skipped here).
+// rein can't cheaply tell whether the App is installed on THIS session's
+// specific repo without a network call, so auto-opening the install page on
+// every local init would be noise. The printed link is the safe default; the
+// user visits it if they still need to grant the install (no ssh -L needed —
+// §5). A headless session gets an extra "open on any machine" hint.
 //
 // The message always contains the literal phrase "visit this URL" and a real
-// link, so a headless run still surfaces something actionable.
-func OfferInstallOnRepo(w io.Writer, configDir, repo string, allowAutoOpen bool) {
+// link, so even a headless run surfaces something actionable.
+func OfferInstallOnRepo(w io.Writer, configDir, repo string) {
 	url, haveSlug := InstallOnRepoURL(configDir)
 
 	fmt.Fprintln(w, "  install on repo:")
@@ -73,17 +76,7 @@ func OfferInstallOnRepo(w io.Writer, configDir, repo string, allowAutoOpen bool)
 	}
 	fmt.Fprintln(w, "    visit this URL in your browser:")
 	fmt.Fprintf(w, "      %s\n", url)
-
-	hi := detectHeadless()
-	if hi.headless {
+	if detectHeadless().headless {
 		fmt.Fprintln(w, "    (no local browser detected; open the link above on any machine — no ssh -L needed)")
-		return
 	}
-	if !allowAutoOpen {
-		return
-	}
-	fmt.Fprintln(w, "    opening your browser…")
-	// openBrowser is best-effort and non-blocking (Start, not Wait); the URL
-	// is already printed above so a launch failure is harmless.
-	_ = openBrowser(url, w)
 }

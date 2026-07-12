@@ -74,12 +74,22 @@ func BuildManifest(r Role, port int, label string) (Manifest, error) {
 	}, nil
 }
 
-// maxLabelLen caps the sanitized machine label. GitHub App names are
-// limited (34 chars for the slug); `rein-primary-` (13) + `-<10hex>` (11)
-// already consume 24, so the label must stay short to leave the name
-// valid. 20 is comfortably under any per-segment concern and keeps the
-// human-recognizable head of a longer hostname.
-const maxLabelLen = 20
+// GitHub App names are capped at 34 characters (the name is the public
+// github.com/apps/<slug> URL). The name is rein-<role>-<label>-<guard>, so
+// the label's budget is 34 minus the fixed parts. maxLabelLen is COMPUTED
+// from that budget (not a magic number) using the LONGEST role, so it stays
+// correct if the prefix, role names, or guard length ever change — and so a
+// common distinctive hostname like `toms-macbook` isn't truncated into a
+// name GitHub rejects browser-side at App creation.
+const (
+	githubAppNameMaxLen = 34
+	appNameGuardLen     = 10 // hex(randomSuffix): 5 bytes => 10 chars
+)
+
+// maxLabelLen = 34 - len("rein-") - len("primary") - 2 hyphens (role|label,
+// label|guard) - 10 guard = 10. Spelled out as a constant expression (all
+// operands are constants) so the compiler recomputes it if any part moves.
+const maxLabelLen = githubAppNameMaxLen - len("rein-") - len(string(RolePrimary)) - len("--") - appNameGuardLen
 
 var (
 	apostropheRe = regexp.MustCompile(`['’` + "`" + `]`)

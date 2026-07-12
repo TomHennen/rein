@@ -380,22 +380,17 @@ func runInit(args []string) error {
 		fmt.Println("  alias:      not installed (opt-in; enable with `rein init --alias`)")
 	}
 
-	// Install-on-repo (onboarding-ux-design.md §5). Offer the deep-link that
+	// Install-on-repo (onboarding-ux-design.md §5). Print the deep-link that
 	// installs the App on the session's repo — the step that makes doctor's
 	// "install-id not cached" go away. No ssh -L needed (install grants take
-	// no callback), so any browser on any machine works; the printed link is
-	// the baseline and auto-open is a bonus when a local display exists.
-	//
-	// Auto-open is allowed only when the App isn't installed yet (appCfgPtr
-	// nil = manifest path, install-id unknown) so the env-managed path — where
-	// REIN_APP_INSTALLATION_ID already resolves — prints the link as an
-	// informational pointer without popping a browser on every init.
+	// no callback), so any browser on any machine works; print-only (see
+	// OfferInstallOnRepo for why init doesn't auto-open here).
 	//
 	// Skip entirely on a fresh manifest run: RunManifestFlow's
 	// printPostFlowSummary already printed the per-App install deep-links
 	// (Primary + Audit), so this would just duplicate them.
 	if !ranManifest {
-		appsetup.OfferInstallOnRepo(os.Stdout, configDir, sessionRepo, appCfgPtr == nil)
+		appsetup.OfferInstallOnRepo(os.Stdout, configDir, sessionRepo)
 	}
 
 	// Sandbox-stack health (onboarding-ux-design.md decision 2 / §3 step 1).
