@@ -71,6 +71,15 @@ func LoadAppConfig() (githubapp.Config, keystore.Keystore, error) {
 	if err != nil {
 		return githubapp.Config{}, nil, fmt.Errorf("REIN_APP_INSTALLATION_ID not an int64: %w", err)
 	}
+	// Reject 0 (and negatives) explicitly. githubapp uses 0 as the "absent"
+	// sentinel — NewClient rejects it, and ResolveApp's SourceState path
+	// returns 0 to mean "uncached, go fetch it". An env var literally set to
+	// 0 is a misconfiguration, not an id; letting it through would make
+	// SourceEnv's "InstallationID is always non-zero" contract a lie and
+	// silently collide with the sentinel. Fail closed at the source.
+	if installationID <= 0 {
+		return githubapp.Config{}, nil, fmt.Errorf("REIN_APP_INSTALLATION_ID must be a positive installation id, got %d", installationID)
+	}
 	slug := os.Getenv("REIN_TEST_REPO_A")
 	_, repoName, ok := strings.Cut(slug, "/")
 	if !ok || repoName == "" {

@@ -92,7 +92,7 @@ func runSandboxed(cmdline []string) (int, error) {
 	}
 	appCfg.RepoNames = sess.BareRepoNames()
 	ctx, cancel := context.WithTimeout(context.Background(), installIDTimeout)
-	err = resolveAndCacheInstallID(ctx, sess, fetchRepoInstallationID)
+	err = resolveAndCacheInstallID(ctx, sess, newAppInstallProber)
 	cancel()
 	if err != nil {
 		return 1, err

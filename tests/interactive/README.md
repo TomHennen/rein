@@ -222,6 +222,35 @@ python3 tests/interactive/journey_write_ceremony.py    # one journey
 tests/interactive/run-journeys.sh                      # ALL journeys: regenerate goldens + report drift
 ```
 
+### `journey_app_not_installed.py` — MISCONFIG: App not installed on a session repo (#68)
+
+A **journey** (not swept by `run.sh`, which only discovers `test_*.py`): it both
+SHOWS and ASSERTS the #68 fix — the D4 install-coverage check that early-returned
+on the `REIN_APP_*` env path, so an uncovered session repo used to launch happily
+and fail *inside* the agent. Two legs, both a real `rein run --direct` (the
+coverage gate runs before the mode split, so `--direct` exercises it without the
+sandbox stack):
+
+- **misconfig:** a session naming a fictional `<owner>/definitely-not-installed`
+  (a FIXED name — stable-by-construction, so not normalized; does not exist and
+  404s identically to "App not installed on repo", so it touches **no real repo**
+  — hard-constraint #1 holds). rein must refuse at LAUNCH, exit 1,
+  and the refusal must name the repo, name the App (slug), and carry the
+  App-specific `.../installations/new` deep-link. The inner command never runs.
+- **control:** a normal single-repo session on the throwaway clears the gate and
+  the inner command actually runs, exit 0.
+
+Run it: `python3 tests/interactive/journey_app_not_installed.py`. A normalized
+golden capture lives at `golden/app_not_installed.txt`.
+
+> **Journey-catalogue note.** PR #72 (branch `e2e-suite-doctrine`) rewrites this
+> README into a numbered journey catalogue where this is **row 10, "Misconfig: App
+> not installed on a session repo"** — currently a **GAP**. This file is the demo
+> that row points to; **row 10 flips GAP → COVERED when #72 and this branch both
+> land.** The table itself isn't on this branch, so it's reconciled at merge (see
+> the PR body). When #72's golden-transcript helpers land, this journey should
+> adopt them (its normalization is deliberately simple and local until then).
+
 ## Disposable branches & cleanup
 
 Each write test creates a clearly-timestamped `reintest-<UTC>-<rand>` branch on
@@ -248,6 +277,12 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
   `normalize_for_compare` is idempotent on it. Runs in the sweep and standalone.
 - `journey_write_ceremony.py` + `golden/write_ceremony.txt` — journey #2 and its
   checked-in RAW golden transcript (not swept by `run.sh`).
+- `journey_app_not_installed.py` + `golden/app_not_installed.txt` — the
+  #68 misconfig journey (row 10; NOT swept; run it deliberately) and its RAW
+  golden transcript.
+- `demo-transcripts/` — reference captures for the non-journey demos
+  (`demo_pat_leak.sh` and the `cmd/rein` Go demos). These are static docs, not
+  normalize-on-compare goldens, so they live OUTSIDE `golden/`.
 - `run-journeys.sh` — the on-demand runner: compare each journey to its golden
   (normalized); `REIN_UPDATE_GOLDEN=1` to adopt, `--normalized` to view the lens.
 - `recipes/` — per-test setup scripts for the gated tests (e.g.

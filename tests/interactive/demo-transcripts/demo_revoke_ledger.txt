@@ -1,0 +1,41 @@
+# REFERENCE TRANSCRIPT — issue #67 (write-token ledger dedupe + revoke eventual-consistency)
+#
+# A static, human-reviewable capture of two Go demo tests' STRUCTURED reports —
+# NOT a normalize-on-compare golden (a Go test's t.Log output is a report, not a
+# shell terminal; test:line prefixes + timing are normalized out), so it lives in
+# demo-transcripts/ (outside golden/, which is journey RAW goldens only).
+# Two captures, both live/real:
+
+## (A) dedupe: the exit-revoke summary reads 'revoked 1 of 1', not '1 of 6'
+##     go test ./cmd/rein -run TestDemo_RevokeLedgerDedupe -v
+
+=== RUN   TestDemo_RevokeLedgerDedupe
+    demo_revoke_ledger_test.go: 
+    demo_revoke_ledger_test.go: issue #67 — the write-token ledger dedupe
+    demo_revoke_ledger_test.go: 
+    demo_revoke_ledger_test.go:   ledger entries written this run : 6 (all the SAME memoized token)
+    demo_revoke_ledger_test.go:   distinct tokens                 : 1
+    demo_revoke_ledger_test.go:   revoke() calls made             : 1
+    demo_revoke_ledger_test.go: 
+    demo_revoke_ledger_test.go:   BEFORE #67 : revoked 1 of 6 write token(s) on exit   (+5 '404 already gone' warnings)
+    demo_revoke_ledger_test.go:                ^ RECORDED pre-fix observation from the live run (not re-executed here;
+    demo_revoke_ledger_test.go:                  reconstructing the old no-dedup loop would be over-building)
+    demo_revoke_ledger_test.go:   AFTER  #67 : rein: revoked 1 of 1 write token(s) on exit   <- LIVE, captured from this run's stderr
+    demo_revoke_ledger_test.go: 
+--- PASS: TestDemo_RevokeLedgerDedupe (0.00s)
+PASS
+ok  	github.com/TomHennen/rein/cmd/rein	0.002s
+
+## (B) eventual-consistency: revoke WORKS but is not synchronous (poll, not sample-once)
+##     REIN_LIVE=1 go test ./internal/githubapp -run TestLiveRevokeTokenKillsTheToken -v
+##     (repo name = REIN_TEST_REPO_A throwaway; GETs only, no write; token len/expiry vary)
+
+=== RUN   TestLiveRevokeTokenKillsTheToken
+    live_revoke_test.go:82: minted write token (len=NN) expiring <TS> (1h0m0s from now)
+    live_revoke_test.go:91: PRE-REVOKE : GET /repos/<THROWAWAY> = 200 (token is live)
+    live_revoke_test.go:97: REVOKE     : DELETE /installation/token = 204 (accepted)
+    live_revoke_test.go:121: POST-REVOKE: GET /repos/<THROWAWAY> = 401 (token is DEAD)
+    live_revoke_test.go:130: RE-REVOKE  : DELETE /installation/token on the dead token = success (404 mapped to already-revoked)
+--- PASS: TestLiveRevokeTokenKillsTheToken (N.NNs)
+PASS
+ok  	github.com/TomHennen/rein/internal/githubapp	(cached)

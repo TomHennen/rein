@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -101,10 +102,21 @@ func main() {
 	// internally forks itself for some operations; the child would
 	// otherwise mint+revoke its own token, doubling API pressure per
 	// user-visible gh command. Skip and exec directly.
+	//
+	// Carry the parent shim's GH_TOKEN through (that is the whole point of
+	// the re-entry guard) but rebuild the rest from baseEnv, so the OTHER
+	// three credential vars are still stripped. On the legitimate path this
+	// is a no-op — the parent already scrubbed them. It matters only when
+	// the guard is set with a stale or hand-crafted environment, where it
+	// keeps three of the four vars from riding through unexamined.
 	if os.Getenv(reentryEnv) != "" {
 		logger.Printf("re-entrant invocation detected (%s set); execing real gh directly", reentryEnv)
+		env := baseEnv()
+		if parentToken := os.Getenv("GH_TOKEN"); parentToken != "" {
+			env = append(env, "GH_TOKEN="+parentToken)
+		}
 		argv := append([]string{realGh}, os.Args[1:]...)
-		if err := syscall.Exec(realGh, argv, os.Environ()); err != nil {
+		if err := syscall.Exec(realGh, argv, env); err != nil {
 			fmt.Fprintf(os.Stderr, "rein-gh: exec %s: %v\n", realGh, err)
 			os.Exit(127)
 		}
@@ -113,18 +125,169 @@ func main() {
 	switch cls {
 	case "write":
 		os.Exit(runWrite(realGh, os.Args[1:], stateDir, logger))
+	case "local":
+		runLocalAndExec(realGh, os.Args[1:], logger)
 	default: // "read" or "unknown"
 		runReadAndExec(realGh, os.Args[1:], stateDir, logger)
 	}
 }
 
+// runLocalAndExec handles the subcommands that manage gh's OWN local state
+// rather than talking to GitHub on rein's behalf: auth, config, alias,
+// extension. They get baseEnv() — every ambient credential still stripped, so
+// nothing leaks — but NO GH_TOKEN of any kind, not even the placeholder.
+//
+// Injecting a token here was a bug (found in review of #57): gh 2.67 refuses
+// to run `gh auth login`/`logout` while GH_TOKEN is set —
+//
+//	"The value of the GH_TOKEN environment variable is being used for
+//	 authentication. To have GitHub CLI store credentials instead, first
+//	 clear the value from the environment."
+//
+// — so the fail-closed placeholder blocked the exact command a user needs to
+// REPAIR a setup where rein cannot mint. The recovery path must stay open.
+//
+// It does not stay open for the AGENT. When REIN_RUN_ID is set we are inside a
+// `rein run`, so the caller is the agent, not the human, and the whole `auth`
+// noun is refused: see refuseAgentAuth.
+func runLocalAndExec(realGh string, args []string, logger *log.Logger) {
+	if noun := firstNoun(args); noun == "auth" && os.Getenv("REIN_RUN_ID") != "" {
+		refuseAgentAuth(os.Stderr, args)
+		logger.Printf("local tier: refused `gh %s` inside a rein run (agent must not manage the developer's gh credentials)", argSummary(args))
+		os.Exit(1)
+	}
+	logger.Printf("local tier: execing gh with no GH_TOKEN (local/credential-management subcommand)")
+	argv := append([]string{realGh}, args...)
+	if err := syscall.Exec(realGh, argv, baseEnv()); err != nil {
+		fmt.Fprintf(os.Stderr, "rein-gh: exec %s: %v\n", realGh, err)
+		os.Exit(127)
+	}
+}
+
+// refuseAgentAuth explains why `gh auth ...` is denied inside a `rein run`.
+//
+// The whole noun is refused, not just the mutating verbs, because every verb
+// under it either mutates the developer's credential store or reads it back:
+//
+//   - login / logout / refresh: re-authenticate or de-authenticate the HUMAN's
+//     gh install. An agent acquiring the developer's login is the thing rein
+//     exists to prevent.
+//   - setup-git: rewrites git's credential.helper — literal broker
+//     displacement (design §5.3, TM-G8).
+//   - token: PRINTS the token gh would use. Verified on gh 2.67. rein run
+//     scrubs the ambient token vars from the agent's env, so gh falls back to
+//     hosts.yml and prints the developer's stored PAT straight to the agent's
+//     stdout. That is a direct exfil of the credential the scope ceiling
+//     exists to replace.
+//   - status (--show-token): same exfil, one flag away.
+//
+// There is no legitimate agent use for any of them: an agent's credentials
+// come from rein, never from gh's keyring. Shape B limit, unchanged: a
+// determined agent can invoke the real gh directly and reach hosts.yml. This
+// closes the shim path, which is the path a well-behaved (or
+// prompt-injected-but-not-adversarial) agent actually takes.
+func refuseAgentAuth(w io.Writer, args []string) {
+	fmt.Fprintf(w, "rein-gh: refusing `gh %s` inside a rein run.\n", argSummary(args))
+	fmt.Fprintln(w, "         `gh auth` manages the DEVELOPER's GitHub credentials: it can log in or out as")
+	fmt.Fprintln(w, "         them, print their stored token, or repoint git's credential helper away from")
+	fmt.Fprintln(w, "         rein. An agent has no business doing any of that — your credentials are brokered")
+	fmt.Fprintln(w, "         by rein and scoped to this session's issue and repos.")
+	fmt.Fprintln(w, "         If you need different access, ask the human to change the session.")
+}
+
+// firstNoun returns the first non-option token in args (the gh noun), or "".
+func firstNoun(args []string) string {
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			return a
+		}
+	}
+	return ""
+}
+
+// tokenEnvVars is the canonical set of ambient GitHub credential env vars.
+// It MUST stay in sync with cmd/rein/run.go's scrub list: that is what
+// `rein run` strips from a wrapped agent's environment, and the shim has to
+// strip exactly the same set for the scope ceiling to hold when the shim is
+// invoked OUTSIDE `rein run` (issue #57).
+var tokenEnvVars = []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}
+
+// baseEnv returns the process environment with every ambient GitHub
+// credential var REMOVED. Every exec of the real gh must start from this,
+// never from a raw os.Environ() (issue #57).
+//
+// Before this existed, each leg that failed to mint appended nothing to
+// os.Environ(), so a GH_TOKEN/GITHUB_TOKEN exported in the developer's own
+// shell was inherited straight through to gh: a write that rein could not
+// broker then executed with the user's full-scope PAT, defeating the whole
+// scope ceiling. (`rein run` children and sandboxed runs were never exposed
+// — run.go scrubs these vars and the srt env allowlist drops them. The
+// exposed case is the shim on PATH outside `rein run`.)
+//
+// Removing rather than overwriting also closes a subtler hazard, and the
+// mechanism differs between this file's two exec paths, which is exactly why
+// "just append and let the last one win" was never safe:
+//
+//   - syscall.Exec (the read/local/re-entry paths) hands the slice to execve
+//     untouched, duplicate keys and all. Go's os.Getenv is FIRST-wins, so an
+//     inherited GH_TOKEN earlier in the block SHADOWED the minted token we
+//     appended after it: the read tier's success leg was serving reads with
+//     the developer's ambient PAT while looking rein-scoped.
+//   - exec.Command (the write path) runs dedupEnv before execve, which keeps
+//     the LAST occurrence — so the same append DID override there.
+//
+// One append, two opposite outcomes. Stripping first collapses both to a
+// single entry that is unambiguously ours, whichever exec path runs.
+func baseEnv() []string {
+	src := os.Environ()
+	out := make([]string, 0, len(src))
+	for _, kv := range src {
+		name, _, ok := strings.Cut(kv, "=")
+		if ok && slices.Contains(tokenEnvVars, name) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+// placeholderToken is the deliberately-invalid GH_TOKEN handed to gh on any
+// leg where rein declined or failed to broker a real one.
+const placeholderToken = "rein-placeholder-denied"
+
+// denyEnv is the fail-closed environment: no inherited GitHub credential of
+// any kind, plus a deliberately-invalid GH_TOKEN so gh fails LOUDLY instead
+// of silently falling back to the user's hosts.yml login. This mirrors the
+// credential helper's TM-G8 placeholder contract — always hand the tool
+// SOMETHING that visibly fails, never nothing.
+//
+// Shape B limit (unchanged): a determined agent can `unset GH_TOKEN` and
+// re-run, reaching hosts.yml. This is a fail-closed gate for well-behaved
+// agents; adversarial bypass requires the Shape A sandbox.
+func denyEnv() []string {
+	env := baseEnv()
+	env = append(env, "GH_TOKEN="+placeholderToken)
+	// Short-circuit the shim's re-entry guard on the denial path too, so gh
+	// forking itself internally doesn't re-trigger the prompt and emit a
+	// duplicate helpful-stderr message.
+	env = append(env, reentryEnv+"=1")
+	return env
+}
+
 // runReadAndExec mints (or reads from cache) a read-tier token, sets
 // GH_TOKEN, and execs the real gh. Does not return on success.
+//
+// On a read-tier mint failure it fails CLOSED (issue #57): gh is exec'd with
+// denyEnv, never with the user's inherited credentials. See readTierToken.
 func runReadAndExec(realGh string, args []string, stateDir string, logger *log.Logger) {
 	token := readTierToken(stateDir, logger)
-	env := os.Environ()
+	var env []string
 	if token != "" {
-		env = append(env, "GH_TOKEN="+token, reentryEnv+"=1")
+		env = append(baseEnv(), "GH_TOKEN="+token, reentryEnv+"=1")
+	} else {
+		fmt.Fprintln(os.Stderr, "rein-gh: could not broker a read-tier token; running gh with a placeholder credential.")
+		fmt.Fprintln(os.Stderr, "         gh will fail to authenticate rather than silently using your own GitHub credentials. Run `rein doctor`.")
+		env = denyEnv()
 	}
 	argv := append([]string{realGh}, args...)
 	if err := syscall.Exec(realGh, argv, env); err != nil {
@@ -133,10 +296,18 @@ func runReadAndExec(realGh string, args []string, stateDir string, logger *log.L
 	}
 }
 
-// readTierToken returns a cached or freshly-minted read-only gh token,
-// or "" if config / mint fails. Returning "" lets gh fall back to its
-// own hosts.yml-based auth and surface its own error rather than a
-// shim-level error.
+// readTierToken returns a cached or freshly-minted read-only gh token, or ""
+// if config / mint fails. "" means the caller MUST fail closed (denyEnv).
+//
+// "" used to mean "exec gh with the untouched environment and let it fall
+// back to its own auth". That was the read-tier half of issue #57: a read the
+// operator believes is rein-scoped (read-only, session repos only) instead
+// executed with their full-scope PAT, so a mint failure — or an agent that
+// induced one — silently widened the read ceiling from "this session's repos"
+// to "everything the human can see". The scope ceiling is the product;
+// degrading out of it silently is the bug, whichever tier it happens on. gh
+// still surfaces a clear auth error (the stated intent of the old behavior);
+// it just no longer succeeds with the wrong credential first.
 func readTierToken(stateDir string, logger *log.Logger) string {
 	appCfg, ks, _, err := loadAppCfgWithSession(logger)
 	if err != nil {
@@ -185,32 +356,23 @@ func loadAppCfgWithSession(logger *log.Logger) (githubapp.Config, keystore.Keyst
 	return appCfg, ks, sess, nil
 }
 
-// execGhWithoutToken is the denial path: fork real gh with a
-// deliberately-invalid GH_TOKEN so gh doesn't fall back to the user's
-// hosts.yml and silently succeed with the user's PAT. This mirrors the
-// credential helper's TM-G8 placeholder behavior: always emit
-// SOMETHING the operator can see fail, rather than no token at all.
+// execGhWithoutToken is the denial path: fork real gh with denyEnv — every
+// ambient GitHub credential stripped, plus a deliberately-invalid GH_TOKEN so
+// gh doesn't fall back to the user's hosts.yml and silently succeed with
+// their PAT. This mirrors the credential helper's TM-G8 placeholder behavior:
+// always emit SOMETHING the operator can see fail, rather than no token at
+// all.
 //
-// We also empty GITHUB_TOKEN so tools that read it as a fallback don't
-// pick up a different value from the inherited env.
-//
-// Shape B limit: a determined agent could `unset GH_TOKEN` itself and
-// re-run, hitting hosts.yml. This is a fail-closed gate for well-behaved
-// agents; adversarial bypass requires Shape A sandbox. Documented in
-// internal/ui/grant's package doc.
+// It previously appended the placeholder to a raw os.Environ() and merely
+// blanked GITHUB_TOKEN, leaving GH_ENTERPRISE_TOKEN / GITHUB_ENTERPRISE_TOKEN
+// inherited and relying on last-key-wins to mask GH_TOKEN. denyEnv removes
+// all four outright (issue #57).
 func execGhWithoutToken(realGh string, args []string) int {
-	env := os.Environ()
-	env = append(env, "GH_TOKEN=rein-placeholder-denied")
-	env = append(env, "GITHUB_TOKEN=")
-	// Short-circuit the shim's re-entry guard on the denial path too,
-	// so gh forking itself internally doesn't re-trigger the prompt
-	// and emit a duplicate helpful-stderr message.
-	env = append(env, reentryEnv+"=1")
 	cmd := exec.Command(realGh, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = env
+	cmd.Env = denyEnv()
 	return exitCodeFromRunErr(cmd.Run())
 }
 
@@ -273,10 +435,11 @@ func envInt(name string) int {
 }
 
 // runWrite mints a fresh write-tier token (no cache), forks the real gh
-// with GH_TOKEN set, waits for it to exit, best-effort revokes the
-// token, and returns gh's exit code. On mint failure we still exec gh
-// (without GH_TOKEN) so the user gets gh's "needs auth" error instead
-// of a shim error.
+// with GH_TOKEN set, waits for it to exit, best-effort revokes the token,
+// and returns gh's exit code. On ANY failure to broker that token (config,
+// client, mint) it still runs gh, but with the fail-closed denial env — so
+// the user gets gh's "needs auth" error instead of a shim error, and never a
+// write executed with their own ambient PAT (issue #57).
 func runWrite(realGh string, args []string, stateDir string, logger *log.Logger) int {
 	appCfg, ks, sess, cfgErr := loadAppCfgWithSession(logger)
 	var token string
@@ -322,16 +485,16 @@ func runWrite(realGh string, args []string, stateDir string, logger *log.Logger)
 	}
 
 	if cfgErr != nil {
-		logger.Printf("write tier: %v; execing gh without GH_TOKEN", cfgErr)
+		logger.Printf("write tier: %v; execing gh with the denial env", cfgErr)
 	} else if c, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole); err != nil {
-		logger.Printf("write tier: NewClient failed: %v; execing gh without GH_TOKEN", err)
+		logger.Printf("write tier: NewClient failed: %v; execing gh with the denial env", err)
 	} else {
 		client = c
 		ctx, cancel := context.WithTimeout(context.Background(), mintTimeout)
 		t, expiresAt, err := client.MintGhSessionToken(ctx)
 		cancel()
 		if err != nil {
-			logger.Printf("write tier: mint failed: %v; execing gh without GH_TOKEN", err)
+			logger.Printf("write tier: mint failed: %v; execing gh with the denial env", err)
 		} else {
 			token = t
 			logger.Printf("write tier: mint succeeded expires_at=%s ttl=%s token_len=%d",
@@ -341,10 +504,19 @@ func runWrite(realGh string, args []string, stateDir string, logger *log.Logger)
 		}
 	}
 
-	env := os.Environ()
-	if token != "" {
-		env = append(env, "GH_TOKEN="+token, reentryEnv+"=1")
+	// Every leg that reaches here without a token — cfg load failed, client
+	// construction failed, mint failed — must fail CLOSED, exactly like the
+	// gate-denied legs above. These previously fell through to exec.Command
+	// with a raw os.Environ(), so a GH_TOKEN exported in the developer's
+	// shell executed the write with their full-scope PAT: the rein-gh half of
+	// issue #57. Nothing was minted here, so there is no token to revoke.
+	if token == "" {
+		fmt.Fprintln(os.Stderr, "rein-gh: could not broker a write-tier token; running gh with a placeholder credential.")
+		fmt.Fprintln(os.Stderr, "         gh will fail to authenticate rather than silently using your own GitHub credentials. Run `rein doctor`.")
+		return execGhWithoutToken(realGh, args)
 	}
+
+	env := append(baseEnv(), "GH_TOKEN="+token, reentryEnv+"=1")
 	cmd := exec.Command(realGh, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -352,8 +524,10 @@ func runWrite(realGh string, args []string, stateDir string, logger *log.Logger)
 	cmd.Env = env
 	runErr := cmd.Run()
 
-	// Revoke the write token regardless of gh's exit status.
-	if token != "" && client != nil {
+	// Revoke the write token regardless of gh's exit status. (token is
+	// non-empty here by the fail-closed return above; client is non-nil
+	// whenever a token was minted.)
+	if client != nil {
 		revokeCtx, cancel := context.WithTimeout(context.Background(), mintTimeout)
 		if err := client.RevokeToken(revokeCtx, token); err != nil {
 			logger.Printf("write tier: revoke failed (best-effort): %v", err)
@@ -437,10 +611,16 @@ func openLog(stateDir string) (*log.Logger, func(), error) {
 // listed defaults to "read" — safer if we misclassify (the operation
 // will 403 cleanly rather than silently use a wider token).
 //
-// Source: `gh --help` recursive walk against gh 2.67 (the version
-// installed in this VM). Local-only operations (alias, config,
-// extension install, auth login, browse) are intentionally NOT here —
-// they ignore GH_TOKEN anyway, so "read" is fine.
+// Source: `gh --help` recursive walk against gh 2.67 (the version installed
+// in this VM). Local/credential-management operations (auth, config, alias,
+// extension) are intentionally NOT here — but NOT because "they ignore
+// GH_TOKEN anyway, so read is fine", which is what this comment used to claim
+// and is demonstrably FALSE: `gh auth login` and `gh auth logout` on gh 2.67
+// REFUSE to run while GH_TOKEN is set, and `gh auth token` prints whatever
+// token gh would use. That stale claim is what let the read tier's
+// fail-closed placeholder block the user's own recovery command. They now
+// route to their own "local" tier (classify → runLocalAndExec): no token
+// injected at all, ambient credentials still stripped.
 var writeSubcommands = map[[2]string]bool{
 	{"issue", "create"}:   true,
 	{"issue", "edit"}:     true,
@@ -536,7 +716,30 @@ var writeSubcommands = map[[2]string]bool{
 	{"run", "delete"}: true,
 }
 
-// classify returns "read", "write", or "unknown" for an argv (without
+// localOnlyNouns are the gh nouns that manage gh's OWN local state instead of
+// acting on GitHub with rein's credential. They route to the "local" tier:
+// exec'd with a scrubbed env and NO GH_TOKEN (see runLocalAndExec).
+//
+//   - auth:      credential management. Injecting a token BLOCKS `gh auth
+//     login`/`logout` outright on gh 2.67, i.e. the user's own
+//     recovery command. Refused entirely inside a `rein run`
+//     (refuseAgentAuth).
+//   - config:    gh's own settings file. Never touches GitHub.
+//   - alias:     gh's own alias file. Never touches GitHub.
+//   - extension: install/list gh extensions.
+//
+// `browse` is deliberately NOT here despite the old comment grouping it with
+// these: it resolves the repo (and can hit the API to do so) and is not
+// credential management, so it stays on the read tier where its behavior is
+// unchanged.
+var localOnlyNouns = map[string]bool{
+	"auth":      true,
+	"config":    true,
+	"alias":     true,
+	"extension": true,
+}
+
+// classify returns "read", "write", "local", or "unknown" for an argv (without
 // the leading "gh"). Unknown defaults to read at the caller; this
 // function reports it separately mostly for logging.
 //
@@ -553,6 +756,9 @@ func classify(args []string) string {
 		return "unknown"
 	}
 	noun := args[0]
+	if localOnlyNouns[noun] {
+		return "local"
+	}
 	if noun == "api" {
 		return classifyAPI(args[1:])
 	}

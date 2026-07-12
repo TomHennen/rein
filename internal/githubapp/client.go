@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jferrl/go-githubauth"
@@ -63,16 +64,31 @@ type Client struct {
 	httpClient *http.Client
 
 	// apiBaseURL, when non-empty, overrides the GitHub API base URL for the
-	// MINT path (threaded to githubauth.WithEnterpriseURL). It is a
-	// TESTABILITY SEAM ONLY: unexported, settable solely from within this
-	// package, and no production constructor ever sets it — when empty
-	// (always, in production) the mint path is byte-for-byte the previous
+	// MINT path (threaded to githubauth.WithEnterpriseURL) and the REVOKE
+	// path. It is a TESTABILITY SEAM ONLY: unexported, settable solely from
+	// within this package, and no production constructor ever sets it — when
+	// empty (always, in production) both paths are byte-for-byte the previous
 	// behavior against https://api.github.com. It exists so a unit test can
 	// point the mint at a local httptest server and assert the
 	// installation-token request body carries the scope ceiling
 	// (Repositories + Permissions) — the invariant a regression dropping
 	// `opts` below would silently break (conformance audit #44 §2).
+	//
+	// Revoke honors it too so the two paths cannot drift apart: a revoke that
+	// kept targeting api.github.com while the mint went elsewhere would get a
+	// 404 from the wrong host and — since RevokeToken maps 404 to
+	// "already gone" — report SUCCESS for a token that is still live.
 	apiBaseURL string
+}
+
+// apiURL joins path onto the API base (the apiBaseURL test seam when set,
+// https://api.github.com otherwise).
+func (c *Client) apiURL(path string) string {
+	base := c.apiBaseURL
+	if base == "" {
+		base = "https://api.github.com"
+	}
+	return strings.TrimSuffix(base, "/") + path
 }
 
 // client returns the injectable HTTP client, defaulting to
@@ -195,10 +211,21 @@ func (c *Client) MintGhSessionToken(ctx context.Context) (token string, expiresA
 // the call doesn't actually need any of Client's config because the token
 // itself authenticates the request. The 5s timeout is honored via ctx.
 //
+// Status handling (issue #67): 204 is "revoked"; 404 is "this token is not a
+// live installation token" — i.e. it is ALREADY GONE (revoked earlier, or
+// expired). Both mean the token is dead, which is the entire goal, so both are
+// success. Only a network error or some OTHER status is an error. Mapping 404
+// here rather than at the call site means every caller (exit-revoke, the
+// expiry path, the broker's revoke closure) gets the same idempotent contract.
+//
+// NOTE: revocation is eventually consistent — a revoked token can still
+// authenticate for a few seconds after the 204 (measured ~2-5s live). Revoke
+// shrinks the exposure window to seconds; it is not an instantaneous kill.
+//
 // Best-effort: callers should log + ignore the error. A failed revoke is
 // not a security problem (token still expires at its native ~1h).
 func (c *Client) RevokeToken(ctx context.Context, token string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, "https://api.github.com/installation/token", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.apiURL("/installation/token"), nil)
 	if err != nil {
 		return fmt.Errorf("build revoke request: %w", err)
 	}
@@ -212,10 +239,14 @@ func (c *Client) RevokeToken(ctx context.Context, token string) error {
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body)
-	if resp.StatusCode != http.StatusNoContent {
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return nil // revoked
+	case http.StatusNotFound:
+		return nil // already gone (revoked earlier, or expired) — same end state
+	default:
 		return fmt.Errorf("revoke: unexpected status %d", resp.StatusCode)
 	}
-	return nil
 }
 
 func (c *Client) mint(ctx context.Context, perms *githubauth.InstallationPermissions) (string, time.Time, error) {

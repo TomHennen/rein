@@ -19,6 +19,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -27,12 +28,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/TomHennen/rein/internal/approvals"
 	"github.com/TomHennen/rein/internal/broker"
+	"github.com/TomHennen/rein/internal/brokercore"
 	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/declare"
 	"github.com/TomHennen/rein/internal/ghsession"
@@ -218,10 +221,161 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  rein run --direct -- <cmd> [args...]       (unsandboxed; throwaway repos only)")
 }
 
+// testPanicHook, when non-nil, is called at the top of the broker path. It is
+// a TEST-ONLY seam for the TM-G8 panic-recovery test (issue #61), which has to
+// inject a crash on the broker path to prove guardHelperPanic still answers
+// git with a credential. It receives the helper's stdout so a test can also
+// emit PARTIAL output before panicking and prove those bytes never reach git.
+//
+// SECURITY REVIEW, please confirm: this is deliberately a package-private var
+// with no exported setter, no env-var trigger, and no config/argv path that
+// can assign it. Only code compiled into package main can set it, i.e. the
+// _test.go files. In a production binary it is nil forever and the branch is a
+// single nil check on a path that already does file I/O and network calls. A
+// panic seam reachable from the environment WOULD be a real hazard — an
+// attacker who could force a panic gets a denied credential (fail-closed), but
+// it would still be a free DoS on every git operation. This shape is not
+// reachable that way.
+var testPanicHook func(out io.Writer)
+
 // runCredentialHelper wires env-derived config to the broker using the
-// process's real stdio. runCredentialHelperEnv is the testable seam.
+// process's real stdio. guardHelperPanic is the TM-G8 backstop;
+// runCredentialHelperEnv is the testable seam beneath it.
 func runCredentialHelper(action string) error {
-	return runCredentialHelperEnv(action, os.Stdin, os.Stdout, os.Stderr)
+	return guardHelperPanic(action, os.Stdin, os.Stdout, os.Stderr)
+}
+
+// guardHelperPanic is the last line of the TM-G8 / hard-constraint-#2 defense
+// (issue #61): the credential helper must ALWAYS answer git with a credential
+// — never empty, never exit 1.
+//
+// #45 closed that hole for ERROR RETURNS (every pre-broker failure now routes
+// through serveHelperPlaceholder). A PANIC produced the identical outcome by a
+// different route: the Go runtime prints a stack to stderr and exits 2 with
+// EMPTY STDOUT, git reads "no answer" and falls through to the next credential
+// source — the OS keychain or the developer's ambient PAT — and the push it
+// was supposed to gate silently succeeds outside rein's scope ceiling. The
+// broker has targeted recoveries around DetectWrite/ConfirmWrite/RecordWrite,
+// but a panic anywhere else on the path (a nil map, a bad slice index, a
+// third-party dependency) was unguarded.
+//
+// Two buffers make the recovery safe:
+//
+//   - stdin is read to completion up front (git writes the attribute block
+//     then closes), so the recovery can REPLAY the same request through the
+//     real broker via serveHelperPlaceholder. Without this the request bytes
+//     are gone by the time we recover, and we could not tell a github.com get
+//     (must answer) from a non-github get (must stay silent).
+//
+//   - stdout is buffered and flushed only on a clean return. A panic
+//     mid-write would otherwise leave a TRUNCATED credential block on git's
+//     stdin, and appending the placeholder after it would produce a
+//     double-keyed block whose meaning depends on git's last-key-wins parse.
+//     On panic the partial bytes are dropped and the placeholder is written to
+//     a clean stdout.
+//
+// Trade-off worth naming: if a panic happened AFTER a real credential was
+// fully written, dropping the buffer downgrades a working credential to the
+// placeholder, and the operation fails loudly instead of succeeding. That is
+// the fail-closed direction (hard constraint #3), and a helper that crashed
+// mid-invocation has already lost its claim to be trusted for that operation.
+func guardHelperPanic(action string, in io.Reader, out, diag io.Writer) (err error) {
+	req, readErr := io.ReadAll(in)
+	if readErr != nil {
+		// Mirrors the broker's own stdin-error policy: it cannot tell which
+		// host the request was for, so it answers empty rather than risk a
+		// Bearer for the wrong host. Preserve that, but say so on stderr.
+		fmt.Fprintf(diag, "rein: warning: could not read the credential request from git (%v)\n", readErr)
+		req = nil
+	}
+
+	var buf bytes.Buffer
+	defer func() {
+		r := recover()
+		if r == nil {
+			// Clean run: hand git exactly what the broker produced.
+			if _, werr := out.Write(buf.Bytes()); werr != nil && err == nil {
+				err = fmt.Errorf("write credential response: %w", werr)
+			}
+			return
+		}
+		// Panicked: drop any partial output and answer from a clean stdout.
+		//
+		// Everything from here on is itself panic-guarded. The diagnostics and
+		// openLog run BEFORE the credential is served, and they touch writers
+		// and a filesystem we no longer trust — a panicking diag writer or log
+		// path would otherwise escape this defer and land right back on the
+		// TM-G8 outcome we are here to prevent (non-zero exit, empty stdout).
+		// The guard guarantees a credential block reaches git no matter what
+		// fails inside the recovery.
+		served := false
+		defer func() {
+			if r2 := recover(); r2 != nil {
+				if action == "get" && !served {
+					fmt.Fprintf(out, "username=%s\npassword=%s\n\n",
+						brokercore.CredentialUsername, brokercore.PlaceholderMintFailed)
+				}
+				err = nil // exit 0: git must never read this as "no answer"
+			}
+		}()
+
+		stack := debug.Stack()
+		fmt.Fprintf(diag, "rein: internal error in the credential helper (panic: %v)\n", r)
+		fmt.Fprintln(diag, "      Serving a placeholder credential so git fails loudly instead of falling back")
+		fmt.Fprintln(diag, "      to another credential source (your ambient PAT). Please report this with the")
+		fmt.Fprintln(diag, "      stack trace in the helper log.")
+
+		logger, closeLog, lerr := openLog()
+		if lerr != nil {
+			logger = log.New(io.Discard, "", 0)
+			closeLog = func() {}
+		}
+		defer closeLog()
+		logger.Printf("PANIC in credential helper: %v\n%s", r, stack)
+
+		err = servePanicPlaceholder(action, req, out, diag, logger, r)
+		served = true
+	}()
+
+	err = runCredentialHelperEnv(action, bytes.NewReader(req), &buf, diag)
+	return err
+}
+
+// servePanicPlaceholder replays the buffered request through the SAME route
+// every other pre-broker failure uses (serveHelperPlaceholder), so a panic
+// yields the identical contract: the TM-G8 placeholder on a github.com get,
+// the protocol's empty "not my host" block elsewhere, no-ops for store/erase,
+// and exit 0 throughout.
+//
+// It is itself panic-guarded. If even serveHelperPlaceholder blows up, the
+// last resort writes the placeholder credential block directly — the same
+// brokercore constants the broker would have used — because emitting SOMETHING
+// on a github.com get is the whole invariant. We cannot parse the host in that
+// state, so the direct write is limited to `get` and unconditional; a
+// placeholder credential offered to a non-github host is a loud auth failure
+// there, never a leak (the value is non-secret and useless).
+func servePanicPlaceholder(action string, req []byte, out, diag io.Writer, logger *log.Logger, cause any) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Printf("PANIC while serving the panic placeholder: %v", r)
+			if action == "get" {
+				fmt.Fprintf(out, "username=%s\npassword=%s\n\n",
+					brokercore.CredentialUsername, brokercore.PlaceholderMintFailed)
+			}
+			err = nil // exit 0: git must never read this as "no answer"
+		}
+	}()
+
+	hint := "rein: the credential below is a placeholder — the operation will fail rather than silently use another credential."
+	perr := serveHelperPlaceholder(action, bytes.NewReader(req), out, diag, logger,
+		fmt.Errorf("panic in credential helper: %v", cause), hint)
+	if perr != nil {
+		// serveHelperPlaceholder only errors on broker programming bugs. Even
+		// then, do not surface a non-nil error: main would exit 1 with the
+		// stdout we just wrote, and git treats a failed helper as "no answer".
+		logger.Printf("serveHelperPlaceholder failed after panic: %v", perr)
+	}
+	return nil
 }
 
 // runCredentialHelperEnv is the env-driven helper core.
@@ -357,6 +511,10 @@ func (h *hintFirstWriter) Write(p []byte) (int, error) {
 // empty credential. There must be NO error return between ResolveApp and this
 // call on the github.com path.
 func runCredentialHelperWithConfig(action string, in io.Reader, out, diag io.Writer, appCfg githubapp.Config, ks keystore.Keystore, sess session.Session, stateDir string, logger *log.Logger) error {
+	if testPanicHook != nil {
+		testPanicHook(out)
+	}
+
 	mintRead := broker.MintFunc(func(ctx context.Context) (string, time.Time, error) {
 		client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
 		if err != nil {

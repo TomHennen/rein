@@ -1,0 +1,30 @@
+# REFERENCE TRANSCRIPT — cmd/rein/demo_tmg8_panic_test.go (issue #61)
+#
+# A static, human-reviewable capture of a Go demo test's STRUCTURED before/after
+# report — NOT a normalize-on-compare golden (a Go test's t.Log output is a
+# report, not a shell terminal; test:line prefixes are normalized out), so it
+# lives in demo-transcripts/ (outside golden/, which is journey RAW goldens only).
+# Captured from: go test ./cmd/rein -run TestDemo_TMG8PanicRecovery -v
+# Shows the REAL exit codes (subprocess): a panic in the helper must not become
+# empty-stdout/exit-2 (git's PAT fall-through); the guard serves the placeholder + exit 0.
+
+=== RUN   TestDemo_TMG8PanicRecovery
+    demo_tmg8_panic_test.go: 
+    demo_tmg8_panic_test.go: issue #61 — a panic in the credential helper must NOT become empty stdout
+    demo_tmg8_panic_test.go: (git reads an erroring/empty helper as 'no answer' and falls back to your PAT)
+    demo_tmg8_panic_test.go: 
+    demo_tmg8_panic_test.go:                BEFORE (raw)   AFTER (guarded) 
+    demo_tmg8_panic_test.go:   exit code    2              0             
+    demo_tmg8_panic_test.go:   stdout bytes 0              63            
+    demo_tmg8_panic_test.go: 
+    demo_tmg8_panic_test.go:   BEFORE — unguarded dispatch, panic escapes:
+    demo_tmg8_panic_test.go:     exit=2  helper stdout=""  stderr="panic: boom: simulated broker-path crash [recovered, repanicked]"
+    demo_tmg8_panic_test.go:   AFTER  — guarded dispatch, panic recovered:
+    demo_tmg8_panic_test.go:     stdout served to git:
+    demo_tmg8_panic_test.go:       | username=x-access-token
+    demo_tmg8_panic_test.go:       | password=rein-placeholder-mint-failed
+    demo_tmg8_panic_test.go:     exit=0  stderr(first)="rein: internal error in the credential helper (panic: boom: simulated broker-path crash)"
+    demo_tmg8_panic_test.go: 
+--- PASS: TestDemo_TMG8PanicRecovery (0.00s)
+PASS
+ok  	github.com/TomHennen/rein/cmd/rein	(cached)

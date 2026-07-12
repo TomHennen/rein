@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -178,4 +179,152 @@ func TestCredentialHelper_TMG8_OnStateDirFailure(t *testing.T) {
 
 	err, out, diag := driveHelperGet(t)
 	assertPlaceholderServed(t, err, out, diag, "state dir unavailable", "without logging")
+}
+
+// --- issue #61: panic recovery in the credential-helper dispatch ---
+
+// setTestPanicHook installs a panic on the broker path for the duration of one
+// test and guarantees removal afterwards, so the seam can never leak into
+// another test in this package.
+func setTestPanicHook(t *testing.T, panicValue string) {
+	t.Helper()
+	testPanicHook = func(io.Writer) { panic(panicValue) }
+	t.Cleanup(func() { testPanicHook = nil })
+}
+
+// TestCredentialHelper_TMG8_OnPanic is the issue-#61 regression test. A panic
+// anywhere on the broker path used to crash the process: Go prints a stack and
+// exits 2 with EMPTY STDOUT, which git reads as "no answer" and answers by
+// falling through to the next credential source — the developer's ambient PAT.
+// That is the same TM-G8 outcome #45 closed for error returns, reached by a
+// different route.
+//
+// guardHelperPanic must recover, drop any partial output, and answer the
+// github.com get with the placeholder credential and exit 0.
+func TestCredentialHelper_TMG8_OnPanic(t *testing.T) {
+	setupHelperTestEnv(t)
+	setTestPanicHook(t, "boom: simulated broker-path crash")
+
+	in := strings.NewReader("protocol=https\nhost=github.com\n\n")
+	var out, diag strings.Builder
+
+	err := guardHelperPanic("get", in, &out, &diag)
+
+	assertPlaceholderServed(t, err, out.String(), diag.String(), "panic")
+	if !strings.Contains(diag.String(), "boom: simulated broker-path crash") {
+		t.Errorf("stderr must name the panic value for the operator, got:\n%s", diag.String())
+	}
+}
+
+// TestCredentialHelper_PanicOnNonGithubHostStaysSilent: a panic on a request
+// for a host rein does not broker must NOT invent a credential for it. The
+// recovery replays the buffered request through the real broker, so a
+// non-github host still gets the protocol's empty "not my host" block and
+// exit 0 — byte-identical to a healthy helper.
+func TestCredentialHelper_PanicOnNonGithubHostStaysSilent(t *testing.T) {
+	setupHelperTestEnv(t)
+	setTestPanicHook(t, "boom")
+
+	in := strings.NewReader("protocol=https\nhost=gitlab.com\n\n")
+	var out, diag strings.Builder
+
+	err := guardHelperPanic("get", in, &out, &diag)
+	if err != nil {
+		t.Fatalf("helper must not error even on panic: %v", err)
+	}
+	if strings.Contains(out.String(), "password=") {
+		t.Errorf("a panic must not fabricate a credential for a non-github host, got stdout:\n%q", out.String())
+	}
+}
+
+// TestCredentialHelper_PanicDropsPartialStdout: stdout is buffered, so bytes a
+// panicking run had already written must NOT reach git. A truncated credential
+// block followed by the placeholder would be a double-keyed block whose meaning
+// depends on git's last-key-wins parse; the recovery must serve a clean one.
+func TestCredentialHelper_PanicDropsPartialStdout(t *testing.T) {
+	setupHelperTestEnv(t)
+	// Write a partial credential block, THEN panic — the shape of a crash
+	// midway through emitting a real credential.
+	testPanicHook = func(out io.Writer) {
+		fmt.Fprint(out, "username=x-access-token\npassword=ghs_real_token_half_writ")
+		panic("boom after partial write")
+	}
+	t.Cleanup(func() { testPanicHook = nil })
+
+	in := strings.NewReader("protocol=https\nhost=github.com\n\n")
+	var out, diag strings.Builder
+
+	err := guardHelperPanic("get", in, &out, &diag)
+	if err != nil {
+		t.Fatalf("helper must not error even on panic: %v", err)
+	}
+	got := out.String()
+	if strings.Contains(got, "ghs_real_token_half_writ") {
+		t.Errorf("partial bytes written before the panic reached git's stdin; they must be dropped:\n%q", got)
+	}
+	if strings.Count(got, "password=") != 1 {
+		t.Errorf("stdout must carry exactly one credential block after a panic, got:\n%q", got)
+	}
+	if !strings.Contains(got, "password=rein-placeholder-mint-failed") {
+		t.Errorf("expected the TM-G8 placeholder on stdout, got:\n%q", got)
+	}
+}
+
+// TestCredentialHelper_PanicOnStoreEraseStaysByteIdentical closes the last gap
+// the security review flagged (#61 (c)): store/erase must remain no-ops on
+// panic, byte-identical to a healthy helper. Correct by construction — the
+// recovery replays the request through the real broker, which no-ops these —
+// but untested until now. A regression that fabricated a credential block here
+// would corrupt git's protocol on every store/erase.
+func TestCredentialHelper_PanicOnStoreErase(t *testing.T) {
+	for _, action := range []string{"store", "erase"} {
+		t.Run(action, func(t *testing.T) {
+			setupHelperTestEnv(t)
+			setTestPanicHook(t, "boom")
+
+			in := strings.NewReader("protocol=https\nhost=github.com\npassword=ghs_x\n\n")
+			var out, diag strings.Builder
+
+			err := guardHelperPanic(action, in, &out, &diag)
+			if err != nil {
+				t.Fatalf("%s must not error on panic: %v", action, err)
+			}
+			if out.String() != "" {
+				t.Errorf("%s must write NOTHING to stdout even on panic, got:\n%q", action, out.String())
+			}
+			if !strings.Contains(diag.String(), "panic") {
+				t.Errorf("%s should still report the panic on stderr, got:\n%s", action, diag.String())
+			}
+		})
+	}
+}
+
+// panicWriter panics on every Write. It stands in for the writers/filesystem
+// the recovery path touches AFTER the first panic (stderr diagnostics, the log
+// file) — all of which we no longer have grounds to trust.
+type panicWriter struct{}
+
+func (panicWriter) Write([]byte) (int, error) { panic("diag writer is broken too") }
+
+// TestCredentialHelper_PanicInsideRecoveryStillServesCredential pins the
+// hardening the security review asked for (#61 (b)): the recovery's own
+// preamble (stderr diagnostics, openLog) runs BEFORE the credential is served.
+// If something in there panics, the outer defer has already fired and a second
+// panic would escape — exiting non-zero with EMPTY STDOUT, which is exactly the
+// TM-G8 failure this whole function exists to prevent. The nested guard must
+// still put a credential on git's stdin.
+func TestCredentialHelper_PanicInsideRecoveryStillServesCredential(t *testing.T) {
+	setupHelperTestEnv(t)
+	setTestPanicHook(t, "boom on the broker path")
+
+	in := strings.NewReader("protocol=https\nhost=github.com\n\n")
+	var out strings.Builder
+
+	err := guardHelperPanic("get", in, &out, panicWriter{})
+	if err != nil {
+		t.Fatalf("must not error even when the recovery path itself panics: %v", err)
+	}
+	if !strings.Contains(out.String(), "password=") {
+		t.Errorf("git must still receive a credential block when the recovery panics, got:\n%q", out.String())
+	}
 }
