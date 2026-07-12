@@ -94,7 +94,14 @@ func TestWritePrompt_ExpansionHeader(t *testing.T) {
 		t.Fatalf("writePrompt: %v", err)
 	}
 	if !strings.Contains(buf.String(), "ALSO work on") {
-		t.Errorf("expansion prompt must carry the scope-expansion header, got:\n%s", buf.String())
+		t.Errorf("a second in-run issue must carry the ALSO-work-on header, got:\n%s", buf.String())
+	}
+	// An issue-set expansion (AddRepo == "") must NOT borrow the repo
+	// scope-expansion vocabulary — "scope expansion" is reserved for the
+	// AddRepo path (TestWritePrompt_ScopeExpansionHeader), which is the one
+	// that widens the ceiling and offers persist.
+	if strings.Contains(buf.String(), "scope expansion") {
+		t.Errorf("an in-ceiling second issue must NOT say \"scope expansion\", got:\n%s", buf.String())
 	}
 }
 

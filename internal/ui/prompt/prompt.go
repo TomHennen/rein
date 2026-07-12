@@ -257,7 +257,15 @@ func writePrompt(w io.Writer, req Request) error {
 	}
 	header := "=== rein: agent declares work on an issue ==="
 	if req.Expansion {
-		header = "=== rein: agent wants to ALSO work on an issue (scope expansion) ==="
+		// A second-or-later issue in the SAME run whose repo is already in
+		// the ceiling (AddRepo == "" — the repo-expansion branch above
+		// returned). This is an issue-set expansion, NOT a repo scope
+		// expansion, so the header must not borrow "scope expansion"
+		// vocabulary: that phrase is reserved for the AddRepo path, which
+		// is the one that actually widens the ceiling and offers persist.
+		// A reader who sees "scope expansion" here reasonably expects the
+		// "Also save <repo> to the session?" question that never comes.
+		header = "=== rein: agent wants to ALSO work on an issue ==="
 	}
 	_, err := fmt.Fprintf(w, "\n"+
 		"%s\n"+
