@@ -221,6 +221,34 @@ def delete_branch(repo: str, branch: str, env: dict | None = None) -> bool:
     return r.returncode == 0
 
 
+def list_issue_comments(repo: str, issue: int, env: dict | None = None) -> list[dict]:
+    """HOST-side: the issue's comments as [{"id":int,"body":str}, ...] via the
+    operator's OWN authed gh — the GROUND TRUTH a gh-write journey checks a
+    sandboxed `gh` write against (did the comment actually post at GitHub?).
+    Legitimate host action: the developer/operator, NOT the sandboxed agent.
+    """
+    env = env or rein_env()
+    import json as _json
+
+    out = subprocess.check_output(
+        ["gh", "api", f"repos/{repo}/issues/{issue}/comments",
+         "--jq", "[.[] | {id, body}]"],
+        cwd=REPO_ROOT, env=env, text=True,
+    ).strip()
+    return _json.loads(out) if out else []
+
+
+def delete_issue_comment(repo: str, comment_id: int, env: dict | None = None) -> bool:
+    """Best-effort HOST-side cleanup of a single issue comment via the host's gh."""
+    env = env or rein_env()
+    r = subprocess.run(
+        ["gh", "api", "-X", "DELETE", f"repos/{repo}/issues/comments/{comment_id}"],
+        cwd=REPO_ROOT, env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return r.returncode == 0
+
+
 # --------------------------------------------------------------------------
 # In-sandbox script generation (the SANDBOX-side of the loop)
 # --------------------------------------------------------------------------
@@ -949,6 +977,12 @@ _NORMALIZE_RULES = [
     # rein's error text — harmless, since it hits both compare sides identically.
     (r"#\d+", "#<ISSUE>"),
     (r"agent/\d+/", "agent/<ISSUE>/"),
+    # issue number inside a REST API path, e.g. the gh-write journey's
+    # `gh api /repos/<owner>/<repo>/issues/<n>/comments`. Generic (not a
+    # per-journey whitelist): any `/issues/<digits>` collapses so two runs on
+    # DIFFERENT issue numbers still match. Bare digits, so the letter-requiring
+    # hash rule below never eats it.
+    (r"/issues/\d+", "/issues/<ISSUE>"),
     (r"\bdeclare \d+", "declare <ISSUE>"),
     (r"issue number \(\d+\)", "issue number (<ISSUE>)"),
     (r"(?m)^> \d+$", "> <ISSUE>"),

@@ -58,6 +58,27 @@ import (
 // GH_TOKEN-absent code path. Deliberately not a real token.
 const stubGHToken = "x-access-token-rein-sandbox-stub"
 
+// sandboxReadMint / sandboxWriteMint name the two permission TIERS the
+// sandbox injecting proxy mints. In sandboxed mode ALL of the agent's github
+// traffic — git AND gh/REST/GraphQL — is injected by this one proxy, so both
+// tiers must carry the issue/PR capability `gh` needs, not just contents.
+//
+//   - READ tier  = MintGhReadOnlyToken: contents+issues+pull_requests+metadata,
+//     all READ (no write permission — the read/write split holds at the wire).
+//   - WRITE tier = MintGhSessionToken:  contents+issues+pull_requests WRITE,
+//     metadata read — the implement role (design §4.2.2), so a post-declare
+//     `gh pr create` / `gh issue comment` lands instead of 403'ing.
+//
+// They are method-expression vars (not inline `c.Mint...` calls) precisely so
+// a unit test can pin the tier CHOICE and the read/write split without a live
+// mint — see TestSandboxMintTiersAreGhCapable. Changing either back to the
+// contents-only git tier (MintReadOnlyToken/MintWriteToken) re-opens the bug
+// where in-sandbox gh issue/PR reads and writes fail.
+var (
+	sandboxReadMint  = (*githubapp.Client).MintGhReadOnlyToken
+	sandboxWriteMint = (*githubapp.Client).MintGhSessionToken
+)
+
 // verifyTimeout caps the pre-launch VerifyConfigApplied srt spawn.
 const verifyTimeout = 30 * time.Second
 
@@ -450,7 +471,16 @@ func runSandboxed(cmdline []string) (int, error) {
 		if err != nil {
 			return "", time.Time{}, err
 		}
-		return c.MintReadOnlyToken(ctx)
+		// In sandboxed mode ALL of the agent's github.com/api.github.com
+		// traffic — git AND gh/REST/GraphQL — flows through this one
+		// injecting proxy, so this read token is what backs `gh issue view`,
+		// `gh pr view`, and issue/PR REST reads too. The plain
+		// MintReadOnlyToken (contents+metadata only) lacks issues:read /
+		// pull_requests:read, so those reads 403'd in-sandbox. Use the
+		// gh-shaped read tier (contents+issues+pull_requests+metadata, all
+		// READ) — matching direct mode's gh read path and design §4.2.2.
+		// TIER SPLIT PRESERVED: this token carries NO write permission.
+		return sandboxReadMint(c, ctx)
 	})
 	// ghReadToken supplies the issues:read-capable read token the declare
 	// fetch and the TM-G6 transfer re-check use (the MintGhReadOnlyToken
@@ -476,7 +506,25 @@ func runSandboxed(cmdline []string) (int, error) {
 		if err != nil {
 			return "", time.Time{}, err
 		}
-		return c.MintWriteToken(ctx)
+		// In sandboxed mode this write token backs the agent's `git push`
+		// AND its `gh pr create` / `gh issue comment` / issue-or-PR REST +
+		// GraphQL writes (everything post-declare flows through this one
+		// injecting proxy). The plain MintWriteToken (contents+metadata only)
+		// let the push land but 403'd every gh/API issue-or-PR write —
+		// falsifying the injected contract's promise that approving covers
+		// ALL writes. Use the implement-role write tier
+		// (contents+issues+pull_requests WRITE, metadata read) so the
+		// contract is true, matching direct mode's gh write path and design
+		// §4.2.2. The scope CEILING (scopedAppCfg().RepoNames) still confines
+		// it to the run's repos, and the declare gate still gates it (nothing
+		// mints until declare+approve).
+		//
+		// KNOWN RESIDUAL (#86, #6): pull_requests:write also confers PR
+		// review/approve/merge, so a session holding this token could approve
+		// or merge its own PR. Accepted for now; #86 tracks blocking
+		// self-merge (design §4.2.8's "agent-delegated commits don't count as
+		// a second signer"), #6 tracks the broader role-permission hardening.
+		return sandboxWriteMint(c, ctx)
 	})
 
 	approve := buildSandboxApprove(sess, stateDir, runID, logger)
