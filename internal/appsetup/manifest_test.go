@@ -29,7 +29,7 @@ func TestRandomSuffix_VariesAcrossCalls(t *testing.T) {
 }
 
 func TestBuildManifest_Primary(t *testing.T) {
-	m, err := BuildManifest(RolePrimary, 54321)
+	m, err := BuildManifest(RolePrimary, 54321, "")
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestBuildManifest_Primary(t *testing.T) {
 }
 
 func TestBuildManifest_Audit(t *testing.T) {
-	m, err := BuildManifest(RoleAudit, 1234)
+	m, err := BuildManifest(RoleAudit, 1234, "")
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -84,19 +84,81 @@ func TestBuildManifest_Audit(t *testing.T) {
 }
 
 func TestBuildManifest_UnknownRole(t *testing.T) {
-	if _, err := BuildManifest("unknown", 1); err == nil {
+	if _, err := BuildManifest("unknown", 1, ""); err == nil {
 		t.Error("expected error for unknown role")
+	}
+}
+
+func TestBuildManifest_LabelWovenIntoName(t *testing.T) {
+	// A machine label lands between the role and the random guard:
+	// rein-<role>-<label>-<shortrand>. The guard is still present (global
+	// uniqueness), and the label is sanitized (onboarding-ux-design.md §4).
+	m, err := BuildManifest(RolePrimary, 1, "Tom's Laptop!")
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if !strings.HasPrefix(m.Name, "rein-primary-toms-laptop-") {
+		t.Errorf("name = %q, want rein-primary-toms-laptop-<rand> prefix", m.Name)
+	}
+	// The trailing guard is still 10 hex chars (40-bit uniqueness).
+	guard := strings.TrimPrefix(m.Name, "rein-primary-toms-laptop-")
+	if len(guard) != 10 {
+		t.Errorf("guard = %q (len %d), want 10 hex chars", guard, len(guard))
+	}
+}
+
+func TestBuildManifest_EmptyLabelKeepsLabellessShape(t *testing.T) {
+	// A label that sanitizes to nothing (all punctuation / whitespace)
+	// must fall back to the pre-label rein-<role>-<shortrand> shape, never
+	// emit a double hyphen or a trailing hyphen.
+	for _, in := range []string{"", "   ", "!!!", "----"} {
+		m, err := BuildManifest(RolePrimary, 1, in)
+		if err != nil {
+			t.Fatalf("build(%q): %v", in, err)
+		}
+		if strings.Contains(m.Name, "--") {
+			t.Errorf("label %q => name %q has a double hyphen", in, m.Name)
+		}
+		if strings.TrimPrefix(m.Name, "rein-primary-") == "" || strings.HasSuffix(m.Name, "-") {
+			t.Errorf("label %q => malformed name %q", in, m.Name)
+		}
+	}
+}
+
+func TestSanitizeMachineLabel(t *testing.T) {
+	cases := map[string]string{
+		"Tom's Laptop":     "toms-laptop",
+		"ubuntu":           "ubuntu",
+		"  MyBox  ":        "mybox",
+		"a__b--c":          "a-b-c",
+		"!!!":              "",
+		"":                 "",
+		"UPPER":            "upper",
+		"work.vm.internal": "work-vm-internal",
+	}
+	for in, want := range cases {
+		if got := SanitizeMachineLabel(in); got != want {
+			t.Errorf("SanitizeMachineLabel(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// Over-length labels are capped and never end in a hyphen.
+	long := SanitizeMachineLabel("this-is-a-really-long-hostname-that-exceeds-the-cap")
+	if len(long) > maxLabelLen {
+		t.Errorf("label not capped: %q (len %d > %d)", long, len(long), maxLabelLen)
+	}
+	if strings.HasSuffix(long, "-") {
+		t.Errorf("capped label ends in hyphen: %q", long)
 	}
 }
 
 func TestBuildManifest_FreshSuffixPerCall(t *testing.T) {
 	// Primary and audit MUST get different suffixes (research anti-
 	// pattern §6.4: "Same App name").
-	p, err := BuildManifest(RolePrimary, 1)
+	p, err := BuildManifest(RolePrimary, 1, "")
 	if err != nil {
 		t.Fatalf("primary: %v", err)
 	}
-	a, err := BuildManifest(RoleAudit, 1)
+	a, err := BuildManifest(RoleAudit, 1, "")
 	if err != nil {
 		t.Fatalf("audit: %v", err)
 	}
@@ -114,7 +176,7 @@ func TestRenderAutoPostHTML_RoundTripsManifest(t *testing.T) {
 	// unmarshalling. The point of this test is to lock in that we
 	// can recover the original manifest from what the browser will
 	// submit.
-	m, err := BuildManifest(RolePrimary, 1234)
+	m, err := BuildManifest(RolePrimary, 1234, "")
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
