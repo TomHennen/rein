@@ -32,9 +32,11 @@ Prereqs: a live throwaway repo + a working App (see README). ``python3`` +
 
 from __future__ import annotations
 
+import contextlib
 import io
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -1181,3 +1183,170 @@ def resolve_throwaway_repo(env: dict | None = None) -> str:
         "no throwaway repo: set REIN_JOURNEY_REPO, or run `rein init` to scaffold "
         "a dev-session, or (legacy) source ./dev-env for REIN_TEST_REPO_A"
     )
+
+
+# --------------------------------------------------------------------------
+# helper.log — rein's forensic log (state-dir/helper.log)
+# --------------------------------------------------------------------------
+
+
+def helper_log_path(env: dict | None = None) -> Path:
+    """Path of rein's forensic log (openLog -> <state-dir>/helper.log).
+
+    State dir mirrors internal/config.StateDir: XDG_STATE_HOME/rein, else
+    ~/.local/state/rein. A journey reads the DELTA it produced (seek to the
+    pre-run size) to assert, e.g., that the broker routed approval to the tmux
+    popup — a POSITIVE proof of the surface chosen, not an inference from the
+    absence of an inline prompt.
+    """
+    env = env or rein_env()
+    base = env.get("XDG_STATE_HOME") or os.path.join(
+        env.get("HOME", str(Path.home())), ".local", "state"
+    )
+    return Path(base) / "rein" / "helper.log"
+
+
+def read_log_since(path: Path, offset: int) -> str:
+    """Return helper.log bytes written AFTER `offset` (this run's lines only)."""
+    if not path.exists():
+        return ""
+    with path.open("r", errors="replace") as f:
+        f.seek(offset)
+        return f.read()
+
+
+# --------------------------------------------------------------------------
+# tmux-popup approval surface — the DEFAULT surface inside $TMUX (issue #37)
+# --------------------------------------------------------------------------
+#
+# rein's default write-approval surface when $TMUX is set is NOT the inline
+# /dev/tty prompt — it is a tmux popup (internal/ui/grant: PopupPreferenceFromEnv
+# returns true inside $TMUX, and attemptPopup runs, via DefaultTmuxRunner,
+#     tmux popup -E "rein approval grant --run-id <id>"
+# whose pty is its OWN /dev/tty, where `rein approval grant` renders Form A).
+# Every OTHER journey runs OUTSIDE tmux (so $TMUX is unset and the inline prompt
+# fires), so this default path was untested end to end — the coverage gap #37.
+#
+# Driving a real popup under pexpect needs three things, and this helper wires
+# all of them:
+#
+#   1. A DEDICATED tmux server (`tmux -L <unique>`), so the journey NEVER touches
+#      the operator's own sessions. It kills only its OWN socket on teardown.
+#   2. An ATTACHED client — a pexpect pty running `tmux attach`. A popup is a
+#      CLIENT-OWNED overlay (it is NOT an addressable pane: it never appears in
+#      `list-panes`, and `send-keys` cannot reach it). It renders on, and grabs
+#      the keyboard of, an attached client. So the ONLY way to answer it is to
+#      write keys to that client's pty — which this helper's `drive_popup` does.
+#   3. The rein process on a SEPARATE plain pty whose $TMUX/$TMUX_PANE point at
+#      this session (see `tmux_env`). That keeps rein's OWN output clean and
+#      deterministic (the golden), while the popup renders on the attached
+#      client (finicky full-screen box-art, deliberately NOT in the golden).
+#      This mirrors reality: `rein run -- <agent>` runs inside the operator's
+#      tmux pane, and the broker it hosts launches the popup on that same client.
+#
+# If tmux is not installed the popup surface cannot be driven at all; a journey
+# should SKIP gracefully (see journey_tmux_popup_approval.py), never fake it.
+
+
+def tmux_available() -> bool:
+    """Is a `tmux` binary on PATH? The popup surface is undriveable without it."""
+    return shutil.which("tmux") is not None
+
+
+def _tmux(socket: str, *args: str) -> subprocess.CompletedProcess:
+    """Run `tmux -L <socket> <args>` on the DEDICATED server (never the default)."""
+    return subprocess.run(["tmux", "-L", socket, *args], capture_output=True, text=True)
+
+
+@dataclass
+class TmuxPopupSession:
+    """A live tmux session on a dedicated socket, with a pexpect-attached client
+    a popup can render on and be answered through. Build it via
+    `tmux_popup_session()` (a context manager that tears the server down)."""
+
+    socket: str
+    client: pexpect.spawn
+    log: io.StringIO
+    sockpath: str
+    pane: str
+
+    def tmux_env(self) -> dict:
+        """Env overlay that routes a SEPARATE rein process's approval to THIS
+        session's popup: $TMUX (socket_path,pid,session — rein only checks it is
+        non-empty) and $TMUX_PANE. Pass it as spawn_rein_run(extra_env=...)."""
+        return {"TMUX": f"{self.sockpath},0,0", "TMUX_PANE": self.pane}
+
+    def drive_popup(self, expect_pattern: str, answer: str, *, settle: float = 0.5,
+                    timeout: int = 90) -> None:
+        """Wait for the popup's Form A to RENDER on the attached client, then type
+        the answer. The popup grabs the client keyboard, so keys written to the
+        client pty reach `rein approval grant` inside the popup. `expect_pattern`
+        must be text the popup PRINTS (e.g. "type the issue number"), not text
+        from the command line that opened it."""
+        self.client.expect(expect_pattern, timeout=timeout)
+        time.sleep(settle)
+        self.client.send(answer + "\r")
+
+    def render(self) -> str:
+        """ANSI-stripped bytes the client received — what the human SAW in the
+        popup. Useful to show a reviewer; too box-art/cursor-driven to golden."""
+        return strip_ansi(self.log.getvalue())
+
+    def close(self) -> None:
+        _tmux(self.socket, "kill-server")
+        try:
+            self.client.close(force=True)
+        except Exception:
+            pass
+
+
+@contextlib.contextmanager
+def tmux_popup_session(*, width: int = 200, height: int = 50, attach_settle: float = 1.0):
+    """Stand up a dedicated-socket tmux session with a pexpect-attached client for
+    a popup to render on, yield a TmuxPopupSession, and ALWAYS kill the server on
+    exit. Raises RuntimeError if tmux is absent (the caller should have checked
+    `tmux_available()` and skipped)."""
+    if not tmux_available():
+        raise RuntimeError("tmux not on PATH — the popup approval surface cannot be driven")
+    socket = f"reinjourney-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+    _tmux(socket, "kill-server")  # clean slate on OUR socket only
+    time.sleep(0.2)
+    # Everything from new-session onward is inside the try, so ANY failure during
+    # setup (a raise, a failed attach) still kills the dedicated server in the
+    # finally — the unique socket name means the next call's kill-server would
+    # NOT reap an orphan, so we must not leak one here.
+    sess = None
+    server_up = False
+    try:
+        r = _tmux(socket, "new-session", "-d", "-s", "w", "-x", str(width), "-y", str(height))
+        if r.returncode != 0:
+            raise RuntimeError(f"tmux new-session failed: {r.stderr.strip() or r.stdout.strip()}")
+        server_up = True
+        pane = _tmux(socket, "list-panes", "-t", "w", "-F", "#{pane_id}").stdout.strip()
+        sockpath = _tmux(socket, "display-message", "-p", "#{socket_path}").stdout.strip()
+        # tmux_env() feeds `sockpath` into the rein process's $TMUX, and rein's
+        # own `tmux popup` (DefaultTmuxRunner) has NO -L — it lands on THIS server
+        # only because it inherits that $TMUX. An empty sockpath would make $TMUX
+        # ",0,0" (still non-empty, so rein still fires the popup) whose fallback
+        # could be the operator's real default server. Fail closed instead.
+        if not pane or not sockpath:
+            raise RuntimeError(
+                f"tmux did not report a pane id / socket path (pane={pane!r} "
+                f"sockpath={sockpath!r}); refusing to proceed — an empty $TMUX "
+                "socket could fall back to the operator's own tmux server"
+            )
+        log = io.StringIO()
+        client = pexpect.spawn(
+            "tmux", ["-L", socket, "attach", "-t", "w"],
+            encoding="utf-8", codec_errors="replace",
+            timeout=30, dimensions=(height, width),
+        )
+        client.logfile_read = log
+        time.sleep(attach_settle)  # the client must be attached before a popup can render
+        sess = TmuxPopupSession(socket=socket, client=client, log=log, sockpath=sockpath, pane=pane)
+        yield sess
+    finally:
+        if sess is not None:
+            sess.close()  # kills the server AND closes the client
+        elif server_up:
+            _tmux(socket, "kill-server")  # setup raised before sess existed; don't leak it
