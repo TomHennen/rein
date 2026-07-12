@@ -16,11 +16,14 @@ makes it reliable (see "Why not automated?" below).
 # or:  REIN_DEMO_REPO=you/throwaway ./demo/record-demo.sh
 ```
 
-It creates a fresh demo issue, drops you into `rein run -- claude` inside a
+It creates a fresh demo issue, drops you into `rein run -- claude` (in yolo mode:
+`--dangerously-skip-permissions`, so there are no claude permission prompts — the
+sandbox + rein's declare gate are the guardrails, which is the point) inside a
 dedicated tmux server, and records with `script(1)`. During the take:
 
-- if claude asks **"Is this a project you trust?"**, press `1` then Enter;
-- when the **popup** appears, type the issue number + Enter to approve;
+- claude writes the joke and tries to push; it **figures out the declare itself**
+  from rein's write-locked error (we don't script it), and the **write-approval
+  popup** appears — type the issue number + Enter to approve;
 - when claude is done, type `exit` to end — the GIF renders to
   `demo/creds-joke.gif` automatically (`script(1)` → `script2cast.py` → `agg`).
 

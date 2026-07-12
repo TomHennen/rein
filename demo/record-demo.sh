@@ -40,24 +40,25 @@ echo "==> repo=$repo  issue=#$issue"
 work="$(mktemp -d)/repo"
 git clone --depth 1 "https://github.com/${repo}.git" "$work" >/dev/null 2>&1
 printf 'id: sess_demo\nrole: implement\nrepos:\n  - %s\n' "$repo" > "$work/.demo-session.yaml"
-prompt="Please do exactly these steps in order: \
-1) write a short one-line joke about credentials to a file named jokes.md; \
-2) commit it with git; \
-3) run 'rein declare ${issue}' to declare issue ${issue}; \
-4) push the commit to a branch named agent/${issue}/joke; \
-5) open a pull request with 'gh pr create --fill'."
+# Let claude FIGURE OUT the declare itself — it'll try to push, hit rein's
+# "writes are locked until you declare" gate, and work it out. Don't spell it out.
+prompt="Add a short one-line joke about credentials to a new file jokes.md, then commit it, push it, and open a pull request. This work is for issue ${issue}."
 cat > "$work/run-agent.sh" <<AGENT
 #!/usr/bin/env bash
 cd "$work"
-REIN_SESSION_FILE="$work/.demo-session.yaml" rein run -- claude "$prompt"
+# --dangerously-skip-permissions ("yolo"): the sandbox + rein's declare gate ARE
+# the guardrails, so claude doesn't need its own per-tool permission prompts —
+# and this is the whole point of the demo. It also skips the folder-trust dialog.
+REIN_SESSION_FILE="$work/.demo-session.yaml" rein run -- claude --dangerously-skip-permissions "$prompt"
 AGENT
 chmod +x "$work/run-agent.sh"
 
 cat <<EOF
 
-==> Recording starts on Enter. You'll be in tmux running \`rein run -- claude\`.
-    - If claude shows "Is this a project you trust?", press  1  then Enter.
-    - When the WRITE-APPROVAL POPUP appears, type  ${issue}  and press Enter.
+==> Recording starts on Enter. You'll be in tmux running \`rein run -- claude\`
+    in yolo mode (no claude permission prompts — the sandbox is the guardrail).
+    - claude will write the joke and try to push; when it hits the write gate and
+      declares, the WRITE-APPROVAL POPUP appears — type  ${issue}  and press Enter.
     - When claude finishes, type  exit  to end the take. The GIF renders itself.
 
     (Press Enter to begin.)

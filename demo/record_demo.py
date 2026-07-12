@@ -84,18 +84,20 @@ def main() -> int:
     sess_file = os.path.join(work, ".demo-session.yaml")
     open(sess_file, "w").write(f"id: sess_demo\nrole: implement\nrepos:\n  - {repo}\n")
 
-    prompt = (f"Please do exactly these steps in order: "
-              f"1) write a short one-line joke about credentials to a file named jokes.md; "
-              f"2) commit it with git; "
-              f"3) run 'rein declare {issue}' to declare issue {issue}; "
-              f"4) push the commit to a branch named agent/{issue}/joke; "
-              f"5) open a pull request with 'gh pr create --fill'.")
+    # Let claude FIGURE OUT the declare itself (it hits rein's write gate and works
+    # it out) — don't spell out the steps.
+    prompt = ("Add a short one-line joke about credentials to a new file jokes.md, "
+              "then commit it, push it, and open a pull request. "
+              f"This work is for issue {issue}.")
     # Put the launch in a script so send-keys never has to quote the prompt.
+    # --dangerously-skip-permissions ("yolo"): the sandbox + rein's declare gate are
+    # the guardrails, so claude needs no per-tool permission prompts (the point of
+    # the demo); it also skips the folder-trust dialog.
     agent_sh = os.path.join(work, "run-agent.sh")
     open(agent_sh, "w").write(
         "#!/usr/bin/env bash\n"
         f'cd "{work}"\n'
-        f'REIN_SESSION_FILE="{sess_file}" "{rein}" run -- claude "{prompt}"\n')
+        f'REIN_SESSION_FILE="{sess_file}" "{rein}" run -- claude --dangerously-skip-permissions "{prompt}"\n')
     os.chmod(agent_sh, 0o755)
 
     approved = pr = False
