@@ -100,6 +100,20 @@ func remediationFor(r checkResult) (remediation, bool) {
 			guide: r.message,
 		}, true
 
+	// Session remediation is GUIDE-only in both shapes. The design lists
+	// "(re)write the session" as a no-priv fix, but the two cases that
+	// actually arise here both need a human: a MISSING session needs the
+	// repo (a decision), and an EXISTING session carrying the retired
+	// `issue:` field must not be machine-rewritten (that would clobber the
+	// user's comments/formatting) — and init deliberately never rewrites an
+	// existing session, so pointing a warn at `rein init` would loop. Branch
+	// on status so each guide is actionable.
+	case r.name == "session" && r.status == statusWarn:
+		return remediation{
+			tier:  remedyGuide,
+			what:  "clean up the session file",
+			guide: "edit your dev-session.yaml and remove the `issue:` line — it is IGNORED (the issue is agent-declared via `rein declare <n>`, never configured)",
+		}, true
 	case r.name == "session":
 		return remediation{
 			tier:  remedyGuide,

@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestRemediationTiers is the security-critical invariant for `doctor --fix`:
 // only the no-privilege tier is auto-runnable, and every privileged/external
@@ -55,6 +58,32 @@ func TestRemediationTiers(t *testing.T) {
 				t.Errorf("tier %v has no guide text", c.wantTier)
 			}
 		})
+	}
+}
+
+// TestSessionRemediationBranchesOnStatus guards the dead-end-guidance bug: a
+// MISSING session (fail) must point at `rein init --repo`, but an EXISTING
+// session with the retired `issue:` field (warn) must NOT — init never
+// rewrites an existing session, so that would loop. The warn case guides the
+// one-line manual edit instead.
+func TestSessionRemediationBranchesOnStatus(t *testing.T) {
+	missing, ok := remediationFor(checkResult{"session", statusFail, "no session file"})
+	if !ok || missing.tier != remedyGuide {
+		t.Fatalf("missing session: want guide remedy, got ok=%v tier=%v", ok, missing.tier)
+	}
+	if !strings.Contains(missing.guide, "rein init") {
+		t.Errorf("missing-session guide should point at rein init, got %q", missing.guide)
+	}
+
+	retired, ok := remediationFor(checkResult{"session", statusWarn, "`issue: 5` is IGNORED"})
+	if !ok || retired.tier != remedyGuide {
+		t.Fatalf("retired-field session: want guide remedy, got ok=%v tier=%v", ok, retired.tier)
+	}
+	if strings.Contains(retired.guide, "rein init") {
+		t.Errorf("retired-field guide must NOT suggest `rein init` (init won't rewrite an existing session — a loop); got %q", retired.guide)
+	}
+	if !strings.Contains(retired.guide, "issue:") {
+		t.Errorf("retired-field guide should tell the user to remove the issue: line, got %q", retired.guide)
 	}
 }
 

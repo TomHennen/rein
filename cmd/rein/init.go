@@ -131,6 +131,11 @@ func runInit(args []string) error {
 	// appKS is the keystore the mint check builds NewClient against.
 	var appCfgPtr *githubapp.Config
 	var appKS keystore.Keystore
+	// ranManifest is true when the manifest flow executed this run. Its
+	// printPostFlowSummary already prints the per-App install deep-links, so
+	// the install-on-repo step below suppresses itself to avoid a double link
+	// on a fresh new-user run.
+	ranManifest := false
 
 	switch action {
 	case appsetup.BridgeStateCorrupt, appsetup.BridgeManagedExternallyMissingEnv:
@@ -181,6 +186,7 @@ func runInit(args []string) error {
 		fmt.Println("              wrote managed_externally marker (state.json)")
 
 	case appsetup.BridgeRunManifest, appsetup.BridgeForce, appsetup.BridgeResumeManifest:
+		ranManifest = true
 		ks := keystore.NewFileKeystore(configDir)
 		if expectedOwner == "" {
 			fmt.Fprintln(os.Stderr, "WARN: --owner not set; cannot detect 'wrong account' footgun (see docs/init-manifest-design.md §Security considerations)")
@@ -384,7 +390,13 @@ func runInit(args []string) error {
 	// nil = manifest path, install-id unknown) so the env-managed path — where
 	// REIN_APP_INSTALLATION_ID already resolves — prints the link as an
 	// informational pointer without popping a browser on every init.
-	appsetup.OfferInstallOnRepo(os.Stdout, configDir, sessionRepo, appCfgPtr == nil)
+	//
+	// Skip entirely on a fresh manifest run: RunManifestFlow's
+	// printPostFlowSummary already printed the per-App install deep-links
+	// (Primary + Audit), so this would just duplicate them.
+	if !ranManifest {
+		appsetup.OfferInstallOnRepo(os.Stdout, configDir, sessionRepo, appCfgPtr == nil)
+	}
 
 	// Sandbox-stack health (onboarding-ux-design.md decision 2 / §3 step 1).
 	// SOFT-BLOCK by default: run the same srt preflight `rein doctor`
