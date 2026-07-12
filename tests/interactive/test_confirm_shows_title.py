@@ -1,4 +1,4 @@
-"""test_confirm_shows_title — GATED / HUMAN-RUN. Regression spec for issue #35.
+"""test_confirm_shows_title — GATED (on a real issue). Regression spec for #35.
 
 Issue #35 landed the agent-declared, human-confirmed issue-scoping model: at
 declare time (`rein declare <n>`) rein FETCHES the declared issue and the
@@ -14,15 +14,18 @@ decorator is dropped now that the behavior exists — this is a REAL regression
 test: if the prompt ever stops showing the fetched title/home-repo, this goes
 red.
 
-GATING: this is a live, human-run test. It needs a real srt sandbox, a real
-/dev/tty, a throwaway repo, a configured rein App, AND a real issue on that
-throwaway whose number + a distinctive title word the human supplies via env:
+GATING: this is a LIVE test — but not a human-run one. It needs a real srt
+sandbox, a real controlling terminal, a throwaway repo, a configured rein App,
+AND a real issue on that throwaway. pexpect supplies the terminal and answers the
+prompt (see the README's doctrine section), so an AGENT can run this itself; what
+it cannot invent is the issue, whose number + a distinctive title word come from
+env (an invented number would 404 at fetch time and fail closed, by design):
 
     REIN_ITEST_TITLE_ISSUE   the issue number the agent will declare
     REIN_ITEST_TITLE_WORD    a distinctive word that appears in that issue's title
 
-Without those it SKIPS. Do not run it in CI. Manual recipe:
-tests/interactive/recipes/confirm-shows-title.sh.
+Without those it SKIPS (it is live: it pushes to a real throwaway, so it is not
+a CI test). Setup recipe: tests/interactive/recipes/confirm-shows-title.sh.
 """
 
 from __future__ import annotations

@@ -566,3 +566,317 @@ def spawn_rein(
     )
     child.logfile_read = transcript
     return ReinRun(child=child, transcript=transcript, workdir="")
+
+
+# --------------------------------------------------------------------------
+# JOURNEY helpers (shared exemplar API — see tests/interactive/CLAUDE.md)
+# --------------------------------------------------------------------------
+#
+# A "journey" drives one major user path end to end and produces a checked-in,
+# human-reviewable GOLDEN transcript. These helpers are what make the NEXT
+# journey mostly declarative; journey_write_ceremony.py is the exemplar that
+# proved the shape. The four moving parts:
+#
+#   SBX_TAG / get_views  — EXACT host-vs-agent split. The in-sandbox script tags
+#                          every line it emits with SBX_TAG, so a line is agent
+#                          iff it carries the tag. No content heuristics.
+#   normalize_transcript — swap the volatile bits (issue #, nonces, timestamps,
+#                          object counts, hashes, tmp paths) for stable
+#                          placeholders so two runs yield an identical golden.
+#   read_golden/compare_golden/update_golden — the golden file itself.
+#   create_issue/close_issue/issue_title      — a throwaway issue to declare.
+
+GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
+
+# The agent tags EVERY line it emits with this. `tr '\r' '\n'` upstream turns
+# git's carriage-return progress redraws into real lines so each one still
+# carries the tag (a lone \r would otherwise overwrite the tag on the terminal).
+SBX_TAG = "SBX| "
+
+
+def sandbox_preamble() -> str:
+    """Bash helper functions every in-sandbox journey script prepends (shared so
+    #78's scope-expansion journey inherits the exact same transcript shape).
+
+    Two helpers, both tagging their output with SBX_TAG:
+      emit "<text>"   -- a tagged line (step labels, @PHASE.. sentinels).
+      run  <cmd...>   -- ECHO the command as `SBX| $ <cmd>` FIRST, then run it,
+                         tagging each line of its combined output. So the
+                         transcript reads like a real terminal: command, then its
+                         output, then the next command. (Deliberately NOT `set
+                         -x`, which would dump the while-loop/PIPESTATUS internals
+                         of the tagging machinery as noise.) The command's own exit
+                         code is preserved via PIPESTATUS, so `run git push; emit
+                         "@RC=$?"` still records the real push result.
+    """
+    tag = SBX_TAG
+    return (
+        "set +e\n"
+        f"emit() {{ printf '%s%s\\n' '{tag}' \"$*\"; }}\n"
+        "run() {\n"
+        f"  printf '%s$ %s\\n' '{tag}' \"$*\"\n"
+        f"  \"$@\" 2>&1 | tr '\\r' '\\n' | while IFS= read -r l; do printf '%s%s\\n' '{tag}' \"$l\"; done\n"
+        "  return ${PIPESTATUS[0]}\n"
+        "}"
+    )
+
+
+def _pty_lines(text: str) -> list[str]:
+    """ANSI-stripped physical lines, with CR treated as a line break.
+
+    A bare \\r is a terminal cursor-return; splitting on it (rather than letting
+    it overwrite) keeps every tagged progress redraw as its own analyzable line.
+    """
+    return strip_ansi(text).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+
+def get_views(text: str) -> tuple[list[str], list[str]]:
+    """Split ONE interleaved pty transcript into (host_lines, agent_lines).
+
+    A line belongs to the AGENT iff it STARTS with SBX_TAG. `emit`/`runtagged`
+    write the tag at column 0, so real agent output always leads with it —
+    whereas rein's own startup banner ECHOES the script body (`rein: running:
+    bash -c …`), and those HOST lines contain the literal `SBX| ` *mid-line*
+    (inside the emit/runtagged definitions). Matching on `startswith` (not a
+    substring `find`) keeps that echo on the HOST side; a substring test would
+    mis-file the fragment after the tag as agent output. One pass, so the two
+    views can never disagree about a line; the tag is stripped from agent lines.
+
+    Tag-split is exact for whole, unwrapped lines. It is NOT the whole artifact:
+    callers still CURATE the views for the golden (dropping git object-count
+    noise, masking pty line-wrap), so "tag-split + curation" — not the split
+    alone — is what a human reviews.
+    """
+    host: list[str] = []
+    agent: list[str] = []
+    for ln in _pty_lines(text):
+        if ln.startswith(SBX_TAG):
+            agent.append(ln[len(SBX_TAG):].rstrip())
+        else:
+            host.append(ln.rstrip())
+    return host, agent
+
+
+def normalize_transcript(text: str, subs: list[tuple[str, str]] | None = None) -> str:
+    """Apply the generic volatile-token rules (the COMPARISON transform).
+
+    PR #78 model: the golden FILE is stored RAW (real issue number, repo, title,
+    nonce, object counts). Determinism lives HERE — this transform is applied to
+    BOTH the committed golden and a fresh run before they are diffed, so a run
+    with a different issue / nonce / count still matches. The rules are therefore
+    GENERIC regexes (not runtime-exact swaps): the committed golden's baked-in
+    values differ from a fresh run's, so both must map to the same placeholder
+    with no knowledge of either's specific value.
+
+    `subs` (optional) are exact-string swaps applied first — unused by the write
+    ceremony, kept for a future journey that needs a value regex can't capture.
+    """
+    for old, new in subs or []:
+        if old:
+            text = text.replace(old, new)
+    for pat, repl in _NORMALIZE_RULES:
+        text = re.sub(pat, repl, text)
+    return text
+
+
+# The GENERIC volatile-token rules — the comparison transform (PR #78). Order
+# matters: issue-number rules run BEFORE the hash rule (a 7+-digit issue would
+# otherwise be eaten as a <HASH>), and RATE before SIZE. Everything a rule does
+# NOT recognize is left verbatim, so a brand-new rein line still trips drift.
+# Extend this list (not a per-journey whitelist) for a genuinely new volatile.
+_NORMALIZE_RULES = [
+    # issue number, in every context it appears (BEFORE the hash rule). NB the
+    # `agent/\d+/` rule also rewrites the literal example `agent/73/kx3q` in
+    # rein's error text — harmless, since it hits both compare sides identically.
+    (r"#\d+", "#<ISSUE>"),
+    (r"agent/\d+/", "agent/<ISSUE>/"),
+    (r"\bdeclare \d+", "declare <ISSUE>"),
+    (r"issue number \(\d+\)", "issue number (<ISSUE>)"),
+    (r"(?m)^> \d+$", "> <ISSUE>"),
+    # our disposable branch suffix: <8-digit date>-<6-digit time>-<hex6>
+    (r"\d{8}-\d{6}-[0-9a-f]{6}", "<NONCE>"),
+    # ISO-ish timestamps the probe writes (2026-07-11T18:17:26Z)
+    (r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", "<TS>"),
+    # per-run proxy socket + run id
+    (r"/run/user/\d+/rein/run-[A-Za-z0-9_-]+/proxy\.sock", "<PROXY_SOCK>"),
+    (r"run-[A-Za-z0-9_-]{16,}", "run-<RUNID>"),
+    # scratch dirs (the trailing char class excludes '/', so a suffix like
+    # /session.yaml is preserved: <TMP>/session.yaml)
+    (r"/tmp/rein-[A-Za-z0-9_.-]+", "<TMP>"),
+    # git transfer chatter: keep the line, normalize every volatile number so the
+    # golden is identical whatever the repo's object count / network speed is.
+    # The hash rule REQUIRES a hex letter (?=...[a-f]) so a large all-digit object
+    # count (e.g. `Total 1234567`) is NOT mistaken for a hash — it must reach the
+    # count rules below and normalize to <N>. A real git SHA effectively always
+    # has a letter, so this keeps SHA normalization intact.
+    (r"\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b", "<HASH>"),
+    (r"\((?:delta|deltas) \d+\)", "(delta <N>)"),
+    (r"\(from \d+\)", "(from <N>)"),
+    (r"\b(reused|pack-reused|Total|Enumerating objects:|Counting objects:|"
+     r"Compressing objects:|Receiving objects:|Resolving deltas:|Writing objects:|"
+     r"Unpacking objects:|up to) \d+", r"\1 <N>"),
+    (r"\(\d+/\d+\)", "(<N>/<N>)"),
+    (r"\d+%", "<N>%"),
+    (r"\d+ bytes", "<N> bytes"),
+    # transfer RATE (with /s) BEFORE plain SIZE, so "MiB/s" is consumed first and
+    # the bare "MiB" size that remains is not mis-normalized.
+    (r"\d+(\.\d+)? [KMG]iB/s", "<RATE>"),
+    (r"\d+(\.\d+)? [KMG]iB\b", "<SIZE>"),
+]
+
+# The ONE narrow progress-meter rule (Tom's ruling): drop the intermediate `%`
+# ticks a git operation redraws, but KEEP every terminal `done.` line and every
+# error/reject line. Everything not matched here stays in the golden verbatim.
+_PROGRESS_RE = re.compile(
+    r"(remote:\s*)?(Counting|Compressing|Receiving|Resolving|Writing|Enumerating|Unpacking)"
+    r"\s+(objects|deltas):\s+\d+%"
+)
+
+
+def is_progress_tick(line: str) -> bool:
+    """A mid-progress redraw (drop it); a terminal `done.` line is NOT (keep it)."""
+    return bool(_PROGRESS_RE.search(line)) and "done." not in line
+
+
+def build_raw_transcript(text: str) -> str:
+    """The RAW terminal transcript that goes in the golden file (PR #78).
+
+    REAL values throughout — real issue number, repo, title, branch nonce, object
+    counts — so a human reviewing the checked-in golden sees exactly what the run
+    produced. The ONLY things stripped are mechanical, not semantic: ANSI escapes,
+    the sub-100% progress redraw ticks (transient `\\r` overwrites a terminal
+    never shows as separate lines; the terminal `done.` summary — with its real
+    counts — stays), and runs of blank lines collapsed to one. NO placeholders.
+
+    Determinism does NOT live here; it lives in normalize_for_compare, applied to
+    both sides at compare time.
+    """
+    out: list[str] = []
+    prev_blank = False
+    for ln in _pty_lines(text):
+        ln = ln.rstrip()
+        if is_progress_tick(ln):
+            continue
+        if ln == "":
+            if prev_blank:
+                continue
+            prev_blank = True
+        else:
+            prev_blank = False
+        out.append(ln)
+    return "\n".join(out).strip("\n") + "\n"
+
+
+def normalize_for_compare(text: str) -> str:
+    """The comparison LENS: raw transcript -> volatiles replaced by placeholders.
+
+    Applied to BOTH the committed (raw) golden and a fresh (raw) run before they
+    are diffed, so different issue numbers / nonces / object counts still match
+    but a genuinely new or changed line trips drift. Idempotent: re-normalizing an
+    already-normalized transcript is a no-op (test_golden_shape asserts this).
+
+    Use REIN_SHOW_NORMALIZED=1 on a journey to eyeball this form directly.
+    """
+    return normalize_transcript(build_raw_transcript(text))
+
+
+def read_golden(name: str) -> str | None:
+    p = GOLDEN_DIR / name
+    return p.read_text() if p.exists() else None
+
+
+def update_golden(name: str, raw_text: str) -> Path:
+    """Write the RAW transcript to the golden file (real values, no placeholders)."""
+    GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
+    p = GOLDEN_DIR / name
+    p.write_text(raw_text)
+    return p
+
+
+def compare_golden(name: str, fresh_raw: str) -> tuple[bool, str]:
+    """Compare a fresh RAW run to the committed RAW golden, NORMALIZING BOTH first.
+
+    Returns (matches, normalized_unified_diff). The diff is over the NORMALIZED
+    forms, so a human sees the meaningful change, not per-run noise. A missing
+    golden reads as a diff against empty.
+    """
+    import difflib
+
+    golden_raw = read_golden(name) or ""
+    expected = normalize_for_compare(golden_raw)
+    actual = normalize_for_compare(fresh_raw)
+    if expected == actual:
+        return True, ""
+    diff = difflib.unified_diff(
+        expected.splitlines(keepends=True),
+        actual.splitlines(keepends=True),
+        fromfile=f"golden/{name} (normalized)",
+        tofile="fresh run (normalized)",
+    )
+    return False, "".join(diff)
+
+
+# -- throwaway issue lifecycle (gh; the operator's own token) ----------------
+
+
+def create_issue(repo: str, title: str, body: str, env: dict | None = None) -> int:
+    """Open a real issue on the THROWAWAY and return its number.
+
+    The declare FETCHES the issue before prompting (#35 decision E), so a
+    journey needs a real, open issue — an invented number 404s and fails closed.
+    """
+    env = env or rein_env()
+    out = subprocess.check_output(
+        ["gh", "issue", "create", "--repo", repo, "--title", title, "--body", body],
+        text=True, env=env,
+    ).strip()
+    return int(out.rstrip("/").split("/")[-1])
+
+
+def issue_title(repo: str, issue: int, env: dict | None = None) -> str:
+    env = env or rein_env()
+    import json as _json
+
+    out = subprocess.check_output(
+        ["gh", "issue", "view", str(issue), "--repo", repo, "--json", "title"],
+        text=True, env=env,
+    )
+    return _json.loads(out)["title"]
+
+
+def close_issue(repo: str, issue: int, env: dict | None = None, comment: str = "") -> None:
+    env = env or rein_env()
+    args = ["gh", "issue", "close", str(issue), "--repo", repo]
+    if comment:
+        args += ["--comment", comment]
+    subprocess.run(args, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def resolve_throwaway_repo(env: dict | None = None) -> str:
+    """The throwaway repo a journey pushes to, resolved the rein-init way FIRST.
+
+    Order (issue #40 — journeys must not DEPEND on REIN_TEST_REPO_A special-
+    casing):
+      1. REIN_JOURNEY_REPO           — an explicit journey override.
+      2. the configured dev-session  — repos[0] of ~/.config/rein/dev-session.yaml
+                                       (what `rein init` scaffolds).
+      3. REIN_TEST_REPO_A            — LEGACY this-box shortcut, clearly last.
+
+    A journey still only ever touches this one throwaway (hard-constraint #1).
+    """
+    env = env or rein_env()
+    if env.get("REIN_JOURNEY_REPO"):
+        return env["REIN_JOURNEY_REPO"]
+    cfg = env.get("XDG_CONFIG_HOME") or os.path.join(env.get("HOME", str(Path.home())), ".config")
+    session_file = Path(cfg) / "rein" / "dev-session.yaml"
+    if session_file.exists():
+        for line in session_file.read_text().splitlines():
+            m = re.match(r"\s*-\s*(\S+/\S+)\s*$", line)
+            if m:
+                return m.group(1)
+    if env.get("REIN_TEST_REPO_A"):
+        return env["REIN_TEST_REPO_A"]
+    raise RuntimeError(
+        "no throwaway repo: set REIN_JOURNEY_REPO, or run `rein init` to scaffold "
+        "a dev-session, or (legacy) source ./dev-env for REIN_TEST_REPO_A"
+    )

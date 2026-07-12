@@ -7,14 +7,17 @@
 # must DISPLAY the fetched title + home repo (decision E — the load-bearing
 # misattribution control, probe S1/S4/S5).
 #
-# It needs a REAL environment a human must provide:
+# It needs a REAL environment (a human OR an agent can provide it):
 #   - a working `rein init` App on this machine (see HANDOFF.md)
 #   - the srt sandbox available (Linux userns) and a real controlling /dev/tty
 #   - a THROWAWAY repo (the harness picks it from REIN_* env; see reinharness.py)
 #   - a real issue on that throwaway with a distinctive word in its title
 #
-# Run it FROM YOUR REAL TERMINAL (not from inside an agent — the prompt reads
-# /dev/tty, which an agent's tool subprocess cannot reach):
+# An AGENT CAN RUN THIS ITSELF. (This used to say "run it from your real terminal,
+# not from inside an agent". Stale: the prompt does read /dev/tty, but pexpect
+# hands `rein` a real pty, so the suite drives the prompt with nobody at the
+# keyboard — `tests/interactive/run.sh` runs this very test. See the README's
+# doctrine section.) Typing it by hand still works, and is the point of a recipe:
 #
 #   source ./dev-env                     # load REIN_* env
 #   # create a throwaway issue with a memorable title, e.g.:

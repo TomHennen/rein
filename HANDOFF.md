@@ -261,8 +261,37 @@ into the plan when it reports. One divergence is already tracked:
    a few sessions, then on `wrangle`, testing the design.md §7.2 hypothesis. Before
    dogfood: durable VM time-sync (#23) and re-verify the srt pin.
 
-**The write path needs a human tty** — verify with `docs/cp3-manual-test.sh`
-(read path is autonomous) and the CP4 identity/push check `docs/cp4-manual-test.sh`.
+**The write path needs a tty — but NOT a human.** (This used to say "needs a human
+tty"; that was stale and it cost us: agents kept parking write-path verification
+for Tom.) The pexpect suite in `tests/interactive/` hands `rein` a real pty and
+**is** the human stand-in — it answers the Form A prompt just as a developer
+would. So an agent can and **should** self-verify the whole ceremony, autonomously:
+
+Setup is the **`rein init` world**, not `source ./dev-env` — dev-env is the dead-App
+footgun this HANDOFF's top banner warns about. `rein init` configures the App +
+a dev-session; a journey resolves its throwaway with `resolve_throwaway_repo`
+(`REIN_JOURNEY_REPO` → the configured dev-session → `REIN_TEST_REPO_A` only as a
+labeled legacy shortcut), so journeys don't depend on `REIN_TEST_REPO_A` special-
+casing (#40).
+
+```sh
+# once per machine: rein init (see the env prereqs above); this box's legacy
+# shortcut is `source ./dev-env`, but the documented path is init.
+python3 tests/interactive/journey_write_ceremony.py     # the ceremony journey (creates + closes its own issue)
+
+# the gated test_*.py take an issue via env (they don't self-create one):
+gh issue create --repo <throwaway> --title "..." --body "..."   # declare FETCHES a real issue
+REIN_ITEST_ISSUE=<n> REIN_ITEST_TITLE_ISSUE=<n> REIN_ITEST_TITLE_WORD=<word-in-title> \
+  tests/interactive/run.sh                              # write_approval + confirm_shows_title + init + realagent
+```
+
+The security model is untouched: the **sandboxed** agent has no tty at all and
+still cannot self-approve; pexpect drives only the **host-side** prompt. The
+`docs/cp*-manual-test.sh` scripts remain as human walkthroughs, but they are no
+longer the *only* way to verify writes. A manual script is genuinely required for
+exactly one thing: the **browser** flow (GitHub App *creation* via the manifest —
+`scripts/cp5-manifest-manual-test.sh`).
+
 Read `PLAN-1.md` Notes tail for the full live status + every design decision.
 
 Three prior open questions are CLOSED (Tom, 2026-07-05; see PLAN-1 Notes):

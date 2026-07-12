@@ -137,7 +137,9 @@ all fire from the proxy; direct-mode test suite still green. Unit-tested.
 srt 0.0.63 with rein's proxy injecting credentials. Reviewed (code + security:
 7/8 invariants clean, one HIGH fixed) + **supervisor live-gate PASSED** on real
 srt against the throwaway. See the 2026-07-05 CP3 Notes entry. Read path
-autonomous; write path needs a human tty (manual script). CP4 makes sandboxed
+autonomous; the write path needs a *tty* — but not a human: the pexpect suite
+(`tests/interactive/`) drives a real pty and stands in for the approver, so an
+agent can self-verify the ceremony end to end. CP4 makes sandboxed
 the default; for now `--sandbox` is explicit opt-in.
 
 **Estimate:** 2-3 days.
@@ -262,8 +264,9 @@ plus the /dev/tty self-test above. Reviews found NO critical/high/blocker.
 **Unit-verifiable vs live-gate:** BuildEnv emitting the 4 GIT_* vars + the
 resolved values, the fail-open chain, expiry policy + teardown, dispatch/fail-
 closed, and both approval invariants are all unit-verified. The one claim that
-survives on the LIVE PUSH (manual script, tty) not unit tests: that GitHub
-actually ATTRIBUTES the commit to the App from the bot noreply email.
+survives on the LIVE PUSH (a real tty — nowadays the pexpect suite's, no human
+required) not unit tests: that GitHub actually ATTRIBUTES the commit to the App
+from the bot noreply email.
 
 **Estimate:** 2 days.
 
