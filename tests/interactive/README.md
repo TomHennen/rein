@@ -86,6 +86,8 @@ a new `golden/*.txt`). See `tests/interactive/CLAUDE.md` for the authoring rules
 | 11 | **Misconfig: App not installed on a session repo** | **GAP** — this is issue **#68** (the D4 install-coverage check is skipped entirely on the env-App path). A live journey here would have caught it; the unit tests didn't | — |
 | 12 | **Misconfig: broken / expired session file** | **GAP** | — |
 | 13 | **Init repo autodetection** — `rein init`'s repo prompt DEFAULT is autodetected from the cwd's git `origin` (issue **#69**/#78): from a checkout of the repo the prompt is PRE-FILLED with the detected `owner/name` (Enter accepts); from a NON-git dir the prompt is bare — proving it is cwd-derived, not hardcoded. `rein run` with no session likewise hints the detected repo | **COVERED** | `journey_init_autodetect.py` → **`golden/init_autodetect.txt`** (the two prompt legs) + the run-hint as a plain assertion inside it (the `--direct` warning banner keeps it out of the golden) |
+| 14 | **Session commands** — the HUMAN-side `rein session show` / `rein session add-repo <owner/name>` (issue **#69**, mocks §2): `show` prints the standing scope ceiling with per-repo LIVE install-coverage (`[App installed]`) and any live-run deltas (`live runs: none` when none); `add-repo` VALIDATES at write time (same-owner + install-coverage probe) then widens the ceiling, and the next `show` lists the new repo. Also fills the hole that `rein session show` had NO test of any kind | **COVERED** | `journey_session_commands.py` → **`golden/session_commands.txt`** (show → add-repo B → show, ONE story; the CROSS-OWNER reject is a plain assertion beside it, not in the golden) |
+| 15 | **404-at-expansion install NOTICE** — the sibling of scope expansion (issue **#69**, mocks §1.4/§5.2): the agent declares an expansion to a repo the App is NOT installed on (same owner, so it passes the cross-owner check and reaches the coverage probe). Nothing is approvable, so NO prompt fires — the human gets an interactive NOTICE (names the repo, "there is no approval to give", install deep-link), and the declare REFUSES with the agent-facing install-then-retry message | **COVERED** | `journey_expansion_404.py` → **`golden/expansion_404.txt`** (the host-tty NOTICE + the SBX-tagged agent refusal, in one interleaved terminal) |
 
 Statuses: **COVERED** (a file drives it), **PARTIAL** (some of it), **GAP** (real
 journey, no demo yet), **UNDRIVEABLE** (needs a browser — say so and move on).
@@ -365,6 +367,13 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
 - `journey_init_autodetect.py` + `golden/init_autodetect.txt` — journey #13 (#69/#78:
   `rein init`'s repo-prompt default autodetected from the cwd's git `origin`; the
   bare-prompt contrast + the `rein run` no-session hint ride along as assertions).
+- `journey_session_commands.py` + `golden/session_commands.txt` — journey #14 (#69:
+  the human-side `rein session show` / `add-repo`; show → add-repo B → show, the
+  cross-owner reject as a plain assertion beside the golden). ALSO the first live
+  exercise of `rein session show`, which previously had no test at all.
+- `journey_expansion_404.py` + `golden/expansion_404.txt` — journey #15 (#69: the
+  404-at-expansion install NOTICE; the agent declares an expansion to an uninstalled
+  same-owner repo → host-tty NOTICE, no approval, declare refuses).
 - `run-journeys.sh` — the on-demand runner: compare each journey to its golden
   (normalized); `REIN_UPDATE_GOLDEN=1` to adopt, `--normalized` to view the lens.
 - `recipes/` — per-test setup scripts for the gated tests (e.g.
