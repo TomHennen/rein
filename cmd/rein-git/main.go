@@ -39,7 +39,19 @@ var readSubcommands = map[string]bool{
 }
 
 func main() {
-	op := classify(os.Args[1:])
+	args := os.Args[1:]
+	op := classify(args)
+
+	// In the sandbox, .git/config is read-only (#64 host-exec hardening), so a
+	// `git push -u/--set-upstream` — which writes branch.<x>.remote/merge into
+	// .git/config — fails with "could not write config file .git/config: Device
+	// or resource busy". The push itself succeeds, but the agent burns tokens
+	// puzzling over and explaining the error. Silently drop the upstream-setup
+	// flag on push so the push looks NORMAL to the agent. Tracking for a shared
+	// checkout is a separate, host-side concern (#102).
+	if findSubcommand(args) == "push" {
+		args = dropPushUpstreamFlag(args)
+	}
 
 	env := append(os.Environ(), "REIN_GIT_OP="+op)
 
@@ -51,11 +63,26 @@ func main() {
 
 	// Replace this process with real git. Note: syscall.Exec wants argv[0]
 	// to be the program name; we pass realGit so git sees its real path.
-	argv := append([]string{realGit}, os.Args[1:]...)
+	argv := append([]string{realGit}, args...)
 	if err := syscall.Exec(realGit, argv, env); err != nil {
 		fmt.Fprintf(os.Stderr, "rein-git: exec %s: %v\n", realGit, err)
 		os.Exit(127)
 	}
+}
+
+// dropPushUpstreamFlag removes `-u` / `--set-upstream` from a `git push` argv.
+// Both are valueless flags meaning "record the pushed branch as upstream" — a
+// .git/config write that is read-only in the sandbox. Exact-token match only:
+// a refspec or branch can never be literally "-u"/"--set-upstream".
+func dropPushUpstreamFlag(args []string) []string {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == "-u" || a == "--set-upstream" {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // classify scans argv past git's global options to find the subcommand and
