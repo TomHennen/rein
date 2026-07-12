@@ -54,9 +54,11 @@ reaches the golden. The SANDBOXED leg has no such access: that is the point.
     REIN_UPDATE_GOLDEN=1 python3 tests/interactive/journey_credential_boundary.py   # write the RAW golden
     REIN_SHOW_NORMALIZED=1 python3 tests/interactive/journey_credential_boundary.py # also print the compare lens
 
-Exit 0 = boundary held AND the normalized transcript matches the golden (or bagel
-absent -> skip). Exit 1 = drift. Exit 2 = the boundary BROKE (sandboxed scan saw a
-credential, or the control found none, or bagel did not run).
+Exit 0 = boundary held AND the normalized transcript matches the golden. Exit 1 =
+drift. Exit 2 = the boundary BROKE (sandboxed scan saw a credential, or the control
+found none, or bagel did not run). Exit 3 = SKIPPED because bagel is not installed —
+deliberately NOT 0, so run-journeys.sh reports SKIP rather than PASS (a skipped
+check that reads as green is the #68 footgun).
 """
 
 from __future__ import annotations
@@ -205,10 +207,14 @@ def _extract(step_text: str):
 def main() -> int:
     bagel = shutil.which("bagel")
     if not bagel:
-        print("SKIP: bagel not on PATH — install with "
+        # Exit 3 = SKIPPED, NOT 0. run-journeys.sh maps 0 -> PASS, so returning 0
+        # here would report this journey as green on any machine without bagel —
+        # a skipped check masquerading as coverage, which is exactly the #68
+        # footgun. 3 makes the runner print "SKIP ... did NOT run" instead.
+        print("SKIP: bagel not on PATH — this journey did NOT run. Install with "
               "`go install github.com/boostsecurityio/bagel/cmd/bagel@latest` "
               "(external CLI only; do NOT add to go.mod, it is GPL-3.0).", flush=True)
-        return 0
+        return 3
 
     env = H.rein_env()
     repo = H.resolve_throwaway_repo(env)  # rein-init way first; #40

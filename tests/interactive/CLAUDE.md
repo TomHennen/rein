@@ -183,10 +183,19 @@ in `reinharness.py`, so a new journey is mostly wiring:
 `tests/interactive/run-journeys.sh` is the **manual, on-demand** runner (no timer,
 no background minting). By default it runs every `journey_*.py` live and each one
 COMPARES its fresh run to the committed RAW golden (normalizing both sides), so a
-different issue/nonce/count still passes; it reports PASS / DRIFT / BROKE with a
-non-zero exit on drift. `REIN_UPDATE_GOLDEN=1 run-journeys.sh` instead ADOPTS —
+different issue/nonce/count still passes; it reports PASS / DRIFT / BROKE / SKIP with
+a non-zero exit on drift. `REIN_UPDATE_GOLDEN=1 run-journeys.sh` instead ADOPTS —
 rewriting each raw golden from a live run (then `git diff` shows what to commit).
 `run-journeys.sh --normalized` also prints each journey's normalized transcript.
+
+**A journey that cannot run must exit 3, never 0.** The runner maps `0 -> PASS`, so
+a journey that returns 0 because a prerequisite is missing (an external tool not
+installed, a gated capability absent) reports **green for a path nothing
+exercised** — the #68 footgun, the exact failure this suite exists to prevent. Exit
+**3 = SKIPPED**: the runner prints `SKIP … this journey did NOT run` plus a summary
+warning, so missing coverage is visible instead of masquerading as coverage. A skip
+is not a failure (it does not fail the run), but it must never look like a pass.
+`journey_credential_boundary.py` is the exemplar (it needs the external `bagel` CLI).
 
 - Default (compare) mode does NOT rewrite the raw goldens, so a PASS leaves the
   tree clean. DRIFT prints the normalized diff and a scratch path to the raw

@@ -69,18 +69,24 @@ if [ "${#journeys[@]}" -eq 0 ]; then
 fi
 
 fail=0
+skipped=0
 summary=()
 for j in "${journeys[@]}"; do
   name="$(basename "$j")"
   echo "=== $name (live) ==="
   # The journey itself does the normalize-both compare and sets the exit code:
   #   0 = match (or golden updated)   1 = drift   2 = ceremony/boundary broke
+  #   3 = SKIPPED — a prerequisite is missing, so the journey did NOT run.
+  # 3 is its own status ON PURPOSE: a skip that reports PASS is the #68 footgun
+  # (a green suite hiding an untested path). A skip is not a failure, but it must
+  # never look like coverage.
   python3 "$j"
   rc=$?
   case "$rc" in
     0) summary+=("PASS  $name") ;;
     1) summary+=("DRIFT $name (normalized diff above; raw fresh at \$TMPDIR)"); fail=1 ;;
     2) summary+=("BROKE $name (invariant failed)"); fail=1 ;;
+    3) summary+=("SKIP  $name (prerequisite missing — this journey did NOT run; see above)"); skipped=1 ;;
     *) summary+=("ERROR $name (exit $rc)"); fail=1 ;;
   esac
   echo
@@ -88,6 +94,12 @@ done
 
 echo "=== [A] golden-drift summary ==="
 printf '  %s\n' "${summary[@]}"
+if [ "$skipped" -eq 1 ]; then
+  echo
+  echo "  WARNING: one or more journeys SKIPPED — that coverage did NOT run."
+  echo "  Install the missing prerequisite and re-run, or you are reading a green"
+  echo "  summary for a path nothing exercised (#68)."
+fi
 if [ -n "${REIN_UPDATE_GOLDEN:-}" ]; then
   echo
   echo "REIN_UPDATE_GOLDEN was set: the RAW goldens were rewritten from live runs."

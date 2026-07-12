@@ -351,8 +351,11 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
   checked-in RAW golden transcript (not swept by `run.sh`).
 - `journey_credential_boundary.py` + `golden/credential_boundary.txt` — row 9's
   complementary scanner-differential: `bagel` run `--direct` (finds 4) vs
-  sandboxed (finds 0), as two `run_journey` steps. Skips if `bagel` is not on
-  PATH. `bagel` is GPL-3.0 and used ONLY as an external CLI — never a go.mod dep.
+  sandboxed (finds 0), as two `run_journey` steps. **Needs the external `bagel`
+  CLI** — without it the journey exits **3 = SKIP** (the runner prints "did NOT
+  run"; it is never reported as PASS — see CLAUDE.md). Install it with:
+  `go install github.com/boostsecurityio/bagel/cmd/bagel@latest`. `bagel` is
+  GPL-3.0 and used ONLY as an external CLI — never a go.mod dep.
 - `journey_app_not_installed.py` + `golden/app_not_installed.txt` — the
   #68 misconfig journey (row 10; NOT swept; run it deliberately) and its RAW
   golden transcript.
