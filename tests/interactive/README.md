@@ -80,7 +80,7 @@ a new `golden/*.txt`). See `tests/interactive/CLAUDE.md` for the authoring rules
 | 5 | **Ref cross-check** — after approval, a non-`agent/<n>/<nonce>` ref is still rejected (#35 decision C) | **COVERED** | `test_write_approval.py::nonmatching_ref_rejected_after_approval` + phase 4 of the ceremony golden |
 | 6 | **Scope expansion** — agent (scoped to repo A) declares an issue that lives in repo B, OUTSIDE scope (`rein declare <n> --repo B`); the SCOPE EXPANSION prompt fires with its distinct "this ADDS a repo to the scope ceiling" header, the human approves + answers the persist `[y/N]`, and the widened token lets the agent clone + push to repo B | **COVERED** | `journey_scope_expansion.py` → **`golden/scope_expansion.txt`** (approve → run-only → push-to-B, ONE story) + `test_scope_expansion.py` (the DENY leg + the CROSS-OWNER structural rejection, as plain assertions — no golden) |
 | 7 | **Real agent in the sandbox** — interactive `claude` under `rein run`, reaching `api.anthropic.com` | **COVERED** | `test_realagent_e2e.py` (live since CP4.5 landed egress) |
-| 8 | **tmux-popup grant** — the DEFAULT TUI path (#37): the confirm prompt fires in a tmux popup, not inline; the operator answers there | **GAP** — pexpect can drive it (spawn inside a `tmux` session, assert the popup fires, `send-keys` the answer), gated on `$TMUX`. Its own journey (`journey_tmux_popup.py`), not yet built. The popup is the default for a TUI agent, so it must not stay untested | — |
+| 8 | **tmux-popup grant** — the DEFAULT TUI path (#37): with `$TMUX` set and `REIN_APPROVAL` unset the confirm prompt fires in a `tmux popup -E "rein approval grant"`, NOT inline; the operator answers there | **COVERED** | `journey_tmux_popup_approval.py` → **`golden/tmux_popup_approval.txt`**. Drives a REAL popup on a DEDICATED tmux socket (`reinharness.tmux_popup_session`, never the operator's own server): rein runs on a plain pty with `$TMUX`/`$TMUX_PANE` pointing at the session so its OWN output is a clean deterministic golden, while the popup renders on an ATTACHED pexpect client the harness answers through (a popup is a client-owned overlay — `send-keys` can't reach it; keys go to the client's pty). Positive proof of the surface: the golden shows the declare confirmed with the Form A block ABSENT (it rendered in the popup, unlike the write-ceremony golden's inline block), and rein's `helper.log` records `launching tmux popup` + `issue #<n> CONFIRMED via tmux popup`. SKIPs cleanly if `tmux` is absent |
 | 9 | **Sandbox filesystem boundary** — from INSIDE (#59/#63/#64): credential stores + `~/.ssh` + `~/.aws` + rein's own app key read as *absent*; `$HOME` is ephemeral (a write succeeds into tmpfs, then never persists on the host); the `.git` host-exec escape is CLOSED (`mv .git`→"Device or resource busy", `.git/hooks` + `.git/config` read-only); ordinary edits still `add`/`commit`; and the injected agent contract is shown *verbatim* | **COVERED** | `journey_sandbox_filesystem.py` → **`golden/sandbox_filesystem.txt`** (a deterministic bash "agent" — reproducible, unlike real claude) + gated `test_git_hardening.py` (the `.git` escape, incl. the `config.worktree` edge) + `test_agent_contract.py` (real-claude contract read-back — LLM phrasing varies, so NOT golden material). **Complementary evidence:** `journey_credential_boundary.py` → **`golden/credential_boundary.txt`** proves the same hide with an INDEPENDENT third-party scanner (`bagel`) run as a differential — finds 4 planted creds `--direct`, 0 sandboxed — a sweep that catches un-enumerated paths the `cat`-checks can't (the #55 unknown-unknown class). Skips if `bagel` (GPL-3.0, external CLI only) is absent |
 | 10 | **Direct mode (`--direct`)** — the same ceremony without srt | **GAP** — `reinharness.spawn_rein_run(direct=True)` exists and is unused. Cheap journey to add | — |
 | 11 | **Misconfig: App not installed on a session repo** | **GAP** — this is issue **#68** (the D4 install-coverage check is skipped entirely on the env-App path). A live journey here would have caught it; the unit tests didn't | — |
@@ -325,6 +325,43 @@ python3 tests/interactive/journey_init_autodetect.py   # one journey; exit 0 == 
 REIN_UPDATE_GOLDEN=1 python3 tests/interactive/journey_init_autodetect.py   # regenerate the golden
 ```
 
+### `journey_tmux_popup_approval.py` — journey #8, with a GOLDEN (#37)
+
+The DEFAULT approval surface inside `$TMUX`. rein's write-approval prompt does NOT
+default to the inline `/dev/tty` prompt when `$TMUX` is set — it defaults to a
+`tmux popup -E "rein approval grant --run-id <id>"` (internal/ui/grant:
+`PopupPreferenceFromEnv` is true inside `$TMUX`, so `attemptPopup` runs). Every
+OTHER journey/test runs OUTSIDE tmux (or forces `REIN_APPROVAL=tty`), so this
+default surface was untested end to end. This journey drives the REAL popup on the
+same #35 loop as the write ceremony.
+
+Driving a popup under pexpect (`reinharness.tmux_popup_session`, a context manager):
+
+- a DEDICATED tmux server (`tmux -L <unique>`), so it NEVER touches the operator's
+  own sessions; it kills only its own socket on teardown;
+- an ATTACHED pexpect client the popup renders on and grabs the keyboard of — a
+  popup is a client-owned OVERLAY, not an addressable pane (it never appears in
+  `list-panes`, and `send-keys` cannot reach it), so the only way to answer it is
+  to write keys to the attached client's pty (`drive_popup`);
+- rein on a SEPARATE plain pty whose `$TMUX`/`$TMUX_PANE` (`tmux_env`) point at the
+  session — keeping rein's OWN output clean and deterministic (the golden), while
+  the popup's finicky box-art render stays OFF the golden. This mirrors reality:
+  `rein run -- <agent>` runs inside the operator's tmux pane and the broker it
+  hosts launches the popup on that same client.
+
+Positive proof of the surface (asserted; some in the golden, some as outcomes):
+the golden shows `$ rein declare <n>` going straight to `confirmed` with the Form A
+block ABSENT (contrast the write-ceremony golden's inline `=== rein: agent declares
+work … > <n> [approved]`), `prompt_count()==0` on rein's terminal, and rein's
+`helper.log` records `grant: launching tmux popup (… approval grant --run-id …)`
+then `grant: issue #<n> CONFIRMED via tmux popup`. SKIPs cleanly (exit 0) if `tmux`
+is not on PATH — the surface is undriveable without it.
+
+```sh
+python3 tests/interactive/journey_tmux_popup_approval.py   # one journey; exit 0 == matches golden
+REIN_UPDATE_GOLDEN=1 python3 tests/interactive/journey_tmux_popup_approval.py   # regenerate the golden
+```
+
 ## Disposable branches & cleanup
 
 Each write test creates a clearly-timestamped `reintest-<UTC>-<rand>` branch on
@@ -341,7 +378,9 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
   and the shared **journey** API (`sandbox_preamble`, `SBX_TAG`, `get_views`,
   `build_raw_transcript`,
   `normalize_for_compare`, `compare_golden`, `create_issue`/`close_issue`,
-  `resolve_throwaway_repo`).
+  `resolve_throwaway_repo`), plus `tmux_popup_session`/`TmuxPopupSession` (drive a
+  REAL tmux popup on a dedicated socket — the #37 default approval surface) and
+  `helper_log_path`/`read_log_since` (read rein's forensic log delta).
 - `itest_base.py` — `ReinTestCase` (one-time build, env + throwaway repo,
   disposable-branch cleanup) and the unittest/xfail/skip rationale.
 - `test_write_approval.py`, `test_init_interactive.py`, `test_realagent_e2e.py`,
@@ -377,6 +416,11 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
 - `journey_expansion_404.py` + `golden/expansion_404.txt` — journey #15 (#69: the
   404-at-expansion install NOTICE; the agent declares an expansion to an uninstalled
   same-owner repo → host-tty NOTICE, no approval, declare refuses).
+- `journey_tmux_popup_approval.py` + `golden/tmux_popup_approval.txt` — journey #8
+  (#37: the DEFAULT approval surface inside `$TMUX` — a REAL `tmux popup` driven via
+  `reinharness.tmux_popup_session` on a dedicated socket; the golden is rein's clean
+  terminal, the Form A block ABSENT because it rendered in the popup). Skips if
+  `tmux` is not on PATH.
 - `run-journeys.sh` — the on-demand runner: compare each journey to its golden
   (normalized); `REIN_UPDATE_GOLDEN=1` to adopt, `--normalized` to view the lens.
 - `recipes/` — per-test setup scripts for the gated tests (e.g.
