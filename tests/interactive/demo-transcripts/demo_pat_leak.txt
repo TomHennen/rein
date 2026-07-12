@@ -1,8 +1,13 @@
-# GOLDEN TRANSCRIPT — demo_pat_leak.sh (issue #57)
-# Captured live. /tmp paths normalized to <TMP>. The script self-asserts (12
-# checks) and exits non-zero on any regression. Regenerate:
-#   source ./dev-env && tests/interactive/demo_pat_leak.sh
-building rein-gh -> <TMP>
+# REFERENCE TRANSCRIPT — demo_pat_leak.sh (issue #57)
+#
+# A static, human-reviewable capture — NOT a normalize-on-compare golden, so it
+# lives in demo-transcripts/ (outside golden/, which is journey RAW goldens only).
+# Captured live; /tmp paths normalized to <TMP>. The script echoes each command
+# it runs as `$ <command>` then its output, self-asserts (12 checks), and exits
+# non-zero on any regression. Regenerate:
+#   source ./dev-env && tests/interactive/demo_pat_leak.sh \
+#     | sed 's#/tmp/[^ ]*#<TMP>#g' > tests/interactive/demo-transcripts/demo_pat_leak.txt
+$ go build -o <TMP> ./cmd/rein-gh
 ==============================================================================
   #57 DEMO — rein-gh must not leak the developer's ambient PAT
 ==============================================================================

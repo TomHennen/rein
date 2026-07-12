@@ -32,7 +32,7 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 cd "$ROOT" || exit 1
 
 BIN="$(mktemp -d)/rein-gh"
-echo "building rein-gh -> $BIN"
+echo "\$ go build -o $BIN ./cmd/rein-gh"
 go build -o "$BIN" ./cmd/rein-gh || { echo "build failed"; exit 1; }
 
 # --- a fake gh that dumps the credential env it was handed -----------------

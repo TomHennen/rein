@@ -240,7 +240,7 @@ sandbox stack):
   the inner command actually runs, exit 0.
 
 Run it: `python3 tests/interactive/journey_app_not_installed.py`. A normalized
-golden capture lives at `golden/journey_app_not_installed.txt`.
+golden capture lives at `golden/app_not_installed.txt`.
 
 > **Journey-catalogue note.** PR #72 (branch `e2e-suite-doctrine`) rewrites this
 > README into a numbered journey catalogue where this is **row 10, "Misconfig: App
@@ -276,7 +276,7 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
   `normalize_for_compare` is idempotent on it. Runs in the sweep and standalone.
 - `journey_write_ceremony.py` + `golden/write_ceremony.txt` — journey #2 and its
   checked-in RAW golden transcript (not swept by `run.sh`).
-- `journey_app_not_installed.py` + `golden/journey_app_not_installed.txt` — the
+- `journey_app_not_installed.py` + `golden/app_not_installed.txt` — the
   #68 misconfig journey (row 10; NOT swept; run it deliberately) and its RAW
   golden transcript.
 - `demo-transcripts/` — reference captures for the non-journey demos

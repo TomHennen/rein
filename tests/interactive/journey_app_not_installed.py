@@ -1,24 +1,16 @@
 """journey_app_not_installed — MISCONFIG: App not installed on a session repo.
 
+This is ONE journey. For what a journey IS, the golden-transcript rule, and how
+to author the next one, read tests/interactive/CLAUDE.md — none of that lives here.
+
 JOURNEY CATALOGUE (tests/interactive/README.md, row 10): this file IS the
 "Misconfig: App not installed on a session repo" journey. It is the live demo
-that issue #68 asked for — the D4 install-coverage check (design.md:581: an
-uncovered session repo must be a LOUD launch error, not a placeholder failing
-inside the agent) was early-returning on the REIN_APP_* env path, so the whole
-check never ran there. A unit suite stayed green; only RUNNING it caught the gap.
+issue #68 asked for — the D4 install-coverage check (design.md:581: an uncovered
+session repo must be a LOUD launch error, not a placeholder failing inside the
+agent) was early-returning on the REIN_APP_* env path, so the whole check never
+ran there. A unit suite stayed green; only RUNNING it caught the gap.
 
-    catalogue row 10 flips GAP -> COVERED once this lands; this file is the
-    demo the catalogue row points to. (The numbered catalogue table itself
-    lives on PR #72 / branch e2e-suite-doctrine, which rewrites this README into
-    the catalogue; on THIS branch, cred-boundary, the table isn't present yet.
-    Reconciled at merge — see the PR body.)
-
-Journeys live in `journey_*.py`; the assertion tests live in `test_*.py` and are
-what `run.sh` sweeps. This file is NOT swept (it needs live creds). It both SHOWS
-the two outcomes and ASSERTS them, so an autonomous agent can re-run it and get a
-clean pass/fail plus a pasteable transcript.
-
-Two legs, both driven through a real `rein run`:
+Two legs, both driven through a real `rein run --direct`:
 
   * MISCONFIG: a session naming an UNCOVERED repo. rein must refuse at LAUNCH,
     exit 1, and the refusal must name the repo, name the App (slug), and carry
@@ -29,30 +21,48 @@ Two legs, both driven through a real `rein run`:
 
 WHY --direct: the coverage gate (cmd/rein/run.go: resolveAndCacheInstallID) runs
 BEFORE the sandboxed/direct mode split, so it fires identically either way. Using
-`--direct` lets this journey demonstrate the gate WITHOUT depending on a healthy
-srt/bwrap sandbox stack or paying for a full sandboxed clone — the refusal and
-the control are both about the launch-time gate, not the sandbox.
+`--direct` demonstrates the gate WITHOUT depending on a healthy srt/bwrap sandbox
+stack or paying for a full sandboxed clone — the refusal and the control are both
+about the launch-time gate, not the sandbox.
 
-THE UNCOVERED REPO IS FICTIONAL AND SAFE. It is `<owner>/definitely-not-installed
--<unix-ts>` under the SAME owner as the throwaway. GitHub's
-`GET /repos/{owner}/{repo}/installation` 404s identically for "repo does not
-exist" and "App not installed on repo", so this touches NO real repo — it cannot,
-it names one that does not exist. Hard-constraint #1 holds: nothing real is
-touched, least of all a real repo.
+COMMAND-ECHO IS HOST-SIDE, NOT `SBX| `. The write-ceremony exemplar runs an
+in-sandbox script and tags each command `SBX| $ <cmd>` via
+`reinharness.sandbox_preamble()`. THIS journey has no sandbox side: both legs are
+`--direct`, and the misconfig leg refuses at LAUNCH so nothing runs in a sandbox
+at all. Tagging rein's own host output `SBX| ` would be a lie ("this came from
+inside the sandbox"). So the two host commands are echoed at the HOST level as
+`$ rein run --direct -- …` then rein's raw output — the same command-echo
+convention Tom asked for, just host-side. It DOES adopt the rest of the #78 model:
+`reinharness.build_raw_transcript` for the RAW golden and `compare_golden`
+(normalize BOTH sides) for drift detection.
 
-NOT PART OF THE SWEEP. `run.sh` discovers `test_*.py`; this is `journey_*.py`.
-Run it deliberately:
+DELIVERABLE: a RAW, human-reviewable transcript at `golden/app_not_installed.txt`
+— real repo, real App slug, real refusal wording — so Tom SEES exactly what the
+run produced (PR #78). Determinism does NOT live in the file: a fresh run is
+compared by normalizing BOTH sides first (reinharness.compare_golden), so
+different tmp paths still match while a genuinely new or changed rein line trips
+drift. The repo names (throwaway + the fictional uncovered leaf) and the App slug
+are stable-by-construction on a machine, so — like the write ceremony's repo —
+they are kept RAW and matched verbatim.
 
-    source ./dev-env
-    python3 tests/interactive/journey_app_not_installed.py
-    REIN_DEMO_RAW=1 python3 tests/interactive/journey_app_not_installed.py   # no normalization
+    python3 tests/interactive/journey_app_not_installed.py          # exit 0 == matches (normalized)
+    REIN_UPDATE_GOLDEN=1 python3 tests/interactive/journey_app_not_installed.py   # write the RAW golden
+    REIN_SHOW_NORMALIZED=1 python3 tests/interactive/journey_app_not_installed.py # also print the compare lens
 
-The printed transcript normalizes the volatile bits (the timestamp in the
-fictional repo name, the App slug, tmp paths) so it is a stable doc/golden
-source. Set REIN_DEMO_RAW=1 to see the raw transcript. NOTE: when PR #72's
-golden-transcript helpers land (normalized transcripts under
-tests/interactive/golden/), this file should adopt them; until then its
-normalization is deliberately simple and local (see normalize()).
+Exit 0 = the gate behaved AND the normalized transcript matches the golden.
+Exit 1 = drift (RAW fresh transcript dropped to a scratch path; NORMALIZED diff
+printed). Exit 2 = the #68 gate itself misbehaved (the invariants below failed).
+
+THE UNCOVERED REPO IS FICTIONAL AND SAFE. It is `<owner>/definitely-not-installed`
+under the SAME owner as the throwaway — a FIXED name (stable-by-construction, so
+it is not normalized; #78). GitHub's `GET /repos/{owner}/{repo}/installation`
+404s identically for "repo does not exist" and "App not installed on repo", so
+this touches NO real repo — it cannot, it names one that does not exist.
+Hard-constraint #1 holds.
+
+SETUP is the `rein init` world; the repo is resolved the rein-init way
+(reinharness.resolve_throwaway_repo): REIN_JOURNEY_REPO, else the configured
+dev-session, else the legacy REIN_TEST_REPO_A shortcut (#40).
 """
 
 from __future__ import annotations
@@ -61,22 +71,18 @@ import os
 import re
 import sys
 import tempfile
-import time
 
 import reinharness as H
 
-RULE = "=" * 78
+GOLDEN_NAME = "app_not_installed.txt"
 
+# The sentinel the inner command echoes. The whole point of the misconfig leg is
+# that this NEVER appears (rein refuses before the command runs).
+SENTINEL = "REIN_INNER_COMMAND_RAN"
 
-def say(s: str = "") -> None:
-    print(s, flush=True)
-
-
-def banner(title: str) -> None:
-    say()
-    say(RULE)
-    say(f"  {title}")
-    say(RULE)
+# A FIXED fictional leaf under the throwaway's owner. Stable-by-construction (so
+# NOT normalized, #78), does not exist, 404s identically to "App not installed".
+UNCOVERED_LEAF = "definitely-not-installed"
 
 
 def write_session(repo: str, sess_id: str) -> str:
@@ -91,7 +97,12 @@ def write_session(repo: str, sess_id: str) -> str:
 
 
 def run_leg(inner_argv, session_file, env):
-    """Drive one `rein run --direct` to completion; return (exit_code, text)."""
+    """Drive one `rein run --direct` to completion.
+
+    Returns (exit_code, raw_text, command_shown). `command_shown` is the exact
+    host command spawn_rein_run runs — `rein run --direct -- <inner> <workdir>` —
+    so the transcript can echo it `$ …` before rein's own output.
+    """
     wd = H.make_workdir()
     run = H.spawn_rein_run(
         inner_argv,
@@ -109,142 +120,103 @@ def run_leg(inner_argv, session_file, env):
         except Exception:
             pass
         code = run.wait(timeout=5)
-    return code, H.strip_ansi(run.text())
+    command_shown = "rein run --direct -- " + " ".join([*inner_argv, wd])
+    return code, run.text(), command_shown
 
 
-def normalize(text: str, uncovered_repo: str) -> str:
-    """Replace the volatile bits so the transcript is a stable golden source.
+def build_transcript(legs) -> str:
+    """Assemble the interleaved HOST transcript and hand it to build_raw_transcript.
 
-    Local and simple on purpose (see module docstring re: PR #72). Normalizes:
-      * the unix timestamp in the fictional repo name -> <TS>
-      * the App slug (varies per developer's App) -> <APP-SLUG>
-      * tmp paths (session file, per-run gitconfig, workdir) -> <TMP>
+    For each leg: a `# …` label, the `$ <command>` echo, then rein's raw output.
+    build_raw_transcript then applies the exact golden shape (ANSI strip, drop
+    sub-100% progress ticks, collapse blank runs) — the same machinery the write
+    ceremony's golden uses, so both journeys' goldens are built identically.
     """
-    if os.getenv("REIN_DEMO_RAW"):
-        return text
-    out = text
-    # <owner>/definitely-not-installed-1783800473 -> <owner>/definitely-not-installed-<TS>
-    out = re.sub(r"(definitely-not-installed)-\d+", r"\1-<TS>", out)
-    # App <slug> is not installed ...  and  github.com/apps/<slug>/installations/new
-    m = re.search(r"App (\S+) is not installed", out)
-    if m:
-        out = out.replace(m.group(1), "<APP-SLUG>")
-    # tmp paths (stop at whitespace or a closing bracket/paren/comma)
-    out = re.sub(r"/tmp/[^\s,)\]]+", "<TMP>", out)
-    return out
-
-
-def block(text: str) -> None:
-    for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        say(f"  | {ln.rstrip()}")
-
-
-# The sentinel the inner command echoes. The whole point of the misconfig leg is
-# that this NEVER appears (rein refuses before the command runs).
-SENTINEL = "REIN_INNER_COMMAND_RAN"
+    parts: list[str] = []
+    for label, command_shown, raw in legs:
+        parts.append(label)
+        parts.append(f"$ {command_shown}")
+        parts.append(raw)
+        parts.append("")
+    return H.build_raw_transcript("\n".join(parts))
 
 
 def main() -> int:
     env = H.rein_env()
-    repo = H.throwaway_repo(env)  # hard-constraint #1: the throwaway, only
+    repo = H.resolve_throwaway_repo(env)  # rein-init way first; #40
     H.build_binaries(env)
 
     owner = repo.split("/", 1)[0]
-    ts = int(time.time())
-    uncovered = f"{owner}/definitely-not-installed-{ts}"
+    uncovered = f"{owner}/{UNCOVERED_LEAF}"
 
-    banner("JOURNEY (row 10): Misconfig — App not installed on a session repo")
-    say(f"  throwaway (covered)  : {repo}")
-    say(f"  fictional (uncovered): {uncovered}")
-    say("                         ^ does not exist; 404s identically to")
-    say("                           'App not installed on repo'. Touches nothing.")
-    say()
-    say("  #68: the D4 install-coverage check early-returned on the REIN_APP_*")
-    say("  env path, so an uncovered repo launched happily and the mint failed")
-    say("  INSIDE the agent. The fix makes it a loud LAUNCH refusal. Both legs")
-    say("  below run a real `rein run --direct` (the gate runs before the mode")
-    say("  split, so --direct exercises it without the sandbox stack).")
+    print(f"journey: app-not-installed on {repo} "
+          f"(fictional uncovered repo: {uncovered})", flush=True)
 
-    failures: list[str] = []
-
-    # ---- Leg 1: MISCONFIG -------------------------------------------------
+    # ---- run both legs live ----------------------------------------------
     sess_bad = write_session(uncovered, "sess_journey_uncovered")
-    code, raw = run_leg(["echo", SENTINEL], sess_bad, env)
+    code_bad, raw_bad, cmd_bad = run_leg(["echo", SENTINEL], sess_bad, env)
 
-    banner("(1) MISCONFIG leg — session names the uncovered repo")
-    # Elide the static direct-mode warning header; show from the refusal.
-    shown_bad = normalize(raw, uncovered)
-    say("  (direct-mode warning header elided; showing from the refusal)")
-    idx_bad = shown_bad.find("rein run: App")
-    block(shown_bad[idx_bad:] if idx_bad != -1 else shown_bad)
-    say()
-    say(f"  rein run exit code: {code}")
-
-    checks = [
-        (code == 1, f"exit 1 (loud refusal)              got exit {code}"),
-        ("is not installed on" in raw, "refusal says 'is not installed on'"),
-        (uncovered in raw, f"refusal names the repo ({uncovered})"),
-        (bool(re.search(r"App \S+ is not installed", raw)),
-         "refusal names the App (slug)"),
-        ("installations/new" in raw, "refusal carries the install deep-link"),
-        (SENTINEL not in raw,
-         "inner command NEVER ran (refused before launch)"),
-    ]
-    say()
-    for ok, desc in checks:
-        say(f"    [{'PASS' if ok else 'FAIL'}] {desc}")
-        if not ok:
-            failures.append(f"misconfig: {desc}")
-
-    # Deep-link must be App-SPECIFIC (the #68 review found the "we can't know the
-    # slug on the env path" premise false; it now deep-links the App's own page).
-    m = re.search(r"App (\S+) is not installed", raw)
-    if m:
-        slug = m.group(1)
-        app_specific = f"github.com/apps/{slug}/installations/new" in raw
-        say(f"    [{'PASS' if app_specific else 'FAIL'}] "
-            f"deep-link is App-specific (github.com/apps/{slug}/installations/new)")
-        if not app_specific:
-            failures.append("misconfig: deep-link is not App-specific")
-
-    # ---- Leg 2: CONTROL ---------------------------------------------------
     sess_ok = write_session(repo, "sess_journey_control")
-    code2, raw2 = run_leg(["echo", SENTINEL], sess_ok, env)
+    code_ok, raw_ok, cmd_ok = run_leg(["echo", SENTINEL], sess_ok, env)
 
-    banner("(2) CONTROL leg — session names the covered throwaway repo")
-    # Trim the direct-mode warning header for readability; show from the launch.
-    shown = normalize(raw2, uncovered)
-    say("  (direct-mode warning header elided; showing from the launch)")
-    idx = shown.find("rein: launching")
-    block(shown[idx:] if idx != -1 else shown)
-    say()
-    say(f"  rein run exit code: {code2}")
-
-    checks2 = [
-        (code2 == 0, f"exit 0 (launched)                  got exit {code2}"),
-        ("is not installed" not in raw2,
-         "no coverage refusal (gate cleared)"),
-        (SENTINEL in raw2, f"inner command RAN ({SENTINEL} printed)"),
+    # 1) The #68 gate itself must hold — independent of the golden (exit 2).
+    m = re.search(r"App (\S+) is not installed", raw_bad)
+    slug = m.group(1) if m else None
+    invariants = [
+        (code_bad == 1, f"misconfig leg must exit 1 (loud refusal); got exit {code_bad}"),
+        ("is not installed on" in raw_bad, "refusal says 'is not installed on'"),
+        (uncovered in raw_bad, f"refusal names the uncovered repo ({uncovered})"),
+        (slug is not None, "refusal names the App (slug)"),
+        ("installations/new" in raw_bad, "refusal carries the install deep-link"),
+        (slug is not None and f"github.com/apps/{slug}/installations/new" in raw_bad,
+         "deep-link is App-specific (github.com/apps/<slug>/installations/new)"),
+        (SENTINEL not in raw_bad,
+         "inner command NEVER ran on the misconfig leg (refused before launch)"),
+        (code_ok == 0, f"control leg must exit 0 (launched); got exit {code_ok}"),
+        ("is not installed" not in raw_ok, "control leg has no coverage refusal (gate cleared)"),
+        (SENTINEL in raw_ok, f"control leg RAN the inner command ({SENTINEL} printed)"),
     ]
-    say()
-    for ok, desc in checks2:
-        say(f"    [{'PASS' if ok else 'FAIL'}] {desc}")
-        if not ok:
-            failures.append(f"control: {desc}")
+    broken = [msg for ok, msg in invariants if not ok]
+    if broken:
+        print("JOURNEY BROKE — the #68 install-coverage gate did not behave:", flush=True)
+        for msg in broken:
+            print(f"  - {msg}", flush=True)
+        print(f"  misconfig exit={code_bad}  control exit={code_ok}", flush=True)
+        return 2
 
-    # ---- Verdict ----------------------------------------------------------
-    banner("VERDICT")
-    if failures:
-        say(f"  FAILED ({len(failures)}):")
-        for fdesc in failures:
-            say(f"    - {fdesc}")
-        say()
-        say("  The install-coverage gate did not behave as #68 requires.")
-        return 1
-    say("  PASS — an uncovered session repo is a loud launch refusal (exit 1,")
-    say("  names the repo + App + App-specific install deep-link), and a covered")
-    say("  session still launches (exit 0). #68 holds.")
-    return 0
+    # 2) Build the RAW transcript (real values) and compare NORMALIZED.
+    legs = [
+        (f"# leg 1 — MISCONFIG: session names the UNCOVERED repo {uncovered}", cmd_bad, raw_bad),
+        (f"# leg 2 — CONTROL: session names the COVERED throwaway {repo}", cmd_ok, raw_ok),
+    ]
+    raw = build_transcript(legs)
+    print()
+    print(raw, flush=True)  # what actually happened, real repo + real App slug
+    print("--- outcomes (asserted; not in the golden) ---", flush=True)
+    print(f"  misconfig leg  exit={code_bad}  (loud refusal; inner command never ran)", flush=True)
+    print(f"  control leg    exit={code_ok}  (coverage gate cleared; inner command ran)", flush=True)
+
+    if os.getenv("REIN_SHOW_NORMALIZED"):
+        print("\n--- normalized (the comparison lens) ---", flush=True)
+        print(H.normalize_for_compare(raw), flush=True)
+
+    if os.getenv("REIN_UPDATE_GOLDEN"):
+        p = H.update_golden(GOLDEN_NAME, raw)  # store RAW
+        print(f"[golden UPDATED] {p} (raw)", flush=True)
+        return 0
+
+    ok, diff = H.compare_golden(GOLDEN_NAME, raw)  # normalizes BOTH sides
+    if ok:
+        print(f"[golden OK] fresh run matches golden/{GOLDEN_NAME} (normalized)", flush=True)
+        return 0
+    scratch = os.path.join(tempfile.gettempdir(), "app_not_installed.fresh.txt")
+    with open(scratch, "w") as f:
+        f.write(raw)
+    print(f"[golden DRIFT] fresh run != golden/{GOLDEN_NAME} (normalized) — re-review:", flush=True)
+    print(diff, flush=True)
+    print(f"raw fresh transcript written to {scratch}", flush=True)
+    print("(if the change is intended: REIN_UPDATE_GOLDEN=1 to adopt the new RAW golden)", flush=True)
+    return 1
 
 
 if __name__ == "__main__":
