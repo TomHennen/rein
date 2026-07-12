@@ -24,7 +24,17 @@ need script "util-linux (already on Linux)"
 need tmux   "apt install tmux"
 need agg    "asciinema gif renderer — prebuilt binary at github.com/asciinema/agg/releases (no browser needed)"
 need gh     "GitHub CLI, authed as you (creates the demo issue)"
-need rein   "build rein and run 'rein init'"
+need go     "to build a fresh rein"
+
+# Build a FRESH rein from THIS checkout — never trust a possibly-stale installed
+# binary. A pre-#91 rein injects a contents-only token, so `git push` lands but
+# `gh pr create` 403s on pull_requests:write ("Resource not accessible by
+# integration"). rein init (App + dev-session) must already be done.
+root="$(cd "$here/.." && pwd)"
+echo "==> building rein from $(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo local) ..."
+( cd "$root" && go build -o bin/rein ./cmd/rein )
+REIN="$root/bin/rein"
+[ -f "${HOME}/.config/rein/state.json" ] || { echo "rein not configured — run 'rein init' first." >&2; exit 1; }
 
 repo="${REIN_DEMO_REPO:-}"
 if [ -z "$repo" ]; then
@@ -49,7 +59,7 @@ cd "$work"
 # --dangerously-skip-permissions ("yolo"): the sandbox + rein's declare gate ARE
 # the guardrails, so claude doesn't need its own per-tool permission prompts —
 # and this is the whole point of the demo. It also skips the folder-trust dialog.
-REIN_SESSION_FILE="$work/.demo-session.yaml" rein run -- claude --dangerously-skip-permissions "$prompt"
+REIN_SESSION_FILE="$work/.demo-session.yaml" "$REIN" run -- claude --dangerously-skip-permissions "$prompt"
 AGENT
 chmod +x "$work/run-agent.sh"
 
