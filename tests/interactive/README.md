@@ -85,6 +85,7 @@ a new `golden/*.txt`). See `tests/interactive/CLAUDE.md` for the authoring rules
 | 10 | **Direct mode (`--direct`)** — the same ceremony without srt | **GAP** — `reinharness.spawn_rein_run(direct=True)` exists and is unused. Cheap journey to add | — |
 | 11 | **Misconfig: App not installed on a session repo** | **GAP** — this is issue **#68** (the D4 install-coverage check is skipped entirely on the env-App path). A live journey here would have caught it; the unit tests didn't | — |
 | 12 | **Misconfig: broken / expired session file** | **GAP** | — |
+| 13 | **Init repo autodetection** — `rein init`'s repo prompt DEFAULT is autodetected from the cwd's git `origin` (issue **#69**/#78): from a checkout of the repo the prompt is PRE-FILLED with the detected `owner/name` (Enter accepts); from a NON-git dir the prompt is bare — proving it is cwd-derived, not hardcoded. `rein run` with no session likewise hints the detected repo | **COVERED** | `journey_init_autodetect.py` → **`golden/init_autodetect.txt`** (the two prompt legs) + the run-hint as a plain assertion inside it (the `--direct` warning banner keeps it out of the golden) |
 
 Statuses: **COVERED** (a file drives it), **PARTIAL** (some of it), **GAP** (real
 journey, no demo yet), **UNDRIVEABLE** (needs a browser — say so and move on).
@@ -295,6 +296,33 @@ python3 tests/interactive/journey_scope_expansion.py   # one journey; exit 0 == 
 REIN_UPDATE_GOLDEN=1 python3 tests/interactive/journey_scope_expansion.py   # regenerate the golden
 ```
 
+### `journey_init_autodetect.py` — journey #13, with a GOLDEN (#69/#78)
+
+The cwd-autodetection journey. #78 made `rein init`'s repo-prompt DEFAULT the repo
+the human is STANDING IN: `cmd/rein/gitremote.go:detectRepoFromGit` reads the cwd's
+git `origin` URL → `owner/name`, and `resolveRepoForSession` offers it as the prompt
+default. Two legs, both a real interactive `rein init` under a pty (NO --yes, so the
+prompt renders), each confined to a throwaway HOME/XDG tempdir:
+
+- **DETECTED:** init runs from a checkout of the throwaway; the repo prompt is
+  PRE-FILLED with the detected `[owner/name]`, the human accepts with Enter, and the
+  session is scaffolded for the detected repo.
+- **CONTRAST:** init runs from a NON-git dir; there is no `origin`, so the prompt has
+  NO default (the bare prompt) — proving the default is cwd-derived, not hardcoded.
+
+A PLAIN ASSERTION rides along (NOT in the golden): `rein run` with no session prints
+a hint that names the cwd repo (`gitremote.go:noSessionHint`) — from the checkout it
+names `rein init --repo <repo>`, from a NON-git dir it degrades to the generic hint.
+Reaching that hint needs `--direct`, whose loud UNSANDBOXED-MODE banner would muddy an
+init-focused golden, so it stays an assertion. The "checkout" is a bare `git init` +
+`remote add origin` at the throwaway — enough for origin-URL detection, touching no
+real repo (hard-constraint #1).
+
+```sh
+python3 tests/interactive/journey_init_autodetect.py   # one journey; exit 0 == matches golden
+REIN_UPDATE_GOLDEN=1 python3 tests/interactive/journey_init_autodetect.py   # regenerate the golden
+```
+
 ## Disposable branches & cleanup
 
 Each write test creates a clearly-timestamped `reintest-<UTC>-<rand>` branch on
@@ -330,6 +358,9 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
 - `journey_scope_expansion.py` + `golden/scope_expansion.txt` — journey #6 (scope
   expansion: declare a repo OUTSIDE scope → approve → push to it) and its RAW
   golden. `test_scope_expansion.py` carries the deny + cross-owner edge cases.
+- `journey_init_autodetect.py` + `golden/init_autodetect.txt` — journey #13 (#69/#78:
+  `rein init`'s repo-prompt default autodetected from the cwd's git `origin`; the
+  bare-prompt contrast + the `rein run` no-session hint ride along as assertions).
 - `run-journeys.sh` — the on-demand runner: compare each journey to its golden
   (normalized); `REIN_UPDATE_GOLDEN=1` to adopt, `--normalized` to view the lens.
 - `recipes/` — per-test setup scripts for the gated tests (e.g.

@@ -1,0 +1,53 @@
+# leg 1 — DETECTED: `rein init` from a checkout of the throwaway repo.
+# The repo prompt's DEFAULT is autodetected from the cwd's git `origin`;
+# the human ACCEPTS it with Enter and the session is scaffolded for it.
+$ git -C /tmp/rein-journey-checkout-9s1l2oon remote get-url origin
+https://github.com/TomHennen/agentcreds-validation-a.git
+$ cd /tmp/rein-journey-checkout-9s1l2oon && rein init --no-alias --no-symlink --skip-mint-check
+rein init: setting up local scaffolding
+  state dir:  /tmp/rein-itest-home-hiftjdtz/.local/state/rein
+  config dir: /tmp/rein-itest-home-hiftjdtz/.config/rein
+  setup:      no state.json; REIN_APP_* env vars detected — using env-managed path (marker state.json will be written)
+              wrote managed_externally marker (state.json)
+  app:        client_id=Iv23lii9NlJIOVZkkD7G installation_id=134965206
+  shim:       3 binaries under /tmp/rein-itest-home-hiftjdtz/.local/state/rein/shim
+  symlink:    skipped (--no-symlink)
+  mint check: skipped (--skip-mint-check)
+  (add more later with `rein session add-repo`, or approve the agent's
+   expansion requests as it encounters work)
+Which repo should the agent work on? (default detected from this dir) [TomHennen/agentcreds-validation-a]:
+  session:    scaffolded at /tmp/rein-itest-home-hiftjdtz/.config/rein/dev-session.yaml (repos: [TomHennen/agentcreds-validation-a])
+              writes are agent-declared (#35): the agent runs `rein declare <n>`,
+              you confirm on your terminal, then writes flow for that run. Reads work immediately.
+  alias:      not installed (opt-in; enable with `rein init --alias`)
+
+rein init: done.
+Next:
+  - /tmp/rein-itest-home-hiftjdtz/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
+  - run `rein run -- claude` (or another agent) to launch with rein in effect
+  - (optional) enable the `claude` alias with `rein init --alias`
+  - run `rein doctor` to verify everything is wired up
+
+# leg 2 — CONTRAST: `rein init` from a NON-git directory (no `origin`).
+# No cwd git remote => NO detected default (the bare prompt) — proving the
+# default is cwd-derived, not hardcoded. Enter here is a graceful skip.
+$ cd /tmp/rein-journey-nongit-3u1393q2 && rein init --no-alias --no-symlink --skip-mint-check
+rein init: setting up local scaffolding
+  state dir:  /tmp/rein-itest-home-e7s73j09/.local/state/rein
+  config dir: /tmp/rein-itest-home-e7s73j09/.config/rein
+  setup:      no state.json; REIN_APP_* env vars detected — using env-managed path (marker state.json will be written)
+              wrote managed_externally marker (state.json)
+  app:        client_id=Iv23lii9NlJIOVZkkD7G installation_id=134965206
+  shim:       3 binaries under /tmp/rein-itest-home-e7s73j09/.local/state/rein/shim
+  symlink:    skipped (--no-symlink)
+  mint check: skipped (--skip-mint-check)
+Which repo should the agent work on? (owner/name, Enter to skip):
+  session:    not scaffolded (pass --repo owner/name to scaffold)
+  alias:      not installed (opt-in; enable with `rein init --alias`)
+
+rein init: done.
+Next:
+  - /tmp/rein-itest-home-e7s73j09/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
+  - run `rein run -- claude` (or another agent) to launch with rein in effect
+  - (optional) enable the `claude` alias with `rein init --alias`
+  - run `rein doctor` to verify everything is wired up
