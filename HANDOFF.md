@@ -33,6 +33,15 @@ except this repo.
   the env prerequisites below. The CP1 spike binary lived in `/tmp` on the
   origin machine and is gone — it is fully reconstructable from the recipe,
   but CP2 productizes it into the daemon anyway, so you won't need it.
+- **README demo recording:** the gif + its recorder are NOT on main yet —
+  they live on branch **`demo-recording`** (PR **#99**, still a draft). The
+  committed take is `demo/creds-joke.gif`; `demo/record-demo.sh` regenerates
+  it (zero-install `script(1)` + `agg`, human-driven at a real terminal — you
+  approve the write popup by hand). See `demo/README.md` for the run steps and
+  why the toolchain is what it is (no headless-Chromium renderer on arm64; the
+  automated `record_demo.py` truncates in a headless VM). A clean re-record is
+  gated on **PR #103** landing (it removes the srt dotfile noise + the
+  `.git/config` push error the current gif still shows).
 
 ## 1. Environment bring-up (Linux)
 
