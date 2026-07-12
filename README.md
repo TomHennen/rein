@@ -1,5 +1,13 @@
 # rein
 
+> [!WARNING]
+> rein is an **experimental proof of concept**. The design, interfaces, and
+> security guarantees are still settling, and the code has **not had an
+> independent security review** — don't point it at anything you can't afford to
+> lose, and use **throwaway repos only** for now. Kicking the tires, filing
+> issues, and **external security reviews are very welcome**. Keep your existing
+> protections in place.
+
 **A local credential broker for AI coding agents — let a coding agent work on
 GitHub without ever handing it your credentials.**
 
