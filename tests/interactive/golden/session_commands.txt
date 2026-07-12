@@ -1,0 +1,26 @@
+$ rein session show
+session: sess_journey_sesscmds   (/tmp/rein-journey-sesscmds-3dszn34h/session.yaml)
+  role:      implement
+  repos:     TomHennen/agentcreds-validation-a  [App installed]
+  issue:     agent-declared at runtime (confirmed per run; #35 model)
+
+live runs: none
+
+$ rein session add-repo TomHennen/agentcreds-validation-b
+rein: checking TomHennen/agentcreds-validation-b...
+  owner:    TomHennen — matches session owner            OK
+  install:  the App covers it  OK
+rein: added. Session repos are now:
+  - TomHennen/agentcreds-validation-a
+  - TomHennen/agentcreds-validation-b
+Takes effect on the NEXT `rein run`. A live run keeps its launch-time scope —
+inside a run, the agent requests expansion with `rein declare <n> --repo <owner/name>`.
+
+$ rein session show
+session: sess_journey_sesscmds   (/tmp/rein-journey-sesscmds-3dszn34h/session.yaml)
+  role:      implement
+  repos:     TomHennen/agentcreds-validation-a  [App installed]
+             TomHennen/agentcreds-validation-b  [App installed]
+  issue:     agent-declared at runtime (confirmed per run; #35 model)
+
+live runs: none
