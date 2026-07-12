@@ -29,7 +29,7 @@ need rein   "build rein and run 'rein init'"
 repo="${REIN_DEMO_REPO:-}"
 if [ -z "$repo" ]; then
   s="${HOME}/.config/rein/dev-session.yaml"
-  [ -f "$s" ] && repo="$(awk '/^repos:/{f=1;next} f&&/^[[:space:]]*-/{gsub(/[[:space:]-]/,"");print;exit}' "$s")"
+  [ -f "$s" ] && repo="$(awk '/^repos:/{f=1;next} f&&/^[[:space:]]*-/{sub(/^[[:space:]]*-[[:space:]]*/,"");gsub(/[[:space:]]/,"");print;exit}' "$s")"
 fi
 [ -n "$repo" ] || { echo "Set REIN_DEMO_REPO=owner/name (a THROWAWAY)." >&2; exit 1; }
 
