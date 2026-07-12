@@ -35,14 +35,14 @@ dedicated tmux server, and records. When the popup appears, type the issue numbe
 - **Dedicated tmux socket** (`-L reindemo`): never touches your real tmux server,
   and avoids nested-session weirdness if you're already in tmux.
 
-## Fully-automated variant (once #88 lands)
+## Fully-automated variant (harness is in `main`)
 
 `record-demo.sh` is human-driven (you approve the popup live). To drive it
-*without* a human — for a reproducible, re-runnable capture — reuse the proven
-harness from the tmux-popup journey (#88): `reinharness.tmux_popup_session()`
-stands up the dedicated-socket tmux + attached client, and `drive_popup(pattern,
-answer)` waits for the Form A and sends the approval. Swap the journey's bash
-agent for `rein run -- claude "<prompt>"` run inside that session, add asciicast
-timestamps to the client log, and render with `agg`. That harness isn't in `main`
-yet (it ships with #88), which is why the runnable script here uses asciinema
-instead.
+*without* a human — for a re-runnable capture — reuse the proven tmux-popup
+harness (#88, now merged): `reinharness.tmux_popup_session()` stands up the
+dedicated-socket tmux + attached client, and `drive_popup(pattern, answer)` waits
+for the Form A and sends the approval. Run `rein run -- claude "<prompt>"` **inside
+that session** (so claude's TUI and the popup share one client pty and both get
+captured), record the client pty with asciicast timestamps, and render with `agg`.
+The one non-deterministic part is real claude itself — re-run until you get a
+clean take. `record_demo.py` (alongside this file) is that automated recorder.
