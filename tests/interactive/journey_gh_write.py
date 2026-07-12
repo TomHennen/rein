@@ -275,13 +275,22 @@ def main() -> int:
     finally:
         # Delete the comment the sandbox posted (host-side; verified above), then
         # clean the checkout and close the issue. Hard-constraint #1: throwaway only.
-        for cid in posted_comment_ids:
+        # Belt-and-suspenders: if an exception fired mid-run before host
+        # verification recorded any ids, re-list and sweep ANY comment matching
+        # our body so nothing leaks on the throwaway (union with the known ids).
+        to_delete = set(posted_comment_ids)
+        try:
+            to_delete |= {c["id"] for c in H.list_issue_comments(repo, issue, env)
+                          if c["body"] == COMMENT_BODY}
+        except Exception:
+            pass
+        for cid in to_delete:
             H.delete_issue_comment(repo, cid, env)
         if workdir and os.path.isdir(workdir):
             shutil.rmtree(workdir, ignore_errors=True)
         if ours:
             H.close_issue(repo, issue, env, comment="journey complete; closing.")
-        print(f"cleanup: {len(posted_comment_ids)} comment(s) deleted; checkout removed"
+        print(f"cleanup: {len(to_delete)} comment(s) deleted; checkout removed"
               + ("; issue closed" if ours else ""), flush=True)
 
 
