@@ -31,11 +31,20 @@ rein's OWN output stays clean and deterministic. See the module for the full
 rationale.
 
 DELIVERABLE: a RAW, human-reviewable transcript at golden/tmux_popup_approval.txt
-— rein's OWN terminal capture. The Form A block is deliberately NOT in it (it
-rendered in the popup, on the client); its ABSENCE where the write ceremony's
-golden shows it inline IS the reviewable signal that approval went to the popup.
-The popup-routing facts and the popup's Form A content are asserted / printed as
-outcomes (not golden material — the popup render is finicky box-art).
+— ONE transcript, TWO views (the write-ceremony model). rein's OWN pty shows the
+declare going straight to `confirmed` with NO inline Form A (approval routed
+AWAY); folded in right at the `$ rein declare <n>` line are the POPUP|-tagged
+Form A lines — the exact prompt the human READ and answered in the tmux popup, on
+its separate client-owned pty. That adjacency (popup content beside rein's own
+Form-A-less declare) IS the reviewable proof the surface was the popup, not the
+inline tty — the same "capture is structural" doctrine as SBX| vs host lines (#82).
+
+The popup pty carries box-art borders and cursor-positioning redraws; those are
+stripped down to the readable Form A text (reinharness.extract_popup_forma) —
+DETERMINISTICALLY, because rein writes each Form A line once and the popup then
+blocks on input, so a drained capture is identical every run (only issue #/title/
+repo vary, handled by normalize-on-compare). The positive routing facts
+(helper.log launched/CONFIRMED, prompt_count()==0) are ALSO asserted as outcomes.
 
     python3 tests/interactive/journey_tmux_popup_approval.py            # exit 0 == matches (normalized)
     REIN_UPDATE_GOLDEN=1 python3 tests/interactive/journey_tmux_popup_approval.py  # write the RAW golden
@@ -130,6 +139,7 @@ def run_ceremony(env, repo, issue):
 
     rcs: dict[int, int] = {}
     popup_render = ""
+    forma: list[str] = []
     with H.tmux_popup_session() as tmux_sess:
         # $TMUX/$TMUX_PANE route THIS rein's approval to the session's popup; the
         # session file pins scope so the journey never depends on the ambient one.
@@ -150,10 +160,11 @@ def run_ceremony(env, repo, issue):
 
             run.child.expect(r"@PHASE2_START", timeout=30)
             # The declare BLOCKS. Because $TMUX is set, approval routes to a tmux
-            # POPUP (NOT the inline host tty). Answer it on the attached client the
-            # popup renders on and grabs the keyboard of — type the DISPLAYED
-            # number, exactly as a human would in the popup.
-            tmux_sess.drive_popup(H.PROMPT_HINT, str(issue), timeout=120)
+            # POPUP (NOT the inline host tty). drive_popup waits for Form A to
+            # render on the attached client, CAPTURES it (cleaned, for folding into
+            # the transcript), then types the DISPLAYED number exactly as a human
+            # would in the popup.
+            forma = tmux_sess.drive_popup(H.PROMPT_HINT, str(issue), timeout=120)
             run.child.expect(r"@PHASE2_RC=(\d+)", timeout=90)
             rcs[2] = _rc(run.child.match)
 
@@ -171,6 +182,7 @@ def run_ceremony(env, repo, issue):
             pass
         finally:
             popup_render = tmux_sess.render()
+            forma = forma or tmux_sess.forma
             try:
                 run.child.close(force=True)
             except Exception:
@@ -189,6 +201,7 @@ def run_ceremony(env, repo, issue):
         "bad": bad,
         "log": new_log,
         "popup_render": popup_render,
+        "forma": forma,
     }
 
 
@@ -232,13 +245,14 @@ def main() -> int:
         rcs, prompts, landed = r["rcs"], r["prompts"], r["landed"]
         branches = r["branches"]
         good, bad = r["good"], r["bad"]
-        log, popup_render = r["log"], r["popup_render"]
+        log, popup_render, forma = r["log"], r["popup_render"], r["forma"]
 
         # 1) The ceremony + the POPUP ROUTING must hold — independent of the golden.
         host_has_forma = (H.PROMPT_BANNER in r["text"]) or (H.PROMPT_HINT in r["text"])
         popup_launched = "launching tmux popup" in log
         popup_confirmed = "CONFIRMED via tmux popup" in log
-        popup_showed_forma = H.PROMPT_HINT in popup_render
+        forma_text = "\n".join(forma)
+        popup_showed_forma = (H.PROMPT_BANNER in forma_text) and (H.PROMPT_HINT in forma_text)
         invariants = [
             (rcs.get(1, 0) != 0, "phase 1 (pre-declaration push) must FAIL — writes locked"),
             (rcs.get(2) == 0, "phase 2 (declare) must succeed after popup confirmation"),
@@ -248,7 +262,8 @@ def main() -> int:
             (not host_has_forma, "Form A must NOT appear on rein's own terminal (it rendered in the popup)"),
             (popup_launched, "rein's log must record launching the tmux popup (surface = popup)"),
             (popup_confirmed, "rein's log must record CONFIRMED via tmux popup"),
-            (popup_showed_forma, "the popup client must have shown Form A ('type the issue number')"),
+            (popup_showed_forma, "the popup client must have shown Form A (banner + 'type the issue number')"),
+            (len(forma) >= 6, "the popup's Form A must have captured cleanly for the transcript fold"),
             (landed.get(good) is True, "the convention-following branch must LAND"),
             (landed.get(bad) is False, "the non-convention branch must NOT land"),
         ]
@@ -263,10 +278,13 @@ def main() -> int:
                   flush=True)
             return 2
 
-        # 2) Build the RAW transcript (real values) and compare NORMALIZED.
-        raw = H.build_raw_transcript(r["text"])
+        # 2) Build the RAW transcript (real values), FOLD the popup's Form A into
+        #    it (POPUP| lines, adjacent to rein's own `$ rein declare` -> confirmed
+        #    with NO inline Form A — the reviewable routing contrast), compare
+        #    NORMALIZED.
+        raw = H.fold_popup(H.build_raw_transcript(r["text"]), forma)
         print()
-        print(raw, flush=True)  # what actually happened on rein's terminal
+        print(raw, flush=True)  # rein's own terminal + the folded POPUP| Form A
         print("--- outcomes (asserted; not in the golden) ---", flush=True)
         for ph, meaning in ((1, "writes locked"), (2, "human confirmed in popup"),
                             (3, "verified push"), (4, "ref cross-check")):
@@ -277,13 +295,6 @@ def main() -> int:
                 print(f"  log: {line.split('] ', 1)[-1]}", flush=True)
         for br, ok in landed.items():
             print(f"  branch {br}: {'LANDED' if ok else 'ABSENT'}", flush=True)
-        # What the HUMAN saw in the popup (client render; finicky box-art, so NOT
-        # golden material — printed here so a reviewer can see the Form A the
-        # popup presented).
-        print("  --- what the human saw in the popup (client render; not golden) ---", flush=True)
-        forma = _extract_forma(popup_render)
-        for line in forma:
-            print(f"  | {line}", flush=True)
 
         if os.getenv("REIN_SHOW_NORMALIZED"):
             print("\n--- normalized (the comparison lens) ---", flush=True)
@@ -313,22 +324,6 @@ def main() -> int:
         if ours:
             H.close_issue(repo, issue, env, comment="journey complete; closing.")
         print("cleanup: branches deleted" + ("; issue closed" if ours else ""), flush=True)
-
-
-def _extract_forma(render: str) -> list[str]:
-    """Best-effort readable slice of the popup's Form A from the (box-art, cursor-
-    collapsed) client render — for the human, never for the golden. Falls back to
-    a compact single line if the render can't be split cleanly."""
-    marker = "agent declares work on an issue"
-    idx = render.find(marker)
-    if idx == -1:
-        return ["(popup render unavailable)"]
-    tail = render[idx:]
-    end = tail.find("press enter")
-    snippet = tail[: end + len("press enter")] if end != -1 else tail[:400]
-    # Collapse whitespace runs the cursor positioning introduced; keep it compact.
-    compact = " ".join(snippet.split())
-    return [compact[i:i + 100] for i in range(0, len(compact), 100)]
 
 
 def _pinned_session(repo: str) -> str:

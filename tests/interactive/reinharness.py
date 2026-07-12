@@ -871,6 +871,14 @@ GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
 # carries the tag (a lone \r would otherwise overwrite the tag on the terminal).
 SBX_TAG = "SBX| "
 
+# The tag for lines captured from the tmux POPUP's own (client-owned) pty and
+# FOLDED into the one transcript — the mirror of SBX_TAG for the sandbox child.
+# rein's own pty shows `$ rein declare <n>` -> `confirmed` with NO inline Form A
+# (approval routed AWAY to the popup); the POPUP| lines carry the Form A the human
+# actually READ in the popup, interleaved right where the declare blocked. Same
+# "one transcript, two views" model as SBX| vs untagged host lines (#82).
+POPUP_TAG = "POPUP| "
+
 
 def sandbox_preamble() -> str:
     """Bash helper functions every in-sandbox journey script prepends (shared so
@@ -908,17 +916,24 @@ def _pty_lines(text: str) -> list[str]:
     return strip_ansi(text).replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
 
-def get_views(text: str) -> tuple[list[str], list[str]]:
-    """Split ONE interleaved pty transcript into (host_lines, agent_lines).
+def get_views(text: str) -> tuple[list[str], list[str], list[str]]:
+    """Split ONE interleaved transcript into (host_lines, agent_lines, popup_lines).
 
-    A line belongs to the AGENT iff it STARTS with SBX_TAG. `emit`/`runtagged`
-    write the tag at column 0, so real agent output always leads with it —
-    whereas rein's own startup banner ECHOES the script body (`rein: running:
-    bash -c …`), and those HOST lines contain the literal `SBX| ` *mid-line*
-    (inside the emit/runtagged definitions). Matching on `startswith` (not a
-    substring `find`) keeps that echo on the HOST side; a substring test would
-    mis-file the fragment after the tag as agent output. One pass, so the two
-    views can never disagree about a line; the tag is stripped from agent lines.
+    A line belongs to the AGENT iff it STARTS with SBX_TAG, and to the POPUP iff
+    it STARTS with POPUP_TAG. `emit`/`runtagged` (and the popup fold) write the tag
+    at column 0, so real tagged output always leads with it — whereas rein's own
+    startup banner ECHOES the script body (`rein: running: bash -c …`), and those
+    HOST lines contain the literal `SBX| ` *mid-line* (inside the emit/runtagged
+    definitions). Matching on `startswith` (not a substring `find`) keeps that echo
+    on the HOST side; a substring test would mis-file the fragment after the tag as
+    agent output. One pass, so the views can never disagree about a line; the tag is
+    stripped from tagged lines.
+
+    Three views because the popup approval journey folds a SECOND, client-owned pty
+    (the Form A the human read in the tmux popup) into the same transcript under
+    POPUP_TAG — the mirror of SBX_TAG for the sandbox child. A caller wanting the
+    Form A alone reads `popup`; the routing invariant "no inline Form A on rein's
+    own terminal" is `PROMPT_HINT not in "\\n".join(host)`.
 
     Tag-split is exact for whole, unwrapped lines. It is NOT the whole artifact:
     callers still CURATE the views for the golden (dropping git object-count
@@ -927,12 +942,115 @@ def get_views(text: str) -> tuple[list[str], list[str]]:
     """
     host: list[str] = []
     agent: list[str] = []
+    popup: list[str] = []
     for ln in _pty_lines(text):
         if ln.startswith(SBX_TAG):
             agent.append(ln[len(SBX_TAG):].rstrip())
+        elif ln.startswith(POPUP_TAG):
+            popup.append(ln[len(POPUP_TAG):].rstrip())
         else:
             host.append(ln.rstrip())
-    return host, agent
+    return host, agent, popup
+
+
+# Box-drawing glyphs (U+2500..U+257F) tmux paints the popup border with. Stripped
+# when we extract Form A CONTENT from the client render — a segment that is only
+# border/whitespace after this collapses to empty and is dropped.
+_BOX_DRAWING = re.compile(r"[─-╿]")
+# Charset-designation + keypad-mode escapes tmux emits that _ANSI (which only
+# matches CSI `\x1b[…`) does not: `\x1b(B`, `\x1b)0`, `\x1b=`, `\x1b>`.
+_TMUX_MISC_ESC = re.compile(r"\x1b[()][AB0]|\x1b[=>]")
+# Absolute cursor-position (CUP) escape: `\x1b[<row>;<col>H`. tmux writes each
+# popup line by first homing the cursor to its row/col, then the clean text.
+_CUP = re.compile(r"\x1b\[(\d+);(\d+)H")
+
+
+def _clean_popup_segment(seg: str) -> str:
+    """One CUP-positioned write, reduced to its READABLE text (or "" if it was
+    pure border/cursor noise). Strips CSI + OSC (strip_ansi), the charset/keypad
+    escapes strip_ansi misses, and the box-drawing glyphs, then trims. Form A
+    content (plain ASCII like `=== rein: …`) survives; a border/blank write does
+    not."""
+    s = _TMUX_MISC_ESC.sub("", strip_ansi(seg))
+    s = _BOX_DRAWING.sub("", s)
+    # Trim the line breaks tmux/rein put at a segment's edges and any trailing
+    # padding, but KEEP leading spaces: they are rein's own Form A indentation
+    # (`   issue:` / `             in …`), part of what the human read.
+    return s.strip("\r\n").rstrip()
+
+
+def extract_popup_forma(raw: str, answer: str | None = None) -> list[str]:
+    """Clean the tmux popup's client-render bytes down to the Form A text lines.
+
+    The popup pty is a SEPARATE, client-owned surface; tmux paints Form A into a
+    box by homing the cursor to each line's row (`\\x1b[row;colH`) and writing the
+    clean text, wrapped in box-art borders and repainted on redraw. This recovers
+    the semantic content DETERMINISTICALLY, independent of paint order:
+
+      * split the stream on CUP escapes; each segment is one positioned write;
+      * clean each (drop border/cursor/charset noise — `_clean_popup_segment`);
+      * key the survivors by ROW, last CONTENT write winning (a later border/empty
+        repaint cleans to "" and is skipped, so it never clobbers real content);
+      * emit rows in ascending order — the on-screen top-to-bottom Form A.
+
+    Because rein writes each Form A line exactly once and the popup then BLOCKS on
+    input, a drained capture is quiescent and identical every run; only the issue
+    number / title / repo vary, and those are handled by normalize-on-compare.
+
+    `answer` (the number the human typed) is appended to the trailing `>` prompt
+    line, so the block reads `> <n>` — what the human saw AND did. The echo itself
+    is not in the captured bytes (pexpect stops reading at the prompt, before the
+    popup-close redraw that would wipe Form A), so recording the sent keystroke is
+    both faithful and the deterministic choice.
+    """
+    matches = list(_CUP.finditer(raw))
+    rows: dict[int, str] = {}
+    for i, m in enumerate(matches):
+        row = int(m.group(1))
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
+        text = _clean_popup_segment(raw[m.end():end])
+        if text:
+            rows[row] = text  # last CONTENT write for this row wins
+    lines = [rows[r] for r in sorted(rows)]
+    # Bound to rein's OWN Form A: it starts at the `=== rein: …` header and ends
+    # at the `> ` prompt (writePrompt, internal/ui/prompt). Everything the client
+    # painted OUTSIDE the popup box — the underlying shell prompt above, the tmux
+    # status bar below — is chrome, not Form A; drop it. The anchors are stable
+    # (rein writes them verbatim) so the slice is deterministic, not curation.
+    start = next((i for i, ln in enumerate(lines) if ln.startswith("=== rein:")), None)
+    if start is None:
+        return []
+    end = next((i for i in range(start, len(lines)) if lines[i].startswith(">")), len(lines) - 1)
+    lines = lines[start:end + 1]
+    if answer is not None:
+        lines = [f"> {answer}" if ln.rstrip() == ">" else ln for ln in lines]
+    return lines
+
+
+def fold_popup(transcript: str, popup_lines: list[str],
+               anchor_prefix: str = SBX_TAG + "$ rein declare ") -> str:
+    """Interleave the POPUP| Form A block into the ONE transcript, right after the
+    `SBX| $ rein declare <n>` line — where the declare BLOCKED and the popup fired.
+
+    That adjacency is the reviewable contrast (#82's "capture is structural"): on
+    rein's own pty the declare goes straight to `confirmed` with NO inline Form A
+    (approval routed to the popup); the POPUP| lines, sitting between the declare
+    and its `confirmed`, are the Form A the human read in the popup. Mirrors
+    write_ceremony's agent-vs-host two views in one artifact — here popup-vs-host.
+
+    Deterministic: anchored to the FIRST declare-execution line (the sandbox `run`
+    echoes it as `SBX| $ rein declare <n>`; rein's banner echo of the script body
+    is `run rein declare <n>`, no `$`, so it does not match).
+    """
+    block = [""] + [POPUP_TAG + ln for ln in popup_lines]
+    out: list[str] = []
+    injected = False
+    for ln in transcript.split("\n"):
+        out.append(ln)
+        if not injected and ln.startswith(anchor_prefix):
+            out.extend(block)
+            injected = True
+    return "\n".join(out)
 
 
 def normalize_transcript(text: str, subs: list[tuple[str, str]] | None = None) -> str:
@@ -988,6 +1106,9 @@ _NORMALIZE_RULES = [
     (r"\bdeclare \d+", "declare <ISSUE>"),
     (r"issue number \(\d+\)", "issue number (<ISSUE>)"),
     (r"(?m)^> \d+$", "> <ISSUE>"),
+    # the issue number the human typed into the tmux popup's Form A prompt,
+    # folded into the transcript as `POPUP| > <n>` (see fold_popup).
+    (r"(?m)^POPUP\| > \d+$", "POPUP| > <ISSUE>"),
     # our disposable branch suffix: <8-digit date>-<6-digit time>-<hex6>
     (r"\d{8}-\d{6}-[0-9a-f]{6}", "<NONCE>"),
     # ISO-ish timestamps the probe writes (2026-07-11T18:17:26Z)
@@ -1269,6 +1390,7 @@ class TmuxPopupSession:
     log: io.StringIO
     sockpath: str
     pane: str
+    forma: list[str] = field(default_factory=list)
 
     def tmux_env(self) -> dict:
         """Env overlay that routes a SEPARATE rein process's approval to THIS
@@ -1277,15 +1399,39 @@ class TmuxPopupSession:
         return {"TMUX": f"{self.sockpath},0,0", "TMUX_PANE": self.pane}
 
     def drive_popup(self, expect_pattern: str, answer: str, *, settle: float = 0.5,
-                    timeout: int = 90) -> None:
-        """Wait for the popup's Form A to RENDER on the attached client, then type
-        the answer. The popup grabs the client keyboard, so keys written to the
-        client pty reach `rein approval grant` inside the popup. `expect_pattern`
-        must be text the popup PRINTS (e.g. "type the issue number"), not text
-        from the command line that opened it."""
+                    timeout: int = 90, quiesce: float = 0.4,
+                    drain_max: float = 6.0) -> list[str]:
+        """Wait for the popup's Form A to RENDER on the attached client, CAPTURE it,
+        then type the answer. Returns the cleaned Form A lines (also stored on
+        `self.forma`) for folding into the transcript.
+
+        The popup grabs the client keyboard, so keys written to the client pty
+        reach `rein approval grant` inside the popup. `expect_pattern` must be text
+        the popup PRINTS (e.g. "type the issue number"), not text from the command
+        line that opened it.
+
+        Capture order matters for DETERMINISM. After the pattern matches, the
+        render arrives in a burst and the popup then BLOCKS on input; we DRAIN the
+        client (read until `quiesce` seconds pass with no new bytes) so the log
+        holds the WHOLE Form A at a quiescent, identical-every-run state — not a
+        timing-dependent read-chunk boundary. We snapshot and clean it BEFORE
+        sending the answer, because typing it makes `rein approval grant` exit,
+        which closes the popup and repaints over Form A. `answer` is recorded onto
+        the trailing `>` prompt line (`> <n>`) — the keystroke we send, faithful
+        and deterministic, since the echo is never read back."""
         self.client.expect(expect_pattern, timeout=timeout)
+        # Drain to quiescence: the popup is now blocked on input, so once no bytes
+        # arrive for `quiesce` seconds the full Form A is in the log and stable.
+        deadline = time.time() + drain_max
+        while time.time() < deadline:
+            try:
+                self.client.read_nonblocking(size=4096, timeout=quiesce)
+            except (pexpect.TIMEOUT, pexpect.EOF):
+                break
+        self.forma = extract_popup_forma(self.log.getvalue(), answer=answer)
         time.sleep(settle)
         self.client.send(answer + "\r")
+        return self.forma
 
     def render(self) -> str:
         """ANSI-stripped bytes the client received — what the human SAW in the
