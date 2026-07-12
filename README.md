@@ -90,6 +90,11 @@ sequenceDiagram
 - **Yours, not ours** — the App is yours, the key stays on your machine, the tokens are
   minted locally. No rein service, no shared secret, nothing the rein authors can see,
   hold, or revoke.
+- **Autonomy without the babysitting** — because the agent is boxed (no credentials, an
+  ephemeral tree, egress limited to GitHub), you can run it with permissions off
+  (`claude --dangerously-skip-permissions`) instead of clicking a tool-approval prompt
+  on every command. rein moves the one approval that matters — writing to GitHub — to a
+  single per-issue gate. Containment replaces permission fatigue.
 
 ### What rein does and doesn't protect (stated plainly)
 
