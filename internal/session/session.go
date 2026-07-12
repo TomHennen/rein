@@ -74,6 +74,29 @@ type Session struct {
 	// warning at launch because broad egress is a data-exfiltration surface.
 	// Optional and empty by default (Sandboxed mode only; ignored in direct mode).
 	AllowDomains []string `yaml:"allow_domains,omitempty"`
+
+	// Worktrees maps a session repo ("owner/name") to the ABSOLUTE path of the
+	// developer's EXISTING local checkout of it (issue #64). Each mapped
+	// checkout is bind-mounted READ-WRITE into the sandbox at launch, so the
+	// agent works in the developer's real tree instead of an ephemeral clone —
+	// Tom on PR #56: "I had expected it to work in my local copy."
+	//
+	// Launch-time only, by construction: bwrap binds are fixed when the sandbox
+	// starts, so a repo approved MID-RUN can never get its checkout bound this
+	// run (it clones into the ephemeral REIN_EPHEMERAL_CLONE_DIR instead, and
+	// its checkout lights up on the NEXT run once mapped here).
+	//
+	// The repo the developer is STANDING IN needs no entry — it is the working
+	// tree, already writable, and its repo is autodetected from its git remote
+	// (docs/session-scope-ux-mocks.md §3). This map is for the OTHER repos.
+	//
+	// Validated fail-closed at launch (internal/worktree.Resolve): the key must
+	// be one of Repos, the path must exist, be a git checkout, and its `origin`
+	// remote must actually be that GitHub repo. Structural checks (key shape,
+	// key in Repos, path absolute) also run in Validate, so a typo surfaces on
+	// load rather than at bind time. Optional; sandboxed mode only (direct mode
+	// already sees the whole filesystem).
+	Worktrees map[string]string `yaml:"worktrees,omitempty"`
 }
 
 // BareRepoNames returns the "name" halves of the session's "owner/name"
@@ -198,6 +221,25 @@ func (s *Session) Validate() error {
 			owner = o
 		} else if o != owner {
 			return fmt.Errorf("session.repos mixes owners (%q and %q); a session must be scoped to a single owner (the App installation is single-owner)", owner, o)
+		}
+	}
+	// worktrees: structural checks only (issue #64). The filesystem checks —
+	// does the path exist, is it a git checkout, is its origin remote really
+	// this repo — happen at LAUNCH (internal/worktree.Resolve), where they can
+	// fail the run closed; a session file must stay loadable by the credential
+	// helper on a machine where the checkout has since moved. What IS enforced
+	// here is what can never be right: a key that isn't owner/name, a key
+	// outside the scope ceiling (a writable tree for a repo rein will never
+	// mint a credential for is incoherent), or a relative path.
+	for repo, path := range s.Worktrees {
+		if normalizeRepo(repo) == "" {
+			return fmt.Errorf("session.worktrees key %q is not owner/name", repo)
+		}
+		if !s.Contains(repo) {
+			return fmt.Errorf("session.worktrees maps %q, which is not in session.repos; add the repo to the scope ceiling first (a writable checkout for an out-of-scope repo could never be pushed)", repo)
+		}
+		if !filepath.IsAbs(path) {
+			return fmt.Errorf("session.worktrees[%s] = %q must be an absolute path", repo, path)
 		}
 	}
 	return nil

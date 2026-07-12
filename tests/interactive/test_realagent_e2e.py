@@ -37,7 +37,20 @@ class RealAgentEndToEnd(ReinTestCase):
     def test_claude_starts_in_sandbox_and_answers(self):
         """`rein run -- claude` starts a real agent in-sandbox (no EROFS/hang) and
         answers 2+2 -> '4'."""
-        run = H.spawn_claude_interactive(env=self.env, timeout=90)
+        # This test's cwd is the rein repo root, which in the dev flow is a git
+        # LINKED WORKTREE (.claude/worktrees/…) — its `.git` is a FILE, which #64
+        # treats as unhardenable, so by default `rein run` would give claude an
+        # EPHEMERAL scratch tree (a fresh, untrusted dir → claude's folder-trust
+        # dialog intercepts startup). That ephemeral fallback is exercised by its
+        # own tests + demos; THIS test is about claude actually starting in the
+        # tree the developer is in, so it opts into binding the real (linked)
+        # worktree writable. A mainstream user in a NORMAL checkout (`.git` dir)
+        # gets the hardened bind with no opt-in and no dialog.
+        run = H.spawn_claude_interactive(
+            env=self.env,
+            extra_env={"REIN_SANDBOX_ALLOW_UNHARDENED_GIT": "1"},
+            timeout=90,
+        )
         try:
             ready, dialog, exited = run.read_until_ready(
                 H.CLAUDE_READY_MARKERS,

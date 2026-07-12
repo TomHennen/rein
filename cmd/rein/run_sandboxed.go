@@ -47,6 +47,7 @@ import (
 	"github.com/TomHennen/rein/internal/srt"
 	"github.com/TomHennen/rein/internal/tokencache"
 	"github.com/TomHennen/rein/internal/ui/grant"
+	"github.com/TomHennen/rein/internal/worktree"
 )
 
 // stubGHToken is the non-secret placeholder GH_TOKEN inside the sandbox. gh
@@ -159,6 +160,14 @@ func runSandboxed(cmdline []string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
+	// Symlink-resolve the working tree BEFORE it is used anywhere (banner,
+	// ForbiddenDirs, srt config): a symlinked REIN_SANDBOX_WORKDIR pointing
+	// into a denied path must be seen in resolved form by every check (audit
+	// finding D6, #44). srt.Build re-resolves as the enforcement backstop.
+	workTree, err = proxy.ResolveAbs(workTree)
+	if err != nil {
+		return 1, fmt.Errorf("resolve working tree symlinks: %w", err)
+	}
 
 	// (6) Per-run runtime dir for the proxy socket — user-writable, NOT under the
 	// working tree, and itself denyRead'd in-sandbox (defense-in-depth). Prefer
@@ -222,16 +231,175 @@ func runSandboxed(cmdline []string) (int, error) {
 		fmt.Fprintf(os.Stderr, "rein: EGRESS WARNING: %s\n", wmsg)
 	}
 
+	// (7e) The developer's EXISTING local checkouts (issue #64). The working
+	// tree's repo is AUTODETECTED from its git remote (mocks §3: "detect the
+	// repo the user is standing in"); the session's `worktrees:` map (plus the
+	// REIN_WORKTREES per-run override) names where the session's OTHER repos are
+	// checked out, and each mapped tree is bound READ-WRITE below via
+	// ExtraAllowWrite — so the agent edits the developer's real tree, not an
+	// ephemeral clone. Fail closed on every mismatch (worktree.Resolve): the
+	// path must exist, be a git checkout, and its `origin` remote must really be
+	// the mapped repo, which must be in the session's scope ceiling.
+	//
+	// This can only ever cover repos known at LAUNCH. A repo approved MID-RUN
+	// gets no bind (bwrap binds are fixed at launch) — it clones into agentTmp,
+	// advertised to the agent as REIN_EPHEMERAL_CLONE_DIR.
+	homeForGuard, _ := os.UserHomeDir()
+	if homeForGuard != "" {
+		if r, rerr := proxy.ResolveAbs(homeForGuard); rerr == nil {
+			homeForGuard = r
+		}
+	}
+	wt, err := worktree.Resolve(worktree.Params{
+		SessionRepos: sess.Repos,
+		FileMap:      sess.Worktrees,
+		EnvValue:     os.Getenv(worktree.EnvWorktrees),
+		WorkTree:     workTree,
+		Home:         homeForGuard,
+	})
+	if err != nil {
+		return 1, fmt.Errorf("resolve local checkouts (worktrees): %w", err)
+	}
+	for _, w := range wt.Warnings {
+		fmt.Fprintf(os.Stderr, "rein: worktrees: %s\n", w)
+	}
+	worktreeWrites := make([]string, 0, len(wt.Bindings))
+	for _, b := range wt.Bindings {
+		worktreeWrites = append(worktreeWrites, b.Path)
+	}
+
+	// (7f) Decide how each writable checkout's `.git` is protected against the
+	// rename-parent host-exec escape (internal/srt/githard.go). The AUTODETECTED
+	// cwd and the EXPLICITLY-MAPPED worktrees are treated differently on the
+	// unhardenable path, on purpose:
+	//
+	//   - a MAPPED worktree the human named that cannot be hardened (submodules,
+	//     or a linked worktree whose `.git` is a file) FAILS THE LAUNCH CLOSED —
+	//     they chose that tree deliberately, so an actionable error is right; and
+	//   - the cwd the developer merely happens to be STANDING IN falls back to an
+	//     EPHEMERAL working tree rather than locking them out (a submodule
+	//     superproject / linked worktree is common). rein does NOT bind the real
+	//     tree WRITABLE; the agent gets a fresh, empty, writable scratch tree,
+	//     clones its repo into it, and pushes — the durable artifact is the push,
+	//     not the local tree (mocks §7). The real tree cannot be MODIFIED (so the
+	//     .git host-exec escape is closed and uncommitted work is safe); it stays
+	//     readable read-only if it sits outside $HOME, and hidden if under it.
+	//
+	// REIN_SANDBOX_ALLOW_UNHARDENED_GIT=1 is the informed opt-in: bind the real
+	// tree(s) writable with partial (top-level-only) hardening and warn loudly.
+	optInUnhardened := srt.AllowUnhardenedGitFromEnv(os.Getenv(srt.EnvSandboxAllowUnhardenedGit))
+
+	// MAPPED worktrees: an unhardenable one fails the launch closed (unless opt-in).
+	if gaps := srt.AssessGitHardening(worktreeWrites); len(gaps) > 0 {
+		if optInUnhardened {
+			printUnhardenedGitWarning(os.Stderr, gaps)
+		} else {
+			return 1, unhardenedMappedGitError(gaps)
+		}
+	}
+
+	// The cwd: ephemeral-clone fallback when it cannot be hardened (unless opt-in).
+	// On the fallback path we REDIRECT workTree to a fresh scratch dir so every
+	// downstream step (the $HOME punch-out `writables`, the srt WorkingTree bind,
+	// the socket ForbiddenDirs, the banner, REIN_IN_SANDBOX_WORKTREE) uses the
+	// ephemeral tree uniformly and the real cwd is never bound.
+	cwdEphemeral := false
+	ephemeralCwdPath := "" // the real cwd we DECLINED to bind (for the banner/contract)
+	cwdRepo := wt.WorkTreeRepo
+	if gaps := srt.AssessGitHardening([]string{workTree}); len(gaps) > 0 {
+		if optInUnhardened {
+			printUnhardenedGitWarning(os.Stderr, gaps)
+		} else {
+			ephemeralWork, err := os.MkdirTemp("", "rein-ephemeral-work-*")
+			if err != nil {
+				return 1, fmt.Errorf("create ephemeral working tree: %w", err)
+			}
+			defer os.RemoveAll(ephemeralWork)
+			resolvedEphemeral, err := proxy.ResolveAbs(ephemeralWork)
+			if err != nil {
+				return 1, fmt.Errorf("resolve ephemeral working tree: %w", err)
+			}
+			logger.Printf("cwd checkout %q is not fully hardenable (%s); NOT binding the real tree — falling back to an ephemeral working tree %q (agent clones + pushes; real tree unexposed)",
+				workTree, gaps[0].Reason, resolvedEphemeral)
+			ephemeralCwdPath = workTree
+			workTree = resolvedEphemeral
+			cwdEphemeral = true
+		}
+	}
+
+	// (7d) Wholesale $HOME deny + allow-back set (issue #59, DEFAULT-ON). The
+	// targeted denyStores above stay layered as belt-and-suspenders; hiding
+	// $HOME closes the unknown-unknown credential-store class structurally.
+	// REIN_SANDBOX_SHOW_HOME=1 is the loud kill switch; REIN_SANDBOX_ALLOW_READ
+	// adds narrow allow-backs. Both are surfaced in the banner so a
+	// broken-path discovery loop is self-serve. All decision logic lives in
+	// deriveHomeDenial (sandbox_home.go) — pure and unit-tested, so a
+	// regression here (e.g. an inverted kill-switch branch) fails the suite,
+	// not just a live run. FAIL CLOSED on a home dir or env value we can't
+	// interpret — guessing would either brick the run confusingly or silently
+	// expose the home tree.
+	home, _ := os.UserHomeDir() // "" on error; deriveHomeDenial fails closed when it is actually needed
+	// Every read-WRITE bind, so no allow-back can ro-bind over one of them and
+	// abort the launch (#63). agentTmp is an ExtraAllowWrite and lands under
+	// $HOME whenever TMPDIR does, so it belongs here too — not just the work tree.
+	// Symlink-resolved on both sides or the ancestry comparison silently misses
+	// (workTree is already resolved above; agentTmp comes from MkdirTemp, whose
+	// TMPDIR may itself be a symlink).
+	resolvedAgentTmp, err := proxy.ResolveAbs(agentTmp)
+	if err != nil {
+		return 1, fmt.Errorf("resolve agent scratch dir: %w", err)
+	}
+	// Every read-WRITE bind: work tree, agent scratch, AND the #64 mapped local
+	// checkouts. Any allow-back that is an ancestor of one would ro-bind over it
+	// and abort the launch (#63), so the punch-out must see them all.
+	writables := append([]string{workTree, resolvedAgentTmp}, worktreeWrites...)
+	homeDeny, allowReadPaths, showHome, err := deriveHomeDenial(
+		os.Getenv(srt.EnvSandboxShowHome), os.Getenv(srt.EnvSandboxAllowRead),
+		home, srtPath, cmdline, writables)
+	if err != nil {
+		return 1, err
+	}
+	if showHome {
+		printShowHomeWarning(os.Stderr)
+		if strings.TrimSpace(os.Getenv(srt.EnvSandboxAllowRead)) != "" {
+			fmt.Fprintf(os.Stderr, "rein: note: %s is IGNORED while %s=1 ($HOME is fully visible anyway).\n",
+				srt.EnvSandboxAllowRead, srt.EnvSandboxShowHome)
+		}
+	}
+
 	// (8) Build + validate the srt config (typed struct; no hand-rolled JSON).
 	// baseParams is shared by BOTH the VerifyConfigApplied probe and the real
 	// agent launch, so both see the identical allowlist (including the extras).
+	//
+	// (7f) Harden the writable checkouts' `.git` against the rename-parent
+	// escape. Binding a checkout writable (working tree + #64 worktrees)
+	// necessarily includes its `.git`, whose hooks/ + config are host-code-
+	// execution surfaces. srt ro-binds those by PATH, but a prompt-injected
+	// agent frees the path with `mv .git .aside` (the ro-binds follow the
+	// rename) and rebuilds a malicious `.git`. Pinning each `.git` as its own
+	// mountpoint makes that rename fail EBUSY; rein also lists each one's
+	// hooks/config in denyWrite so the protection covers the worktrees srt's
+	// CWD-scoped scan misses. See srt.Params.WritableGitDirs for the full
+	// rationale and the documented residual gaps (submodules, `.git`-as-file).
+	// The set whose top-level `.git` gets pinned. workTree here is EITHER the
+	// hardenable real cwd OR the ephemeral scratch (which has no `.git` yet, so
+	// writableGitDirs skips it); the unhardenable-cwd and unhardenable-mapped
+	// decisions were already made and enforced in step 7f above.
+	writableCheckouts := append([]string{workTree}, worktreeWrites...)
 	baseParams := srt.Params{
 		SocketPath:          socketPath,
 		WorkingTree:         workTree,
 		ExtraAllowedDomains: extraDomains,
-		ExtraAllowWrite:     []string{agentTmp},
-		DenyReadCredStores:  denyStores,
-		RuntimeDenyRead:     runtimeDeny,
+		// The agent's scratch dir + the developer's mapped local checkouts (#64).
+		// Both are re-bound READ-WRITE under the $HOME deny tmpfs when they live
+		// there (srt pushReadDenyDirMounts; verified in the #59/#63 work), and
+		// both become ForbiddenDirs for the socket placement check below.
+		ExtraAllowWrite:    append([]string{agentTmp}, worktreeWrites...),
+		WritableGitDirs:    writableGitDirs(writableCheckouts),
+		DenyReadCredStores: denyStores,
+		RuntimeDenyRead:    runtimeDeny,
+		DenyReadHome:       homeDeny,
+		AllowRead:          allowReadPaths,
 	}
 	cfg, err := srt.Build(baseParams)
 	if err != nil {
@@ -383,6 +551,16 @@ func runSandboxed(cmdline []string) (int, error) {
 
 	// (11) Scrubbed exec environment (explicit allowlist; gap #1) + the CP4 git
 	// identity + git-config redirects.
+	// The bound checkouts to advertise to the AGENT (REIN_REPO_WORKTREES). In the
+	// ephemeral-cwd fallback the working tree is a fresh EMPTY scratch, not a
+	// checkout — so it is NOT listed here (listing it would imply the repo is
+	// already checked out there). The contract + banner tell the agent to clone
+	// its cwd repo into the working tree and push; the MAPPED worktrees, which
+	// ARE real bound checkouts, are still advertised.
+	agentBindings := wt.AgentBindings(workTree)
+	if cwdEphemeral {
+		agentBindings = wt.Bindings
+	}
 	execEnv := srt.BuildEnv(srt.EnvParams{
 		Parent:              os.Environ(),
 		CABundlePath:        bundlePath,
@@ -391,11 +569,22 @@ func runSandboxed(cmdline []string) (int, error) {
 		GitAuthorEmail:      gitID.Email,
 		GitConfigGlobalPath: managedGitConfig,
 		AgentTmpDir:         agentTmp,
+		DisableClaudeAIMCP:  srt.DisableClaudeMCPFromEnv(os.Getenv(srt.EnvDisableClaudeMCP)),
+		// (#64) Tell the AGENT where the developer's checkouts are mounted — it
+		// cannot guess where repo B lives — and where to clone a repo that only
+		// enters scope mid-run. The human banner alone cannot reach the agent.
+		RepoWorktrees:     worktree.AgentEnvValue(agentBindings),
+		EphemeralCloneDir: agentTmp,
+		// Agent-visible facts (#63): the launch banner tells the HUMAN that
+		// $HOME is ephemeral and only the working tree persists; the agent
+		// never sees it. These carry the same two facts into the sandbox.
+		// homeDeny is non-empty exactly when the deny-read tmpfs is in force.
+		WorkTree:      workTree,
+		HomeEphemeral: homeDeny != "",
 		// The staged rein binary (copied into runTmp below, step 12) goes
 		// on the in-sandbox PATH so `rein declare <n>` works exactly as
 		// the deny messages instruct (#35 §3).
-		ExtraPathDir:       runTmp,
-		DisableClaudeAIMCP: srt.DisableClaudeMCPFromEnv(os.Getenv(srt.EnvDisableClaudeMCP)),
+		ExtraPathDir: runTmp,
 	})
 
 	// (12) FAIL-OPEN DEFENSE: prove the config actually applied by launching srt
@@ -440,14 +629,51 @@ func runSandboxed(cmdline []string) (int, error) {
 		return 1, fmt.Errorf("write settings: %w", err)
 	}
 
-	printSandboxBanner(os.Stderr, sess, sessSource, socketPath, workTree, extraDomains, cmdline)
+	// (11b) THE SANDBOX CONTRACT (#63). Everything the banner says goes to the
+	// HUMAN's terminal; the agent sees none of it. Brief the AGENT itself: claude
+	// gets it in its system prompt (a real context channel), every other agent
+	// gets it printed into the sandbox's own output — weaker, but honest, and the
+	// banner reports WHICH happened rather than implying the agent was briefed.
+	contract := buildAgentContract(contractParams{
+		WorkTree:      workTree,
+		HomeEphemeral: homeDeny != "", // false under the SHOW_HOME kill switch: $HOME really IS persistent then
+		// (#64) when the cwd was unhardenable, the working tree is itself a
+		// throwaway — the contract must say clone-and-push, not "your work
+		// persists here".
+		WorkTreeEphemeral: cwdEphemeral,
+		WorkTreeRepo:      cwdRepo,
+		ExtraDomains:      extraDomains,
+	})
+	contractOff := srt.DisableClaudeMCPFromEnv(os.Getenv(EnvDisableAgentContract))
+	agentArgv := cmdline
+	injected := false
+	if !contractOff {
+		agentArgv, injected = injectContract(cmdline, contract)
+	}
 
-	srtArgv := append([]string{"-s", settingsPath, "--"}, cmdline...)
+	printSandboxBanner(os.Stderr, sess, sessSource, socketPath, workTree, extraDomains, cmdline, showHome, allowReadPaths,
+		contractStatus(contractOff, injected), wt, agentTmp, ephemeralCwdPath, cwdRepo)
+
+	// Non-claude agents: print the contract where the AGENT's own output goes, so
+	// it lands in its transcript/scrollback rather than only on the human's side.
+	if !contractOff && !injected {
+		fmt.Fprintln(os.Stdout, contract)
+	}
+
+	srtArgv := append([]string{"-s", settingsPath, "--"}, agentArgv...)
 	cmd := exec.Command(srtPath, srtArgv...)
 	cmd.Env = execEnv
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// In the unhardenable-cwd ephemeral fallback (#64), rein's OWN cwd is still
+	// the real (unbound) checkout — which is hidden/read-only in-sandbox. Point
+	// srt (and thus the agent) at the ephemeral scratch tree instead, so the
+	// agent starts somewhere writable that matches REIN_IN_SANDBOX_WORKTREE. In
+	// every other case srt inherits rein's cwd unchanged (the bound real tree).
+	if cwdEphemeral {
+		cmd.Dir = workTree
+	}
 
 	if err := cmd.Start(); err != nil {
 		return 127, fmt.Errorf("start srt: %w", err)
@@ -620,6 +846,15 @@ func credentialDenyReadPaths(stateDir string) ([]string, error) {
 	if xdgData == "" {
 		xdgData = filepath.Join(home, ".local", "share")
 	}
+	// cargo: CARGO_HOME else ~/.cargo. Only the CREDENTIAL FILES are denied,
+	// not the dir — ~/.cargo is in the #59 read allow-back set (rustup
+	// toolchain shims + registry cache), and srt's exact-match-only rule for
+	// file denies keeps these hidden UNDER that dir allow-back (verified on
+	// 0.0.63: a dir-level allowRead never un-denies an explicitly listed file).
+	cargoDir := os.Getenv("CARGO_HOME")
+	if cargoDir == "" {
+		cargoDir = filepath.Join(home, ".cargo")
+	}
 
 	out := []string{
 		ghDir,                                              // gh login (env-resolved)
@@ -636,6 +871,10 @@ func credentialDenyReadPaths(stateDir string) ([]string, error) {
 		filepath.Join(home, ".local", "share", "keyrings"), // Secret Service keyring DB default
 		filepath.Join(xdgData, "kwalletd"),                 // KWallet store (env-resolved)
 		filepath.Join(home, ".local", "share", "kwalletd"), // KWallet store default
+		filepath.Join(cargoDir, "credentials.toml"),        // cargo registry token (env-resolved; stays denied under the ~/.cargo allow-back)
+		filepath.Join(cargoDir, "credentials"),             // cargo legacy credentials file (env-resolved)
+		filepath.Join(home, ".cargo", "credentials.toml"),  // cargo registry token default (belt-and-suspenders)
+		filepath.Join(home, ".cargo", "credentials"),       // cargo legacy default
 		filepath.Join(xdgConfig, "rein-credentials"),       // App private key (env-resolved)
 		filepath.Join(home, ".config", "rein-credentials"), // App private key default
 	}
@@ -761,14 +1000,194 @@ func printExpiryBanner(w io.Writer, reason string) {
 	fmt.Fprintln(w, "===============================================================")
 }
 
-func printSandboxBanner(w io.Writer, sess session.Session, sessSource, socketPath, workTree string, extraDomains, cmdline []string) {
+// printShowHomeWarning is the unmissable notice for the REIN_SANDBOX_SHOW_HOME
+// kill switch (issue #59): the operator explicitly opted OUT of hiding $HOME,
+// so every credential store NOT on the targeted denylist is readable by the
+// sandboxed agent. Never silent — this must be as loud as the expiry banner.
+func printShowHomeWarning(w io.Writer) {
+	fmt.Fprintln(w, "===============================================================")
+	fmt.Fprintf(w, "rein: WARNING: %s is set — $HOME is READABLE in-sandbox.\n", srt.EnvSandboxShowHome)
+	fmt.Fprintln(w, "  The wholesale home-directory hiding (issue #59) is DISABLED for")
+	fmt.Fprintln(w, "  this run. The targeted credential denylist (~/.ssh, gh/gpg config,")
+	fmt.Fprintln(w, "  keyrings, …) still applies, but ANY OTHER token or secret file")
+	fmt.Fprintln(w, "  under your home directory is exposed to the sandboxed agent.")
+	fmt.Fprintf(w, "  Prefer narrow allow-backs instead: %s=/abs/path[:/more]\n", srt.EnvSandboxAllowRead)
+	fmt.Fprintln(w, "===============================================================")
+}
+
+// writableGitDirs returns, for each writable checkout, its `<tree>/.git` path
+// WHEN that path is a real directory — the set srt.Params.WritableGitDirs pins
+// against the rename-parent escape. A checkout whose `.git` is a FILE (a linked
+// worktree: `gitdir: …`) is skipped: its exec surfaces live in the common
+// gitdir, not at `<tree>/.git`, and ro-binding a non-existent `<tree>/.git/*`
+// would make bwrap fail the launch. A missing `.git` (not yet a repo) is also
+// skipped. Both residual cases are documented on srt.Params.WritableGitDirs.
+func writableGitDirs(trees []string) []string {
+	out := make([]string, 0, len(trees))
+	for _, t := range trees {
+		if t == "" {
+			continue
+		}
+		gitPath := filepath.Join(t, ".git")
+		fi, err := os.Stat(gitPath)
+		if err != nil || !fi.IsDir() {
+			continue
+		}
+		out = append(out, gitPath)
+	}
+	return out
+}
+
+// unhardenedMappedGitError is the fail-closed refusal when an EXPLICITLY-MAPPED
+// worktree's `.git` cannot be fully hardened (submodules / linked worktree). The
+// cwd never reaches this — it falls back to an ephemeral working tree instead
+// (see step 7f). A mapped tree is one the human named deliberately, so the right
+// answer is an actionable error, not a silent ephemeral swap they didn't ask for.
+func unhardenedMappedGitError(gaps []srt.GitHardeningGap) error {
+	var b strings.Builder
+	b.WriteString("refusing to bind a MAPPED writable checkout whose .git cannot be fully hardened against\n")
+	b.WriteString("the rename-parent escape (a prompt-injected agent could plant git hooks that run AS YOU,\n")
+	b.WriteString("ON THE HOST). Affected worktree(s):\n")
+	for _, g := range gaps {
+		fmt.Fprintf(&b, "  - %s\n      %s\n", g.Tree, g.Reason)
+	}
+	fmt.Fprintf(&b, "Remedy: remove it from the session's `worktrees:` map (or unset %s) so the\n", worktree.EnvWorktrees)
+	fmt.Fprintf(&b, "agent clones it ephemerally and pushes instead of writing your real tree; OR, to bind it\n")
+	fmt.Fprintf(&b, "writable anyway with partial (top-level-only) hardening, set %s=1.", srt.EnvSandboxAllowUnhardenedGit)
+	return fmt.Errorf("%s", b.String())
+}
+
+// printUnhardenedGitWarning is the loud banner when the operator opts in via
+// REIN_SANDBOX_ALLOW_UNHARDENED_GIT: the run proceeds, but the named surfaces
+// stay writable and can execute as the developer on the host.
+func printUnhardenedGitWarning(w io.Writer, gaps []srt.GitHardeningGap) {
+	fmt.Fprintln(w, "===============================================================")
+	fmt.Fprintf(w, "rein: WARNING: %s=1 — proceeding with PARTIAL git hardening.\n", srt.EnvSandboxAllowUnhardenedGit)
+	fmt.Fprintln(w, "  These writable checkouts have a .git exec surface that is NOT protected;")
+	fmt.Fprintln(w, "  a prompt-injected agent can plant hooks that run AS YOU, ON THE HOST:")
+	for _, g := range gaps {
+		fmt.Fprintf(w, "    - %s\n        %s\n", g.Tree, g.Reason)
+	}
+	fmt.Fprintln(w, "===============================================================")
+}
+
+// printWritableTrees is the #64 disclosure: EVERY real directory on the
+// developer's disk that the sandboxed agent can WRITE this run, named
+// explicitly, with the repo each one belongs to.
+//
+// This is deliberately the loudest thing in the banner after the credential
+// story. A mapped checkout is the developer's live tree — it may hold
+// uncommitted work, and a prompt-injected agent can modify it. The mitigation
+// is not obscurity (the agent is told the paths — it must be, or it cannot use
+// them); it is that the human named these trees and sees, at launch, exactly
+// which ones went in. If a listed path is a surprise, that is the signal to
+// Ctrl-C and fix the `worktrees:` map.
+func printWritableTrees(w io.Writer, workTree string, wt worktree.Result, cloneDir, ephemeralCwdPath, cwdRepo string) {
+	if ephemeralCwdPath != "" {
+		// The unhardenable-cwd fallback (#64): the real tree is NOT bound; the
+		// working tree is a fresh throwaway. Say so loudly — the developer needs
+		// to know their real checkout was declined and nothing local survives.
+		repo := cwdRepo
+		if repo == "" {
+			repo = "your cwd repo"
+		}
+		fmt.Fprintln(w, "  ===========================================================")
+		fmt.Fprintf(w, "  YOUR REAL CHECKOUT WAS NOT BOUND (unhardenable .git): %s\n", ephemeralCwdPath)
+		fmt.Fprintln(w, "    (a submodule superproject or a linked worktree — its .git cannot be pinned")
+		fmt.Fprintln(w, "     against the host-code-execution escape, so binding it writable is unsafe).")
+		fmt.Fprintf(w, "  The agent works in an EPHEMERAL throwaway tree instead: %s\n", workTree)
+		fmt.Fprintf(w, "    it clones %s there and PUSHES — nothing local survives the run.\n", repo)
+		fmt.Fprintf(w, "    to bind your REAL tree writable anyway (accepting the .git risk): %s=1\n", srt.EnvSandboxAllowUnhardenedGit)
+		fmt.Fprintln(w, "  ===========================================================")
+	} else if wt.WorkTreeRepo != "" {
+		fmt.Fprintf(w, "  working tree (writable in sandbox): %s  [%s]\n", workTree, wt.WorkTreeRepo)
+	} else {
+		fmt.Fprintf(w, "  working tree (writable in sandbox): %s\n", workTree)
+	}
+	if len(wt.Bindings) > 0 {
+		fmt.Fprintln(w, "  ===========================================================")
+		fmt.Fprintf(w, "  YOUR LOCAL CHECKOUTS ARE AGENT-WRITABLE THIS RUN (%d):\n", len(wt.Bindings))
+		for _, b := range wt.Bindings {
+			fmt.Fprintf(w, "    %s  ->  %s  (rw, from %s)\n", b.Repo, b.Path, b.Source)
+		}
+		fmt.Fprintln(w, "  These are REAL trees, not clones. The agent can modify ANY writable file in")
+		fmt.Fprintln(w, "  them — commit or stash anything you can't lose.")
+		fmt.Fprintln(w, "  Each tree's top-level .git is HARDENED: .git is pinned (rename fails) and")
+		fmt.Fprintln(w, "  .git/hooks, .git/config, .git/config.worktree are read-only in-sandbox — the")
+		fmt.Fprintln(w, "  main plant-a-hook / hooksPath route to running code AS YOU, ON THE HOST, is")
+		fmt.Fprintln(w, "  closed. (Cost: in-sandbox `git config --local` writes fail; commits still work.)")
+		fmt.Fprintln(w, "  But a writable tree is NOT risk-free: the agent can still change tracked build")
+		fmt.Fprintln(w, "  scripts, bury a hostile gitdir/config in a subdir, or plant a submodule/bare-repo")
+		fmt.Fprintln(w, "  gitdir (issue #76) — any of which run on the HOST if YOU later build or run git")
+		fmt.Fprintln(w, "  there. Only map trees you'd let the agent run code from.")
+		fmt.Fprintln(w, "  Trees whose .git cannot be fully hardened (submodules, or a linked worktree")
+		fmt.Fprintf(w, "  where .git is a file) are REFUSED unless you set %s=1.\n", srt.EnvSandboxAllowUnhardenedGit)
+		fmt.Fprintf(w, "  Remove an entry from the session's `worktrees:` map (or unset %s) to withhold it.\n", worktree.EnvWorktrees)
+		fmt.Fprintln(w, "  ===========================================================")
+	}
+	fmt.Fprintf(w, "  a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);\n")
+	fmt.Fprintf(w, "    the agent clones it into %s=%s\n", srt.EnvAgentCloneDir, cloneDir)
+	fmt.Fprintln(w, "    (writable, DISCARDED at run end — the durable artifact is the push, not the tree;")
+	fmt.Fprintln(w, "     never inside the working tree, where a nested clone can be committed into it).")
+	fmt.Fprintf(w, "    map it under `worktrees:` to use your own checkout on the NEXT run.\n")
+}
+
+// contractStatus renders the ONE banner line saying how (or whether) the agent
+// was briefed. This line matters: without it the operator cannot tell a briefed
+// agent from an un-briefed one, and "rein told the agent" would be an
+// assumption rather than an observation.
+func contractStatus(off, injected bool) string {
+	switch {
+	case off:
+		return "  WARNING: agent contract DISABLED (" + EnvDisableAgentContract + ") — the agent was NOT told that $HOME is\n    ephemeral, that credentials are absent, or how to declare its issue. It will find out by failing."
+	case injected:
+		return "  agent contract injected via --append-system-prompt (claude): $HOME is ephemeral, no creds, declare-then-push."
+	default:
+		return "  agent contract PRINTED to the agent's output (this agent has no system-prompt channel, so it may or\n    may not reach the model's context; the REIN_IN_SANDBOX_* env vars carry the same facts machine-readably)."
+	}
+}
+
+func printSandboxBanner(w io.Writer, sess session.Session, sessSource, socketPath, workTree string, extraDomains, cmdline []string, showHome bool, allowReadPaths []string, contractLine string, wt worktree.Result, cloneDir, ephemeralCwdPath, cwdRepo string) {
 	fmt.Fprintln(w, "rein: launching SANDBOXED (srt) run:")
 	fmt.Fprintf(w, "  session: %s (role=%s, repos=%v) [source=%s]\n",
 		sess.ID, sess.Role, sess.Repos, sessSource)
 	fmt.Fprintf(w, "  proxy socket (out of sandbox): %s\n", socketPath)
-	fmt.Fprintf(w, "  working tree (writable in sandbox): %s\n", workTree)
+	printWritableTrees(w, workTree, wt, cloneDir, ephemeralCwdPath, cwdRepo)
 	fmt.Fprintln(w, "  the agent sees NO real token; git/gh are injected at the proxy.")
 	fmt.Fprintln(w, "  credential stores, ~/.ssh, on-disk keyrings, and keyring/agent sockets are hidden.")
+	// Denial UX (#59, first-class requirement): when a hidden path breaks a
+	// tool in-sandbox, the failure shows up as ENOENT/empty-dir with no hint
+	// of WHY — this banner is where the remediation syntax lives, so the
+	// discovery loop (hit a wall -> copy the env var line -> re-run) needs no
+	// docs lookup.
+	//
+	// The three $HOME behaviors below are DISTINCT and were each verified
+	// against real srt 0.0.63 + bwrap (#63 review). The banner used to collapse
+	// them into "reads see an empty dir; writes are discarded", which was wrong
+	// in both directions: it implied allowed-back writes evaporate (they ERROR)
+	// and buried the only fact the operator actually needs — that nothing
+	// outside the working tree survives the run. Do not re-collapse these.
+	if showHome {
+		fmt.Fprintf(w, "  WARNING: $HOME is VISIBLE in-sandbox (%s=1) — unknown credential stores in it are exposed.\n", srt.EnvSandboxShowHome)
+	} else {
+		fmt.Fprintln(w, "  $HOME is HIDDEN in-sandbox. Three different behaviors — know which one you get:")
+		fmt.Fprintln(w, "    READS of a hidden path FAIL LOUDLY: ENOENT, or an empty listing for a dir.")
+		fmt.Fprintln(w, "    WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are")
+		fmt.Fprintln(w, "      DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.")
+		fmt.Fprintln(w, "    WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.")
+		if ephemeralCwdPath != "" {
+			// Ephemeral working tree: NOTHING local survives — not even the tree.
+			fmt.Fprintln(w, "  NOTHING local PERSISTS this run — not even the working tree (it is a throwaway).")
+			fmt.Fprintln(w, "    => the ONLY durable artifact is the agent's PUSH to GitHub.")
+		} else {
+			fmt.Fprintf(w, "  NOTHING under $HOME PERSISTS. Only the working tree does: %s\n", workTree)
+			fmt.Fprintln(w, "    => work the agent must keep has to be written INTO the working tree.")
+		}
+		fmt.Fprintf(w, "    allowed back read-only: %s\n", strings.Join(allowReadPaths, ", "))
+		fmt.Fprintln(w, "    if a tool breaks on a hidden $HOME path, allow it back narrowly:")
+		fmt.Fprintf(w, "      %s=/abs/path[:/more] rein run --sandbox -- …\n", srt.EnvSandboxAllowRead)
+		fmt.Fprintf(w, "    or (NOT recommended — exposes your whole home dir): %s=1\n", srt.EnvSandboxShowHome)
+	}
 	if len(extraDomains) > 0 {
 		fmt.Fprintf(w, "  extra egress ALLOWED (direct TLS, NOT injected, no rein token): %s\n", strings.Join(extraDomains, ", "))
 	}
@@ -778,6 +1197,9 @@ func printSandboxBanner(w io.Writer, sess session.Session, sessSource, socketPat
 	if len(cmdline) > 0 {
 		agent := filepath.Base(cmdline[0])
 		fmt.Fprintf(w, "  to run %s WITHOUT rein for one command: `\\%s` (bash/zsh) or `command %s` (fish)\n", agent, agent, agent)
+	}
+	if contractLine != "" {
+		fmt.Fprintln(w, contractLine)
 	}
 	fmt.Fprintln(w, "rein: running:", strings.Join(cmdline, " "))
 	fmt.Fprintln(w, "---")

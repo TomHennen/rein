@@ -114,10 +114,19 @@ func TestBuildEnvIsStrictAllowlist(t *testing.T) {
 		t.Errorf("CLAUDE_CODE_TMPDIR present with no AgentTmpDir: %q", got["CLAUDE_CODE_TMPDIR"])
 	}
 
-	// The full set is ONLY passthrough + CA vars + GH_TOKEN + GIT_CONFIG_SYSTEM
-	// (no identity or AgentTmpDir supplied here, and MCP not disabled by default) —
-	// nothing else.
-	allowed := map[string]bool{"PATH": true, "HOME": true, "LANG": true, "LC_ALL": true, "TERM": true, "GH_TOKEN": true, "GIT_CONFIG_SYSTEM": true}
+	// No WorkTree / HomeEphemeral supplied here -> the two agent-visible facts
+	// that carry a value must be absent (REIN_IN_SANDBOX itself is unconditional).
+	// Asserted positively in TestBuildEnvAgentVisibleFacts.
+	for _, name := range []string{"REIN_IN_SANDBOX_WORKTREE", "REIN_IN_SANDBOX_HOME"} {
+		if _, ok := got[name]; ok {
+			t.Errorf("%s present with no WorkTree/HomeEphemeral: %q", name, got[name])
+		}
+	}
+
+	// The full set is ONLY passthrough + CA vars + GH_TOKEN + GIT_CONFIG_SYSTEM +
+	// REIN_IN_SANDBOX (no identity or AgentTmpDir supplied here, and MCP not disabled
+	// by default) — nothing else.
+	allowed := map[string]bool{"PATH": true, "HOME": true, "LANG": true, "LC_ALL": true, "TERM": true, "GH_TOKEN": true, "GIT_CONFIG_SYSTEM": true, "REIN_IN_SANDBOX": true}
 	for _, name := range caEnvVars {
 		allowed[name] = true
 	}
@@ -148,8 +157,8 @@ func TestBuildEnvDisableClaudeMCP(t *testing.T) {
 		t.Errorf("ENABLE_CLAUDEAI_MCP_SERVERS = %q, want \"false\" when DisableClaudeAIMCP set", got["ENABLE_CLAUDEAI_MCP_SERVERS"])
 	}
 	// Closed set for this arm: HOME + CA vars + GH_TOKEN + GIT_CONFIG_SYSTEM +
-	// the one MCP-disable var. Nothing else.
-	allowed := map[string]bool{"HOME": true, "GH_TOKEN": true, "GIT_CONFIG_SYSTEM": true, "ENABLE_CLAUDEAI_MCP_SERVERS": true}
+	// REIN_IN_SANDBOX + the one MCP-disable var. Nothing else.
+	allowed := map[string]bool{"HOME": true, "GH_TOKEN": true, "GIT_CONFIG_SYSTEM": true, "ENABLE_CLAUDEAI_MCP_SERVERS": true, "REIN_IN_SANDBOX": true}
 	for _, name := range caEnvVars {
 		allowed[name] = true
 	}
@@ -237,6 +246,99 @@ func TestBuildEnvGitIdentity(t *testing.T) {
 	for _, kv := range env {
 		if strings.Contains(kv, "tom.hennen@gmail.com") {
 			t.Errorf("developer email leaked into sandbox env: %q", kv)
+		}
+	}
+}
+
+// TestBuildEnvCarriesWorktreeChannel (#64): the agent cannot guess where the
+// developer's checkout of repo B lives on disk — rein must TELL it. The banner
+// reaches the human; REIN_REPO_WORKTREES (JSON) and REIN_EPHEMERAL_CLONE_DIR
+// reach the agent. Both are non-secret facts about the sandbox's own
+// filesystem, and both are omitted entirely when there is nothing to say.
+func TestBuildEnvCarriesWorktreeChannel(t *testing.T) {
+	env := BuildEnv(EnvParams{
+		Parent:            []string{"PATH=/usr/bin"},
+		CABundlePath:      "/tmp/ca.pem",
+		StubGHToken:       "stub",
+		RepoWorktrees:     `[{"repo":"owner/b","path":"/srv/dev/b","mode":"rw"}]`,
+		EphemeralCloneDir: "/tmp/rein-agent-tmp-1",
+	})
+	got := envMap(env)
+	if got["REIN_REPO_WORKTREES"] != `[{"repo":"owner/b","path":"/srv/dev/b","mode":"rw"}]` {
+		t.Errorf("REIN_REPO_WORKTREES = %q", got["REIN_REPO_WORKTREES"])
+	}
+	if got["REIN_EPHEMERAL_CLONE_DIR"] != "/tmp/rein-agent-tmp-1" {
+		t.Errorf("REIN_EPHEMERAL_CLONE_DIR = %q", got["REIN_EPHEMERAL_CLONE_DIR"])
+	}
+
+	// Nothing mapped, nothing to clone into => the vars are absent, not empty
+	// (an empty REIN_REPO_WORKTREES would read as "[] is authoritative" noise).
+	got = envMap(BuildEnv(EnvParams{Parent: []string{"PATH=/usr/bin"}, CABundlePath: "/tmp/ca.pem", StubGHToken: "stub"}))
+	if _, ok := got["REIN_REPO_WORKTREES"]; ok {
+		t.Error("REIN_REPO_WORKTREES must be unset when no checkout is bound")
+	}
+	if _, ok := got["REIN_EPHEMERAL_CLONE_DIR"]; ok {
+		t.Error("REIN_EPHEMERAL_CLONE_DIR must be unset when there is no clone dir")
+	}
+}
+
+// envMap turns a BuildEnv result into a name->value map.
+func envMap(env []string) map[string]string {
+	out := map[string]string{}
+	for _, kv := range env {
+		name, value, ok := strings.Cut(kv, "=")
+		if ok {
+			out[name] = value
+		}
+	}
+	return out
+}
+
+// TestBuildEnvAgentVisibleFacts asserts the #63 agent-visible channel: the
+// launch banner that explains the ephemeral $HOME goes to the HUMAN's terminal
+// and the agent never sees it, so BuildEnv carries the two load-bearing facts
+// INTO the sandbox — where the work persists (REIN_IN_SANDBOX_WORKTREE) and that $HOME
+// does not (REIN_IN_SANDBOX_HOME=ephemeral), plus REIN_IN_SANDBOX=1 as the plain
+// "you are inside rein" primitive for hooks and wrapper scripts.
+//
+// Direction is the thing to keep straight: these are WRITTEN BY rein for the
+// agent, unlike REIN_SANDBOX_SHOW_HOME / REIN_SANDBOX_ALLOW_READ, which rein
+// READS from its own env outside the sandbox. None of them carry a secret.
+func TestBuildEnvAgentVisibleFacts(t *testing.T) {
+	env := BuildEnv(EnvParams{
+		Parent:        []string{"HOME=/home/dev"},
+		CABundlePath:  "/run/ca-bundle.pem",
+		StubGHToken:   "stub-tok",
+		WorkTree:      "/work/repo",
+		HomeEphemeral: true,
+	})
+	got := map[string]string{}
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		got[k] = v
+	}
+	for _, tc := range []struct{ k, want string }{
+		{"REIN_IN_SANDBOX", "1"},
+		{"REIN_IN_SANDBOX_WORKTREE", "/work/repo"},
+		{"REIN_IN_SANDBOX_HOME", "ephemeral"},
+	} {
+		if got[tc.k] != tc.want {
+			t.Errorf("%s = %q, want %q", tc.k, got[tc.k], tc.want)
+		}
+	}
+
+	// Kill-switch arm (REIN_SANDBOX_SHOW_HOME=1 upstream => HomeEphemeral false):
+	// $HOME is a real, persistent home in-sandbox, so claiming it is ephemeral
+	// would be a LIE to the agent. The var must be absent, not "false".
+	env = BuildEnv(EnvParams{
+		Parent:       []string{"HOME=/home/dev"},
+		CABundlePath: "/run/ca-bundle.pem",
+		StubGHToken:  "stub-tok",
+		WorkTree:     "/work/repo",
+	})
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "REIN_IN_SANDBOX_HOME=") {
+			t.Errorf("REIN_IN_SANDBOX_HOME must be absent when $HOME is NOT ephemeral; got %q", kv)
 		}
 	}
 }

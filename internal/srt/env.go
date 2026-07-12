@@ -5,6 +5,22 @@ import (
 	"strings"
 )
 
+// EnvAgentWorktrees is the AGENT-visible channel: a JSON array of
+// {"repo","path","mode"} objects naming every local checkout bound into this
+// sandbox and where it is mounted (issue #64). The agent cannot guess where the
+// developer's checkout of repo B lives — this is how it is told. In-sandbox
+// paths equal host paths (srt bind-mounts same-path). The value is rendered by
+// internal/worktree.AgentEnvValue.
+const EnvAgentWorktrees = "REIN_REPO_WORKTREES"
+
+// EnvAgentCloneDir is the AGENT-visible writable, EPHEMERAL directory to clone
+// into when a repo enters scope MID-RUN (docs/session-scope-ux-mocks.md §7):
+// bwrap binds are fixed at launch, so such a repo has no bind and never can.
+// Its tree lives here for the run and the durable artifact is the push, not the
+// tree. Explicitly NOT the working tree — a nested clone inside repo A risks
+// being committed into repo A.
+const EnvAgentCloneDir = "REIN_EPHEMERAL_CLONE_DIR"
+
 // EnvDisableClaudeMCP is the rein-side, per-run opt-OUT that restores the old
 // behavior of disabling Claude Code's account/claude.ai remote MCP connectors
 // (see EnvParams.DisableClaudeAIMCP). By DEFAULT rein no longer disables them —
@@ -28,6 +44,34 @@ func DisableClaudeMCPFromEnv(v string) bool {
 		return false
 	}
 }
+
+// The REIN_IN_SANDBOX_* namespace is the one rein WRITES INTO the sandbox for
+// the AGENT to read (#63). It is deliberately NOT REIN_SANDBOX_*: that prefix
+// is already rein's READ-from-its-own-environment namespace, set by the human
+// OUTSIDE the sandbox (REIN_SANDBOX_SHOW_HOME, REIN_SANDBOX_ALLOW_READ,
+// REIN_SANDBOX_WORKDIR). Two opposite data-flow directions under one prefix is
+// a trap — REIN_SANDBOX_HOME (a fact for the agent) sitting one word from
+// REIN_SANDBOX_SHOW_HOME (a knob for the human) is exactly the confusion that
+// prefix would invite. Read the prefix as the sentence it forms: "rein: in
+// sandbox, <fact>". Verified live that srt/bwrap pass these through unchanged.
+const (
+	// EnvInSandbox is the plain "you are running inside a rein sandbox"
+	// primitive: "1", always set. For agents, hooks, and wrapper scripts that
+	// want to branch without parsing anything else.
+	EnvInSandbox = "REIN_IN_SANDBOX"
+
+	// EnvInSandboxWorktree is the agent's repo checkout — the ONLY path that
+	// survives the run. The single most useful fact rein can hand an agent
+	// whose $HOME evaporates: this is where work has to go.
+	EnvInSandboxWorktree = "REIN_IN_SANDBOX_WORKTREE"
+
+	// EnvInSandboxHome is set to "ephemeral" when $HOME is hidden behind srt's
+	// deny-read tmpfs (the #59 default), and is ABSENT otherwise. Absent rather
+	// than "persistent" so a stale/blank value can never assert the dangerous
+	// direction: an agent that sees nothing here assumes its $HOME is real,
+	// which is the safe reading when the kill switch is on.
+	EnvInSandboxHome = "REIN_IN_SANDBOX_HOME"
+)
 
 // EnvParams are the inputs to BuildEnv.
 type EnvParams struct {
@@ -92,6 +136,34 @@ type EnvParams struct {
 	// passthrough of a parent var into the injected set.
 	DisableClaudeAIMCP bool
 
+	// WorkTree, when non-empty, is the agent's repo checkout — the ONLY path
+	// that survives the run. Delivered to the child as REIN_IN_SANDBOX_WORKTREE.
+	//
+	// Direction matters: unlike EnvSandboxShowHome / EnvSandboxAllowRead (which
+	// rein READS from its own launch env, OUTSIDE the sandbox), the REIN_IN_SANDBOX_*
+	// namespace (see its const block) is WRITTEN BY rein INTO the sandbox for
+	// the AGENT to read. They are the only agent-visible channel rein currently
+	// has: the launch banner explaining the ephemeral $HOME goes to the HUMAN's
+	// terminal, and the agent never sees a word of it (#63).
+	//
+	// Honest about the limits: this is a breadcrumb, not a guarantee. Claude
+	// Code does not surface env vars in its context, so it closes the LOUD case
+	// (an agent debugging a weird filesystem failure runs `env`, or a hook/
+	// wrapper script branches on it) and NOT the silent one (the agent writes
+	// work product to ~/notes.md, reads it back fine all run — the tmpfs is
+	// self-consistent — and it evaporates at teardown, where only the human
+	// ever notices). The channel that DOES close the silent case is the sandbox
+	// contract (cmd/rein/contract.go): claude gets it in its system prompt via
+	// --append-system-prompt, other agents get it printed into their output.
+	// These vars remain the MACHINE-READABLE form of the same facts, for hooks
+	// and wrapper scripts. Non-secret, fixed values.
+	WorkTree string
+
+	// HomeEphemeral reports that this run hides $HOME behind srt's deny-read
+	// tmpfs (i.e. the #59 default, kill switch NOT engaged). Delivered as
+	// REIN_IN_SANDBOX_HOME=ephemeral so an agent that looks can distinguish "my
+	// $HOME writes vanish at teardown" from a normal run. See WorkTree.
+	HomeEphemeral bool
 	// ExtraPathDir, when non-empty, is PREPENDED to the child's PATH. Used
 	// to put the per-run staged rein binary (<runTmp>/rein, the probe
 	// copy) on the in-sandbox PATH so the agent can run `rein declare <n>`
@@ -111,6 +183,21 @@ type EnvParams struct {
 	// and — because bwrap skips allowWrite sources that don't exist on the host —
 	// never binds writable, so the child hits EROFS on its first temp write.
 	AgentTmpDir string
+
+	// RepoWorktrees, when non-empty, is the JSON array of local checkouts bound
+	// into this sandbox (worktree.AgentEnvValue). It is delivered as
+	// REIN_REPO_WORKTREES — the AGENT-visible answer to "where does repo B
+	// live?", which the agent cannot guess and which the human banner alone
+	// cannot tell it (issue #64). In-sandbox paths equal host paths. Non-secret:
+	// it names directories the agent can already see.
+	RepoWorktrees string
+
+	// EphemeralCloneDir, when non-empty, is the writable, per-run scratch dir a
+	// repo that enters scope MID-RUN must be cloned into — delivered as
+	// REIN_EPHEMERAL_CLONE_DIR. Such a repo has no launch-time bind and never
+	// can (bwrap binds are fixed at launch), so its tree is ephemeral and the
+	// durable artifact is the push (docs/session-scope-ux-mocks.md §7).
+	EphemeralCloneDir string
 }
 
 // passthroughExact is the allowlist of environment variable NAMES carried from
@@ -217,6 +304,26 @@ func BuildEnv(p EnvParams) []string {
 	// Set only when provided (the probe path passes it empty and does no temp work).
 	if p.AgentTmpDir != "" {
 		out = append(out, "CLAUDE_CODE_TMPDIR="+p.AgentTmpDir)
+	}
+	// Where the developer's real checkouts are mounted, and where to clone a
+	// repo that only enters scope mid-run (issue #64). Both are non-secret
+	// facts about the sandbox's own filesystem; the agent cannot infer either.
+	if p.RepoWorktrees != "" {
+		out = append(out, EnvAgentWorktrees+"="+p.RepoWorktrees)
+	}
+	if p.EphemeralCloneDir != "" {
+		out = append(out, EnvAgentCloneDir+"="+p.EphemeralCloneDir)
+	}
+
+	// Agent-visible facts (#63). rein WRITES these INTO the sandbox — see the
+	// WorkTree field doc for why (the banner reaches the human, never the agent)
+	// and for the honest limits. All three are non-secret, fixed values.
+	out = append(out, EnvInSandbox+"=1")
+	if p.WorkTree != "" {
+		out = append(out, EnvInSandboxWorktree+"="+p.WorkTree)
+	}
+	if p.HomeEphemeral {
+		out = append(out, EnvInSandboxHome+"=ephemeral")
 	}
 	// By default rein leaves Claude Code's account/claude.ai MCP connectors at
 	// claude's native setting (enabled, connected non-blocking): a user's MCP
