@@ -39,7 +39,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pexpect
@@ -569,6 +569,101 @@ def spawn_rein(
 
 
 # --------------------------------------------------------------------------
+# Shared journey RUNNER — complete capture is structural, not a discipline
+# --------------------------------------------------------------------------
+#
+# Issue #82 / Tom's "shared lib" ruling: a journey golden dropped `rein doctor`
+# because the journey hand-assembled what went into the golden. The fix is to
+# take capture OUT of the author's hands. With run_journey the author declares
+# only STEPS — the argv of each command and the ordered answers to its prompts.
+# The runner captures the COMPLETE pty session of everything it drove and
+# returns it as one raw transcript. There is no supported path to hand-pick or
+# slice which sections land in the golden: a section is present because its
+# command ran in the captured session. Volatiles are handled downstream by
+# normalize-on-compare, NEVER by dropping output.
+
+
+@dataclass
+class JourneyStep:
+    """One host `rein <argv>` command a journey drives.
+
+    The author declares the argv and, for an interactive command, the ORDERED
+    (expect_pattern, answer) pairs — and nothing about capture. `label`
+    overrides the `$ rein <argv>` echo shown before the command's output (rare;
+    the default reads fine).
+    """
+
+    argv: list[str]
+    answers: list[tuple[str, str]] = field(default_factory=list)
+    label: str | None = None
+
+
+@dataclass
+class StepResult:
+    argv: list[str]
+    text: str  # this step's raw pty capture (for per-step assertions only)
+    exitstatus: int | None
+    reached_eof: bool
+
+
+@dataclass
+class JourneyResult:
+    transcript: str  # COMPLETE raw transcript of the WHOLE session (all steps)
+    steps: list[StepResult] = field(default_factory=list)
+
+    @property
+    def reached_eof(self) -> bool:
+        """True iff every step ran to EOF (no prompt was missed / timed out)."""
+        return all(s.reached_eof for s in self.steps)
+
+
+def run_journey(steps, *, env=None, extra_env=None, timeout: int = 60) -> JourneyResult:
+    """Drive a sequence of host `rein <argv>` commands under a pty, answering
+    each step's prompts in order, and capture the COMPLETE session.
+
+    Returns a JourneyResult whose `.transcript` is the whole captured session
+    (build_raw_transcript over every step's output, each preceded by a `$ rein
+    <argv>` echo so it reads like a real terminal). Pass THAT to compare_golden
+    — the author never calls `.text()` and slices, so no section can be omitted.
+
+    The steps share `env`+`extra_env`, so an earlier `rein init` sets up the
+    HOME/XDG world a later `rein doctor` inspects. Host commands only; an
+    in-sandbox journey (the write ceremony) keeps spawn_rein_run + the sandbox
+    preamble, which already capture the full pty the same way — the slicing was
+    the only gap, and this closes it for host-command journeys.
+
+    `.reached_eof` is False if any step missed a prompt / timed out, so the
+    caller can report a clean "flow broke" instead of diffing a partial golden.
+    """
+    parts: list[str] = []
+    results: list[StepResult] = []
+    for st in steps:
+        run = spawn_rein(st.argv, env=env, extra_env=extra_env, timeout=timeout)
+        reached = False
+        try:
+            for pat, ans in st.answers:
+                run.child.expect(pat, timeout=timeout)
+                run.answer(ans)
+            run.child.expect(pexpect.EOF, timeout=timeout)
+            reached = True
+        except (pexpect.EOF, pexpect.TIMEOUT):
+            reached = False
+        finally:
+            try:
+                run.child.close()
+            except Exception:
+                pass
+        label = st.label or ("rein " + " ".join(st.argv))
+        parts.append(f"$ {label}\n" + run.text())
+        results.append(
+            StepResult(argv=st.argv, text=run.text(),
+                       exitstatus=run.child.exitstatus, reached_eof=reached)
+        )
+    transcript = build_raw_transcript("\n".join(parts))
+    return JourneyResult(transcript=transcript, steps=results)
+
+
+# --------------------------------------------------------------------------
 # JOURNEY helpers (shared exemplar API — see tests/interactive/CLAUDE.md)
 # --------------------------------------------------------------------------
 #
@@ -685,6 +780,17 @@ def normalize_transcript(text: str, subs: list[tuple[str, str]] | None = None) -
 # NOT recognize is left verbatim, so a brand-new rein line still trips drift.
 # Extend this list (not a per-journey whitelist) for a genuinely new volatile.
 _NORMALIZE_RULES = [
+    # per-operator GitHub App identity that `rein init` echoes on the env path
+    # (client_id + installation_id are whoever ran `source ./dev-env`). Generic,
+    # so the onboarding golden is portable across operators. BEFORE the hash
+    # rule (client_id can look hex-ish) and the issue rules (installation_id is
+    # bare digits that no issue rule would otherwise touch).
+    (r"client_id=[A-Za-z0-9_]+", "client_id=<CLIENT_ID>"),
+    (r"installation_id=\d+", "installation_id=<INSTALL_ID>"),
+    # scaffolded dev-session id carries a per-run random hex suffix
+    # (sess_dev_init_<hex8> from `rein init`). Fixed-id sessions used by other
+    # journeys (sess_journey_ceremony, sess_itest_pinned) do NOT match.
+    (r"sess_dev_init_[0-9a-f]+", "sess_dev_init_<ID>"),
     # issue number, in every context it appears (BEFORE the hash rule). NB the
     # `agent/\d+/` rule also rewrites the literal example `agent/73/kx3q` in
     # rein's error text — harmless, since it hits both compare sides identically.
@@ -703,6 +809,14 @@ _NORMALIZE_RULES = [
     # scratch dirs (the trailing char class excludes '/', so a suffix like
     # /session.yaml is preserved: <TMP>/session.yaml)
     (r"/tmp/rein-[A-Za-z0-9_.-]+", "<TMP>"),
+    # machine-variable absolute paths -> placeholders (issue #82: `rein doctor`'s
+    # transcript names real box paths — the running binary, the operator's home,
+    # the App key, srt. Normalize them so the golden is stable run-to-run and not
+    # tied to one checkout/home). REIN_BIN before HOME so a home-based rein binary
+    # collapses to <REIN_BIN> whole rather than <HOME>/.../bin/rein. These run
+    # AFTER the /tmp rule so tmp paths are already <TMP>.
+    (r"[^\s()]+/bin/rein(?:-git|-gh)?\b", "<REIN_BIN>"),
+    (r"/home/[^/\s]+|/Users/[^/\s]+", "<HOME>"),
     # git transfer chatter: keep the line, normalize every volatile number so the
     # golden is identical whatever the repo's object count / network speed is.
     # The hash rule REQUIRES a hex letter (?=...[a-f]) so a large all-digit object

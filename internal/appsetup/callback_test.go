@@ -47,7 +47,7 @@ func TestNewStateNonce_LengthAndUniqueness(t *testing.T) {
 
 func newTestManifest(t *testing.T) Manifest {
 	t.Helper()
-	m, err := BuildManifest(RolePrimary, 12345)
+	m, err := BuildManifest(RolePrimary, 12345, "")
 	if err != nil {
 		t.Fatalf("build manifest: %v", err)
 	}

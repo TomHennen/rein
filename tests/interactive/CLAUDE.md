@@ -83,6 +83,37 @@ the `SBX| `-tagged agent lines and rein's untagged host prompt already show the
 two views inline — the faithful "one terminal" artifact. There is **no whitelist**
 and no brand-new-line blind spot: everything is kept, so a new line survives.
 
+## Use the shared journey runner — complete capture is STRUCTURAL (#82)
+
+For a **host-command** journey (one or more `rein <argv>` invocations), use
+`reinharness.run_journey`. You declare only **steps** — each step's `argv` and the
+ordered `(expect_pattern, answer)` pairs for its prompts — and the runner captures
+the **complete pty session** of everything it drove, returning it as one raw
+transcript (`JourneyResult.transcript`). Pass that straight to `compare_golden`.
+
+**Do NOT hand-assemble the golden.** You never call `.text()` and slice, you never
+pick which sections land in the golden. A section is in the golden because its
+command ran in the captured session — that's the whole point. (This is why an
+early onboarding golden silently dropped `rein doctor`: the journey curated its
+own capture. `run_journey` removes that footgun — there's no supported path to
+omit a section.) Volatiles are handled downstream by **normalize-on-compare**
+(add a rule to `_NORMALIZE_RULES`); you **normalize** machine-variable values,
+you do **not** drop output. `journey_onboarding.py` is the exemplar.
+
+An **in-sandbox** journey (the write ceremony) keeps `spawn_rein_run` +
+`sandbox_preamble` — those already capture the full pty the same way (the tagged
+`SBX| ` lines ARE the complete agent output); the slicing footgun only existed for
+hand-written host-command capture, which `run_journey` now owns.
+
+## Prefer inline literals over constants for EXPECTED values (#82)
+
+In journeys and tests, write the expected string/value **inline at the assertion**
+rather than behind a named constant — reviewability first. A reviewer should see
+`"Name this machine [demo-box]" in text` and know exactly what's expected without
+chasing a `DEMO_HOSTNAME = ...` definition elsewhere. (Inputs you reuse several
+times — a repo slug typed into multiple prompts — can still be a local, but the
+*expected* literals in assertions should be visible where they're checked.)
+
 ## Readable expect → act → expect
 
 Where a step is genuinely interactive (the Form A declare prompt), **interleave**:
@@ -110,6 +141,10 @@ in `reinharness.py`, so a new journey is mostly wiring:
 - `branch_exists` / `delete_branch` — HOST-side verify + cleanup (operator's gh).
 - `resolve_throwaway_repo` — the repo, resolved the rein-init way (see below).
 - `spawn_rein_run` / `ReinRun` — the pty wrapper, transcript, prompt matchers.
+- `run_journey(steps)` / `JourneyStep` / `JourneyResult` — the host-command
+  journey runner (#82): declare steps (argv + prompt answers), get the COMPLETE
+  captured session back as `.transcript` for `compare_golden`. Use this for any
+  new host-command journey; it makes complete capture structural.
 
 ## Running & refreshing goldens: `run-journeys.sh`
 

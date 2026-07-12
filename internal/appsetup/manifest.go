@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"regexp"
+	"strings"
 )
 
 // Role identifies which App is being created. Drives both the
@@ -33,11 +35,23 @@ type Manifest struct {
 	DefaultEvents      []string          `json:"default_events"`
 }
 
-// BuildManifest assembles the per-role Manifest using the supplied
-// port for redirect_url and a freshly-generated random10 suffix.
-// `public` is hard-coded false. `default_events` is an empty (non-nil)
-// slice so it serializes as [].
-func BuildManifest(r Role, port int) (Manifest, error) {
+// BuildManifest assembles the per-role Manifest using the supplied port
+// for redirect_url, an optional human machine label, and a freshly-
+// generated random10 uniqueness suffix. `public` is hard-coded false.
+// `default_events` is an empty (non-nil) slice so it serializes as [].
+//
+// The App name is `rein-<role>-<label>-<shortrand>` when a (sanitized,
+// non-empty) label is supplied, else `rein-<role>-<shortrand>` — the
+// pre-label shape, preserved so an unlabeled/headless-default run still
+// gets a valid globally-unique name (onboarding-ux-design.md §4).
+//
+// GitHub App names are globally unique across all of GitHub (the name is
+// the public github.com/apps/<slug> URL), so the random10 suffix is the
+// uniqueness guard and is ALWAYS present even with a label. A collision
+// (GitHub 422 "name taken") surfaces browser-side at the settings/apps/new
+// POST, not on rein's HTTP path, so it can't be auto-retried here; the
+// 40-bit guard makes a collision astronomically unlikely regardless.
+func BuildManifest(r Role, port int, label string) (Manifest, error) {
 	if r != RolePrimary && r != RoleAudit {
 		return Manifest{}, fmt.Errorf("unknown manifest role %q", r)
 	}
@@ -45,8 +59,12 @@ func BuildManifest(r Role, port int) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
+	name := fmt.Sprintf("rein-%s-%s", r, suffix)
+	if lbl := SanitizeMachineLabel(label); lbl != "" {
+		name = fmt.Sprintf("rein-%s-%s-%s", r, lbl, suffix)
+	}
 	return Manifest{
-		Name:               fmt.Sprintf("rein-%s-%s", r, suffix),
+		Name:               name,
 		Description:        manifestDescription(r),
 		URL:                "https://github.com/TomHennen/rein",
 		RedirectURL:        fmt.Sprintf("http://127.0.0.1:%d/callback", port),
@@ -54,6 +72,50 @@ func BuildManifest(r Role, port int) (Manifest, error) {
 		DefaultPermissions: manifestPermissions(r),
 		DefaultEvents:      []string{},
 	}, nil
+}
+
+// GitHub App names are capped at 34 characters (the name is the public
+// github.com/apps/<slug> URL). The name is rein-<role>-<label>-<guard>, so
+// the label's budget is 34 minus the fixed parts. maxLabelLen is COMPUTED
+// from that budget (not a magic number) using the LONGEST role, so it stays
+// correct if the prefix, role names, or guard length ever change — and so a
+// common distinctive hostname like `toms-macbook` isn't truncated into a
+// name GitHub rejects browser-side at App creation.
+const (
+	githubAppNameMaxLen = 34
+	appNameGuardLen     = 10 // hex(randomSuffix): 5 bytes => 10 chars
+)
+
+// maxLabelLen = 34 - len("rein-") - len("primary") - 2 hyphens (role|label,
+// label|guard) - 10 guard = 10. Spelled out as a constant expression (all
+// operands are constants) so the compiler recomputes it if any part moves.
+const maxLabelLen = githubAppNameMaxLen - len("rein-") - len(string(RolePrimary)) - len("--") - appNameGuardLen
+
+var (
+	apostropheRe = regexp.MustCompile(`['’` + "`" + `]`)
+	labelStripRe = regexp.MustCompile(`[^a-z0-9]+`)
+)
+
+// SanitizeMachineLabel lowercases s, replaces every run of non
+// [a-z0-9] characters with a single hyphen, trims leading/trailing
+// hyphens, and caps the result at maxLabelLen. Returns "" when nothing
+// usable remains (caller then falls back to the label-less name shape).
+//
+// Exported so the CLI's hostname default and the manifest builder run the
+// SAME normalization — the name the user sees at the prompt is exactly the
+// name that reaches GitHub.
+func SanitizeMachineLabel(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	// Drop apostrophes so a possessive collapses into the word (Tom's -> toms,
+	// matching design §4's `toms-laptop`), rather than splitting it. Every
+	// OTHER run of non-[a-z0-9] becomes a single hyphen.
+	s = apostropheRe.ReplaceAllString(s, "")
+	s = labelStripRe.ReplaceAllString(s, "-")
+	s = strings.Trim(s, "-")
+	if len(s) > maxLabelLen {
+		s = strings.Trim(s[:maxLabelLen], "-")
+	}
+	return s
 }
 
 // manifestPermissions returns the design-§Manifest-schemas permissions

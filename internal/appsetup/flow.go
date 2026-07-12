@@ -29,6 +29,12 @@ type RunOptions struct {
 	// rounds reuse it (each round's listener is closed before the next
 	// binds; SO_REUSEADDR handles the immediate rebind).
 	Port int
+	// MachineLabel is the sanitized human machine label woven into the
+	// created App's name (rein-<role>-<label>-<shortrand>). Empty falls
+	// back to the label-less name shape. Resolved by the CLI (hostname
+	// default or the "Name this machine" prompt) before the flow runs;
+	// see onboarding-ux-design.md §4.
+	MachineLabel string
 	// APIBase overrides the GitHub API base URL for tests. Empty in
 	// production (uses DefaultGitHubAPIBase).
 	APIBase string
@@ -213,7 +219,7 @@ func runOneStep(ctx context.Context, opts RunOptions, role Role, step int) (*App
 	// runCallback owns shutdown; ln.Close() is idempotent.
 	defer ln.Close()
 
-	m, err := BuildManifest(role, port)
+	m, err := BuildManifest(role, port, opts.MachineLabel)
 	if err != nil {
 		return nil, err
 	}

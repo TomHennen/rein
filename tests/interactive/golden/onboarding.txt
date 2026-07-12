@@ -1,0 +1,49 @@
+$ rein init --no-symlink --skip-mint-check --shell bash
+rein init: setting up local scaffolding
+  state dir:  /tmp/rein-itest-home-97dg0i2o/.local/state/rein
+  config dir: /tmp/rein-itest-home-97dg0i2o/.config/rein
+Name this machine [demo-box]:
+  machine:    demo-box (label for this machine's App name)
+  setup:      no state.json; REIN_APP_* env vars detected — using env-managed path (marker state.json will be written)
+              wrote managed_externally marker (state.json)
+  app:        client_id=Iv23lii9NlJIOVZkkD7G installation_id=134965206
+  shim:       3 binaries under /tmp/rein-itest-home-97dg0i2o/.local/state/rein/shim
+  symlink:    skipped (--no-symlink)
+  mint check: skipped (--skip-mint-check)
+Which repo should the agent work on? (owner/name, Enter to skip): octo-example/demo-repo
+  session:    scaffolded at /tmp/rein-itest-home-97dg0i2o/.config/rein/dev-session.yaml (repos: [octo-example/demo-repo])
+              writes are agent-declared (#35): the agent runs `rein declare <n>`,
+              you confirm on your terminal, then writes flow for that run. Reads work immediately.
+Add alias claude='rein run -- claude' to /tmp/rein-itest-home-97dg0i2o/.bashrc? [y/N]:
+  alias:      not installed (opt-in; enable with `rein init --alias`)
+  install on repo:
+    to let the agent work on octo-example/demo-repo, install the App on it.
+    (env-managed App: pick it from your installations list)
+    visit this URL in your browser:
+      https://github.com/settings/installations
+
+rein init: done.
+Next:
+  - /tmp/rein-itest-home-97dg0i2o/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
+  - run `rein run -- claude` (or another agent) to launch with rein in effect
+  - (optional) enable the `claude` alias with `rein init --alias`
+  - run `rein doctor` to verify everything is wired up
+
+$ rein doctor
+[warn]  rein on PATH:              `which rein` (/home/admin/.local/bin/rein) differs from running binary (/mnt/dev/dev/rein/.claude/worktrees/agent-a8813813ce423f54f/bin/rein); re-run `rein init` to refresh the ~/.local/bin/rein symlink
+[ok]    shim freshness:            3 shims under /tmp/rein-itest-home-97dg0i2o/.local/state/rein/shim up to date
+[ok]    app key:                   /home/admin/.config/rein-credentials/app.pem (mode 0600)
+[ok]    app credentials:           mint ok (token expires 2026-07-12T13:53:44Z)
+[ok]    session:                   file:/tmp/rein-itest-home-97dg0i2o/.config/rein/dev-session.yaml (id=sess_dev_init_ff8ebca6 role=implement repos=[octo-example/demo-repo])
+[warn]  $TMUX:                     unset; tmux-popup grant layer will not fire (use the tty layer or `rein approval grant` from another terminal)
+[warn]  approval cache:            no active runs (per-run approvals; first write inside `rein run` will prompt)
+[warn]  gh-shim cache:             absent (next gh read will mint)
+[ok]    sandbox: srt present:      /home/admin/.npm-global/bin/srt
+[ok]    sandbox: srt version:      0.0.63 (package.json; note `srt --version` misreports 1.0.0)
+[ok]    sandbox: seccomp:          apply-seccomp present (unix-socket block available)
+[ok]    sandbox: bwrap userns:     unprivileged user namespace works
+[ok]    sandbox: system CA bundle:  /etc/ssl/certs/ca-certificates.crt
+
+1 safe fix(es) available — run `rein doctor --fix` to apply (privileged/external steps stay guide-only).
+
+rein doctor: ok
