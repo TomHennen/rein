@@ -205,6 +205,47 @@ func TestClearStaleGhCache(t *testing.T) {
 	}
 }
 
+// TestClearStaleGhCache_MultiScope exercises the issue #95 glob: with several
+// per-scope gh-read-token-<tag>.json files present at once, grooming removes
+// only the stale/corrupt ones and preserves every still-valid scope — the
+// single-file test above can't catch a glob that stops at the first match.
+func TestClearStaleGhCache_MultiScope(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	stateDir, err := config.StateDir()
+	if err != nil {
+		t.Fatalf("state dir: %v", err)
+	}
+
+	valid := ghsession.ReadCachePathForScope(stateDir, "scope-valid")
+	stale := ghsession.ReadCachePathForScope(stateDir, "scope-stale")
+	corrupt := filepath.Join(stateDir, "cache", "gh-read-token-corrupt.json")
+
+	if err := tokencache.Write(valid, tokencache.Entry{Token: "v", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatalf("seed valid: %v", err)
+	}
+	if err := tokencache.Write(stale, tokencache.Entry{Token: "s", ExpiresAt: time.Now().Add(-time.Hour)}); err != nil {
+		t.Fatalf("seed stale: %v", err)
+	}
+	if err := os.WriteFile(corrupt, []byte("{not-json"), 0o600); err != nil {
+		t.Fatalf("seed corrupt: %v", err)
+	}
+
+	if err := clearStaleGhCache(); err != nil {
+		t.Fatalf("clearStaleGhCache: %v", err)
+	}
+
+	if _, err := os.Stat(valid); err != nil {
+		t.Errorf("a VALID scope cache must survive grooming, but it's gone: %v", err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("the STALE scope cache must be removed, stat err = %v (want not-exist)", err)
+	}
+	if _, err := os.Stat(corrupt); !os.IsNotExist(err) {
+		t.Errorf("the CORRUPT scope cache must be removed, stat err = %v (want not-exist)", err)
+	}
+}
+
 // TestNoPrivFixesNeverExecInGuideOnly is a belt-and-suspenders sweep: across a
 // realistic result set, applyRemediations must never be able to run a
 // privileged step. We assert structurally that no privileged/guide remedy has

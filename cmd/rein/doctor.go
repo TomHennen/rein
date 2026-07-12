@@ -538,7 +538,10 @@ func checkGhShimCache() checkResult {
 		other++
 	}
 	if valid > 0 {
-		return checkResult{"gh-shim cache", statusOK, fmt.Sprintf("%d scope(s) valid (latest expires %s)", valid, latest.Format(time.RFC3339))}
+		// "cached scope(s)" not "the active scope": a green here means at least
+		// one per-ceiling cache is warm, NOT necessarily the current run's — a
+		// mismatched scope still re-mints on next use (issue #95).
+		return checkResult{"gh-shim cache", statusOK, fmt.Sprintf("%d cached scope(s) valid (latest expires %s)", valid, latest.Format(time.RFC3339))}
 	}
-	return checkResult{"gh-shim cache", statusWarn, fmt.Sprintf("%d scope(s) expired/unreadable (next gh read will mint)", other)}
+	return checkResult{"gh-shim cache", statusWarn, fmt.Sprintf("%d cached scope(s) expired/unreadable (next gh read will mint)", other)}
 }
