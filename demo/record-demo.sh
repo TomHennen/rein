@@ -17,7 +17,12 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 raw="$here/.creds-joke.raw"; timing="$here/.creds-joke.timing"
 cast="$here/creds-joke.cast"; gif="$here/creds-joke.gif"
-COLS=104; ROWS=32
+# Match the asciicast grid to YOUR ACTUAL terminal, so a smaller window => a
+# smaller gif. Override with REIN_DEMO_COLS/ROWS; falls back to 104x32.
+sz="$(stty size </dev/tty 2>/dev/null || true)"   # "rows cols"
+ROWS="${REIN_DEMO_ROWS:-${sz%% *}}"; COLS="${REIN_DEMO_COLS:-${sz##* }}"
+case "$ROWS" in ''|*[!0-9]*) ROWS=32;; esac
+case "$COLS" in ''|*[!0-9]*) COLS=104;; esac
 
 need(){ command -v "$1" >/dev/null 2>&1 || { echo "MISSING: $1 — $2" >&2; exit 1; }; }
 need script "util-linux (already on Linux)"
@@ -71,6 +76,7 @@ cat <<EOF
       declares, the WRITE-APPROVAL POPUP appears — type  ${issue}  and press Enter.
     - When claude finishes, type  exit  to end the take. The GIF renders itself.
 
+    Recording at ${COLS}x${ROWS} (your terminal). A smaller window => a smaller gif.
     (Press Enter to begin.)
 EOF
 read -r _
