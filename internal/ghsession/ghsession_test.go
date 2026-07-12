@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -146,11 +147,77 @@ func TestEnsureFresh_RevokeSkippedOnCacheHit(t *testing.T) {
 	}
 }
 
-func TestReadCachePath(t *testing.T) {
-	got := ReadCachePath("/var/state/rein")
-	want := "/var/state/rein/cache/gh-read-token.json"
-	if got != want {
-		t.Errorf("ReadCachePath = %q, want %q", got, want)
+// TestReadCachePathForScope_DistinctPerScope pins the issue #95 fix: two
+// different scope ceilings resolve to two DIFFERENT cache files, so a token
+// minted under one ceiling can never be served from the other's cache.
+// Order-insensitivity and case-folding are inherited from runscope.Key(),
+// which produces the scopeKey; the same key ALWAYS yields the same path.
+func TestReadCachePathForScope_DistinctPerScope(t *testing.T) {
+	dir := "/var/state/rein"
+	keyA := "owner/alpha"
+	keyAB := "owner/alpha,owner/beta"
+
+	pathA := ReadCachePathForScope(dir, keyA)
+	pathAB := ReadCachePathForScope(dir, keyAB)
+
+	if pathA == pathAB {
+		t.Fatalf("distinct scopes shared a cache file: A=%q AB=%q", pathA, pathAB)
+	}
+	if got, want := filepath.Dir(pathA), filepath.Join(dir, "cache"); got != want {
+		t.Errorf("cache dir = %q, want %q", got, want)
+	}
+	// Prefix + suffix shape so ReadCacheGlob (gh-read-token*.json) matches it.
+	base := filepath.Base(pathA)
+	if !strings.HasPrefix(base, "gh-read-token-") || !strings.HasSuffix(base, ".json") {
+		t.Errorf("filename %q does not match the gh-read-token-<tag>.json shape", base)
+	}
+	// Stable: same key => same path (no per-call randomness).
+	if ReadCachePathForScope(dir, keyA) != pathA {
+		t.Error("ReadCachePathForScope is not deterministic for a fixed key")
+	}
+	// The legacy untagged filename and a tagged one both match the glob.
+	glob := ReadCacheGlob(dir)
+	for _, name := range []string{"gh-read-token.json", filepath.Base(pathA)} {
+		ok, err := filepath.Match(glob, filepath.Join(dir, "cache", name))
+		if err != nil || !ok {
+			t.Errorf("glob %q did not match %q (ok=%v err=%v)", glob, name, ok, err)
+		}
+	}
+}
+
+// TestReadCachePathForScope_CrossScopeIsCacheMiss is the behavioral proof of
+// the #95 fix at the ghsession layer: a token written under scope A's path is
+// NOT served by an EnsureFresh that reads scope [A,B]'s path — it is a cache
+// MISS, forcing a re-mint at the wider ceiling. A stub MintFunc keeps it
+// off the network.
+func TestReadCachePathForScope_CrossScopeIsCacheMiss(t *testing.T) {
+	dir := t.TempDir()
+	keyA := "owner/alpha"
+	keyAB := "owner/alpha,owner/beta"
+
+	// Simulate the stale NARROW cache an earlier single-repo-A run leaves.
+	narrow := tokencache.Entry{Token: "ghs_scoped_to_A_only", ExpiresAt: time.Now().Add(45 * time.Minute)}
+	if err := tokencache.Write(ReadCachePathForScope(dir, keyA), narrow); err != nil {
+		t.Fatalf("seed narrow cache: %v", err)
+	}
+
+	// The [A,B] run must NOT see the narrow token: cache miss => mint fresh.
+	mint, calls := stubMint("ghs_scoped_to_A_and_B", nil)
+	got, _, err := EnsureFresh(ReadCachePathForScope(dir, keyAB), mint, nil, 5*time.Minute, time.Second, discardLogger())
+	if err != nil {
+		t.Fatalf("EnsureFresh: %v", err)
+	}
+	if got != "ghs_scoped_to_A_and_B" {
+		t.Errorf("token = %q, want the freshly minted [A,B] token — the narrow A-only token must NOT be served across scopes", got)
+	}
+	if *calls != 1 {
+		t.Errorf("mintFn calls = %d, want 1 (cross-scope read must MISS and re-mint)", *calls)
+	}
+
+	// And the narrow A-scope cache is still intact under its own key (the
+	// wider run wrote to a different file, so it can't clobber it).
+	if e, err := tokencache.Read(ReadCachePathForScope(dir, keyA)); err != nil || e.Token != narrow.Token {
+		t.Errorf("A-scope cache = (%q, %v), want it untouched (%q)", e.Token, err, narrow.Token)
 	}
 }
 

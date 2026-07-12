@@ -37,6 +37,8 @@
 package runscope
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"sort"
 	"strings"
 
@@ -154,6 +156,24 @@ func (r *Resolver) Key() string {
 	sort.Strings(keys)
 	return strings.Join(keys, ",")
 }
+
+// CacheTag derives a short, filesystem-safe fingerprint from a scope Key
+// (as produced by Key). It is the SINGLE source of the tag every
+// scope-sensitive token cache uses to key its per-ceiling file — the
+// direct-mode git-read cache (read-token-<tag>.json) and the gh-read cache
+// (gh-read-token-<tag>.json) both derive their filename from it, so the two
+// can never silently diverge. hex(sha256(key))[:12]: collision-resistant
+// enough that two distinct ceilings never share a file, short enough to
+// keep the filename readable.
+func CacheTag(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
+// CacheTag on the resolver tags by this run's EFFECTIVE ceiling (Key). A
+// token minted under one ceiling is scoped to that ceiling's repos and must
+// never be served from a cache file another ceiling would read.
+func (r *Resolver) CacheTag() string { return CacheTag(r.Key()) }
 
 // ownerOf returns the owner half of a normalized owner/name.
 func ownerOf(repo string) string {

@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/TomHennen/rein/internal/config"
@@ -146,25 +147,36 @@ func remediationFor(r checkResult) (remediation, bool) {
 	}
 }
 
-// clearStaleGhCache removes the gh-shim token cache ONLY when it is
+// clearStaleGhCache removes gh-shim token caches ONLY when they are
 // stale/expired/corrupt. A live (still-valid) cache is left untouched, and an
 // absent one is a no-op. This is the "refresh a stale cache" no-priv remedy —
 // scoped so it can never discard a usable token or a live approval.
+//
+// Since issue #95 the gh-read cache is one file PER scope ceiling
+// (gh-read-token-<tag>.json), so this globs ALL of them — including any
+// legacy untagged file and old-ceiling leftovers — and grooms each. A
+// still-valid old-scope token is kept (it is scope-correct to its own key
+// and expires on GitHub's ~1h floor); only stale/corrupt ones are removed.
 func clearStaleGhCache() error {
 	stateDir, err := config.StateDir()
 	if err != nil {
 		return err
 	}
-	path := ghsession.ReadCachePath(stateDir)
-	e, rerr := tokencache.Read(path)
-	if errors.Is(rerr, os.ErrNotExist) {
-		return nil // nothing to clear
-	}
-	if rerr == nil && e.Valid(0) {
-		return nil // LIVE — never delete a valid cache
-	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	paths, err := filepath.Glob(ghsession.ReadCacheGlob(stateDir))
+	if err != nil {
 		return err
+	}
+	for _, path := range paths {
+		e, rerr := tokencache.Read(path)
+		if errors.Is(rerr, os.ErrNotExist) {
+			continue // nothing to clear
+		}
+		if rerr == nil && e.Valid(0) {
+			continue // LIVE — never delete a valid cache
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
 	return nil
 }

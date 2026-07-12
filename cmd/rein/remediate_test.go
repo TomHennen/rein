@@ -173,7 +173,9 @@ func TestClearStaleGhCache(t *testing.T) {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("mkdir state: %v", err)
 	}
-	path := ghsession.ReadCachePath(stateDir)
+	// A per-scope gh-read cache file (issue #95); clearStaleGhCache globs all
+	// gh-read-token*.json, so any scoped filename exercises the same path.
+	path := ghsession.ReadCachePathForScope(stateDir, "owner/alpha")
 
 	// absent -> no-op, no error.
 	if err := clearStaleGhCache(); err != nil {
@@ -200,6 +202,47 @@ func TestClearStaleGhCache(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("a STALE cache must be removed, stat err = %v (want not-exist)", err)
+	}
+}
+
+// TestClearStaleGhCache_MultiScope exercises the issue #95 glob: with several
+// per-scope gh-read-token-<tag>.json files present at once, grooming removes
+// only the stale/corrupt ones and preserves every still-valid scope — the
+// single-file test above can't catch a glob that stops at the first match.
+func TestClearStaleGhCache_MultiScope(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(home, "state"))
+	stateDir, err := config.StateDir()
+	if err != nil {
+		t.Fatalf("state dir: %v", err)
+	}
+
+	valid := ghsession.ReadCachePathForScope(stateDir, "scope-valid")
+	stale := ghsession.ReadCachePathForScope(stateDir, "scope-stale")
+	corrupt := filepath.Join(stateDir, "cache", "gh-read-token-corrupt.json")
+
+	if err := tokencache.Write(valid, tokencache.Entry{Token: "v", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatalf("seed valid: %v", err)
+	}
+	if err := tokencache.Write(stale, tokencache.Entry{Token: "s", ExpiresAt: time.Now().Add(-time.Hour)}); err != nil {
+		t.Fatalf("seed stale: %v", err)
+	}
+	if err := os.WriteFile(corrupt, []byte("{not-json"), 0o600); err != nil {
+		t.Fatalf("seed corrupt: %v", err)
+	}
+
+	if err := clearStaleGhCache(); err != nil {
+		t.Fatalf("clearStaleGhCache: %v", err)
+	}
+
+	if _, err := os.Stat(valid); err != nil {
+		t.Errorf("a VALID scope cache must survive grooming, but it's gone: %v", err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("the STALE scope cache must be removed, stat err = %v (want not-exist)", err)
+	}
+	if _, err := os.Stat(corrupt); !os.IsNotExist(err) {
+		t.Errorf("the CORRUPT scope cache must be removed, stat err = %v (want not-exist)", err)
 	}
 }
 

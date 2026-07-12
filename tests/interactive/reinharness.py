@@ -184,6 +184,49 @@ def build_binaries(env: dict | None = None) -> Path:
 
 
 # --------------------------------------------------------------------------
+# State dir + gh-read cache seeding (issue #95 regression journey support)
+# --------------------------------------------------------------------------
+
+
+def state_dir(env: dict | None = None) -> Path:
+    """The rein state dir, mirroring internal/config.StateDir: XDG_STATE_HOME/rein,
+    else ~/.local/state/rein. A journey that pins XDG_STATE_HOME (via a step's
+    extra_env) to a fresh temp dir uses this to compute where a seeded cache file
+    must land so the run's own ReadCachePathForScope glob looks in the same place."""
+    env = env or rein_env()
+    base = env.get("XDG_STATE_HOME") or os.path.join(
+        env.get("HOME", str(Path.home())), ".local", "state"
+    )
+    return Path(base) / "rein"
+
+
+def legacy_gh_read_cache_path(env: dict | None = None) -> Path:
+    """The PRE-#95 fixed, scope-BLIND gh-read token cache path
+    (<state-dir>/cache/gh-read-token.json). Seeding a stale token HERE simulates
+    the leftover a prior single-repo run wrote before the scope-tag fix; a pre-fix
+    broker reads exactly this path, a post-fix broker reads a scope-tagged sibling
+    and MISSES it (re-minting at the wider ceiling)."""
+    return state_dir(env) / "cache" / "gh-read-token.json"
+
+
+def seed_legacy_gh_read_token(repo: str, out_path: str | Path, env: dict | None = None) -> None:
+    """Mint a REAL, currently-valid gh-read token scoped to `repo` ONLY and write
+    it (as a tokencache.Entry) to `out_path` — the stale, narrower-scoped leftover
+    the #95 regression journey plants before its sandboxed run. Delegates to the
+    test-support `seedghread` binary (tests/interactive/seedghread), which mints
+    exactly what cmd/rein/issue95_live_test.go mints; it is NOT a rein subcommand
+    (no arbitrary-scope token surface in the shipped CLI). build_binaries must have
+    run first (it builds bin/seedghread alongside bin/rein)."""
+    env = env or rein_env()
+    seeder = REPO_ROOT / "bin" / "seedghread"
+    os.makedirs(os.path.dirname(str(out_path)), exist_ok=True)
+    subprocess.run(
+        [str(seeder), "--repo", repo, "--out", str(out_path)],
+        cwd=REPO_ROOT, env=env, check=True,
+    )
+
+
+# --------------------------------------------------------------------------
 # Disposable branches
 # --------------------------------------------------------------------------
 

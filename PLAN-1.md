@@ -533,9 +533,12 @@ closes that gap.
      floor per the approvals package doc.
   5. **Shape-B (direct-mode) read cache can cross sessions**
      (`D-arch-4.2.5-READ-TOKEN-SESSION-TTL`). The read-token cache is a
-     global on-disk file (`stateDir/cache/read-token.json`; rein-gh:
-     `cache/gh-read-token.json`) whose entry is `{token, expires_at}` — no
-     session id in path or schema, and nothing clears it at session end —
+     global on-disk file (`stateDir/cache/read-token-<scope-tag>.json`;
+     rein-gh: `cache/gh-read-token-<scope-tag>.json`, keyed by the run
+     ceiling since #95) whose entry is `{token, expires_at}` — the scope tag
+     stops a narrower run's token from being served to a wider one, but there
+     is still no session id in the path or schema, and nothing clears it at
+     session end —
      so a token minted under one session is served to a later session until
      expiry (up to ~1h). Scope IS re-checked per request against the
      CURRENT session, but the cached token's mint-time repo scope may

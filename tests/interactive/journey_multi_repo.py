@@ -44,41 +44,34 @@ Both branches are then verified HOST-SIDE (the operator's own gh) to confirm eac
 genuinely landed on GitHub, and a `finally` deletes both branches and closes both
 fixture issues.
 
-WHY --direct (not sandboxed): the OLD journey used --direct, and it is the mode that
-exercises the real one-run cross-repo WRITE path cleanly here. The push in --direct
-still goes through rein's per-run credential helper — the golden's banner names the
-`per-process git config` that installs it — so a landing push is rein's BROKERED
-write token, not the operator's ambient gh, even though the process is unsandboxed.
-Sandboxed WOULD be the stronger isolation story, but it is currently BLOCKED by a
-rein bug this very journey surfaced (see the NOTE below): the sandboxed declare of a
-SECOND session repo's issue 404s because the broker reuses a run-cached gh-read token
-scoped narrower than the ceiling, so the second declare can't fetch its issue. That
-is a real defect to fix in rein, not something to route the journey around; until
-it is fixed, --direct is the honest way to show the one-run cross-repo path actually
-working end to end. The clone omits `--progress` (a piped `--progress` clone's
-`remote: Total` line races the local `Receiving/Resolving` lines and reorders
-run-to-run); the pushes pass `--progress` so the golden shows the real "it landed"
-transfer chatter (counts normalized to <N> at compare time), exactly as
-write_ceremony.
+SANDBOXED (the default, stronger isolation): the agent runs INSIDE srt with no tty
+and no token; every git/gh request is injected by rein's per-run proxy, so a landing
+push carries rein's BROKERED, ceiling-scoped write token and NEVER the operator's
+ambient gh. This journey used to run `--direct` ONLY because issue #95 broke the
+sandboxed SECOND declare: the broker's declare fetch served a run-cached gh-read
+token scoped narrower than the [A,B] ceiling, so `rein declare <issueB> --repo B`
+404'd ("issue not found in B") even though the run's read token cloned B fine. That
+fix landed (the gh-read cache is now scope-tagged per ceiling — internal/ghsession
+ReadCachePathForScope, cmd/rein/run_sandboxed.go), so the one-run cross-repo path
+works end to end sandboxed and this journey is back on the default mode. The clone
+omits `--progress` (a piped `--progress` clone's `remote: Total` line races the local
+`Receiving/Resolving` lines and reorders run-to-run); the pushes pass `--progress` so
+the golden shows the real "it landed" transfer chatter (counts normalized to <N> at
+compare time), exactly as write_ceremony.
 
-NOTE (rein bug #95, surfaced by this journey): in
-SANDBOXED mode the broker's declare fetch (cmd/rein/run_sandboxed.go fetchIssue) uses
-the run's CACHED gh-read token for an in-ceiling repo, but that cached token is scoped
-narrower than the full ceiling, so `rein declare <issueB> --repo B` — B being the
-SECOND repo — returns "issue #<n> not found in B" even though the run's own read token
-clones B fine. The --direct declare path (cmd/rein/declare.go) mints a FRESH
-ceiling-scoped token per fetch and is immune, which is why --direct works and the old
-journey did too. Flip this journey back to sandboxed (drop `--direct` from the step
-argv) once the broker caches/rescopes the gh-read token to cover the whole ceiling.
+This journey is the multi-repo HAPPY PATH, not the #95 regression guard: a
+clean-state-dir sandboxed multi_repo passes with OR without the #95 fix (each declare
+mints a fresh [A,B]-scoped token). The load-bearing #95 guard — which SEEDS a stale
+narrow token so a pre-fix broker 404s on B — is journey_sandbox_gh_read_staleness.py.
 
-CAPTURE IS STRUCTURAL (#82/#85): ONE run_journey STEP whose wrapped `bash -c` child
+CAPTURE IS STRUCTURAL (#82/#85): ONE run_journey STEP whose sandboxed `bash -c` child
 drives both declares and both pushes; the runner captures the COMPLETE pty session
-(banner + every SBX| -tagged child line + both host Form A prompts) and returns it as
-`.transcript`. The two Form A prompts are driven by the step's ordered `answers`
-(each answered with its own displayed issue number). Determinism lives in the
-COMPARATOR; repo names + fixed issue titles are stable-by-construction and kept RAW.
-(`SBX| ` here tags the wrapped, unsandboxed child, the same convention
-journey_credential_boundary.py uses for its --direct leg.)
+(sandbox banner + self-test + every SBX| -tagged child line + both host Form A
+prompts) and returns it as `.transcript`. The two Form A prompts are driven by the
+step's ordered `answers` (each answered with its own displayed issue number).
+Determinism lives in the COMPARATOR; repo names + fixed issue titles are
+stable-by-construction and kept RAW. (`SBX| ` here tags the srt child's output, the
+same convention every sandboxed journey uses.)
 
 DELIVERABLE: `golden/multi_repo.txt`.
 
@@ -109,10 +102,10 @@ GOLDEN_NAME = "multi_repo.txt"
 
 def agent_script(repo_a: str, issue_a: int, good_a: str,
                  repo_b: str, issue_b: int, good_b: str) -> str:
-    """A single `bash -c` body run as the wrapped --direct child for the WHOLE run:
+    """A single `bash -c` body run as the srt child for the WHOLE run:
     clone BOTH repos (reads flow with no declaration), then for each repo in turn
     `rein declare <issue> --repo <repo>` (BLOCKS on the host /dev/tty Form A; pexpect
-    answers it) and push a real branch (via rein's per-run credential helper) that
+    answers it) and push a real branch (via rein's per-run injecting proxy) that
     must LAND.
 
     It cannot be puppeted line-by-line (it is one `bash -c` process), so each step
@@ -237,18 +230,19 @@ def main() -> int:
         result = H.run_journey(
             [
                 H.JourneyStep(
-                    argv=["run", "--direct", "--", "bash", "-c",
+                    argv=["run", "--", "bash", "-c",
                           agent_script(repo_a, issue_a, good_a, repo_b, issue_b, good_b), wd],
                     # ordered: the 1st Form A is issue A, the 2nd (the ALSO-work
                     # confirm) is issue B — each answered with its OWN displayed
                     # number (the sole approval token, per repo).
                     answers=[(H.PROMPT_HINT, str(issue_a)), (H.PROMPT_HINT, str(issue_b))],
-                    label=f"rein run --direct -- bash -c <clone+declare+push A and B> {wd}",
+                    label=f"rein run -- bash -c <clone+declare+push A and B> {wd}",
                     extra_env={
+                        "REIN_SANDBOX_WORKDIR": wd,  # bind the writable tree the child clones into
                         "REIN_SESSION_FILE": session,
                         "REIN_APPROVAL": "tty",  # force the inline /dev/tty prompt pexpect drives
                     },
-                    timeout=240,  # two clones + two declares + two pushes (unsandboxed)
+                    timeout=300,  # srt launch + self-test + two clones + two declares + two pushes
                 ),
             ],
             env=env,

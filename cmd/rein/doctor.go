@@ -508,21 +508,40 @@ func srtStatusToDoctor(s srt.Status) checkStatus {
 // will mint a fresh token on the next gh invocation). Valid is green.
 // There is no red here — the gh shim works correctly with or without a
 // cache hit.
+//
+// Since issue #95 the cache is one file PER scope ceiling
+// (gh-read-token-<tag>.json), so this globs them all and reports an
+// aggregate: green if ANY ceiling has a live token, yellow otherwise.
 func checkGhShimCache() checkResult {
 	stateDir, err := config.StateDir()
 	if err != nil {
 		return checkResult{"gh-shim cache", statusFail, err.Error()}
 	}
-	path := ghsession.ReadCachePath(stateDir)
-	e, err := tokencache.Read(path)
-	if errors.Is(err, os.ErrNotExist) {
+	paths, gerr := filepath.Glob(ghsession.ReadCacheGlob(stateDir))
+	if gerr != nil {
+		return checkResult{"gh-shim cache", statusWarn, fmt.Sprintf("glob failed: %v (next gh read will mint)", gerr)}
+	}
+	if len(paths) == 0 {
 		return checkResult{"gh-shim cache", statusWarn, "absent (next gh read will mint)"}
 	}
-	if err != nil {
-		return checkResult{"gh-shim cache", statusWarn, fmt.Sprintf("%s: %v (next gh read will mint)", path, err)}
+	valid, other := 0, 0
+	var latest time.Time
+	for _, p := range paths {
+		e, rerr := tokencache.Read(p)
+		if rerr == nil && e.Valid(0) {
+			valid++
+			if e.ExpiresAt.After(latest) {
+				latest = e.ExpiresAt
+			}
+			continue
+		}
+		other++
 	}
-	if !e.Valid(0) {
-		return checkResult{"gh-shim cache", statusWarn, fmt.Sprintf("expired at %s (next gh read will mint)", e.ExpiresAt.Format(time.RFC3339))}
+	if valid > 0 {
+		// "cached scope(s)" not "the active scope": a green here means at least
+		// one per-ceiling cache is warm, NOT necessarily the current run's — a
+		// mismatched scope still re-mints on next use (issue #95).
+		return checkResult{"gh-shim cache", statusOK, fmt.Sprintf("%d cached scope(s) valid (latest expires %s)", valid, latest.Format(time.RFC3339))}
 	}
-	return checkResult{"gh-shim cache", statusOK, fmt.Sprintf("valid (expires %s)", e.ExpiresAt.Format(time.RFC3339))}
+	return checkResult{"gh-shim cache", statusWarn, fmt.Sprintf("%d cached scope(s) expired/unreadable (next gh read will mint)", other)}
 }

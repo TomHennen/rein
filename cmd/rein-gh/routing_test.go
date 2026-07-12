@@ -17,9 +17,19 @@ import (
 
 	"github.com/TomHennen/rein/internal/approvals"
 	"github.com/TomHennen/rein/internal/ghsession"
+	"github.com/TomHennen/rein/internal/runscope"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/tokencache"
 )
+
+// scopedReadCachePath returns the gh-read cache path the shim uses for this
+// session's CURRENT scope ceiling (issue #95) — the same key the production
+// code derives from loadAppCfgWithSession's resolver. Tests seed and read
+// through this so they exercise the real, scope-tagged filename.
+func scopedReadCachePath(sess session.Session, stateDir string) string {
+	key := runscope.New(sess, stateDir, os.Getenv("REIN_RUN_ID")).Key()
+	return ghsession.ReadCachePathForScope(stateDir, key)
+}
 
 // These tests pin the two-tier read/mint routing and the denial env
 // (audit #44 §2). They run rein-gh's real code paths in-process with a
@@ -181,11 +191,11 @@ func TestReadTierToken_ServesFromReadCache(t *testing.T) {
 	if err := os.WriteFile(pemPath, genTestPEM(t), 0o600); err != nil {
 		t.Fatalf("write pem: %v", err)
 	}
-	setupAppEnv(t, pemPath)
+	sess := setupAppEnv(t, pemPath)
 
 	stateDir := t.TempDir()
 	entry := tokencache.Entry{Token: "cached-read-token", ExpiresAt: time.Now().Add(time.Hour)}
-	if err := tokencache.Write(ghsession.ReadCachePath(stateDir), entry); err != nil {
+	if err := tokencache.Write(scopedReadCachePath(sess, stateDir), entry); err != nil {
 		t.Fatalf("seed read cache: %v", err)
 	}
 
@@ -243,7 +253,7 @@ func TestRunWrite_MintFailureNeverFallsBackToReadCacheOrPAT(t *testing.T) {
 
 	// A fresh READ-tier token is cached — the write path must ignore it.
 	entry := tokencache.Entry{Token: "cached-read-token", ExpiresAt: time.Now().Add(time.Hour)}
-	if err := tokencache.Write(ghsession.ReadCachePath(stateDir), entry); err != nil {
+	if err := tokencache.Write(scopedReadCachePath(sess, stateDir), entry); err != nil {
 		t.Fatalf("seed read cache: %v", err)
 	}
 
@@ -296,7 +306,7 @@ func TestRunWrite_MintFailureNeverFallsBackToReadCacheOrPAT(t *testing.T) {
 
 	// The read cache must be untouched by the write path (writes are never
 	// cached, and a failed write mint must not evict the read tier).
-	after, err := tokencache.Read(ghsession.ReadCachePath(stateDir))
+	after, err := tokencache.Read(scopedReadCachePath(sess, stateDir))
 	if err != nil || after.Token != "cached-read-token" {
 		t.Errorf("read cache after write attempt = (%+v, %v), want the seeded entry untouched", after, err)
 	}

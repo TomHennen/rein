@@ -21,8 +21,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -552,7 +550,9 @@ func runCredentialHelperWithConfig(action string, in io.Reader, out, diag io.Wri
 				if err != nil {
 					return "", err
 				}
-				tok, _, err := ghsession.EnsureFresh(ghsession.ReadCachePath(stateDir), client.MintGhReadOnlyToken, client.RevokeToken, 5*time.Minute, mintTimeout, logger)
+				// Scope-tag the gh-read cache by the run's effective ceiling
+				// (issue #95), consistent with the git-read cache below.
+				tok, _, err := ghsession.EnsureFresh(ghsession.ReadCachePathForScope(stateDir, rscope.Key()), client.MintGhReadOnlyToken, client.RevokeToken, 5*time.Minute, mintTimeout, logger)
 				return tok, err
 			}
 			if err := declare.InvalidateTransferred(ctx, stateDir, runID, sess, ghReadToken, logger, diag); err != nil {
@@ -619,10 +619,11 @@ func runCredentialHelperWithConfig(action string, in io.Reader, out, diag io.Wri
 // scopeCacheTag is a short, filesystem-safe fingerprint of the run's
 // effective ceiling, used to key the read-token cache FILE. Two different
 // ceilings never share a cache file, so a token minted before a scope
-// expansion can never be served after it (issue #69).
+// expansion can never be served after it (issue #69). Delegates to
+// runscope.CacheTag so the git-read and gh-read caches derive the tag from
+// ONE implementation (issue #95).
 func scopeCacheTag(rs *runscope.Resolver) string {
-	sum := sha256.Sum256([]byte(rs.Key()))
-	return hex.EncodeToString(sum[:])[:12]
+	return rs.CacheTag()
 }
 
 // buildConfirmWrite returns the direct-mode credential helper's write
@@ -1011,8 +1012,17 @@ func ghAuth() error {
 	if err != nil {
 		return err
 	}
+	// Scope-tag the cache (issue #95). gh-auth deliberately mints at the
+	// STANDING session repos (appCfg.RepoNames above), not the run's
+	// expanded ceiling — the env-file token is the narrowest thing that
+	// serves the human's shell — so tag by the matching standing-scope key
+	// (runID "" => no expansions). This shares the cache with the rein-gh
+	// shim whenever no expansion is in play (the common case) and, when one
+	// is, simply uses a distinct file rather than ever serving a token that
+	// doesn't match its scope.
+	stdScopeKey := runscope.New(sess, stateDir, "").Key()
 	token, expiresAt, err := ghsession.EnsureFresh(
-		ghsession.ReadCachePath(stateDir),
+		ghsession.ReadCachePathForScope(stateDir, stdScopeKey),
 		client.MintGhReadOnlyToken,
 		client.RevokeToken,
 		5*time.Minute,

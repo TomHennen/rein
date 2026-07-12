@@ -5,9 +5,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/TomHennen/rein/internal/appsetup"
 	"github.com/TomHennen/rein/internal/config"
+	"github.com/TomHennen/rein/internal/ghsession"
+	"github.com/TomHennen/rein/internal/tokencache"
 )
 
 // clearAppEnv unsets the four REIN_APP_* vars so ResolveApp / the doctor
@@ -155,4 +158,72 @@ func TestCheckAppKeyReadable_UsesManagedPEM(t *testing.T) {
 			t.Errorf("message %q does not name managed PEM path %q", res.message, pemPath)
 		}
 	})
+}
+
+// seedGhCache writes a per-scope gh-read cache entry (issue #95:
+// gh-read-token-<tag>.json) for the given scope key under stateDir.
+func seedGhCache(t *testing.T, stateDir, scopeKey string, e tokencache.Entry) {
+	t.Helper()
+	if err := tokencache.Write(ghsession.ReadCachePathForScope(stateDir, scopeKey), e); err != nil {
+		t.Fatalf("seed gh cache %q: %v", scopeKey, err)
+	}
+}
+
+// TestCheckGhShimCache_Aggregate pins the issue #95 glob/aggregate: with the
+// gh-read cache now one file PER scope ceiling, checkGhShimCache globs them
+// all and reports green iff ANY scope is warm, picking the LATEST expiry, and
+// yellow (absent / all-expired) otherwise. A missing cache dir and a
+// zero-match glob are handled without error.
+func TestCheckGhShimCache_Aggregate(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	stateDir, err := config.StateDir()
+	if err != nil {
+		t.Fatalf("StateDir: %v", err)
+	}
+
+	// (a) No cache dir at all -> Glob returns zero matches, no error -> absent.
+	if res := checkGhShimCache(); res.status != statusWarn || !strings.Contains(res.message, "absent") {
+		t.Fatalf("missing dir: status=%v msg=%q, want warn/absent", res.status, res.message)
+	}
+
+	// Seed a mix across distinct scopes: two valid (different expiries), one
+	// expired, one corrupt. All filenames match the gh-read-token*.json glob.
+	early := time.Now().Add(1 * time.Hour).Truncate(time.Second)
+	latest := time.Now().Add(3 * time.Hour).Truncate(time.Second)
+	seedGhCache(t, stateDir, "scope-a", tokencache.Entry{Token: "t1", ExpiresAt: early})
+	seedGhCache(t, stateDir, "scope-b", tokencache.Entry{Token: "t2", ExpiresAt: latest})
+	seedGhCache(t, stateDir, "scope-c", tokencache.Entry{Token: "t3", ExpiresAt: time.Now().Add(-1 * time.Hour)})
+	corrupt := filepath.Join(stateDir, "cache", "gh-read-token-corrupt.json")
+	if err := os.WriteFile(corrupt, []byte("{not-json"), 0o600); err != nil {
+		t.Fatalf("write corrupt: %v", err)
+	}
+
+	// (b) Mix -> green, exactly 2 valid, latest = the +3h expiry (not the +1h).
+	res := checkGhShimCache()
+	if res.status != statusOK {
+		t.Fatalf("mix: status=%v msg=%q, want statusOK", res.status, res.message)
+	}
+	if !strings.Contains(res.message, "2 cached scope(s) valid") {
+		t.Errorf("mix: message %q, want '2 cached scope(s) valid'", res.message)
+	}
+	if !strings.Contains(res.message, latest.Format(time.RFC3339)) {
+		t.Errorf("mix: message %q, want latest expiry %s", res.message, latest.Format(time.RFC3339))
+	}
+	if strings.Contains(res.message, early.Format(time.RFC3339)) {
+		t.Errorf("mix: message %q names the EARLIER expiry — latest selection is wrong", res.message)
+	}
+
+	// (c) Remove both valid scopes; only the expired + corrupt remain -> yellow.
+	for _, key := range []string{"scope-a", "scope-b"} {
+		if err := os.Remove(ghsession.ReadCachePathForScope(stateDir, key)); err != nil {
+			t.Fatalf("remove %q: %v", key, err)
+		}
+	}
+	res = checkGhShimCache()
+	if res.status != statusWarn {
+		t.Fatalf("all-invalid: status=%v msg=%q, want statusWarn", res.status, res.message)
+	}
+	if !strings.Contains(res.message, "2 cached scope(s) expired/unreadable") {
+		t.Errorf("all-invalid: message %q, want '2 cached scope(s) expired/unreadable'", res.message)
+	}
 }
