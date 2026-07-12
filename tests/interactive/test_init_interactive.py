@@ -12,15 +12,25 @@ against the docs:
                          `--no-alias` force-skips, and a genuine tty with neither
                          flag gets a `[y/N]` prompt defaulting to NO.
 
-  §8.1  machine label    DECIDED (HANDOFF: prompt pre-filled with the detected
-                         hostname, editable — design §4) but NOT BUILT: the App
-                         name is still `rein-<role>-<random10>` (appsetup/
-                         manifest.go) and init never asks. So it is TDD-RED —
-                         `expectedFailure`, not a skip. It flips to "unexpected
-                         success" when CP4.7 lands, which is the promote-me signal.
-  §8.4  doctor --fix     GENUINELY STILL OPEN (no-privilege tier only, or also the
-                         consented-privileged tier?). Stays skipped: we must not
-                         encode behavior Tom hasn't decided.
+  §8.1  machine label    SHIPPED: init PROMPTS for the machine label, pre-filled
+                         with the detected hostname and editable (design §4), and
+                         the App name is now `rein-<role>-<label>-<shortrand>`
+                         (appsetup/manifest.go). The label resolves up front on
+                         every interactive path (cmd/rein/machinelabel.go), so it
+                         is now a REAL test, not `expectedFailure`.
+
+  §5    install-on-repo  SHIPPED: after the session scaffold init prints the
+                         install deep-link (no ssh -L needed), degrading to the
+                         generic installations URL when the slug is unknown and
+                         never auto-opening on a headless session — so the
+                         headless-link spec below is a REAL test too.
+
+  §8.4  doctor --fix     PARTIALLY DECIDED: the NO-PRIVILEGE tier shipped
+                         (`rein doctor --fix` reinstalls shims, refreshes the
+                         PATH symlink, clears a stale cache; privileged/external
+                         steps stay guide-only). The CONSENTED-PRIVILEGED tier is
+                         still open, so test_doctor_fix_scope stays skipped: we
+                         must not encode behavior Tom hasn't decided.
 
 THE PTY IS THE POINT. These are not stubbed prompt tests — pexpect gives init a
 real controlling terminal, so `stdinIsTerminal` is TRUE and the alias `[y/N]`
@@ -167,13 +177,17 @@ class InitAgentAlias(ReinTestCase):
         self.assertTrue(self._alias_installed(home), "--alias must install `alias claude='rein run -- claude'`")
 
     def _drive_tty_init(self, home, alias_answer: str):
-        """Walk the REAL interactive init sequence on a pty: answer the repo
+        """Walk the REAL interactive init sequence on a pty: accept the machine
+        label (bare Enter = keep the pre-filled hostname), answer the repo
         prompt (bare Enter = skip scaffolding), then answer the alias [y/N].
 
-        Answering the repo prompt is NOT optional — it comes first, and a test
-        that jumps straight to expecting [y/N] just hangs on it. Each answer is
-        sent only AFTER its prompt is seen, so init's per-prompt bufio reader
-        can never swallow the next line.
+        The ORDER matters and is NOT optional. On a real tty init now asks, in
+        sequence: (1) "Name this machine [<hostname>]", (2) the repo prompt,
+        (3) the alias [y/N]. Each answer is sent only AFTER its prompt is seen,
+        so init's per-prompt bufio reader can never swallow the next line — and
+        a test that skips an earlier prompt just hangs on it (the machine-label
+        prompt fires FIRST, so it must be answered before the repo prompt is
+        even printed).
         """
         run = H.spawn_rein(
             ["init", *INERT_FLAGS, "--shell", "bash"],
@@ -181,6 +195,8 @@ class InitAgentAlias(ReinTestCase):
             extra_env=H.isolated_home_env(home),
             timeout=30,
         )
+        run.child.expect(r"(?i)name this machine", timeout=30)
+        run.answer("")  # Enter => keep the pre-filled hostname label
         run.child.expect(REPO_PROMPT, timeout=30)
         run.answer("")  # Enter => skip session scaffolding (a graceful no-op)
         run.child.expect(r"\[y/N\]", timeout=30)  # the alias prompt genuinely fired
@@ -220,40 +236,33 @@ class InitAgentAlias(ReinTestCase):
 
 
 class InteractiveInitSettledSpecs(ReinTestCase):
-    """Settled design behavior the interactive init MUST have, but does NOT yet.
+    """Settled design behavior the interactive init MUST have — now BUILT.
 
-    TDD-RED: each is `expectedFailure` until built. Each still runs init to
-    COMPLETION and asserts on the transcript — never `expect`s a prompt that
-    will not come (that would be a TIMEOUT error, not a clean expected failure).
+    Both specs below were `expectedFailure` (TDD-RED) until the onboarding
+    slices landed; they are now REAL tests, verified against the binary. Each
+    runs init on a live pty and asserts on the transcript.
     """
 
-    @unittest.expectedFailure
     def test_machine_label_prompt_prefilled_with_hostname(self):
-        """§8.1 — DECIDED, NOT BUILT.
+        """§8.1 — DECIDED and BUILT.
 
-        Decision (HANDOFF "What's next"; design §4): init prompts for the machine
-        label, PRE-FILLED with the detected hostname and editable — because the
-        App name is globally unique on GitHub and hostname inference alone is
-        unreliable (this VM's hostname is literally `ubuntu`).
+        Decision (design §4/§8.1): init prompts for the machine label,
+        PRE-FILLED with the detected hostname and editable — because the App
+        name is globally unique on GitHub and hostname inference alone is
+        unreliable (this VM's hostname is literally `ubuntu`). The App name is
+        now `rein-<role>-<label>-<shortrand>` (internal/appsetup/manifest.go),
+        and cmd/rein/machinelabel.go resolves the label — prompting on a real
+        tty, falling back to the hostname headless/--yes.
 
-        Today: appsetup/manifest.go names the App `rein-<role>-<random10>` and
-        init never asks. So the label prompt is absent => red.
+        DRIVEN ON A REAL TTY, WITHOUT --yes, ON PURPOSE. The behavior is a
+        PROMPT, and `--yes` is exactly the "never prompt" path — so a `--yes`
+        run could never observe it. We walk the live prompt sequence and accept
+        the label prompt appearing at ANY point (it fires FIRST in practice).
 
-        DRIVEN ON A REAL TTY, WITHOUT --yes, ON PURPOSE. The decided behavior is a
-        PROMPT, and `--yes` is exactly the "never prompt" path — so a `--yes` run
-        could never observe the prompt even after it ships, and this xfail would
-        stay red forever instead of flipping to "unexpected success". We therefore
-        walk the live prompt sequence and accept the label prompt appearing at
-        ANY point in it.
-
-        HONEST CAVEAT: the machine label names the *App*, which is created on the
-        MANIFEST path — and this test deliberately stays on the env path
-        (REIN_APP_* present) because tripping the 25-minute browser/callback flow
-        is not acceptable in a suite. If CP4.7 surfaces the label ONLY on the
-        manifest path, this spec cannot flip here and must move to the manifest
-        walkthrough (scripts/cp5-manifest-manual-test.sh — the one genuinely
-        undriveable, browser-bound journey). Same caveat as the headless-link spec
-        below.
+        The prompt fires on EVERY interactive path, not only App creation: init
+        resolves the label up front (before the bridge dispatch) and displays it
+        regardless of whether an App is created here, so this env-path run
+        (REIN_APP_* present, no 25-minute browser flow) genuinely sees it.
         """
         home = H.isolated_home()
         run = H.spawn_rein(
@@ -281,19 +290,15 @@ class InteractiveInitSettledSpecs(ReinTestCase):
 
         self.assertTrue(asked, "init should prompt for an editable, hostname-prefilled machine label (not built)")
 
-    @unittest.expectedFailure
     def test_headless_init_prints_a_link_and_does_not_hang(self):
-        """Design §5: browser steps degrade to a printed link when headless.
+        """Design §5: browser steps degrade to a printed link when headless — BUILT.
 
         Headless = SSH_CONNECTION set, no DISPLAY/WAYLAND_DISPLAY. Two claims:
-        (a) init does NOT hang headless — reaches EOF (this already holds and
-        guards a regression); (b) it prints a browser/install link. Today's env
-        path prints only the 'Next:' steps, so (b) is red.
-
-        The link-printing step lives on the MANIFEST path, which init
-        deliberately does not take here (REIN_APP_* present) — we must never
-        trip the 25-minute browser flow. So this is aspirational for the
-        interactive build that will surface an install link on the env path too.
+        (a) init does NOT hang headless — reaches EOF (guards a regression);
+        (b) it prints a browser/install link. The install-on-repo step (§5) now
+        prints the deep-link on EVERY path (env path included), degrading to the
+        generic installations URL when it doesn't know the App slug and never
+        auto-opening a browser on a headless session — so (b) holds here.
         """
         home = H.isolated_home()
         headless = dict(H.isolated_home_env(home))

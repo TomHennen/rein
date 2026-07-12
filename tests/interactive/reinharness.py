@@ -685,6 +685,13 @@ def normalize_transcript(text: str, subs: list[tuple[str, str]] | None = None) -
 # NOT recognize is left verbatim, so a brand-new rein line still trips drift.
 # Extend this list (not a per-journey whitelist) for a genuinely new volatile.
 _NORMALIZE_RULES = [
+    # per-operator GitHub App identity that `rein init` echoes on the env path
+    # (client_id + installation_id are whoever ran `source ./dev-env`). Generic,
+    # so the onboarding golden is portable across operators. BEFORE the hash
+    # rule (client_id can look hex-ish) and the issue rules (installation_id is
+    # bare digits that no issue rule would otherwise touch).
+    (r"client_id=[A-Za-z0-9_]+", "client_id=<CLIENT_ID>"),
+    (r"installation_id=\d+", "installation_id=<INSTALL_ID>"),
     # issue number, in every context it appears (BEFORE the hash rule). NB the
     # `agent/\d+/` rule also rewrites the literal example `agent/73/kx3q` in
     # rein's error text — harmless, since it hits both compare sides identically.

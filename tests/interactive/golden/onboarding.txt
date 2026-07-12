@@ -1,0 +1,29 @@
+rein init: setting up local scaffolding
+  state dir:  /tmp/rein-itest-home-1_of0fyg/.local/state/rein
+  config dir: /tmp/rein-itest-home-1_of0fyg/.config/rein
+Name this machine [demo-laptop]:
+  machine:    demo-laptop (label for this machine's App name)
+  setup:      no state.json; REIN_APP_* env vars detected — using env-managed path (marker state.json will be written)
+              wrote managed_externally marker (state.json)
+  app:        client_id=Iv23lii9NlJIOVZkkD7G installation_id=134965206
+  shim:       3 binaries under /tmp/rein-itest-home-1_of0fyg/.local/state/rein/shim
+  symlink:    skipped (--no-symlink)
+  mint check: skipped (--skip-mint-check)
+Which repo should the agent work on? (owner/name, Enter to skip): octo-example/demo-repo
+  session:    scaffolded at /tmp/rein-itest-home-1_of0fyg/.config/rein/dev-session.yaml (repos: [octo-example/demo-repo])
+              writes are agent-declared (#35): the agent runs `rein declare <n>`,
+              you confirm on your terminal, then writes flow for that run. Reads work immediately.
+Add alias claude='rein run -- claude' to /tmp/rein-itest-home-1_of0fyg/.bashrc? [y/N]:
+  alias:      not installed (opt-in; enable with `rein init --alias`)
+  install on repo:
+    to let the agent work on octo-example/demo-repo, install the App on it.
+    (env-managed App: pick it from your installations list)
+    visit this URL in your browser:
+      https://github.com/settings/installations
+
+rein init: done.
+Next:
+  - /tmp/rein-itest-home-1_of0fyg/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
+  - run `rein run -- claude` (or another agent) to launch with rein in effect
+  - (optional) enable the `claude` alias with `rein init --alias`
+  - run `rein doctor` to verify everything is wired up

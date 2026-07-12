@@ -140,16 +140,42 @@ remediation path.
 
 ## 8. Open decisions (for Tom)
 
-1. **Prompt vs. loud-labeled-default for the machine name?** Leaning: prompt
-   (step 3), because hostname inference is unreliable (generic hostnames,
-   global-uniqueness collisions).
-2. **How hard to gate onboarding on a healthy sandbox** — block completion, or
-   allow "finish now, sandbox won't work until fixed"?
-3. **Multi-agent aliasing** — alias every agent the user names, or just the
-   primary? And do we alias non-`claude` agents at all in v1?
-4. **`doctor --fix` scope for v1** — start with the no-privilege tier only
-   (shims/symlink/session) and leave the sudo steps guide-only? Or include the
-   consented-privileged tier from the start?
+1. **Prompt vs. loud-labeled-default for the machine name?** — **RESOLVED +
+   BUILT (prompt).** init prompts "Name this machine", pre-filled with the
+   sanitized hostname and editable; the label is woven into the App name as
+   `rein-<role>-<label>-<shortrand>` (§4). Non-interactive/headless/`--yes`
+   fall back to the hostname (or a generic default) without blocking.
+   Impl: `internal/appsetup/manifest.go` (name + `SanitizeMachineLabel`),
+   `cmd/rein/machinelabel.go` (`resolveMachineLabel`). Note: a name-collision
+   422 surfaces browser-side at App creation, so auto-retry isn't observable in
+   the current callback path — the 40-bit random guard is the practical
+   uniqueness guarantee (not auto-retry).
+2. **How hard to gate onboarding on a healthy sandbox** — **RESOLVED (soft-block,
+   CP4.6/#42).** Loud warning, init still finishes; `--require-sandbox` is the
+   opt-in hard gate.
+3. **Multi-agent aliasing** — **RESOLVED (CP4.6/#42): primary (`claude`) only,
+   opt-in.** Non-`claude` agents are not aliased in v1.
+4. **`doctor --fix` scope for v1** — **PARTIALLY RESOLVED + BUILT.** The
+   **no-privilege tier shipped**: `rein doctor --fix` reinstalls shims,
+   refreshes the PATH symlink, and clears a STALE (never a live) cache, with
+   consent (the flag is consent; a tty additionally confirms each `[Y]`). The
+   privileged/external steps (apt/npm/AppArmor/NTP) stay **guide-only** — the
+   exact command is printed, never run. **STILL OPEN:** whether to add a
+   consented-privileged tier that runs those with per-step consent. Impl:
+   `cmd/rein/remediate.go`, `cmd/rein/doctor.go`; `init` reuses the same guide
+   for its sandbox step-1 handling.
 5. **Where this sits in the plan** — a "CP4.6 onboarding" checkpoint after
    CP4.5, or fold into CP6 dogfood prep (since dogfooding needs a smooth
    onboarding anyway)?
+
+### Built in this pass (§4 machine label, §5 install-on-repo, §6 no-priv `doctor --fix`)
+
+- **§4/§8.1 machine label → prompt:** BUILT (see decision 1 above).
+- **§5 install-on-repo:** BUILT. After the session scaffold, init prints the
+  install deep-link (`https://github.com/apps/<slug>/installations/new` when the
+  slug is known; the generic installations URL otherwise). No `ssh -L` — a plain
+  URL visit grants the install. Auto-open only when a local display exists AND
+  the App isn't installed yet; headless/`--yes` print the link, never block.
+  Impl: `internal/appsetup/installrepo.go`, wired in `cmd/rein/init.go`.
+- **§6 `doctor --fix` no-privilege tier:** BUILT (see decision 4 above). The
+  consented-privileged tier is deliberately NOT built (open per decision 4).

@@ -67,6 +67,7 @@ func runInit(args []string) error {
 	var expectedOwner string
 	var manifestPort int
 	var repoFlag string
+	var machineLabelFlag string
 	var assumeYes bool
 	fs.BoolVar(&skipMint, "skip-mint-check", false, "skip the App credentials network check (useful for repeated re-runs; GitHub's installation-token mint has secondary rate limits)")
 	fs.BoolVar(&noSymlink, "no-symlink", false, "skip creating the ~/.local/bin/rein symlink")
@@ -79,6 +80,7 @@ func runInit(args []string) error {
 	fs.StringVar(&expectedOwner, "owner", "", "expected GitHub owner login (user or org); if set, manifest flow refuses to persist if the App was created under a different account")
 	fs.IntVar(&manifestPort, "port", 0, "pin the manifest-flow callback port (default: random ephemeral); set this on headless/remote machines so you can `ssh -L <port>:127.0.0.1:<port>` before running init")
 	fs.StringVar(&repoFlag, "repo", "", "repo (owner/name) to scaffold the dev session against; non-interactive override for the \"which repo?\" prompt")
+	fs.StringVar(&machineLabelFlag, "machine-label", "", "label woven into a newly-created App's name (rein-<role>-<label>-<rand>); non-interactive override for the \"Name this machine\" prompt (default: sanitized hostname)")
 	fs.BoolVar(&assumeYes, "yes", false, "accept defaults and never prompt (non-interactive); required in headless/CI so init never blocks on a prompt")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
@@ -101,6 +103,17 @@ func runInit(args []string) error {
 		return fmt.Errorf("create config dir %s: %w", configDir, err)
 	}
 	fmt.Printf("  config dir: %s\n", configDir)
+
+	// Machine label (onboarding-ux-design.md §4, §8.1). Resolved up front —
+	// before the bridge dispatch — so the manifest flow can weave it into a
+	// newly-created App's name (rein-<role>-<label>-<rand>). On a real tty
+	// (and no --yes) this PROMPTS, pre-filled with the sanitized hostname and
+	// editable; non-interactive/headless/--yes runs fall back to the hostname
+	// label without blocking (guardrail §7). The label is displayed on every
+	// path so per-machine attribution is visible even when no App is created
+	// here (env-managed path).
+	machineLabel := resolveMachineLabel(machineLabelFlag, os.Stdin, assumeYes)
+	fmt.Printf("  machine:    %s (label for this machine's App name)\n", machineLabel)
 
 	// Bridge: decide between manifest flow and env-var (Phase 0) path
 	// before touching env vars. LoadAppConfig errors when REIN_APP_* are
@@ -185,6 +198,7 @@ func runInit(args []string) error {
 			Stderr:        os.Stderr,
 			ExpectedOwner: expectedOwner,
 			Port:          manifestPort,
+			MachineLabel:  machineLabel,
 		}); err != nil {
 			return err
 		}
@@ -267,9 +281,16 @@ func runInit(args []string) error {
 	if err != nil {
 		return err
 	}
+	// sessionRepo is the repo the install-on-repo step (§5) points at. Best
+	// effort: the freshly-scaffolded repo, else the first repo of an existing
+	// session. Empty is fine — the install step degrades to a repo-less prompt.
+	var sessionRepo string
 	switch _, err := os.Stat(sessionPath); {
 	case err == nil:
 		fmt.Printf("  session:    existing file kept at %s\n", sessionPath)
+		if sess, lerr := session.LoadFromFile(sessionPath); lerr == nil && len(sess.Repos) > 0 {
+			sessionRepo = sess.Repos[0]
+		}
 	case os.IsNotExist(err):
 		// Resolve the repo to scaffold against. Precedence: --repo flag >
 		// interactive prompt. The prompt only fires on a real terminal
@@ -289,6 +310,7 @@ func runInit(args []string) error {
 			fmt.Printf("  session:    scaffolded at %s (repos: [%s])\n", sessionPath, repo)
 			fmt.Println("              writes are agent-declared (#35): the agent runs `rein declare <n>`,")
 			fmt.Println("              you confirm on your terminal, then writes flow for that run. Reads work immediately.")
+			sessionRepo = repo
 		}
 	default:
 		return fmt.Errorf("stat %s: %w", sessionPath, err)
@@ -351,6 +373,18 @@ func runInit(args []string) error {
 	if !installAlias && !aliasNoted {
 		fmt.Println("  alias:      not installed (opt-in; enable with `rein init --alias`)")
 	}
+
+	// Install-on-repo (onboarding-ux-design.md §5). Offer the deep-link that
+	// installs the App on the session's repo — the step that makes doctor's
+	// "install-id not cached" go away. No ssh -L needed (install grants take
+	// no callback), so any browser on any machine works; the printed link is
+	// the baseline and auto-open is a bonus when a local display exists.
+	//
+	// Auto-open is allowed only when the App isn't installed yet (appCfgPtr
+	// nil = manifest path, install-id unknown) so the env-managed path — where
+	// REIN_APP_INSTALLATION_ID already resolves — prints the link as an
+	// informational pointer without popping a browser on every init.
+	appsetup.OfferInstallOnRepo(os.Stdout, configDir, sessionRepo, appCfgPtr == nil)
 
 	// Sandbox-stack health (onboarding-ux-design.md decision 2 / §3 step 1).
 	// SOFT-BLOCK by default: run the same srt preflight `rein doctor`
@@ -417,7 +451,14 @@ func sandboxHealthOutcome(results []checkResult, requireSandbox bool) (healthy b
 	for _, r := range failed {
 		fmt.Fprintf(&b, "  [fail] %s: %s\n", r.name, flattenMessage(r.message))
 	}
-	b.WriteString("  sandboxed `rein run` will NOT work until you fix this; see `rein doctor` and the Prerequisites in README.md\n")
+	// One remediation path (onboarding-ux-design.md §6): the sandbox fixes are
+	// all privileged/external (apt/npm/AppArmor/NTP), so `rein doctor --fix`
+	// shows the exact commands but never runs them — the same guide-only
+	// tier init surfaces here. The per-check messages above already name the
+	// commands; point at doctor for the consolidated view.
+	b.WriteString("  sandboxed `rein run` will NOT work until you fix this. Run `rein doctor --fix`\n")
+	b.WriteString("  for the consolidated remediation (the sandbox steps are privileged/external and\n")
+	b.WriteString("  are shown, never run); see also the Prerequisites in README.md\n")
 	return false, b.String()
 }
 
