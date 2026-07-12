@@ -311,6 +311,20 @@ func newAppInstallProber(clientID string, ks keystore.Keystore, roleName string)
 	return githubapp.NewAppClient(clientID, ks, roleName, os.Getenv("REIN_GITHUB_API_BASE"))
 }
 
+// fetchRepoInstallationID is the one-shot install-coverage probe used by the
+// #69 scope-expansion paths (declare, run_sandboxed, session): build the App-JWT
+// prober via newAppInstallProber and GET the installation covering owner/repo.
+// A non-nil error means the App is not installed on that repo (404) or the
+// lookup failed — the caller fails loud with the install deep-link. It reuses
+// newAppInstallProber so there is a single App-JWT client construction seam.
+func fetchRepoInstallationID(ctx context.Context, clientID string, ks keystore.Keystore, roleName, owner, repo string) (int64, error) {
+	prober, err := newAppInstallProber(clientID, ks, roleName)
+	if err != nil {
+		return 0, err
+	}
+	return prober.RepoInstallationID(ctx, owner, repo)
+}
+
 // resolveAndCacheInstallID verifies that the App's installation actually COVERS
 // every repo in the session, on BOTH config sources, and — on the manifest-flow
 // state path only — caches the resolved id in state.json.
