@@ -75,6 +75,33 @@ DENIED_MARK = "[denied"  # "[denied: input did not match the issue number]"
 PRE_DECLARE_LOCKED = "writes are locked until you declare your issue"
 # The post-approval convention deny git prints as `! [remote rejected] ...`.
 REF_CONVENTION_DENY = "refs must match agent/"
+# The distinctive first line of the SCOPE EXPANSION prompt (issue #69,
+# internal/ui/prompt writePrompt, AddRepo branch). Its presence means the
+# declare was recognized as a REPO expansion, not a plain issue declaration.
+EXPANSION_BANNER = "SCOPE EXPANSION requested"
+# The line naming the repo the ceiling is about to grow by.
+EXPANSION_ADD_REPO = "agent asks to ADD repo"
+# TTYPrompter's expansion approval marker (distinct from the plain
+# "[approved]" so a test can tell an expansion approval from an issue one).
+EXPANSION_APPROVED_MARK = "[approved for this run]"
+# The second (in-prompt persist) question the expansion prompt asks after a
+# successful number match (Tom's decision, mocks §1.2).
+PERSIST_QUESTION = "save"  # "Also save <repo> to the session for future runs? [y/N]"
+
+
+def throwaway_repo_b(env: dict | None = None) -> str:
+    """The owner/name of the SECOND throwaway repo (issue #69 scope
+    expansion). Same owner as REIN_TEST_REPO_A — the App installation is
+    single-owner, so an expansion target must share the owner.
+
+    Hard-constraint #1: this is a throwaway too. It is created once via
+    `gh repo create <owner>/agentcreds-validation-b --private` if absent.
+    """
+    env = env or rein_env()
+    repo = env.get("REIN_TEST_REPO_B")
+    if not repo:
+        raise RuntimeError("REIN_TEST_REPO_B unset; source ./dev-env")
+    return repo
 
 
 # --------------------------------------------------------------------------
@@ -272,6 +299,72 @@ def clone_declare_push_script(repo: str, issue: int, branches: list[str]) -> str
     return "\n".join(body)
 
 
+def scope_expansion_script(
+    repo_a: str, repo_b: str, issue_b: int, branch_b: str
+) -> str:
+    """The issue-#69 scope-expansion fixture, END TO END inside the sandbox.
+
+    Order matters and is the natural one (no local checkout is needed to
+    declare): clone A into the working-tree mount, then `rein declare
+    <issue_b> --repo <repo_b>` — which fires the SCOPE EXPANSION prompt on
+    the HOST tty and BLOCKS. Only AFTER approval does the token cover repo B,
+    so the clone + push of B come next.
+
+    Repo B has NO sandbox bind mount (binds are fixed at launch, #64), so B
+    is cloned into the writable scratch dir the sandbox DOES provide — the
+    child's TMPDIR (rein's per-run agentTmp, bound writable) — NOT nested in
+    A's working tree. This mirrors the approve-message's steering.
+
+    Sentinels: SBX_CLONE_OK, SBX_DECLARE1_RC (the expansion declare),
+    SBX_CLONEB_RC, SBX_PUSHB_RC (the push to repo B).
+    """
+    scratch = "${TMPDIR:-/tmp}/rein-expansion-b"
+    return "\n".join(
+        [
+            "set +e",
+            'cd "$0"',
+            "rm -rf repo",
+            f"git clone --depth 1 https://github.com/{repo_a} repo",
+            'cd repo || { echo "SBX_CLONE_FAIL"; exit 3; }',
+            "echo SBX_CLONE_OK",
+            # The expansion declare — fires the host-tty SCOPE EXPANSION prompt.
+            f'echo "SBX_DECLARE1_START issue={issue_b} repo={repo_b}"',
+            f"rein declare {issue_b} --repo {repo_b}",
+            "echo SBX_DECLARE1_RC=$?",
+            # Repo B lives in the writable scratch dir, never inside A's tree.
+            f'rm -rf "{scratch}"',
+            f'git clone --depth 1 https://github.com/{repo_b} "{scratch}"',
+            f'echo "SBX_CLONEB_RC=$?"',
+            f'cd "{scratch}" || {{ echo "SBX_CLONEB_FAIL"; exit 4; }}',
+            # A FLAT probe filename: branch_b holds slashes (agent/<n>/<nonce>)
+            # that would be read as directory components.
+            'echo "probe $(date -u +%FT%TZ)" >> expansion-probe.txt',
+            "git add -A",
+            f'git commit -q -m "interactive harness expansion: {branch_b}"',
+            f"git push origin HEAD:refs/heads/{branch_b}",
+            "echo SBX_PUSHB_RC=$?",
+            "echo SBX_SCRIPT_DONE",
+        ]
+    )
+
+
+def cross_owner_declare_script(issue: int, cross_repo: str) -> str:
+    """Drive a declare against a DIFFERENT-owner repo. The same-owner rule is
+    structural (the App installation is single-owner), so this must be denied
+    WITHOUT any prompt and WITHOUT a network call — the deny is synthesized
+    locally. Sentinel: SBX_DECLARE1_RC (non-zero)."""
+    return "\n".join(
+        [
+            "set +e",
+            'cd "$0"',
+            f'echo "SBX_DECLARE1_START issue={issue} repo={cross_repo}"',
+            f"rein declare {issue} --repo {cross_repo}",
+            "echo SBX_DECLARE1_RC=$?",
+            "echo SBX_SCRIPT_DONE",
+        ]
+    )
+
+
 # --------------------------------------------------------------------------
 # ReinRun — a pexpect wrapper with a captured transcript
 # --------------------------------------------------------------------------
@@ -331,6 +424,28 @@ class ReinRun:
         """Parse the SBX_DECLARE<n>_RC=<code> sentinel from the transcript."""
         m = re.search(rf"SBX_DECLARE{n}_RC=(\d+)", self.text())
         return int(m.group(1)) if m else None
+
+    def named_rc(self, name: str) -> int | None:
+        """Parse an arbitrary SBX_<name>_RC=<code> sentinel (issue #69 uses
+        SBX_PUSHB / SBX_CLONEB for the expansion's repo-B leg)."""
+        m = re.search(rf"SBX_{name}_RC=(\d+)", self.text())
+        return int(m.group(1)) if m else None
+
+    def expansion_prompt_count(self) -> int:
+        """How many SCOPE EXPANSION prompts fired (issue #69 banner)."""
+        return self.text().count(EXPANSION_BANNER)
+
+    def expect_expansion_prompt(self, timeout=90):
+        """Wait for the SCOPE EXPANSION prompt to appear on the host tty."""
+        return self.child.expect(re.escape(EXPANSION_ADD_REPO), timeout=timeout)
+
+    def expect_expansion_approved(self, timeout=60):
+        """Wait for the expansion-approved marker (escaped; regex metachars)."""
+        return self.child.expect(re.escape(EXPANSION_APPROVED_MARK), timeout=timeout)
+
+    def expect_persist_question(self, timeout=30):
+        """Wait for the in-prompt 'Also save ... to the session?' question."""
+        return self.child.expect("Also save", timeout=timeout)
 
     # -- interactive (TUI) helpers, for the real-agent e2e ------------------
 

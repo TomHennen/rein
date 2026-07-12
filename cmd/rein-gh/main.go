@@ -42,6 +42,7 @@ import (
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
+	"github.com/TomHennen/rein/internal/runscope"
 	"github.com/TomHennen/rein/internal/session"
 )
 
@@ -351,7 +352,14 @@ func loadAppCfgWithSession(logger *log.Logger) (githubapp.Config, keystore.Keyst
 	if err != nil {
 		return githubapp.Config{}, nil, session.Session{}, fmt.Errorf("load session: %w", err)
 	}
+	// Effective ceiling, not just the standing session (issue #69): a gh
+	// write/read against a repo the human approved as a mid-run scope
+	// expansion must be covered by the token this shim mints. A state-dir
+	// hiccup degrades to the standing ceiling — never wider.
 	appCfg.RepoNames = sess.BareRepoNames()
+	if stateDir, serr := config.StateDir(); serr == nil {
+		appCfg.RepoNames = runscope.New(sess, stateDir, os.Getenv("REIN_RUN_ID")).BareNames()
+	}
 	logger.Printf("session: id=%q repos=%v source=%s", sess.ID, sess.Repos, src)
 	return appCfg, ks, sess, nil
 }

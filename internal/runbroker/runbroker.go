@@ -50,9 +50,15 @@ type Config struct {
 	MintRead  brokercore.MintFunc
 	MintWrite brokercore.MintFunc
 
-	// InScope is the session's scope ceiling (session.Session.Contains). Nil
-	// disables scope enforcement (tests only).
+	// InScope is the session's scope ceiling (runscope.Resolver.Contains —
+	// the standing session repos UNION this run's approved scope
+	// expansions). Nil disables scope enforcement (tests only).
 	InScope func(repo string) bool
+
+	// ScopeKey fingerprints the current effective ceiling so scope-sensitive
+	// token caches drop tokens minted at an older, narrower scope (issue
+	// #69). Nil = a static ceiling. See proxy.SessionConfig.ScopeKey.
+	ScopeKey func() string
 
 	// EmptyPathScope governs a request whose repo can't be derived from the
 	// path. "" / "allow" (default) or "refuse".
@@ -190,6 +196,7 @@ func Start(cfg Config) (*Host, error) {
 		MintRead:       cfg.MintRead,
 		MintWrite:      cfg.MintWrite,
 		InScope:        cfg.InScope,
+		ScopeKey:       cfg.ScopeKey,
 		EmptyPathScope: cfg.EmptyPathScope,
 		Approve:        cfg.Approve,
 		ReadCache:      proxy.NewMemCache(), // FRESH per run — never shared across sessions

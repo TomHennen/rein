@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/TomHennen/rein/internal/approvals"
 	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/declare"
 	"github.com/TomHennen/rein/internal/githubapp"
@@ -130,13 +131,61 @@ func declareDirect(number int, repoFlag, runID string) (int, error) {
 	}
 	appCfg.RepoNames = sess.BareRepoNames()
 
+	appName, installURL := appInstallHints(appCfg)
+	sessionFile := session.SourceFilePath(sessSource)
+	oldSig := approvals.SignatureOf(sess)
+
+	gcfg := grant.Config{
+		TTL:           approvalTTL,
+		PromptTimeout: 60 * time.Second,
+		PreferPopup:   grant.PopupPreferenceFromEnv(),
+		StateDir:      stateDir,
+		RunID:         runID,
+		RunPID:        envInt("REIN_RUN_PID"),
+		SessionFile:   sessionFile,
+		// Direct mode: the credential helper reloads the session file every
+		// git op, so an in-prompt persist must re-sign this run's approval
+		// (below, and — for the out-of-process grant surface — via the
+		// snapshot's Direct flag). Sandboxed mode leaves this false.
+		Direct: true,
+		// DIRECT-MODE ONLY (issue #69): the credential helper re-loads the
+		// session file on EVERY git operation, so persisting the approved
+		// repo would change the session signature under the live run and
+		// invalidate the approval the human just gave — re-locking their own
+		// run. Re-sign the record for the session rein itself just wrote.
+		// (Sandboxed mode holds its launch session in-process and needs
+		// nothing here; a HAND-edited yaml still invalidates, as designed.)
+		OnPersist: func(newSess session.Session) {
+			if err := approvals.Resign(stateDir, runID, oldSig, approvals.SignatureOf(newSess), newSess.ID); err != nil {
+				logger.Printf("declare: re-sign of the approval record after persist failed: %v", err)
+				fmt.Fprintln(os.Stderr, "rein: WARNING: the repo was saved, but this run's approval could not be re-keyed to the wider session.")
+				fmt.Fprintln(os.Stderr, "      Re-run `rein declare <n>` if writes stop working.")
+				return
+			}
+			logger.Printf("declare: approval record re-signed for the persisted session (%v)", newSess.Repos)
+		},
+		Logger: logger,
+	}
+
 	deps := declare.Deps{
-		StateDir: stateDir,
-		RunID:    runID,
-		RunPID:   envInt("REIN_RUN_PID"),
-		Session:  sess,
+		StateDir:   stateDir,
+		RunID:      runID,
+		RunPID:     envInt("REIN_RUN_PID"),
+		Session:    sess,
+		AppName:    appName,
+		InstallURL: installURL,
 		Fetch: func(ctx context.Context, repo string, n int) (issuemeta.Meta, error) {
-			client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
+			// Scope the fetch token to the session PLUS the requested repo:
+			// a scope expansion targets a repo outside the standing ceiling,
+			// and a token that doesn't cover it 404s on the issue (which
+			// would look like "issue not found" instead of "not in scope").
+			// See declare.Deps.Fetch's security note.
+			cfg := appCfg
+			cfg.RepoNames = sess.BareRepoNames()
+			if !sess.Contains(repo) {
+				cfg.RepoNames = append(cfg.RepoNames, bareRepoName(repo))
+			}
+			client, err := githubapp.NewClient(cfg, ks, config.AppKeystoreRole)
 			if err != nil {
 				return issuemeta.Meta{}, err
 			}
@@ -146,14 +195,30 @@ func declareDirect(number int, repoFlag, runID string) (int, error) {
 			if err != nil {
 				return issuemeta.Meta{}, fmt.Errorf("mint read token for issue fetch: %w", err)
 			}
+			if !sess.Contains(repo) {
+				// Not cached anywhere, and revoked right after use: a DENIED
+				// expansion leaves no credential covering the candidate repo.
+				defer func() {
+					rctx, rcancel := context.WithTimeout(context.Background(), mintTimeout)
+					defer rcancel()
+					if rerr := client.RevokeToken(rctx, token); rerr != nil {
+						logger.Printf("declare: revoke of the candidate-scoped read token failed: %v", rerr)
+					}
+				}()
+			}
 			return issuemeta.Fetch(ctx, os.Getenv("REIN_GITHUB_API_BASE"), token, repo, n)
 		},
-		Grant: grant.Config{
-			TTL:           approvalTTL,
-			PromptTimeout: 60 * time.Second,
-			PreferPopup:   grant.PopupPreferenceFromEnv(),
-			Logger:        logger,
+		ProbeInstall: func(ctx context.Context, repo string) error {
+			owner, name, _ := strings.Cut(repo, "/")
+			_, err := fetchRepoInstallationID(ctx, appCfg.ClientID, ks, config.AppKeystoreRole, owner, name)
+			return err
 		},
+		Notice: func(ctx context.Context, n declare.Notice) {
+			grant.ShowInstallNotice(ctx, gcfg, grant.InstallNotice{
+				Repo: n.Repo, Issue: n.Issue, InstallURL: n.InstallURL, AppName: n.AppName,
+			})
+		},
+		Grant:  gcfg,
 		Logger: logger,
 	}
 

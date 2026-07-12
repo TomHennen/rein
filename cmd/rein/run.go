@@ -117,7 +117,8 @@ func runWrapped(argv []string) (int, error) {
 	// REIN_SESSION_FILE override and env-fallback rules apply.
 	sess, sessSource, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
 	if err != nil {
-		return 1, fmt.Errorf("load session: %w (see README for dev-session.yaml format)", err)
+		cwd, _ := os.Getwd()
+		return 1, fmt.Errorf("load session: %w (see README for dev-session.yaml format)\n      %s", err, noSessionHint(cwd))
 	}
 
 	// One-time, user-facing note if the env App identity is half-configured
@@ -308,6 +309,20 @@ type installProberFactory func(clientID string, ks keystore.Keystore, roleName s
 // same escape hatch the appsetup conversion path exposes for testing.
 func newAppInstallProber(clientID string, ks keystore.Keystore, roleName string) (installProber, error) {
 	return githubapp.NewAppClient(clientID, ks, roleName, os.Getenv("REIN_GITHUB_API_BASE"))
+}
+
+// fetchRepoInstallationID is the one-shot install-coverage probe used by the
+// #69 scope-expansion paths (declare, run_sandboxed, session): build the App-JWT
+// prober via newAppInstallProber and GET the installation covering owner/repo.
+// A non-nil error means the App is not installed on that repo (404) or the
+// lookup failed — the caller fails loud with the install deep-link. It reuses
+// newAppInstallProber so there is a single App-JWT client construction seam.
+func fetchRepoInstallationID(ctx context.Context, clientID string, ks keystore.Keystore, roleName, owner, repo string) (int64, error) {
+	prober, err := newAppInstallProber(clientID, ks, roleName)
+	if err != nil {
+		return 0, err
+	}
+	return prober.RepoInstallationID(ctx, owner, repo)
 }
 
 // resolveAndCacheInstallID verifies that the App's installation actually COVERS

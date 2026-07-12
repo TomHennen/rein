@@ -164,14 +164,20 @@ func TestRun_SecondIssueIsExpansion(t *testing.T) {
 func TestRun_RepoResolution(t *testing.T) {
 	t.Setenv("TMUX", "")
 
-	t.Run("explicit repo out of scope denied", func(t *testing.T) {
+	t.Run("cross-owner repo denied structurally, no prompt", func(t *testing.T) {
+		// Session owner is "o"; "evil/other" is a DIFFERENT owner, so it can
+		// never be added — the App installation is single-owner (issue #69).
+		// This is a structural deny, not a human decision: no prompt fires.
 		d, stub := deps(t, "73")
 		out := Run(context.Background(), d, 73, "evil/other")
-		if out.Confirmed || out.Audit != AuditBadRequest {
-			t.Fatalf("out-of-scope --repo must be refused, got %+v", out)
+		if out.Confirmed || out.Audit != AuditCrossOwner {
+			t.Fatalf("cross-owner --repo must be refused structurally, got %+v", out)
 		}
 		if stub.Calls != 0 {
-			t.Error("no prompt for a refused repo")
+			t.Error("no prompt for a cross-owner repo")
+		}
+		if !strings.Contains(out.Message, "single-owner") {
+			t.Errorf("denial must explain the single-owner rule: %q", out.Message)
 		}
 	})
 

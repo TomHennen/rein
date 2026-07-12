@@ -197,6 +197,24 @@ type RunContext struct {
 	// Session is the resolved session for this run.
 	Session session.Session `json:"session"`
 
+	// Direct records whether the owning run is DIRECT mode (vs sandboxed).
+	// It exists for ONE purpose (issue #69): the out-of-process grant
+	// surface (`rein approval grant`, the tmux popup) must re-sign the
+	// approval record after an in-prompt persist ONLY for a direct run —
+	// whose credential helper reloads the widened session file and would
+	// otherwise re-lock the run. A sandboxed run must NOT be re-signed (its
+	// broker keeps the launch session and keys the write gate on it), so
+	// the grant subcommand reads this flag to decide. Never a write gate.
+	Direct bool `json:"direct,omitempty"`
+
+	// SessionFile is the PATH the session was loaded from, or "" when it
+	// came from the env fallback (no file). Transport, like PendingIssue:
+	// the out-of-process grant surfaces have no REIN_SESSION_FILE and must
+	// not resolve the default session, so this snapshot is the only way the
+	// popup can know which file an in-prompt "save this repo" answer should
+	// append to (issue #69). Never consulted by a write gate.
+	SessionFile string `json:"session_file,omitempty"`
+
 	// RunPID is the pid of the owning `rein run` process (REIN_RUN_PID),
 	// used by Sweep's liveness probe. 0 means unknown.
 	RunPID int `json:"run_pid"`
@@ -209,8 +227,27 @@ type RunContext struct {
 	// declare; never consulted by any write gate.
 	PendingIssue *ConfirmedIssue `json:"pending_issue,omitempty"`
 
+	// PendingNotice is the install-NOTICE snapshot (issue #69): transport
+	// for the out-of-process notice surface (`rein approval notice
+	// --run-id X`, run by the tmux popup), exactly as PendingIssue is for
+	// the grant surface. It carries NO approval authority — it exists so
+	// the popup can render a deep-link the human follows — and no write
+	// gate ever consults it.
+	PendingNotice *PendingNotice `json:"pending_notice,omitempty"`
+
 	// WrittenAt is when the helper wrote this snapshot.
 	WrittenAt time.Time `json:"written_at"`
+}
+
+// PendingNotice is a non-authorizing message awaiting the human's
+// acknowledgement (issue #69): the App is not installed on a repo the agent
+// asked for, so there is nothing to approve — only something to install.
+type PendingNotice struct {
+	Repo       string    `json:"repo"`
+	Issue      int       `json:"issue,omitempty"`
+	InstallURL string    `json:"install_url,omitempty"`
+	AppName    string    `json:"app_name,omitempty"`
+	WrittenAt  time.Time `json:"written_at"`
 }
 
 // RunStatus is one entry returned by List, for `rein approval status`.
@@ -391,6 +428,47 @@ func AppendConfirmedIssue(stateDir, runID, sig, sessionID string, ci ConfirmedIs
 		return nil
 	}
 	rec.Issues = append(rec.Issues, ci)
+	return WriteApproval(stateDir, runID, rec)
+}
+
+// Resign re-keys a run's approval record from oldSig to newSig, preserving
+// its confirmed-issue set (issue #69).
+//
+// # Why this exists, and why it is not a hole
+//
+// A session's repo list is part of the approval SIGNATURE: change it and the
+// record goes invalid, which is exactly right for a hand-edited yaml (a
+// carried approval must not silently cover widened scope — see the package
+// doc's Invalidation section). But the in-prompt "also save this repo?"
+// answer changes the same field DELIBERATELY, in the same breath as the
+// human approving that exact repo. In DIRECT mode the credential helper
+// re-loads the session file on every git operation, so without this the
+// human's `y` would invalidate the approval they just gave and re-lock their
+// own run.
+//
+// This is safe precisely because of what the caller must have done first:
+// the human completed the non-replayable Form A ceremony for a repo that
+// passed the same-owner rule and the install-coverage probe, and rein itself
+// (not an editor) performed the validated write. Nothing here re-signs a
+// record for a session rein did not just author: the caller passes the
+// session it wrote, and a MISMATCHED existing record (oldSig doesn't match)
+// is left alone — it is already invalid and must stay so.
+func Resign(stateDir, runID, oldSig, newSig, sessionID string) error {
+	if runID == "" || oldSig == "" || newSig == "" || oldSig == newSig {
+		return nil
+	}
+	rec, err := ReadApproval(stateDir, runID)
+	if err != nil {
+		return nil // no record yet: nothing to carry forward
+	}
+	if !Valid(rec, oldSig) {
+		// Already invalid under the OLD session (e.g. a concurrent hand-edit).
+		// Re-signing it would resurrect an approval the invalidation rule
+		// deliberately killed. Leave it.
+		return nil
+	}
+	rec.Signature = newSig
+	rec.SessionID = sessionID
 	return WriteApproval(stateDir, runID, rec)
 }
 

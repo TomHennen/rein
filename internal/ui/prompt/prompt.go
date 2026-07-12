@@ -92,19 +92,52 @@ type Request struct {
 	// ceremony, distinct header, appends to the run's confirmed set.
 	Expansion bool
 
+	// AddRepo, when non-empty, marks the declaration as a REPO scope
+	// expansion (issue #69): the declared issue's home repo is OUTSIDE the
+	// session's standing ceiling, and approving ADDS it to what this run
+	// may touch. The prompt must say so — a human who reads only "issue
+	// #41, looks fine" would otherwise widen the repo ceiling without
+	// noticing (mocks §1.2). Same Form A token: the issue number.
+	AddRepo string
+
+	// AskPersist adds the second question — "Also save <AddRepo> to the
+	// session for future runs? [y/N]" — asked ONLY after the number
+	// matched (Tom's decision, mocks §1.2/§1.3). The number remains the
+	// SOLE approval token: a stray "y" can never approve anything, because
+	// this question is never reached unless approval already succeeded.
+	// Ignored unless AddRepo is set.
+	AskPersist bool
+
 	// Timeout caps how long Confirm waits for the human. A zero value
 	// means "no timeout" — Confirm blocks until input or signal.
 	Timeout time.Duration
 }
 
+// Result is the outcome of one confirmation.
+//
+// Persist is ONLY ever meaningful when Approved is true: it is read from a
+// second question the prompt asks after the issue number matched. Callers
+// MUST NOT act on Persist when Approved is false (and no Prompter may set
+// it in that case) — persistence follows approval, it never grants it.
+type Result struct {
+	// Approved is true iff the human typed the displayed issue number.
+	Approved bool
+
+	// Persist is true iff the human ALSO answered `y` to the
+	// save-to-session question (Request.AskPersist). Default false = N =
+	// run-only, keeping the standing ceiling a deliberate act.
+	Persist bool
+}
+
 // Prompter handles a single confirmation request and reports whether
-// the human approved.
+// the human approved (and, for a repo expansion, whether they asked to
+// persist the repo to the session).
 //
 // Implementations:
 //   - TTYPrompter: opens /dev/tty for production use.
 //   - Tests provide a stub that returns canned responses.
 type Prompter interface {
-	Confirm(ctx context.Context, req Request) (approved bool, err error)
+	Confirm(ctx context.Context, req Request) (Result, error)
 }
 
 // TTYPrompter is the production Prompter. Opens /dev/tty for read +
@@ -112,21 +145,28 @@ type Prompter interface {
 type TTYPrompter struct{}
 
 // Confirm displays the prompt to /dev/tty, reads a single line, and
-// returns approved=true iff the line (trimmed) equals fmt.Sprint(req.Issue).
+// returns Approved=true iff the line (trimmed) equals fmt.Sprint(req.Issue).
 //
-// Returns (false, ErrNoTTY) if /dev/tty is unavailable.
-// Returns (false, ErrCancelled) on context cancellation or SIGINT.
-// Returns (false, nil) for any wrong answer or EOF — i.e. an explicit
+// On approval of a repo expansion with req.AskPersist, it then asks the
+// save-to-session question and reads ONE more line; `y`/`yes` (case
+// insensitive) sets Persist. Anything else — including a read error, EOF,
+// or a timeout on that second question — leaves Persist false (default N =
+// run-only). The second question can never change Approved: by the time it
+// is asked, approval has already succeeded.
+//
+// Returns (zero, ErrNoTTY) if /dev/tty is unavailable.
+// Returns (zero, ErrCancelled) on context cancellation or SIGINT.
+// Returns (zero, nil) for any wrong answer or EOF — i.e. an explicit
 // "denied" with no error condition.
-func (TTYPrompter) Confirm(ctx context.Context, req Request) (bool, error) {
+func (TTYPrompter) Confirm(ctx context.Context, req Request) (Result, error) {
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
-		return false, fmt.Errorf("%w: %v", ErrNoTTY, err)
+		return Result{}, fmt.Errorf("%w: %v", ErrNoTTY, err)
 	}
 	defer tty.Close()
 
 	if err := writePrompt(tty, req); err != nil {
-		return false, fmt.Errorf("write prompt: %w", err)
+		return Result{}, fmt.Errorf("write prompt: %w", err)
 	}
 
 	// Wrap ctx with a Timeout (if set) and a signal trap so Ctrl-C in
@@ -142,25 +182,50 @@ func (TTYPrompter) Confirm(ctx context.Context, req Request) (bool, error) {
 	line, err := readLineCtx(sigCtx, tty)
 	if err != nil {
 		fmt.Fprintln(tty, "  [cancelled]")
-		return false, ErrCancelled
+		return Result{}, ErrCancelled
 	}
 	expected := fmt.Sprintf("%d", req.Issue)
-	if strings.TrimSpace(line) == expected {
-		fmt.Fprintln(tty, "  [approved]")
-		return true, nil
+	if strings.TrimSpace(line) != expected {
+		fmt.Fprintln(tty, "  [denied: input did not match the issue number]")
+		return Result{}, nil
 	}
-	fmt.Fprintln(tty, "  [denied: input did not match the issue number]")
-	return false, nil
+	if req.AddRepo == "" {
+		fmt.Fprintln(tty, "  [approved]")
+		return Result{Approved: true}, nil
+	}
+	// A repo expansion: say what was just granted, THEN (optionally) ask
+	// about persistence. Approval is already locked in at this point.
+	fmt.Fprintln(tty, "  [approved for this run]")
+	if !req.AskPersist {
+		return Result{Approved: true}, nil
+	}
+	fmt.Fprintf(tty, "Also save %s to the session for future runs? [y/N]\n> ", req.AddRepo)
+	answer, perr := readLineCtx(sigCtx, tty)
+	if perr != nil {
+		// Cancelled/timed out on the SECOND question: the approval stands
+		// (it was already given); persistence defaults to N.
+		fmt.Fprintln(tty, "\n  [not saved (run-only)]")
+		return Result{Approved: true}, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "y", "yes":
+		return Result{Approved: true, Persist: true}, nil
+	default:
+		fmt.Fprintln(tty, "  [not saved (run-only)]")
+		return Result{Approved: true}, nil
+	}
 }
 
 // writePrompt renders the Form A prompt block (issue #35 §4). Format is
 // deliberately compact — a developer sees this mid-flow and wants to
 // read the title, check it is the RIGHT issue, and act.
+//
+// A REPO expansion (req.AddRepo, issue #69) gets a distinct header and an
+// explicit blast-radius line: approving does not just bind an issue, it
+// grows the set of repos this run can write to, and every later write to
+// that repo flows without a further prompt. The mocks (§1.2) make this
+// unmistakable on purpose — the human must approve knowing it.
 func writePrompt(w io.Writer, req Request) error {
-	header := "=== rein: agent declares work on an issue ==="
-	if req.Expansion {
-		header = "=== rein: agent wants to ALSO work on an issue (scope expansion) ==="
-	}
 	kind := ""
 	if req.IsPR {
 		kind = "  [pull request]"
@@ -168,6 +233,31 @@ func writePrompt(w io.Writer, req Request) error {
 	state := req.State
 	if state == "" {
 		state = "unknown"
+	}
+	if req.AddRepo != "" {
+		_, err := fmt.Fprintf(w, "\n"+
+			"=== rein: SCOPE EXPANSION requested ===\n"+
+			"   session:   %s (role=%s, repos=[%s])\n"+
+			"   agent asks to ADD repo:  %s\n"+
+			"   for issue:  #%d %q  [%s]%s\n"+
+			"               in %s\n"+
+			"   approving ADDS this repo to the scope ceiling\n"+
+			"   (all writes to it then flow without further prompts).\n"+
+			"\n"+
+			"To approve, type the issue number (%d) and press enter.\n"+
+			"To deny, press Ctrl-C or type anything else.\n"+
+			"> ",
+			req.SessionID, req.Role, strings.Join(req.Repos, ", "),
+			req.AddRepo,
+			req.Issue, req.Title, state, kind,
+			req.IssueRepo,
+			req.Issue,
+		)
+		return err
+	}
+	header := "=== rein: agent declares work on an issue ==="
+	if req.Expansion {
+		header = "=== rein: agent wants to ALSO work on an issue (scope expansion) ==="
 	}
 	_, err := fmt.Fprintf(w, "\n"+
 		"%s\n"+
@@ -185,6 +275,17 @@ func writePrompt(w io.Writer, req Request) error {
 		req.Issue,
 	)
 	return err
+}
+
+// ReadLine reads one \n-terminated line from r, honoring ctx cancellation
+// (and the caller's signal trap). Exported for the sibling surfaces that
+// read a NON-authorizing acknowledgement from the same /dev/tty — the
+// install NOTICE (internal/ui/grant), which grants nothing.
+//
+// It is deliberately NOT a confirmation primitive: the Form A approval
+// token is only ever compared inside Confirm.
+func ReadLine(ctx context.Context, r io.Reader) (string, error) {
+	return readLineCtx(ctx, r)
 }
 
 // readLineCtx reads a single \n-terminated line from r, returning
@@ -220,11 +321,18 @@ func readLineCtx(ctx context.Context, r io.Reader) (string, error) {
 
 // StubPrompter is a Prompter for tests. The Response field is the
 // raw string the human "types"; Approved is computed by comparing it
-// to req.Issue, same as TTYPrompter would. Or set Force to override.
+// to req.Issue, same as TTYPrompter would. Or set ForceErr to override.
 type StubPrompter struct {
 	// Response is what the "human" types. Compared against the issue
 	// number; matches → approved.
 	Response string
+
+	// PersistResponse is what the "human" types at the second
+	// (save-to-session) question. Only consulted when the request asks it
+	// AND the number matched — mirroring TTYPrompter, so a test cannot
+	// accidentally demonstrate a persist-without-approval that production
+	// could not produce.
+	PersistResponse string
 
 	// ForceErr, if non-nil, is returned instead of running the compare.
 	// Useful for testing ErrNoTTY / ErrCancelled handling.
@@ -239,12 +347,23 @@ type StubPrompter struct {
 }
 
 // Confirm satisfies Prompter.
-func (s *StubPrompter) Confirm(ctx context.Context, req Request) (bool, error) {
+func (s *StubPrompter) Confirm(ctx context.Context, req Request) (Result, error) {
 	s.Calls++
 	s.Last = req
 	if s.ForceErr != nil {
-		return false, s.ForceErr
+		return Result{}, s.ForceErr
 	}
 	expected := fmt.Sprintf("%d", req.Issue)
-	return strings.TrimSpace(s.Response) == expected, nil
+	if strings.TrimSpace(s.Response) != expected {
+		return Result{}, nil
+	}
+	if req.AddRepo == "" || !req.AskPersist {
+		return Result{Approved: true}, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(s.PersistResponse)) {
+	case "y", "yes":
+		return Result{Approved: true, Persist: true}, nil
+	default:
+		return Result{Approved: true}, nil
+	}
 }

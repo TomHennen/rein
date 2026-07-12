@@ -56,6 +56,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -129,6 +130,38 @@ type Config struct {
 	// (which honors REIN_APPROVAL=tty|popup); this package reads no env for
 	// this.
 	PreferPopup bool
+
+	// SessionFile is the path of the session YAML the standing ceiling
+	// lives in. It is the target of the in-prompt persist answer (issue
+	// #69): on a repo expansion approved with `y`, the repo is appended
+	// there through session.AddRepoToFile (structural validation +
+	// atomic write; no network).
+	//
+	// Empty means the session did not come from a file (the env fallback),
+	// so there is nothing to persist to — the [y/N] question is then NOT
+	// asked at all rather than asked and silently ignored.
+	SessionFile string
+
+	// Direct marks the owning run as DIRECT mode (vs sandboxed). It is
+	// stamped into the run-context snapshot so the OUT-OF-PROCESS grant
+	// surface (`rein approval grant`, the tmux popup) can re-sign the
+	// approval after an in-prompt persist for a direct run — the common
+	// path, since a direct-mode agent's `rein declare` usually has no tty
+	// and approval arrives out-of-process. Sandboxed leaves it false.
+	Direct bool
+
+	// OnPersist, if set, runs after the repo was successfully appended to
+	// SessionFile. It is the mode-specific follow-up: DIRECT mode uses it
+	// to re-sign this run's approval record for the now-wider session
+	// (approvals.Resign), because its credential helper re-loads the session
+	// file on every invocation and would otherwise invalidate the very
+	// approval the human just gave. Sandboxed mode needs nothing (it holds
+	// the launch session in-process) and leaves this nil.
+	//
+	// The IN-PROCESS caller (cmd/rein declareDirect) sets this directly; the
+	// out-of-process Grant subcommand SYNTHESIZES it from RunContext.Direct
+	// (it has no caller to set it), so both approval surfaces re-sign.
+	OnPersist func(newSess session.Session)
 
 	// Logger receives forensic log lines.
 	Logger *log.Logger
@@ -241,6 +274,8 @@ func ObtainIssueApproval(ctx context.Context, req IssueRequest, cfg Config) bool
 	// fetch. It also carries RunPID for Sweep's liveness probe.
 	snap := approvals.RunContext{
 		Session:      req.Session,
+		SessionFile:  cfg.SessionFile,
+		Direct:       cfg.Direct,
 		RunPID:       cfg.RunPID,
 		PendingIssue: &req.Issue,
 		WrittenAt:    time.Now(),
@@ -302,11 +337,12 @@ func ObtainIssueApproval(ctx context.Context, req IssueRequest, cfg Config) bool
 	// Inline /dev/tty Form A prompt. A Ctrl-C OR prompt-timeout is an
 	// EXPLICIT human denial — short-circuit (no further layers, no
 	// helpful-stderr; the human knew what they were doing).
-	approved, err := cfg.Prompter.Confirm(ctx, formARequest(req, expansion, cfg.PromptTimeout))
+	res, err := cfg.Prompter.Confirm(ctx, formARequest(req, expansion, cfg))
 	switch {
-	case err == nil && approved:
+	case err == nil && res.Approved:
 		recordIssue(cfg, sig, req.Session.ID, req.Issue)
 		cfg.Logger.Printf("grant: issue #%d (%s) CONFIRMED via /dev/tty", req.Issue.Number, req.Issue.Repo)
+		settleExpansion(cfg, req.Session, req.Issue, res)
 		return true
 	case err == nil:
 		cfg.Logger.Printf("grant: DENIED via /dev/tty (input mismatched)")
@@ -331,18 +367,87 @@ func ObtainIssueApproval(ctx context.Context, req IssueRequest, cfg Config) bool
 }
 
 // formARequest builds the prompt.Request for a declared issue.
-func formARequest(req IssueRequest, expansion bool, timeout time.Duration) prompt.Request {
+//
+// The REPO-expansion fields (issue #69) are derived HERE, from the session
+// the approval is keyed to — never from anything the agent said: AddRepo is
+// set iff the declared issue's home repo is outside the session's standing
+// ceiling, and the persist question is offered only when there is a session
+// FILE to persist into.
+func formARequest(req IssueRequest, expansion bool, cfg Config) prompt.Request {
+	addRepo := ""
+	if !req.Session.Contains(req.Issue.Repo) {
+		addRepo = req.Issue.Repo
+	}
 	return prompt.Request{
-		SessionID: req.Session.ID,
-		Role:      req.Session.Role,
-		Repos:     req.Session.Repos,
-		Issue:     req.Issue.Number,
-		IssueRepo: req.Issue.Repo,
-		Title:     req.Issue.Title,
-		State:     req.Issue.State,
-		IsPR:      req.Issue.IsPR,
-		Expansion: expansion,
-		Timeout:   timeout,
+		SessionID:  req.Session.ID,
+		Role:       req.Session.Role,
+		Repos:      req.Session.Repos,
+		Issue:      req.Issue.Number,
+		IssueRepo:  req.Issue.Repo,
+		Title:      req.Issue.Title,
+		State:      req.Issue.State,
+		IsPR:       req.Issue.IsPR,
+		Expansion:  expansion,
+		AddRepo:    addRepo,
+		AskPersist: addRepo != "" && cfg.SessionFile != "",
+		Timeout:    cfg.PromptTimeout,
+	}
+}
+
+// settleExpansion runs AFTER a confirmed repo expansion: it tells the human
+// what the run's scope now is, and — iff they answered `y` to the persist
+// question — appends the repo to the standing session file.
+//
+// Invariants:
+//   - It is only ever called on res.Approved (every call site is in an
+//     approved branch), so the [y/N] can never grant anything by itself.
+//   - A persist FAILURE never revokes the approval: the run keeps the repo
+//     (the record is already written); only the standing ceiling is
+//     unchanged, and the human is told the command to run instead.
+func settleExpansion(cfg Config, sess session.Session, ci approvals.ConfirmedIssue, res prompt.Result) {
+	if !res.Approved || sess.Contains(ci.Repo) {
+		return // not a repo expansion; nothing to settle
+	}
+	scope := strings.Join(append(append([]string{}, sess.Repos...), ci.Repo), ", ")
+	fmt.Fprintf(cfg.Stderr, "rein: scope for this run is now %s (+#%d confirmed)\n", scope, ci.Number)
+
+	if !res.Persist {
+		fmt.Fprintf(cfg.Stderr, "rein: (not saved; future runs will ask again — or run:\n      rein session add-repo %s)\n", ci.Repo)
+		cfg.Logger.Printf("grant: expansion to %s approved for THIS RUN only (not persisted)", ci.Repo)
+		return
+	}
+	if cfg.SessionFile == "" {
+		// Defensive: the question is not even asked without a file.
+		cfg.Logger.Printf("grant: persist requested but no session file; ignoring")
+		return
+	}
+	newSess, err := session.AddRepoToFile(cfg.SessionFile, ci.Repo)
+	switch {
+	case errors.Is(err, session.ErrRepoAlreadyInSession):
+		cfg.Logger.Printf("grant: %s already in %s; nothing to persist", ci.Repo, cfg.SessionFile)
+	case err != nil:
+		cfg.Logger.Printf("grant: persist of %s to %s FAILED: %v", ci.Repo, cfg.SessionFile, err)
+		fmt.Fprintf(cfg.Stderr, "rein: WARNING: could not save %s to %s (%v).\n", ci.Repo, cfg.SessionFile, err)
+		fmt.Fprintf(cfg.Stderr, "      The repo IS approved for this run. To save it: rein session add-repo %s\n", ci.Repo)
+		return
+	default:
+		cfg.Logger.Printf("grant: expansion to %s PERSISTED to %s", ci.Repo, cfg.SessionFile)
+		fmt.Fprintf(cfg.Stderr, "rein: saved to %s — future runs include %s without asking.\n", cfg.SessionFile, ci.Repo)
+		if cfg.OnPersist != nil {
+			// Re-sign ONLY when the file is EXACTLY the launch session plus
+			// the one repo just approved. If a concurrent hand-edit widened
+			// it further in the persist window, the reloaded session differs
+			// — do NOT re-sign: the hand-edit invalidation must stand (fail
+			// closed; the human re-declares). This closes the "trust the
+			// reloaded file" gap (review FINDING 2).
+			expected := sess
+			expected.Repos = append(append([]string{}, sess.Repos...), ci.Repo)
+			if approvals.SignatureOf(newSess) == approvals.SignatureOf(expected) {
+				cfg.OnPersist(newSess)
+			} else {
+				cfg.Logger.Printf("grant: persisted session is not launch+%s (concurrent edit?); NOT re-signing — re-declare if writes lock", ci.Repo)
+			}
+		}
 	}
 }
 
@@ -426,6 +531,19 @@ func recordIssue(cfg Config, sig, sessionID string, ci approvals.ConfirmedIssue)
 // multiple runs are concurrent) and it never fetches (issue #35 §4:
 // "the popup never fetches").
 //
+// PERSIST NOTE (issue #69): this out-of-process surface can persist an
+// approved expansion repo (settleExpansion writes the yaml), and it MUST
+// re-sign the run's approval for a DIRECT run or the credential helper's
+// next reload of the widened file re-locks the run. It reads the mode from
+// the snapshot's RunContext.Direct flag (it has no caller to set OnPersist)
+// and synthesizes the Resign closure below:
+//   - Direct + out-of-process persist (the common case — a direct agent's
+//     `rein declare` usually has no tty, so approval arrives here or in
+//     another terminal): re-signs, so the run stays authorized.
+//   - Sandboxed + popup persist: Direct is false, OnPersist stays nil — the
+//     record correctly stays at the launch signature the broker's write
+//     gate checks; the yaml change only affects the NEXT run.
+//
 // It tries /dev/tty first (no CLI flag accepts the issue number — the
 // answer must arrive via /dev/tty so a confused or malicious agent can't
 // supply it as an argument; --run-id is routing, not the secret). If
@@ -438,6 +556,9 @@ func recordIssue(cfg Config, sig, sessionID string, ci approvals.ConfirmedIssue)
 func Grant(ctx context.Context, cfg Config) error {
 	if cfg.Logger == nil {
 		cfg.Logger = log.New(io.Discard, "", 0)
+	}
+	if cfg.Stderr == nil {
+		cfg.Stderr = os.Stderr
 	}
 	if cfg.Prompter == nil {
 		cfg.Prompter = prompt.TTYPrompter{}
@@ -474,11 +595,36 @@ func Grant(ctx context.Context, cfg Config) error {
 		expansion = len(rec.Issues) > 0
 	}
 
-	pr := formARequest(IssueRequest{Session: sess, Issue: pending}, expansion, cfg.PromptTimeout)
-	approved, err := cfg.Prompter.Confirm(ctx, pr)
+	// The out-of-process surface has no REIN_SESSION_FILE and must not
+	// resolve the DEFAULT session (that would approve the wrong session for
+	// a concurrent run) — so the persist target comes from the SNAPSHOT the
+	// declare wrote, exactly like the session itself does.
+	if cfg.SessionFile == "" {
+		cfg.SessionFile = rc.SessionFile
+	}
+	// A DIRECT run persisting a repo here must re-sign its own approval, or
+	// the credential helper's next reload of the widened file re-locks the
+	// run (issue #69). The in-process caller sets OnPersist itself; this
+	// subcommand has no caller, so synthesize it from the snapshot's Direct
+	// flag. Sandboxed runs (Direct=false) leave OnPersist nil — re-signing
+	// would break their launch-session-keyed write gate.
+	if rc.Direct && cfg.OnPersist == nil {
+		oldSig := sig
+		stateDir, runID := cfg.StateDir, cfg.RunID
+		logger := cfg.Logger
+		cfg.OnPersist = func(newSess session.Session) {
+			if err := approvals.Resign(stateDir, runID, oldSig, approvals.SignatureOf(newSess), newSess.ID); err != nil {
+				logger.Printf("grant subcommand: re-sign after persist failed: %v", err)
+			}
+		}
+	}
+
+	pr := formARequest(IssueRequest{Session: sess, Issue: pending}, expansion, cfg)
+	res, err := cfg.Prompter.Confirm(ctx, pr)
 	switch {
-	case err == nil && approved:
+	case err == nil && res.Approved:
 		recordIssue(cfg, sig, sess.ID, pending)
+		settleExpansion(cfg, sess, pending, res)
 		return nil
 	case err == nil:
 		cfg.Logger.Printf("grant subcommand: denied (wrong answer)")

@@ -43,6 +43,19 @@ def declare_issue() -> int | None:
     return int(v) if v and v.isdigit() else None
 
 
+# Issue #69 scope-expansion demo: the SECOND throwaway repo and a real open
+# issue ON it (fetched before the expansion prompt fires, same decision E).
+# Both come from the human via env, defaulting from ./dev-env's
+# REIN_TEST_REPO_B and a conventional issue #1 on it.
+DECLARE_ISSUE_B_ENV = "REIN_ITEST_ISSUE_B"
+
+
+def declare_issue_b() -> int | None:
+    """The real repo-B issue number for the scope-expansion demo, or None."""
+    v = os.getenv(DECLARE_ISSUE_B_ENV)
+    return int(v) if v and v.isdigit() else None
+
+
 _ready: dict = {}
 
 

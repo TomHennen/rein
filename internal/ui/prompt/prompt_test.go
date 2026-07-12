@@ -12,30 +12,30 @@ import (
 
 func TestStubPrompter_MatchingResponseApproves(t *testing.T) {
 	p := &StubPrompter{Response: "42"}
-	ok, err := p.Confirm(context.Background(), Request{Issue: 42})
+	res, err := p.Confirm(context.Background(), Request{Issue: 42})
 	if err != nil {
 		t.Fatalf("Confirm err: %v", err)
 	}
-	if !ok {
+	if !res.Approved {
 		t.Error("expected approved=true for matching response")
 	}
 }
 
 func TestStubPrompter_NonMatchingResponseDenies(t *testing.T) {
 	p := &StubPrompter{Response: "99"}
-	ok, err := p.Confirm(context.Background(), Request{Issue: 42})
+	res, err := p.Confirm(context.Background(), Request{Issue: 42})
 	if err != nil {
 		t.Fatalf("Confirm err: %v", err)
 	}
-	if ok {
+	if res.Approved {
 		t.Error("expected approved=false for wrong response")
 	}
 }
 
 func TestStubPrompter_TrimsWhitespace(t *testing.T) {
 	p := &StubPrompter{Response: "  42  \n"}
-	ok, _ := p.Confirm(context.Background(), Request{Issue: 42})
-	if !ok {
+	res, _ := p.Confirm(context.Background(), Request{Issue: 42})
+	if !res.Approved {
 		t.Error("expected approved=true for whitespace-padded response")
 	}
 }
@@ -43,11 +43,11 @@ func TestStubPrompter_TrimsWhitespace(t *testing.T) {
 func TestStubPrompter_ForceErr(t *testing.T) {
 	want := errors.New("simulated tty failure")
 	p := &StubPrompter{ForceErr: want}
-	ok, err := p.Confirm(context.Background(), Request{Issue: 1})
+	res, err := p.Confirm(context.Background(), Request{Issue: 1})
 	if err != want {
 		t.Errorf("err = %v, want %v", err, want)
 	}
-	if ok {
+	if res.Approved {
 		t.Error("approved must be false on forced error")
 	}
 }
@@ -152,11 +152,55 @@ func TestTTYPrompter_NoTTY(t *testing.T) {
 		t.Skip("running in a context where /dev/tty IS reachable; nothing to assert")
 	}
 	p := TTYPrompter{}
-	ok, err := p.Confirm(context.Background(), Request{Issue: 1})
+	res, err := p.Confirm(context.Background(), Request{Issue: 1})
 	if !errors.Is(err, ErrNoTTY) {
 		t.Errorf("expected ErrNoTTY, got %v", err)
 	}
-	if ok {
+	if res.Approved {
 		t.Error("approved must be false when /dev/tty is unavailable")
+	}
+}
+
+// TestStubPrompter_PersistOnlyAfterApproval proves the [y/N] can never
+// approve anything by itself (issue #69): a wrong number denies AND leaves
+// Persist false, no matter what PersistResponse says.
+func TestStubPrompter_PersistOnlyAfterApproval(t *testing.T) {
+	// Wrong number, but "human" typed y at persist: must NOT approve or persist.
+	p := &StubPrompter{Response: "99", PersistResponse: "y"}
+	res, _ := p.Confirm(context.Background(), Request{Issue: 42, AddRepo: "o/b", AskPersist: true})
+	if res.Approved || res.Persist {
+		t.Fatalf("a wrong number must deny and never persist, got %+v", res)
+	}
+	// Right number + y => approved AND persist.
+	p = &StubPrompter{Response: "42", PersistResponse: "y"}
+	res, _ = p.Confirm(context.Background(), Request{Issue: 42, AddRepo: "o/b", AskPersist: true})
+	if !res.Approved || !res.Persist {
+		t.Fatalf("right number + y must approve and persist, got %+v", res)
+	}
+	// Right number + n => approved, NOT persist (default run-only).
+	p = &StubPrompter{Response: "42", PersistResponse: "n"}
+	res, _ = p.Confirm(context.Background(), Request{Issue: 42, AddRepo: "o/b", AskPersist: true})
+	if !res.Approved || res.Persist {
+		t.Fatalf("right number + n must approve but not persist, got %+v", res)
+	}
+}
+
+// TestWritePrompt_ScopeExpansionHeader checks the expansion prompt renders
+// the "ADDS a repo" header and blast-radius line (mocks §1.2).
+func TestWritePrompt_ScopeExpansionHeader(t *testing.T) {
+	var buf bytes.Buffer
+	req := Request{
+		SessionID: "s", Role: "implement", Repos: []string{"o/a"},
+		Issue: 41, IssueRepo: "o/b", Title: "Update SBOM", State: "open",
+		AddRepo: "o/b",
+	}
+	if err := writePrompt(&buf, req); err != nil {
+		t.Fatal(err)
+	}
+	s := buf.String()
+	for _, want := range []string{"SCOPE EXPANSION requested", "agent asks to ADD repo:  o/b", "ADDS this repo to the scope ceiling"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("expansion prompt missing %q:\n%s", want, s)
+		}
 	}
 }

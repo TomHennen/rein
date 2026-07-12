@@ -26,9 +26,23 @@ type SessionConfig struct {
 	MintRead  brokercore.MintFunc
 	MintWrite brokercore.MintFunc
 
-	// InScope is the session's scope ceiling (session.Session.Contains in the
-	// daemon). Nil disables scope enforcement — only for tests.
+	// InScope is the session's scope ceiling (runscope.Resolver.Contains in
+	// the daemon — the session's standing repos UNION this run's approved
+	// scope expansions). Nil disables scope enforcement — only for tests.
 	InScope func(repo string) bool
+
+	// ScopeKey fingerprints the CURRENT effective ceiling
+	// (runscope.Resolver.Key). Tokens are minted AT a scope, so a token
+	// minted before a mid-run scope expansion does not cover the new repo
+	// (issue #69): whenever this key changes, the memoized write token and
+	// the read-token cache are dropped and the next request re-mints at the
+	// wider scope. Without it, the human approves the expansion and the
+	// agent still gets a 403 from a stale, narrow, still-valid token — the
+	// widening silently fails to arrive.
+	//
+	// Nil means "the ceiling never changes" (tests, and any caller with a
+	// static scope): caches then behave exactly as before.
+	ScopeKey func() string
 
 	// EmptyPathScope governs a request whose repo couldn't be derived from the
 	// path (e.g. api.github.com/graphql, /user). "refuse" or "" / "allow".
@@ -73,6 +87,10 @@ type sessionState struct {
 
 	writeToken  string
 	writeExpiry time.Time
+	// writeScope is the ScopeKey the memoized write token was minted at.
+	// A change means the ceiling grew (or shrank) and the token no longer
+	// matches the scope the next request will be checked against.
+	writeScope string
 
 	backoffUntil time.Time
 }
@@ -118,9 +136,26 @@ func NewSessionCore(cfg SessionConfig) *brokercore.Core {
 		return true
 	}
 
+	scopeKey := func() string {
+		if cfg.ScopeKey == nil {
+			return ""
+		}
+		return cfg.ScopeKey()
+	}
+
 	mintWrite := func(ctx context.Context) (string, time.Time, error) {
 		st.mu.Lock()
 		defer st.mu.Unlock()
+		key := scopeKey()
+		if st.writeToken != "" && st.writeScope != key {
+			// The ceiling moved under us (a scope expansion was approved
+			// mid-run). The memoized token is scoped to the OLD repo set:
+			// drop it so this request re-mints at the new one.
+			if cfg.Logger != nil {
+				cfg.Logger.Printf("scope changed (%q -> %q); dropping the memoized write token so the next mint covers the new ceiling", st.writeScope, key)
+			}
+			st.writeToken, st.writeExpiry = "", time.Time{}
+		}
 		if st.writeToken != "" && time.Until(st.writeExpiry) > skew {
 			return st.writeToken, st.writeExpiry, nil
 		}
@@ -139,6 +174,7 @@ func NewSessionCore(cfg SessionConfig) *brokercore.Core {
 		}
 		st.writeToken = token
 		st.writeExpiry = expiresAt
+		st.writeScope = key
 		return token, expiresAt, nil
 	}
 
@@ -157,7 +193,7 @@ func NewSessionCore(cfg SessionConfig) *brokercore.Core {
 	return &brokercore.Core{
 		MintRead:       cfg.MintRead,
 		MintWrite:      mintWrite,
-		ReadCache:      cfg.ReadCache,
+		ReadCache:      scopedReadCache(cfg.ReadCache, scopeKey),
 		ReadCacheSkew:  readSkew,
 		InScope:        cfg.InScope,
 		EmptyPathScope: cfg.EmptyPathScope,
@@ -165,6 +201,47 @@ func NewSessionCore(cfg SessionConfig) *brokercore.Core {
 		RecordWrite:    cfg.RecordWrite,
 		Logger:         cfg.Logger,
 	}
+}
+
+// scopedReadCache wraps a ReadCache so a cached READ token minted at an
+// older scope is treated as a MISS once the ceiling changes.
+//
+// Reads matter as much as writes here: cloning the newly-approved repo is a
+// read, and a read token minted at the pre-expansion scope 404s on it — the
+// human would approve the expansion and watch the clone fail.
+//
+// A nil inner cache stays nil (caching disabled).
+func scopedReadCache(inner brokercore.ReadCache, key func() string) brokercore.ReadCache {
+	if inner == nil {
+		return nil
+	}
+	return &scopeKeyedCache{inner: inner, key: key}
+}
+
+type scopeKeyedCache struct {
+	mu     sync.Mutex
+	inner  brokercore.ReadCache
+	key    func() string
+	minted string // the ScopeKey the cached token was minted at
+	primed bool
+}
+
+func (c *scopeKeyedCache) Get(skew time.Duration) (string, bool) {
+	c.mu.Lock()
+	stale := c.primed && c.minted != c.key()
+	c.mu.Unlock()
+	if stale {
+		return "", false
+	}
+	return c.inner.Get(skew)
+}
+
+func (c *scopeKeyedCache) Put(token string, expiresAt time.Time) {
+	c.mu.Lock()
+	c.minted = c.key()
+	c.primed = true
+	c.mu.Unlock()
+	c.inner.Put(token, expiresAt)
 }
 
 // errMintBackoff is returned by the wrapped write mint while a rate-limit

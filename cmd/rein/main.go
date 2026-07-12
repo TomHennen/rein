@@ -21,6 +21,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -41,6 +44,7 @@ import (
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
+	"github.com/TomHennen/rein/internal/runscope"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/srt"
 	"github.com/TomHennen/rein/internal/tokencache"
@@ -179,6 +183,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "rein approval: %v\n", err)
 			os.Exit(1)
 		}
+	case "session":
+		if err := runSession(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "rein session: %v\n", err)
+			os.Exit(1)
+		}
 	case "run":
 		code, err := dispatchRun(os.Args[2:])
 		if err != nil {
@@ -216,6 +225,9 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  rein approval status")
 	fmt.Fprintln(os.Stderr, "  rein approval clear [--run-id <id>]")
 	fmt.Fprintln(os.Stderr, "  rein approval grant --run-id <id>")
+	fmt.Fprintln(os.Stderr, "  rein approval notice --run-id <id>        (show a pending install notice; grants nothing)")
+	fmt.Fprintln(os.Stderr, "  rein session show                         (standing scope ceiling + live runs' expansions)")
+	fmt.Fprintln(os.Stderr, "  rein session add-repo <owner/name>        (validated widening of the standing ceiling)")
 	fmt.Fprintln(os.Stderr, "  rein declare <issue-number> [--repo owner/name]  (declare the issue this run's work is for)")
 	fmt.Fprintln(os.Stderr, "  rein run -- <cmd> [args...]                (sandboxed by default)")
 	fmt.Fprintln(os.Stderr, "  rein run --direct -- <cmd> [args...]       (unsandboxed; throwaway repos only)")
@@ -440,9 +452,6 @@ func runCredentialHelperEnv(action string, in io.Reader, out, diag io.Writer) er
 			fmt.Errorf("session load failed: %w", err),
 			fmt.Sprintf("rein: cannot load the active session (%v).\n      Fix or remove the session file, or run `rein init` to set up; `rein doctor` diagnoses.", err))
 	}
-	// Scope the App config to the session's FULL repo set so the minted token
-	// covers every repo the scope check accepts (issue #10).
-	appCfg.RepoNames = sess.BareRepoNames()
 	logger.Printf("session: id=%q role=%q repos=%v source=%s", sess.ID, sess.Role, sess.Repos, sessSource)
 
 	return runCredentialHelperWithConfig(action, in, out, diag, appCfg, ks, sess, stateDir, logger)
@@ -514,6 +523,16 @@ func runCredentialHelperWithConfig(action string, in io.Reader, out, diag io.Wri
 	if testPanicHook != nil {
 		testPanicHook(out)
 	}
+	// The run's EFFECTIVE ceiling (issue #69): the session's standing repos
+	// UNION the scope expansions the human approved for THIS run. Every
+	// scope-sensitive surface below reads through it — the scope check
+	// (InScope) and the token scope (RepoNames) must agree, or an in-scope
+	// repo gets a token that doesn't cover it.
+	//
+	// Scoping the App config here (rather than at the caller) is deliberate:
+	// this is the ONE place that knows both the session and the run id.
+	rscope := runscope.New(sess, stateDir, os.Getenv("REIN_RUN_ID"))
+	appCfg.RepoNames = rscope.BareNames()
 
 	mintRead := broker.MintFunc(func(ctx context.Context) (string, time.Time, error) {
 		client, err := githubapp.NewClient(appCfg, ks, config.AppKeystoreRole)
@@ -558,15 +577,20 @@ func runCredentialHelperWithConfig(action string, in io.Reader, out, diag io.Wri
 	}
 
 	cfg := broker.Config{
-		MintRead:      mintRead,
-		MintWrite:     mintWrite,
-		MintTimeout:   mintTimeout,
-		Logger:        logger,
-		Diag:          diag,
-		ReadCachePath: filepath.Join(stateDir, "cache", "read-token.json"),
+		MintRead:    mintRead,
+		MintWrite:   mintWrite,
+		MintTimeout: mintTimeout,
+		Logger:      logger,
+		Diag:        diag,
+		// The read-token cache is keyed BY SCOPE: a token minted before a
+		// scope expansion does not cover the newly-approved repo, and the
+		// helper is a fresh process per git op, so an in-memory bust is not
+		// available — a distinct cache file per ceiling is the equivalent
+		// (issue #69). Same ceiling => same file => caching behaves as before.
+		ReadCachePath: filepath.Join(stateDir, "cache", "read-token-"+scopeCacheTag(rscope)+".json"),
 		DetectWrite:   func() bool { return detectWriteIntent(logger) },
 		Revoke:        revoke,
-		InScope:       sess.Contains,
+		InScope:       rscope.Contains,
 		// EmptyPathScope stays "" (= allow): existing test setups
 		// without useHttpPath=true continue to work. install-shim's
 		// instructions recommend setting useHttpPath for strict
@@ -590,6 +614,15 @@ func runCredentialHelperWithConfig(action string, in io.Reader, out, diag io.Wri
 	}
 
 	return broker.RunCredentialHelper(action, in, out, cfg)
+}
+
+// scopeCacheTag is a short, filesystem-safe fingerprint of the run's
+// effective ceiling, used to key the read-token cache FILE. Two different
+// ceilings never share a cache file, so a token minted before a scope
+// expansion can never be served after it (issue #69).
+func scopeCacheTag(rs *runscope.Resolver) string {
+	sum := sha256.Sum256([]byte(rs.Key()))
+	return hex.EncodeToString(sum[:])[:12]
 }
 
 // buildConfirmWrite returns the direct-mode credential helper's write
@@ -692,8 +725,33 @@ func runApproval(args []string) error {
 		}
 		fmt.Printf("approval recorded for run %s\n", runID)
 		return nil
+	case "notice":
+		// The out-of-process INSTALL NOTICE surface (issue #69), run by the
+		// tmux popup. It renders the pending notice from the run-context
+		// snapshot and waits for an acknowledgement. It carries NO approval
+		// authority: it cannot write the approval record, and no answer to
+		// it grants anything — the real scope-expansion prompt fires when
+		// the agent retries its declare.
+		if runID == "" {
+			return errors.New("approval notice requires --run-id")
+		}
+		logger, closeLog, err := openLog()
+		if err != nil {
+			return err
+		}
+		defer closeLog()
+		n, err := grant.NoticeFromRunContext(stateDir, runID)
+		if err != nil {
+			return err
+		}
+		cfg := grant.Config{StateDir: stateDir, RunID: runID, PromptTimeout: 10 * time.Minute, Logger: logger}
+		if err := grant.AcknowledgeInstallNotice(context.Background(), cfg, n); err != nil {
+			// No tty (not in a popup): print it plainly instead.
+			grant.WriteInstallNotice(os.Stdout, n)
+		}
+		return nil
 	default:
-		fmt.Fprintf(os.Stderr, "rein approval: unknown subcommand %q (want status|clear|grant)\n", sub)
+		fmt.Fprintf(os.Stderr, "rein approval: unknown subcommand %q (want status|clear|grant|notice)\n", sub)
 		os.Exit(2)
 	}
 	return nil
