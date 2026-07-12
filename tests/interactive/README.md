@@ -231,9 +231,10 @@ and fail *inside* the agent. Two legs, both a real `rein run --direct` (the
 coverage gate runs before the mode split, so `--direct` exercises it without the
 sandbox stack):
 
-- **misconfig:** a session naming a fictional `<owner>/definitely-not-installed-<ts>`
-  (does not exist; 404s identically to "App not installed on repo", so it touches
-  **no real repo** — hard-constraint #1 holds). rein must refuse at LAUNCH, exit 1,
+- **misconfig:** a session naming a fictional `<owner>/definitely-not-installed`
+  (a FIXED name — stable-by-construction, so not normalized; does not exist and
+  404s identically to "App not installed on repo", so it touches **no real repo**
+  — hard-constraint #1 holds). rein must refuse at LAUNCH, exit 1,
   and the refusal must name the repo, name the App (slug), and carry the
   App-specific `.../installations/new` deep-link. The inner command never runs.
 - **control:** a normal single-repo session on the throwaway clears the gate and
