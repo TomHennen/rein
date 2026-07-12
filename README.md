@@ -1,14 +1,99 @@
 # rein
 
-**A local credential broker for AI coding agents.** rein runs your agent inside
-a sandbox with no direct network access and injects short-lived, repo-scoped
-GitHub tokens *on the wire*, outside the sandbox — so the agent can clone,
-fetch, push, and use `gh` within its session's scope, but **never holds a
-credential it can read or exfiltrate**, and can't reach your own `gh` login or
-SSH keys either. You create a GitHub App once via a guided browser flow; from
-then on rein mints a fresh token per operation and asks you to confirm writes.
-For the full design and threat model, see [`docs/design.md`](docs/design.md) and
+**A local credential broker for AI coding agents — let a coding agent work on
+GitHub without ever handing it your credentials.**
+
+<!-- DEMO: replace this line with a recording (asciinema → gif, or an mp4) of a
+     real `claude` session under rein — the agent hits a write, `rein declare`
+     fires, the tmux popup asks for approval, you confirm, and the push lands.
+     That write-approval popup is the money shot. -->
+> 🎬 **Demo coming:** a real `claude` session under rein — the write-approval
+> popup firing and the push landing. *(placeholder — recording in progress)*
+
+You create a GitHub App — one you own, not rein — scoped to exactly the repos and
+permissions you're willing to risk. rein keeps its key on your machine; when the
+agent needs to write, it declares an issue and you approve on your terminal, and
+rein mints a short-lived token for just that work and injects it into the agent's
+sandbox at the network layer. The agent never sees a token or your login.
+
+You don't have to `gh auth login` or mint and rotate scoped PATs — the only GitHub
+credential on the box is your own narrowly-scoped App. So the worst case, even if
+the agent breaks out of the sandbox, is capped at the scope you chose, never your
+whole account. And it's a local broker: no rein service, no shared secret, nothing
+the rein authors can ever see or hold.
+
+**Where it works today:** Linux · a terminal · `tmux` for the approval popup.
+(macOS is a separate, not-yet-done track.) For the full design and threat model,
+see [`docs/design.md`](docs/design.md) and
 [`docs/phase1-design.md`](docs/phase1-design.md).
+
+### Where the credential lives
+
+```mermaid
+flowchart LR
+  subgraph machine["your machine"]
+    direction LR
+    subgraph sandbox["sandbox"]
+      agent["the agent<br/>no token · no keys · no login"]
+    end
+    proxy["proxy<br/>injects a short-lived token<br/>at the network layer"]
+    broker["broker + your App key<br/>key stays here · mints per-issue tokens"]
+  end
+  gh["GitHub"]
+  agent -- "request" --> proxy
+  broker -. "token" .-> proxy
+  proxy -- "scoped, short-lived" --> gh
+```
+
+The key lives *outside* the sandbox and never crosses into it. What crosses the
+boundary is an already-scoped, short-lived token, added at the network layer — so a
+sandbox escape finds no token to steal, only the traffic it was already allowed to
+make.
+
+### How it works, in one breath
+
+```mermaid
+sequenceDiagram
+  participant A as Agent (sandbox)
+  participant You
+  participant R as rein broker
+  participant G as GitHub
+  A->>You: rein declare (its issue)
+  You->>R: approve (on your terminal)
+  R->>R: mint short-lived, issue-scoped token
+  R-->>A: inject at the proxy — agent never sees it
+  A->>G: push — lands
+```
+
+1. The agent needs to write, so it runs `rein declare` for its issue.
+2. You approve it on your terminal (a `tmux` popup, by default).
+3. rein mints a short-lived token scoped to just that issue.
+4. The proxy injects it into the agent's traffic — the agent never sees it.
+5. The push lands.
+
+### What this gets you
+
+- **No standing credential to manage or leak** — no `gh auth login`, no scoped PATs
+  to mint, rotate, or revoke. rein brokers per-issue, human-gated, short-lived tokens
+  from your own App; they never sit in the agent's environment.
+- **A blast radius you chose** — the only GitHub credential on the box is your scoped
+  App key, so even a full sandbox escape is capped at the App scope you picked, never
+  your account.
+- **Yours, not ours** — the App is yours, the key stays on your machine, the tokens are
+  minted locally. No rein service, no shared secret, nothing the rein authors can see,
+  hold, or revoke.
+
+### What rein does and doesn't protect (stated plainly)
+
+- **Give the agent no standing GitHub credential.** That's the precondition that makes
+  the bounded-blast-radius property true — if you *also* keep a broad `gh` login or PAT
+  on the box, a sandbox escape gets those too. rein removes the reason to.
+- **"Protected by the sandbox" means the agent can't reach the key** — it lives outside
+  the sandbox, used only by the broker. A credential scanner run *inside* the sandbox
+  finds none of your real credentials.
+- **Not "hardware-protected" — yet.** Today the App key is a file protected by OS
+  permissions plus the sandbox keeping the agent away from it. Hardware / host-keychain
+  wrapping is defense-in-depth on the roadmap.
 
 > **Status (2026-07-06).** Phase 1 **sandboxed mode is built and is the
 > default**: `rein run` launches the agent inside Anthropic's
