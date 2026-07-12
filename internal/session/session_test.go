@@ -247,6 +247,51 @@ func TestLoadOrFallback_DefaultMissingFallsBackToEnv(t *testing.T) {
 	}
 }
 
+// TestWorktreesValidation (#64): the `worktrees:` map is the human's explicit
+// statement of "bind MY checkout of this repo writable". Structural nonsense is
+// rejected at load time — most importantly a repo OUTSIDE the scope ceiling: a
+// writable tree for a repo rein will never mint a credential for is incoherent
+// (the agent could commit but never push), and it would widen the filesystem
+// past the scope the human reviewed.
+func TestWorktreesValidation(t *testing.T) {
+	ok := Session{ID: "s", Repos: []string{"owner/a", "owner/b"},
+		Worktrees: map[string]string{"owner/b": "/srv/dev/b"}}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("valid worktrees map rejected: %v", err)
+	}
+
+	for name, s := range map[string]Session{
+		"out of scope": {ID: "s", Repos: []string{"owner/a"},
+			Worktrees: map[string]string{"owner/z": "/srv/dev/z"}},
+		"relative path": {ID: "s", Repos: []string{"owner/a"},
+			Worktrees: map[string]string{"owner/a": "dev/a"}},
+		"key not owner/name": {ID: "s", Repos: []string{"owner/a"},
+			Worktrees: map[string]string{"justaname": "/srv/dev/a"}},
+	} {
+		if err := s.Validate(); err == nil {
+			t.Errorf("%s: Validate accepted an invalid worktrees map", name)
+		}
+	}
+}
+
+// TestWorktreesRoundTripYAML: the field is hand-editable (mocks §4 — the yaml
+// stays the standing ceiling) and survives a load.
+func TestWorktreesRoundTripYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s.yaml")
+	body := "id: sess_x\nrole: implement\nrepos:\n  - owner/a\n  - owner/b\nworktrees:\n  owner/b: /srv/dev/b\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if s.Worktrees["owner/b"] != "/srv/dev/b" {
+		t.Fatalf("worktrees did not round-trip: %v", s.Worktrees)
+	}
+}
+
 func TestWarnIgnoredIssue(t *testing.T) {
 	var buf strings.Builder
 	s := Session{ID: "x", Role: "implement", Repos: []string{"o/a"}, Issue: 73}

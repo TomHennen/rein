@@ -1,0 +1,143 @@
+$ rein run -- bash -c <sandbox agent script> /tmp/rein-sbxfs-vjrns9xb
+rein: sandbox preflight:
+  [ok]   srt present: /home/admin/.npm-global/bin/srt
+  [ok]   srt version: 0.0.63 (package.json; note `srt --version` misreports 1.0.0)
+  [ok]   seccomp: apply-seccomp present (unix-socket block available)
+  [ok]   bwrap userns: unprivileged user namespace works
+  [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
+rein: verifying sandbox config applies (deny-read + seccomp self-test)…
+rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
+rein: launching SANDBOXED (srt) run:
+  session: sess_journey_sandbox_fs (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-z5y2okdl/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-xQy0UwwEoJyeZ9PHbN7e_A/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-sbxfs-vjrns9xb  [TomHennen/agentcreds-validation-a]
+  a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-832968166
+    (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
+     never inside the working tree, where a nested clone can be committed into it).
+    map it under `worktrees:` to use your own checkout on the NEXT run.
+  the agent sees NO real token; git/gh are injected at the proxy.
+  credential stores, ~/.ssh, on-disk keyrings, and keyring/agent sockets are hidden.
+  $HOME is HIDDEN in-sandbox. Three different behaviors — know which one you get:
+    READS of a hidden path FAIL LOUDLY: ENOENT, or an empty listing for a dir.
+    WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
+      DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
+    WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-sbxfs-vjrns9xb
+    => work the agent must keep has to be written INTO the working tree.
+    allowed back read-only: /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.claude, /home/admin/.claude.json, /home/admin/.local/bin, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv
+    if a tool breaks on a hidden $HOME path, allow it back narrowly:
+      REIN_SANDBOX_ALLOW_READ=/abs/path[:/more] rein run --sandbox -- …
+    or (NOT recommended — exposes your whole home dir): REIN_SANDBOX_SHOW_HOME=1
+  extra egress ALLOWED (direct TLS, NOT injected, no rein token): api.anthropic.com
+  writes are LOCKED until the agent declares its issue:  rein declare <n>
+  then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.
+  to run bash WITHOUT rein for one command: `\bash` (bash/zsh) or `command bash` (fish)
+  agent contract PRINTED to the agent's output (this agent has no system-prompt channel, so it may or
+    may not reach the model's context; the REIN_IN_SANDBOX_* env vars carry the same facts machine-readably).
+rein: running: bash -c
+set +e
+emit() { printf '%s%s\n' 'SBX| ' "$*"; }
+run() {
+  printf '%s$ %s\n' 'SBX| ' "$*"
+  "$@" 2>&1 | tr '\r' '\n' | while IFS= read -r l; do printf '%s%s\n' 'SBX| ' "$l"; done
+  return ${PIPESTATUS[0]}
+}
+cd "$0"
+emit "@SANDBOX_FACTS  (the machine-readable mirror of the contract rein injected)"
+run sh -c 'env | grep ^REIN_IN_SANDBOX | sort'
+
+emit "@CREDS_HIDDEN  (real host secrets read as absent in-sandbox)"
+run cat /home/admin/.ssh/id_rsa
+run cat /home/admin/.aws/credentials
+run cat /home/admin/.config/rein-credentials/app.pem
+run ls ~
+
+emit "@HOME_EPHEMERAL  (a write under $HOME succeeds into tmpfs, discarded at run end)"
+run sh -c 'echo scratch > /home/admin/notes.md && cat /home/admin/notes.md'
+
+emit "@GIT_ESCAPE_CLOSED  (.git is a pinned mountpoint; hooks + config read-only)"
+run mv .git .git.aside
+emit "@MV_RC=$?"
+run sh -c 'echo evil > .git/hooks/pre-commit'
+emit "@HOOK_RC=$?"
+run git config --local core.pager 'sh -c pwned'
+emit "@CFG_RC=$?"
+
+emit "@ORDINARY_WORK  (edit a tracked file, add, commit — all still work)"
+run sh -c 'echo "// rein sandbox-filesystem journey: an ordinary agent edit" >> README.md'
+run git add -A
+emit "@ADD_RC=$?"
+run git commit -q -m "sandbox-filesystem journey: an ordinary edit"
+emit "@COMMIT_RC=$?"
+run git log --oneline -1
+emit "@SCRIPT_DONE"
+ /tmp/rein-sbxfs-vjrns9xb
+---
+rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
+
+FILES
+- Your work persists ONLY in the working tree: /tmp/rein-sbxfs-vjrns9xb
+  Write anything that must outlive this run THERE. Nothing else survives.
+- $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
+  DISCARDED when the run ends. You will get no error. Do not keep work there.
+- Most of $HOME reads as empty/missing; a few paths are re-exposed READ-ONLY, where
+  writes fail with "Read-only file system". Caches work but start cold each run.
+
+CREDENTIALS
+- There are NO credentials in this environment. Tokens, keys, and credential stores
+  are hidden on purpose. Do not go looking for them, and do not ask the user for one.
+- git and gh still work anyway: a proxy OUTSIDE the sandbox injects a short-lived
+  GitHub token you never see. Just use them normally.
+
+GITHUB WRITES
+- Writes to GitHub (push, PRs, comments, any API mutation) are LOCKED until you
+  declare the issue this work is for:
+      rein declare <n>
+  That asks the human to approve, on their terminal. Reads work without it.
+- Once confirmed, push ONLY to a branch named:
+      agent/<n>/<nonce>
+  where <n> is the declared issue number and <nonce> is a short name you choose
+  (letters/digits, then letters/digits/./_/-). Any other ref is rejected.
+- One issue per push.
+
+NETWORK
+- Egress is restricted to GitHub plus: api.anthropic.com
+- Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.
+
+SBX| @SANDBOX_FACTS  (the machine-readable mirror of the contract rein injected)
+SBX| $ sh -c env | grep ^REIN_IN_SANDBOX | sort
+SBX| REIN_IN_SANDBOX=1
+SBX| REIN_IN_SANDBOX_HOME=ephemeral
+SBX| REIN_IN_SANDBOX_WORKTREE=/tmp/rein-sbxfs-vjrns9xb
+SBX| @CREDS_HIDDEN  (real host secrets read as absent in-sandbox)
+SBX| $ cat /home/admin/.ssh/id_rsa
+SBX| cat: /home/admin/.ssh/id_rsa: No such file or directory
+SBX| $ cat /home/admin/.aws/credentials
+SBX| cat: /home/admin/.aws/credentials: No such file or directory
+SBX| $ cat /home/admin/.config/rein-credentials/app.pem
+SBX| cat: /home/admin/.config/rein-credentials/app.pem: No such file or directory
+SBX| $ ls /home/admin
+SBX| go
+SBX| @HOME_EPHEMERAL  (a write under /home/admin succeeds into tmpfs, discarded at run end)
+SBX| $ sh -c echo scratch > /home/admin/notes.md && cat /home/admin/notes.md
+SBX| scratch
+SBX| @GIT_ESCAPE_CLOSED  (.git is a pinned mountpoint; hooks + config read-only)
+SBX| $ mv .git .git.aside
+SBX| mv: cannot move '.git' to '.git.aside': Device or resource busy
+SBX| @MV_RC=1
+SBX| $ sh -c echo evil > .git/hooks/pre-commit
+SBX| sh: 1: cannot create .git/hooks/pre-commit: Read-only file system
+SBX| @HOOK_RC=2
+SBX| $ git config --local core.pager sh -c pwned
+SBX| error: could not write config file .git/config: Device or resource busy
+SBX| @CFG_RC=4
+SBX| @ORDINARY_WORK  (edit a tracked file, add, commit — all still work)
+SBX| $ sh -c echo "// rein sandbox-filesystem journey: an ordinary agent edit" >> README.md
+SBX| $ git add -A
+SBX| @ADD_RC=0
+SBX| $ git commit -q -m sandbox-filesystem journey: an ordinary edit
+SBX| @COMMIT_RC=0
+SBX| $ git log --oneline -1
+SBX| 5a0e954 sandbox-filesystem journey: an ordinary edit
+SBX| @SCRIPT_DONE

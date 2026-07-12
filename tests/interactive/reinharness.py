@@ -548,8 +548,15 @@ def spawn_rein(
     env: dict | None = None,
     extra_env: dict | None = None,
     timeout: int = 30,
+    cwd: str | None = None,
 ) -> ReinRun:
-    """Spawn an arbitrary `rein <args>` under a pty with a captured transcript."""
+    """Spawn an arbitrary `rein <args>` under a pty with a captured transcript.
+
+    `cwd` defaults to the repo root. A journey step that drives a sandbox launch
+    (`rein run -- … <workdir>`) can point it (or REIN_SANDBOX_WORKDIR via
+    extra_env) at the writable checkout so rein binds the intended tree — see
+    run_journey, which threads a step's cwd/extra_env through here.
+    """
     env = dict(env or rein_env())
     if extra_env:
         env.update(extra_env)
@@ -557,7 +564,7 @@ def spawn_rein(
     child = pexpect.spawn(
         str(REIN_BIN),
         args,
-        cwd=str(REPO_ROOT),
+        cwd=str(cwd or REPO_ROOT),
         env=env,
         encoding="utf-8",
         codec_errors="replace",
@@ -565,7 +572,7 @@ def spawn_rein(
         dimensions=(40, 200),
     )
     child.logfile_read = transcript
-    return ReinRun(child=child, transcript=transcript, workdir="")
+    return ReinRun(child=child, transcript=transcript, workdir=str(cwd or ""))
 
 
 # --------------------------------------------------------------------------
@@ -585,17 +592,35 @@ def spawn_rein(
 
 @dataclass
 class JourneyStep:
-    """One host `rein <argv>` command a journey drives.
+    """One `rein <argv>` command a journey drives — a host command OR a sandbox
+    launch (`argv=["run", "--", …inner…, <workdir>]`).
 
     The author declares the argv and, for an interactive command, the ORDERED
     (expect_pattern, answer) pairs — and nothing about capture. `label`
-    overrides the `$ rein <argv>` echo shown before the command's output (rare;
-    the default reads fine).
+    overrides the `$ rein <argv>` echo shown before the command's output. For a
+    sandbox step whose inner argv is a big `bash -c <script>`, set a concise
+    `label` (rein re-echoes the full script itself right below), so the golden's
+    boundary line stays readable.
+
+    Per-step overrides (each WINS over the journey-level value of the same name,
+    so a single slow sandbox step can raise just its own timeout without slowing
+    the fast host steps around it). `cwd`+`extra_env` use the SAME names/semantics
+    as parallel branch #78 so the two converge:
+      cwd        — working directory rein is spawned in. A sandbox step points it
+                   (or REIN_SANDBOX_WORKDIR via extra_env) at the writable
+                   checkout so rein binds the intended tree.
+      extra_env  — env overlaid for THIS step only (e.g. REIN_SESSION_FILE, or
+                   REIN_SANDBOX_WORKDIR to name the sandbox working tree).
+      timeout    — seconds for this step's spawn + every expect (a sandbox launch
+                   needs ~120-180s vs the fast host-command default).
     """
 
     argv: list[str]
     answers: list[tuple[str, str]] = field(default_factory=list)
     label: str | None = None
+    cwd: str | None = None
+    extra_env: dict | None = None
+    timeout: int | None = None
 
 
 @dataclass
@@ -626,11 +651,18 @@ def run_journey(steps, *, env=None, extra_env=None, timeout: int = 60) -> Journe
     <argv>` echo so it reads like a real terminal). Pass THAT to compare_golden
     — the author never calls `.text()` and slices, so no section can be omitted.
 
-    The steps share `env`+`extra_env`, so an earlier `rein init` sets up the
-    HOME/XDG world a later `rein doctor` inspects. Host commands only; an
-    in-sandbox journey (the write ceremony) keeps spawn_rein_run + the sandbox
-    preamble, which already capture the full pty the same way — the slicing was
-    the only gap, and this closes it for host-command journeys.
+    The steps share the journey-level `env`+`extra_env`+`timeout`, so an earlier
+    `rein init` sets up the HOME/XDG world a later `rein doctor` inspects. A step
+    may OVERRIDE `cwd`/`extra_env`/`timeout` for itself (per-step wins) — that is
+    what makes a single-run SANDBOX launch a first-class step: declare
+    `argv=["run", "--", …inner…, <workdir>]`, point it at the writable tree
+    (`extra_env={"REIN_SANDBOX_WORKDIR": workdir}` or `cwd=workdir`), and give it
+    the slow-launch `timeout` (~180s). Its `answers` drive the mid-run Form-A
+    declare prompt exactly like any other step's prompts, and the in-sandbox
+    script's `sandbox_preamble()`/`run` SBX| output is captured as session
+    content. There is no host-vs-sandbox carve-out any more: run_journey is THE
+    interface for every journey, and the complete session (banner, contract, the
+    tagged agent output — no slicing) becomes the golden.
 
     `.reached_eof` is False if any step missed a prompt / timed out, so the
     caller can report a clean "flow broke" instead of diffing a partial golden.
@@ -638,13 +670,19 @@ def run_journey(steps, *, env=None, extra_env=None, timeout: int = 60) -> Journe
     parts: list[str] = []
     results: list[StepResult] = []
     for st in steps:
-        run = spawn_rein(st.argv, env=env, extra_env=extra_env, timeout=timeout)
+        step_timeout = st.timeout if st.timeout is not None else timeout
+        # journey-level extra_env first, step extra_env overlaid (step wins).
+        step_extra_env = {**(extra_env or {}), **(st.extra_env or {})} or None
+        run = spawn_rein(
+            st.argv, env=env, extra_env=step_extra_env,
+            timeout=step_timeout, cwd=st.cwd,
+        )
         reached = False
         try:
             for pat, ans in st.answers:
-                run.child.expect(pat, timeout=timeout)
+                run.child.expect(pat, timeout=step_timeout)
                 run.answer(ans)
-            run.child.expect(pexpect.EOF, timeout=timeout)
+            run.child.expect(pexpect.EOF, timeout=step_timeout)
             reached = True
         except (pexpect.EOF, pexpect.TIMEOUT):
             reached = False

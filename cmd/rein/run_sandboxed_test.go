@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/TomHennen/rein/internal/approvals"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/srt"
+	"github.com/TomHennen/rein/internal/worktree"
 )
 
 // TestPreflightGateFailsClosed asserts the launch gate: any hard (StatusFail)
@@ -384,7 +386,7 @@ func TestCredentialDenyReadHidesReinOwnArtifacts(t *testing.T) {
 func TestSandboxBannerHintsAndEgress(t *testing.T) {
 	var buf bytes.Buffer
 	sess := session.Session{ID: "sess_test", Role: "implement", Repos: []string{"owner/repo"}}
-	printSandboxBanner(&buf, sess, "file:/x", "/run/s.sock", "/work", []string{"api.anthropic.com", "registry.npmjs.org"}, []string{"claude", "-p", "hi"})
+	printSandboxBanner(&buf, sess, "file:/x", "/run/s.sock", "/work", []string{"api.anthropic.com", "registry.npmjs.org"}, []string{"claude", "-p", "hi"}, false, []string{"/home/x/.claude", "/home/x/go"}, "", worktree.Result{}, "/tmp/clone", "", "")
 	out := buf.String()
 
 	if !strings.Contains(out, "api.anthropic.com") || !strings.Contains(out, "registry.npmjs.org") {
@@ -395,6 +397,62 @@ func TestSandboxBannerHintsAndEgress(t *testing.T) {
 	}
 	if !strings.Contains(out, `\claude`) || !strings.Contains(out, "command claude") {
 		t.Errorf("banner missing the bypass hint (\\claude / command claude); got:\n%s", out)
+	}
+}
+
+// TestSandboxBannerHomeDenialUX asserts the #59 first-class denial-UX
+// requirement: the default banner states $HOME is hidden, lists the
+// allow-backs, and shows the EXACT remediation syntax (REIN_SANDBOX_ALLOW_READ
+// and the REIN_SANDBOX_SHOW_HOME kill switch) so a broken-path discovery loop
+// is self-serve. With the kill switch on, the banner instead warns loudly that
+// $HOME is visible.
+func TestSandboxBannerHomeDenialUX(t *testing.T) {
+	sess := session.Session{ID: "sess_test", Role: "implement", Repos: []string{"owner/repo"}}
+
+	var buf bytes.Buffer
+	printSandboxBanner(&buf, sess, "file:/x", "/run/s.sock", "/work", nil, []string{"claude"}, false, []string{"/home/x/.claude", "/home/x/go"}, "", worktree.Result{}, "/tmp/clone", "", "")
+	out := buf.String()
+	for _, want := range []string{
+		"$HOME is HIDDEN",
+		"/home/x/.claude, /home/x/go",       // the allow-back list is surfaced
+		"REIN_SANDBOX_ALLOW_READ=/abs/path", // exact remediation syntax
+		"REIN_SANDBOX_SHOW_HOME=1",          // kill switch named
+		"NOT recommended",                   // ...and warned about
+
+		// #63: the banner must state the THREE distinct $HOME behaviors, not
+		// collapse them. Each was verified against real srt 0.0.63 + bwrap:
+		// hidden reads ENOENT; hidden writes land in a scratch tmpfs and
+		// SUCCEED, then vanish at teardown; writes to an allowed-back path
+		// (a read-only bind) fail with EROFS. Collapsing them — as the
+		// original "reads see an empty dir; writes are discarded" line did —
+		// mis-states two of the three and hides the fact that actually
+		// matters: nothing outside the working tree survives.
+		"READS of a hidden path FAIL LOUDLY",
+		"SILENTLY SUCCEED",
+		"DISCARDED at run end",
+		"ERROR (read-only)",
+		"NOTHING under $HOME PERSISTS",
+		"/work", // ...and the working tree is named as the place that does
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("default banner missing %q; got:\n%s", want, out)
+		}
+	}
+
+	buf.Reset()
+	printSandboxBanner(&buf, sess, "file:/x", "/run/s.sock", "/work", nil, []string{"claude"}, true, nil, "", worktree.Result{}, "/tmp/clone", "", "")
+	out = buf.String()
+	if !strings.Contains(out, "$HOME is VISIBLE") {
+		t.Errorf("show-home banner must warn $HOME is visible; got:\n%s", out)
+	}
+	if strings.Contains(out, "$HOME is HIDDEN") {
+		t.Errorf("show-home banner must not claim $HOME is hidden; got:\n%s", out)
+	}
+
+	buf.Reset()
+	printShowHomeWarning(&buf)
+	if !strings.Contains(buf.String(), "READABLE in-sandbox") {
+		t.Errorf("kill-switch warning missing; got:\n%s", buf.String())
 	}
 }
 
@@ -470,5 +528,127 @@ func TestAuditLogPathIsUnderDenyReadSet(t *testing.T) {
 	}
 	if !under {
 		t.Errorf("audit log path %q is not under any deny-read path; the sandboxed agent could read its own audit trail.\ndeny-read set: %v", p, denies)
+	}
+}
+
+// TestSandboxBannerListsWritableCheckouts (#64) is the security-disclosure
+// test. Binding the developer's REAL checkout writable is a genuinely new
+// exposure: the tree may hold uncommitted human work, and a prompt-injected
+// agent can modify it. rein's mitigation is not obscurity (the agent MUST be
+// told the paths or it cannot use them) — it is that the human sees, at launch,
+// exactly which real trees went in and can Ctrl-C if one is a surprise. If this
+// test ever goes quiet, the widening became invisible.
+func TestSandboxBannerListsWritableCheckouts(t *testing.T) {
+	var buf bytes.Buffer
+	sess := session.Session{ID: "sess_test", Role: "implement", Repos: []string{"owner/a", "owner/b"}}
+	wt := worktree.Result{
+		WorkTreeRepo: "owner/a",
+		Bindings: []worktree.Binding{
+			{Repo: "owner/b", Path: "/srv/dev/b", Mode: "rw", Source: "session"},
+		},
+	}
+	printSandboxBanner(&buf, sess, "file:/x", "/run/s.sock", "/srv/dev/a",
+		nil, []string{"claude"}, false, []string{"/home/x/.claude"}, "", wt, "/tmp/rein-agent-tmp-1", "", "")
+	out := buf.String()
+
+	for _, want := range []string{
+		"AGENT-WRITABLE",                // the loud header
+		"owner/b  ->  /srv/dev/b",       // the exact real tree, named
+		"(rw, from session)",            // ...and where the mapping came from
+		"modify ANY writable file",      // ...and what is at stake
+		".git is pinned",                // the hardening is disclosed
+		"NOT risk-free",                 // ...but honestly, not overclaimed
+		"issue #76",                     // ...naming the tracked residual
+		"/srv/dev/a",                    // the working tree
+		"[owner/a]",                     // ...with its autodetected repo
+		"REIN_EPHEMERAL_CLONE_DIR",      // the mid-run fallback, named
+		"/tmp/rein-agent-tmp-1",         // ...with its actual path
+		"never inside the working tree", // ...and the nesting warning (mocks §7)
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("banner missing %q; got:\n%s", want, out)
+		}
+	}
+
+	// With nothing mapped, the loud block must NOT appear (no false alarm), but
+	// the ephemeral-clone guidance still must (it is how a mid-run repo works).
+	buf.Reset()
+	printSandboxBanner(&buf, sess, "file:/x", "/run/s.sock", "/srv/dev/a",
+		nil, []string{"claude"}, false, nil, "", worktree.Result{}, "/tmp/rein-agent-tmp-1", "", "")
+	out = buf.String()
+	if strings.Contains(out, "AGENT-WRITABLE") {
+		t.Errorf("no checkouts mapped, but the banner cried wolf:\n%s", out)
+	}
+	if !strings.Contains(out, "REIN_EPHEMERAL_CLONE_DIR") {
+		t.Errorf("banner must always name the ephemeral clone dir; got:\n%s", out)
+	}
+}
+
+// TestMappedCheckoutUnderCredentialDenyFailsClosed (#64 x #59): a `worktrees:`
+// entry is a WIDENING — it must be held to the same authoritative-deny rule as
+// every other widening path. Mapping a "checkout" that sits at or under a
+// credential store (say ~/.ssh, or rein's own key dir) would make srt re-bind
+// that path READ-WRITE over the deny tmpfs, handing the agent the very secrets
+// the deny exists to hide. srt.Build is the enforcement point; this pins that
+// the worktree path (which rein passes through ExtraAllowWrite) is covered by
+// it and cannot become a bypass.
+func TestMappedCheckoutUnderCredentialDenyFailsClosed(t *testing.T) {
+	home := t.TempDir()
+	credStore := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(filepath.Join(credStore, "checkout"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(home, "dev", "a")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := srt.Build(srt.Params{
+		SocketPath:         "/run/user/1000/rein/x/proxy.sock",
+		WorkingTree:        work,
+		ExtraAllowWrite:    []string{filepath.Join(credStore, "checkout")}, // the mapped "worktree"
+		DenyReadCredStores: []string{credStore},
+		DenyReadHome:       home,
+	})
+	if err == nil {
+		t.Fatal("a mapped checkout under a credential-store deny was accepted; srt would re-bind it READ-WRITE and re-expose the store")
+	}
+	if !strings.Contains(err.Error(), "authoritative deny-read") {
+		t.Fatalf("unexpected error (want the fail-closed deny-overlap refusal): %v", err)
+	}
+}
+
+// TestSandboxBannerEphemeralCwd (#64): when the cwd checkout is unhardenable and
+// falls back to an ephemeral working tree, the banner must (a) say the REAL tree
+// was NOT bound and why, (b) name the throwaway tree, (c) tell the human nothing
+// local persists and the push is the only durable artifact, and (d) NOT claim
+// "only the working tree persists" (which would be a lie — the tree is a
+// throwaway). It must also name the opt-in to bind the real tree anyway.
+func TestSandboxBannerEphemeralCwd(t *testing.T) {
+	var buf bytes.Buffer
+	sess := session.Session{ID: "sess_test", Role: "implement", Repos: []string{"owner/a"}}
+	printSandboxBanner(&buf, sess, "file:/x", "/run/s.sock", "/tmp/rein-ephemeral-work-9",
+		nil, []string{"claude"}, false, []string{"/home/x/.claude"}, "", worktree.Result{},
+		"/tmp/rein-agent-tmp-1", "/home/x/super", "owner/a")
+	out := buf.String()
+
+	for _, want := range []string{
+		"YOUR REAL CHECKOUT WAS NOT BOUND",          // the real tree was declined
+		"/home/x/super",                             // ...named
+		"EPHEMERAL throwaway tree",                  // the substitute, named
+		"/tmp/rein-ephemeral-work-9",                // ...its path
+		"clones owner/a there and PUSHES",           // clone-and-push instruction
+		"NOTHING local PERSISTS",                    // the honest persistence story
+		"ONLY durable artifact is the agent's PUSH", // ...restated
+		"REIN_SANDBOX_ALLOW_UNHARDENED_GIT=1",       // the opt-in to bind the real tree
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("ephemeral-cwd banner missing %q; got:\n%s", want, out)
+		}
+	}
+	// It must NOT tell the human the working tree persists — that is the exact lie
+	// the ephemeral special-casing exists to avoid.
+	if strings.Contains(out, "Only the working tree does") {
+		t.Errorf("ephemeral banner falsely claims the working tree persists; got:\n%s", out)
 	}
 }
