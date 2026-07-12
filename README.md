@@ -40,17 +40,22 @@ see [`docs/design.md`](docs/design.md) and
 ```mermaid
 flowchart LR
   subgraph machine["your machine"]
-    direction LR
+    direction TB
     subgraph sandbox["sandbox"]
       agent["the agent<br/>no token · no keys · no login"]
     end
-    proxy["proxy<br/>injects a short-lived token<br/>at the network layer"]
-    broker["broker + your App key<br/>key stays here · mints per-issue tokens"]
+    proxy["proxy<br/>injects the token<br/>at the network layer"]
+    broker["broker<br/>holds your App's private key"]
   end
-  gh["GitHub"]
-  agent -- "request" --> proxy
-  broker -. "token" .-> proxy
-  proxy -- "scoped, short-lived" --> gh
+  subgraph github["GitHub"]
+    app["your GitHub App<br/>scoped to the repos &<br/>permissions you chose"]
+    repos["your repos"]
+  end
+  broker == "signs with the key,<br/>mints a scoped token" ==> app
+  app -. "short-lived token" .-> broker
+  agent -- "git / gh" --> proxy
+  broker -. "injects the token" .-> proxy
+  proxy -- "already-scoped write" --> repos
 ```
 
 The key lives *outside* the sandbox and never crosses into it. What crosses the
@@ -65,10 +70,12 @@ sequenceDiagram
   participant A as Agent (sandbox)
   participant You
   participant R as rein broker
+  participant App as your GitHub App
   participant G as GitHub
   A->>You: rein declare (its issue)
   You->>R: approve (on your terminal)
-  R->>R: mint short-lived, issue-scoped token
+  R->>App: App key → mint a short-lived, issue-scoped token
+  App-->>R: scoped token
   R-->>A: inject at the proxy — agent never sees it
   A->>G: push — lands
 ```
