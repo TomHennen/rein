@@ -61,6 +61,8 @@ type checkResult struct {
 
 func runDoctor(args []string) error {
 	fs := flag.NewFlagSet("rein doctor", flag.ContinueOnError)
+	var fix bool
+	fs.BoolVar(&fix, "fix", false, "apply the SAFE (no-privilege) remediations with consent — reinstall shims, refresh the PATH symlink, clear a stale cache. Privileged/external steps (apt/npm/AppArmor/NTP) are shown, never run (onboarding-ux-design.md §6).")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -83,21 +85,55 @@ func runDoctor(args []string) error {
 	// launch — doctor is where the operator learns why before they hit it.
 	checks = append(checks, sandboxDoctorChecks()...)
 
+	results := runDoctorChecks(checks)
+	printDoctorTable(results)
+
+	if !fix {
+		// Read-only run: nudge toward --fix when there are safe fixes to make.
+		if n := countNoPrivFixes(results); n > 0 {
+			fmt.Printf("\n%d safe fix(es) available — run `rein doctor --fix` to apply (privileged/external steps stay guide-only).\n", n)
+		}
+		return doctorVerdict(results)
+	}
+
+	// --fix: apply the no-priv tier (with consent), guide the rest, then
+	// re-check so the operator sees the post-fix state.
+	fmt.Println("\napplying fixes (no-privilege tier only; privileged/external steps are shown, NOT run):")
+	applied := applyRemediations(results, os.Stdin, os.Stdout)
+	if applied > 0 {
+		fmt.Println("\nre-checking:")
+		results = runDoctorChecks(checks)
+		printDoctorTable(results)
+	}
+	return doctorVerdict(results)
+}
+
+// runDoctorChecks executes each check closure in order.
+func runDoctorChecks(checks []func() checkResult) []checkResult {
 	results := make([]checkResult, 0, len(checks))
 	for _, c := range checks {
 		results = append(results, c())
 	}
+	return results
+}
 
-	// Print aligned: marker | name (padded) | message.
+// printDoctorTable renders the aligned marker | name | message table.
+func printDoctorTable(results []checkResult) {
 	nameWidth := 0
 	for _, r := range results {
 		if len(r.name) > nameWidth {
 			nameWidth = len(r.name)
 		}
 	}
-	var fails int
 	for _, r := range results {
 		fmt.Printf("%s  %-*s  %s\n", marker(r.status), nameWidth, r.name+":", flattenMessage(r.message))
+	}
+}
+
+// doctorVerdict returns the exit-status error (non-nil iff any check failed).
+func doctorVerdict(results []checkResult) error {
+	fails := 0
+	for _, r := range results {
 		if r.status == statusFail {
 			fails++
 		}
