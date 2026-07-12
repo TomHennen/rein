@@ -162,6 +162,32 @@ rewriting each raw golden from a live run (then `git diff` shows what to commit)
 - **Before a PR that changes a journey**, run with `REIN_UPDATE_GOLDEN=1` and
   **commit the regenerated raw golden** — that raw golden IS the PR's deliverable.
 
+### `--sandbox`: prove the sandbox INVARIANTS still hold (not just the transcripts)
+
+A golden compare answers "does the transcript still read the same?". It does NOT,
+on its own, answer "does the sandbox still ENFORCE its boundary?" — a golden could
+keep matching while a regression quietly opened a hole (the transcript would only
+change if the *observable output* changed). So the runner has a **second,
+clearly-separated section**, opt-in via `run-journeys.sh --sandbox`:
+
+- **[A] GOLDEN-DRIFT** — every `journey_*.py` vs its golden (the default section).
+- **[B] SANDBOX-HOLDS** — the live sandbox invariants, run only with `--sandbox`.
+  It is the on-demand **"prove the sandbox still holds"** entry point and runs four
+  suites, PASS/FAIL each, non-zero exit if any (or any journey) fails:
+  1. `REIN_SANDBOX_E2E=1 go test ./internal/srt/ -run E2E` — deny-read + home-deny
+     + home-write-semantics under real srt.
+  2. `REIN_SANDBOX_E2E=1 go test ./cmd/rein/ -run E2E` — a working tree under an
+     allow-back stays writable.
+  3. `test_git_hardening.py` — the `.git` host-exec escape stays CLOSED (mv→EBUSY,
+     hooks/config read-only, `config.worktree` denied).
+  4. `test_agent_contract.py` — the injected contract reaches a REAL claude. Gated
+     on `claude` being on `PATH`; **SKIPped gracefully** (a clear note, not a
+     failure) when it is not, since LLM phrasing is not golden material.
+
+  These assert the same claims the `sandbox_filesystem` journey *narrates*, but as
+  pass/fail invariants — so a hole that left the transcript unchanged still trips.
+  Flags combine in any order: `run-journeys.sh --sandbox --normalized`.
+
 The `test_*.py` sweep (`run.sh`) additionally runs `test_golden_shape.py`, the
 stack-free lint that fails if a journey has no golden or if `normalize_for_compare`
 isn't idempotent on it — a cheap gate that needs no srt/GitHub/tty.
