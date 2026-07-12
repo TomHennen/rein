@@ -491,7 +491,12 @@ func runSandboxed(cmdline []string) (int, error) {
 		if err != nil {
 			return "", err
 		}
-		tok, _, err := ghsession.EnsureFresh(ghsession.ReadCachePath(stateDir), c.MintGhReadOnlyToken, c.RevokeToken, 5*time.Minute, mintTimeout, logger)
+		// Scope-tag the cache by the run's EFFECTIVE ceiling (issue #95): a
+		// still-fresh gh-read token minted by an earlier, NARROWER run (e.g. a
+		// single-repo-A run within the ~1h TTL) must not be served to this run
+		// — it would be scoped to A and 404 on repo B's issue fetch. Same
+		// ceiling => same file => caching behaves as before.
+		tok, _, err := ghsession.EnsureFresh(ghsession.ReadCachePathForScope(stateDir, rscope.Key()), c.MintGhReadOnlyToken, c.RevokeToken, 5*time.Minute, mintTimeout, logger)
 		return tok, err
 	}
 	mintWrite := brokercore.MintFunc(func(ctx context.Context) (string, time.Time, error) {

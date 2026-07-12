@@ -310,7 +310,7 @@ func runReadAndExec(realGh string, args []string, stateDir string, logger *log.L
 // still surfaces a clear auth error (the stated intent of the old behavior);
 // it just no longer succeeds with the wrong credential first.
 func readTierToken(stateDir string, logger *log.Logger) string {
-	appCfg, ks, _, err := loadAppCfgWithSession(logger)
+	appCfg, ks, _, rscope, err := loadAppCfgWithSession(logger)
 	if err != nil {
 		logger.Printf("read tier: %v; execing gh without GH_TOKEN", err)
 		return ""
@@ -321,7 +321,7 @@ func readTierToken(stateDir string, logger *log.Logger) string {
 		return ""
 	}
 	token, _, err := ghsession.EnsureFresh(
-		ghsession.ReadCachePath(stateDir),
+		ghsession.ReadCachePathForScope(stateDir, rscope.Key()),
 		client.MintGhReadOnlyToken,
 		client.RevokeToken,
 		refreshSkew,
@@ -343,25 +343,36 @@ func readTierToken(stateDir string, logger *log.Logger) string {
 // across two reads of dev-session.yaml.
 // CP4 sessions have one repo; CP5+ multi-repo will require per-call
 // repo selection.
-func loadAppCfgWithSession(logger *log.Logger) (githubapp.Config, keystore.Keystore, session.Session, error) {
+func loadAppCfgWithSession(logger *log.Logger) (githubapp.Config, keystore.Keystore, session.Session, *runscope.Resolver, error) {
 	appCfg, ks, _, err := config.ResolveApp()
 	if err != nil {
-		return githubapp.Config{}, nil, session.Session{}, err
+		return githubapp.Config{}, nil, session.Session{}, nil, err
 	}
 	sess, src, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
 	if err != nil {
-		return githubapp.Config{}, nil, session.Session{}, fmt.Errorf("load session: %w", err)
+		return githubapp.Config{}, nil, session.Session{}, nil, fmt.Errorf("load session: %w", err)
 	}
 	// Effective ceiling, not just the standing session (issue #69): a gh
 	// write/read against a repo the human approved as a mid-run scope
 	// expansion must be covered by the token this shim mints. A state-dir
 	// hiccup degrades to the standing ceiling — never wider.
+	//
+	// The SAME resolver is returned so callers scope-tag the gh-read cache by
+	// this exact ceiling (issue #95) — the token's scope and its cache file's
+	// key must agree, or a narrower earlier run's cached token could be served
+	// here. A zero stateDir gives a resolver with no run context (runID ""),
+	// whose Key is the standing repos — matching the fallback mint scope.
+	stateDir, serr := config.StateDir()
+	if serr != nil {
+		stateDir = ""
+	}
+	rscope := runscope.New(sess, stateDir, os.Getenv("REIN_RUN_ID"))
 	appCfg.RepoNames = sess.BareRepoNames()
-	if stateDir, serr := config.StateDir(); serr == nil {
-		appCfg.RepoNames = runscope.New(sess, stateDir, os.Getenv("REIN_RUN_ID")).BareNames()
+	if serr == nil {
+		appCfg.RepoNames = rscope.BareNames()
 	}
 	logger.Printf("session: id=%q repos=%v source=%s", sess.ID, sess.Repos, src)
-	return appCfg, ks, sess, nil
+	return appCfg, ks, sess, rscope, nil
 }
 
 // execGhWithoutToken is the denial path: fork real gh with denyEnv — every
@@ -449,7 +460,7 @@ func envInt(name string) int {
 // the user gets gh's "needs auth" error instead of a shim error, and never a
 // write executed with their own ambient PAT (issue #57).
 func runWrite(realGh string, args []string, stateDir string, logger *log.Logger) int {
-	appCfg, ks, sess, cfgErr := loadAppCfgWithSession(logger)
+	appCfg, ks, sess, rscope, cfgErr := loadAppCfgWithSession(logger)
 	var token string
 	var client *githubapp.Client
 
@@ -480,7 +491,7 @@ func runWrite(realGh string, args []string, stateDir string, logger *log.Logger)
 			if err != nil {
 				return "", err
 			}
-			tok, _, err := ghsession.EnsureFresh(ghsession.ReadCachePath(stateDir), client.MintGhReadOnlyToken, client.RevokeToken, refreshSkew, mintTimeout, logger)
+			tok, _, err := ghsession.EnsureFresh(ghsession.ReadCachePathForScope(stateDir, rscope.Key()), client.MintGhReadOnlyToken, client.RevokeToken, refreshSkew, mintTimeout, logger)
 			return tok, err
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

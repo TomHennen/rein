@@ -173,7 +173,9 @@ func TestClearStaleGhCache(t *testing.T) {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatalf("mkdir state: %v", err)
 	}
-	path := ghsession.ReadCachePath(stateDir)
+	// A per-scope gh-read cache file (issue #95); clearStaleGhCache globs all
+	// gh-read-token*.json, so any scoped filename exercises the same path.
+	path := ghsession.ReadCachePathForScope(stateDir, "owner/alpha")
 
 	// absent -> no-op, no error.
 	if err := clearStaleGhCache(); err != nil {

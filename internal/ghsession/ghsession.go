@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/TomHennen/rein/internal/runscope"
 	"github.com/TomHennen/rein/internal/tokencache"
 )
 
@@ -95,10 +96,28 @@ func EnsureFresh(
 	return token, expiresAt, nil
 }
 
-// ReadCachePath returns the canonical path within stateDir for the gh
-// read-tier token cache. (The write tier is never cached.) Defined as a
-// function so callers don't hardcode the layout — if it moves, both
-// rein-gh and rein gh-auth follow.
-func ReadCachePath(stateDir string) string {
-	return filepath.Join(stateDir, "cache", "gh-read-token.json")
+// ReadCachePathForScope returns the path within stateDir for the gh
+// read-tier token cache of ONE scope ceiling. (The write tier is never
+// cached.) The filename carries a fingerprint of the ceiling's scope key
+// (runscope.Resolver.Key), so a token minted under a NARROWER earlier run —
+// e.g. a single-repo-A run within the ~1h token TTL — is stored under a
+// different filename than a wider [A,B] run's token and can never be served
+// to it (issue #95). This mirrors the direct-mode git-read cache
+// (read-token-<tag>.json) exactly; both derive the tag from
+// runscope.CacheTag so the two never diverge.
+//
+// scopeKey MUST be a runscope.Resolver.Key() value for the CURRENT effective
+// ceiling — never a launch-time snapshot — or a still-fresh token could be
+// served for a repo it does not cover (a 404/403 inside the agent).
+func ReadCachePathForScope(stateDir, scopeKey string) string {
+	return filepath.Join(stateDir, "cache", "gh-read-token-"+runscope.CacheTag(scopeKey)+".json")
+}
+
+// ReadCacheGlob returns a glob that matches EVERY per-scope gh read-token
+// cache file under stateDir, including any legacy untagged
+// gh-read-token.json left by an older rein. Diagnostic/cleanup callers
+// (`rein doctor`, remediation) enumerate this so they still inspect and
+// groom all caches now that the filename varies by scope.
+func ReadCacheGlob(stateDir string) string {
+	return filepath.Join(stateDir, "cache", "gh-read-token*.json")
 }
