@@ -7,9 +7,9 @@ rein: sandbox preflight:
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_expansion (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-b-trqtgdxs/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-DU9CeZu-txucHdRNMPhfTw/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-itest-mnfio__d
+  session: sess_journey_expansion (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-b-7yp_s7vp/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-PCk6cnHNed09JDjB4jhOSw/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-itest-3epehkwy
   the agent sees NO real token; git/gh are injected at the proxy.
   credential stores, ~/.ssh, on-disk keyrings, and keyring/agent sockets are hidden.
   extra egress ALLOWED (direct TLS, NOT injected, no rein token): api.anthropic.com
@@ -19,36 +19,38 @@ rein: launching SANDBOXED (srt) run:
 rein: running: bash -c
 set +e
 emit() { printf '%s%s\n' 'SBX| ' "$*"; }
-runtagged() {
+run() {
+  printf '%s$ %s\n' 'SBX| ' "$*"
   "$@" 2>&1 | tr '\r' '\n' | while IFS= read -r l; do printf '%s%s\n' 'SBX| ' "$l"; done
   return ${PIPESTATUS[0]}
 }
 cd "$0"
 rm -rf repo
-runtagged git clone --progress https://github.com/TomHennen/agentcreds-validation-a repo
+run git clone --progress https://github.com/TomHennen/agentcreds-validation-a repo
 cd repo || { emit "@CLONE_FAIL"; exit 3; }
 emit "@CLONE_OK  (session is scoped to repo A only)"
 
 emit "@PHASE1_START  rein declare 2 --repo TomHennen/agentcreds-validation-b  (B is OUTSIDE scope: expansion prompt, blocks)"
-runtagged rein declare 2 --repo TomHennen/agentcreds-validation-b
+run rein declare 2 --repo TomHennen/agentcreds-validation-b
 emit "@PHASE1_RC=$?"
 
 emit "@PHASE2_START  clone repo B into scratch (scope grew, binds did not: use TMPDIR, not the working tree)"
 scratch="${TMPDIR:-/tmp}/rein-expansion-b"
 rm -rf "$scratch"
-runtagged git clone --progress https://github.com/TomHennen/agentcreds-validation-b "$scratch"
+run git clone --progress https://github.com/TomHennen/agentcreds-validation-b "$scratch"
 emit "@PHASE2_RC=$?"
 cd "$scratch" || { emit "@CLONEB_FAIL"; exit 4; }
 
 emit "@PHASE3_START  push agent/2/<nonce> to repo B (expect: lands)"
 echo "scope-expansion probe $(date -u +%FT%TZ)" >> expansion-probe.txt
-runtagged git add -A
-runtagged git commit -q -m "scope-expansion journey: push to repo B"
-runtagged git push --progress origin HEAD:refs/heads/agent/2/exp-20260711-213057-bb4407
+run git add -A
+run git commit -q -m "scope-expansion journey: push to repo B"
+run git push --progress origin HEAD:refs/heads/agent/2/exp-20260712-105510-efcd9c
 emit "@PHASE3_RC=$?"
 emit "@SCRIPT_DONE"
- /tmp/rein-itest-mnfio__d
+ /tmp/rein-itest-3epehkwy
 ---
+SBX| $ git clone --progress https://github.com/TomHennen/agentcreds-validation-a repo
 SBX| Cloning into 'repo'...
 SBX| remote: Enumerating objects: 57, done.
 SBX| remote: Counting objects: 100% (3/3), done.
@@ -58,6 +60,7 @@ SBX| Receiving objects: 100% (57/57), 5.00 KiB | 5.00 MiB/s, done.
 SBX| Resolving deltas: 100% (17/17), done.
 SBX| @CLONE_OK  (session is scoped to repo A only)
 SBX| @PHASE1_START  rein declare 2 --repo TomHennen/agentcreds-validation-b  (B is OUTSIDE scope: expansion prompt, blocks)
+SBX| $ rein declare 2 --repo TomHennen/agentcreds-validation-b
 
 === rein: SCOPE EXPANSION requested ===
    session:   sess_journey_expansion (role=implement, repos=[TomHennen/agentcreds-validation-a])
@@ -85,25 +88,29 @@ SBX|       working tree, where a nested repo can end up committed into the other
 SBX|       ephemeral; the durable artifact is the PUSH.
 SBX| @PHASE1_RC=0
 SBX| @PHASE2_START  clone repo B into scratch (scope grew, binds did not: use TMPDIR, not the working tree)
-SBX| Cloning into '/tmp/rein-agent-tmp-4043655414/rein-expansion-b'...
+SBX| $ git clone --progress https://github.com/TomHennen/agentcreds-validation-b /tmp/rein-agent-tmp-1613601761/rein-expansion-b
+SBX| Cloning into '/tmp/rein-agent-tmp-1613601761/rein-expansion-b'...
 SBX| remote: Enumerating objects: 3, done.
 SBX| remote: Counting objects: 100% (3/3), done.
 SBX| remote: Total 3 (delta 0), reused 3 (delta 0), pack-reused 0 (from 0)
 SBX| Receiving objects: 100% (3/3), done.
 SBX| @PHASE2_RC=0
 SBX| @PHASE3_START  push agent/2/<nonce> to repo B (expect: lands)
+SBX| $ git add -A
+SBX| $ git commit -q -m scope-expansion journey: push to repo B
+SBX| $ git push --progress origin HEAD:refs/heads/agent/2/exp-20260712-105510-efcd9c
 SBX| Enumerating objects: 5, done.
 SBX| Counting objects: 100% (5/5), done.
 SBX| Delta compression using up to 8 threads
 SBX| Compressing objects: 100% (2/2), done.
-SBX| Writing objects: 100% (3/3), 374 bytes | 374.00 KiB/s, done.
+SBX| Writing objects: 100% (3/3), 379 bytes | 379.00 KiB/s, done.
 SBX| Total 3 (delta 0), reused 0 (delta 0), pack-reused 0
 SBX| remote:
-SBX| remote: Create a pull request for 'agent/2/exp-20260711-213057-bb4407' on GitHub by visiting:
-SBX| remote:      https://github.com/TomHennen/agentcreds-validation-b/pull/new/agent/2/exp-20260711-213057-bb4407
+SBX| remote: Create a pull request for 'agent/2/exp-20260712-105510-efcd9c' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-b/pull/new/agent/2/exp-20260712-105510-efcd9c
 SBX| remote:
 SBX| To https://github.com/TomHennen/agentcreds-validation-b
-SBX|  * [new branch]      HEAD -> agent/2/exp-20260711-213057-bb4407
+SBX|  * [new branch]      HEAD -> agent/2/exp-20260712-105510-efcd9c
 SBX| @PHASE3_RC=0
 SBX| @SCRIPT_DONE
 rein: warning: exit-revoke of a write token failed (best-effort; it expires on its own): revoke: unexpected status 404

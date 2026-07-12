@@ -99,11 +99,13 @@ def expansion_script(repo_a: str, repo_b: str, issue_b: int, branch_b: str) -> s
     tagged `@PHASE..` sentinel and the test asserts on those IN SEQUENCE — the run
     reads as expect->act->expect even though the child runs once.
 
-    `runtagged` pipes a command's combined output through `tr '\\r' '\\n'` (so
-    git's carriage-return progress redraws become real lines) and prefixes every
-    line with SBX_TAG, preserving the command's own exit code via PIPESTATUS. The
-    clone/push pass `--progress` ON PURPOSE (git suppresses its meter once stderr
-    is a pipe, not a tty); the golden keeps those lines with counts normalized.
+    Commands go through `run` (reinharness.sandbox_preamble): it echoes each one
+    as `SBX| $ <command>` and then tags its output, so the transcript interleaves
+    command -> output -> command like a real terminal session. The @PHASE.. lines
+    (via `emit`) stay as the human-readable "what step is this" labels. `run`
+    preserves the command's own exit code via PIPESTATUS. The clone/push pass
+    `--progress` ON PURPOSE (git suppresses its meter once stderr is a pipe, not a
+    tty); the golden keeps those lines with counts normalized.
 
     Repo B has NO sandbox bind mount of its own — the binds are fixed at launch
     (#64) and no mid-run approval can make a new path writable — so B is cloned
@@ -111,36 +113,30 @@ def expansion_script(repo_a: str, repo_b: str, issue_b: int, branch_b: str) -> s
     A's working tree. That is exactly what rein's approve-message steers the agent
     to do (declare.expansionApprovedMessage: "clone into $HOME/ or $TMPDIR").
     """
-    tag = H.SBX_TAG
     return f"""
-set +e
-emit() {{ printf '%s%s\\n' '{tag}' "$*"; }}
-runtagged() {{
-  "$@" 2>&1 | tr '\\r' '\\n' | while IFS= read -r l; do printf '%s%s\\n' '{tag}' "$l"; done
-  return ${{PIPESTATUS[0]}}
-}}
+{H.sandbox_preamble()}
 cd "$0"
 rm -rf repo
-runtagged git clone --progress https://github.com/{repo_a} repo
+run git clone --progress https://github.com/{repo_a} repo
 cd repo || {{ emit "@CLONE_FAIL"; exit 3; }}
 emit "@CLONE_OK  (session is scoped to repo A only)"
 
 emit "@PHASE1_START  rein declare {issue_b} --repo {repo_b}  (B is OUTSIDE scope: expansion prompt, blocks)"
-runtagged rein declare {issue_b} --repo {repo_b}
+run rein declare {issue_b} --repo {repo_b}
 emit "@PHASE1_RC=$?"
 
 emit "@PHASE2_START  clone repo B into scratch (scope grew, binds did not: use TMPDIR, not the working tree)"
 scratch="${{TMPDIR:-/tmp}}/rein-expansion-b"
 rm -rf "$scratch"
-runtagged git clone --progress https://github.com/{repo_b} "$scratch"
+run git clone --progress https://github.com/{repo_b} "$scratch"
 emit "@PHASE2_RC=$?"
 cd "$scratch" || {{ emit "@CLONEB_FAIL"; exit 4; }}
 
 emit "@PHASE3_START  push agent/{issue_b}/<nonce> to repo B (expect: lands)"
 echo "scope-expansion probe $(date -u +%FT%TZ)" >> expansion-probe.txt
-runtagged git add -A
-runtagged git commit -q -m "scope-expansion journey: push to repo B"
-runtagged git push --progress origin HEAD:refs/heads/{branch_b}
+run git add -A
+run git commit -q -m "scope-expansion journey: push to repo B"
+run git push --progress origin HEAD:refs/heads/{branch_b}
 emit "@PHASE3_RC=$?"
 emit "@SCRIPT_DONE"
 """
