@@ -79,16 +79,6 @@ import reinharness as H
 
 GOLDEN_NAME = "init_autodetect.txt"
 
-# --no-alias --no-symlink --skip-mint-check keep an init run inert; NO --yes, so
-# the repo prompt genuinely renders and can be answered live.
-INIT_FLAGS = ["--no-alias", "--no-symlink", "--skip-mint-check"]
-MACHINE_PROMPT = r"(?i)name this machine"  # #82 asks this FIRST, before the repo
-REPO_PROMPT = "Which repo should the agent work on"
-# Pin the machine-label default so the golden is stable run-to-run and portable
-# across boxes (the raw hostname is machine-variable and un-normalized). Same
-# knob the onboarding journey uses.
-MACHINE_LABEL = "demo-box"
-
 
 def make_checkout(repo: str) -> str:
     """A real git work tree whose `origin` is the throwaway repo.
@@ -124,45 +114,54 @@ def main() -> int:
     home_detected = H.isolated_home()
     home_bare = H.isolated_home()
 
-    # Init legs pin the machine label (see MACHINE_LABEL) so the #82 machine-label
-    # prompt renders a stable default.
+    # Init legs pin the machine label to a stable "demo-box" so the #82
+    # machine-label prompt renders a deterministic default (the raw hostname is
+    # machine-variable and un-normalized). Same knob the onboarding journey uses.
     init_env_detected = dict(H.isolated_home_env(home_detected))
-    init_env_detected["REIN_MACHINE_HOSTNAME"] = MACHINE_LABEL
+    init_env_detected["REIN_MACHINE_HOSTNAME"] = "demo-box"
     init_env_bare = dict(H.isolated_home_env(home_bare))
-    init_env_bare["REIN_MACHINE_HOSTNAME"] = MACHINE_LABEL
+    init_env_bare["REIN_MACHINE_HOSTNAME"] = "demo-box"
 
     # The run legs blank REIN_TEST_REPO_A so LoadOrFallback has NO fallback and
     # the cold "no session" (and thus noSessionHint) actually fires; --direct is
     # the only path that carries the hint.
+    #
+    # REIN_TEST_REPO_A is a PRODUCTION special-case: cmd/rein reads it via
+    # session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A")) as a last-resort repo
+    # fallback, so blanking it here is what forces the genuine no-session state.
+    # That production special-casing is tracked for removal by #40 — once #40
+    # lands and LoadOrFallback no longer consults this env var, this blanking
+    # becomes unnecessary and can be dropped.
     run_env = dict(H.isolated_home_env(home_bare))
     run_env["REIN_TEST_REPO_A"] = ""
 
-    flags = " ".join(INIT_FLAGS)
     # DECLARE STEPS ONLY — argv + cwd + the ordered answers. run_journey captures
     # the COMPLETE session of all four; nothing is sliced or hand-assembled. The
     # two init legs run FIRST so the nongit init populates `home_bare`'s shim
-    # before the run legs reuse it.
+    # before the run legs reuse it. The init flags (--no-alias --no-symlink
+    # --skip-mint-check) keep an init run inert; NO --yes, so the repo prompt
+    # genuinely renders and can be answered live.
     result = H.run_journey(
         [
             H.JourneyStep(
-                argv=["init", *INIT_FLAGS],
+                argv=["init", "--no-alias", "--no-symlink", "--skip-mint-check"],
                 answers=[
-                    (MACHINE_PROMPT, ""),   # accept the pinned machine label
-                    (REPO_PROMPT, ""),      # Enter accepts the detected default
+                    (r"(?i)name this machine", ""),   # accept the pinned "demo-box" label
+                    ("Which repo should the agent work on", ""),  # Enter accepts the detected default
                 ],
                 cwd=checkout,
                 extra_env=init_env_detected,
-                label=f"cd {checkout} && rein init {flags}",
+                label=f"cd {checkout} && rein init --no-alias --no-symlink --skip-mint-check",
             ),
             H.JourneyStep(
-                argv=["init", *INIT_FLAGS],
+                argv=["init", "--no-alias", "--no-symlink", "--skip-mint-check"],
                 answers=[
-                    (MACHINE_PROMPT, ""),   # accept the pinned machine label
-                    (REPO_PROMPT, ""),      # Enter with no default = graceful skip
+                    (r"(?i)name this machine", ""),   # accept the pinned "demo-box" label
+                    ("Which repo should the agent work on", ""),  # Enter with no default = graceful skip
                 ],
                 cwd=nongit,
                 extra_env=init_env_bare,
-                label=f"cd {nongit} && rein init {flags}",
+                label=f"cd {nongit} && rein init --no-alias --no-symlink --skip-mint-check",
             ),
             H.JourneyStep(
                 argv=["run", "--direct", "--", "echo", "hi"],
@@ -182,19 +181,16 @@ def main() -> int:
     text = result.transcript
     init_detected, init_bare, run_detected, run_bare = result.steps
 
-    run_repo_hint = f"rein init --repo {repo}"
-    detected_default = f"[{repo}]"
-
     # 1) The #69 detection itself must hold — independent of the golden (exit 2).
     #    Expected values are INLINE LITERALS (a reviewer reads what's expected
-    #    here, not a chased-down constant).
+    #    here, not a chased-down constant); `repo` is the one runtime input.
     invariants = [
         (result.reached_eof, "every driven command must run to completion (no missed prompt)"),
         (init_detected.exitstatus == 0, f"detected-leg init must exit 0; got {init_detected.exitstatus}"),
         (init_bare.exitstatus == 0, f"contrast-leg init must exit 0; got {init_bare.exitstatus}"),
         (
-            "(default detected from this dir)" in text and detected_default in text,
-            f"detected init leg: the prompt is PRE-FILLED with {detected_default}",
+            "(default detected from this dir)" in text and f"[{repo}]" in text,
+            f"detected init leg: the prompt is PRE-FILLED with [{repo}]",
         ),
         (
             f"(repos: [{repo}])" in text,
@@ -206,7 +202,7 @@ def main() -> int:
         ),
         (
             "(default detected from this dir)" not in init_bare.text
-            and detected_default not in init_bare.text,
+            and f"[{repo}]" not in init_bare.text,
             "contrast init leg: the bare prompt has NO pre-filled default (cwd-derived)",
         ),
         (
@@ -214,11 +210,11 @@ def main() -> int:
             "contrast init leg: a bare Enter with no default scaffolds nothing (graceful skip)",
         ),
         (
-            run_repo_hint in run_detected.text,
-            f"run hint from the checkout must name `{run_repo_hint}`",
+            f"rein init --repo {repo}" in run_detected.text,
+            f"run hint from the checkout must name `rein init --repo {repo}`",
         ),
         (
-            run_repo_hint not in run_bare.text
+            f"rein init --repo {repo}" not in run_bare.text
             and "rein init` to create one" in run_bare.text,
             "run hint from a NON-git dir is the generic hint (no --repo) — cwd-derived",
         ),
@@ -235,8 +231,8 @@ def main() -> int:
     print()
     print(text, flush=True)  # what actually happened, real repo + real prompt + real hint
     print("--- outcomes (asserted; the hint is now IN the golden, not excluded) ---", flush=True)
-    print(f"  detected init prompt pre-filled with: {detected_default}", flush=True)
-    print(f"  run hint (checkout) names:            {run_repo_hint}", flush=True)
+    print(f"  detected init prompt pre-filled with: [{repo}]", flush=True)
+    print(f"  run hint (checkout) names:            rein init --repo {repo}", flush=True)
     print("  run hint (non-git) degrades to:       run `rein init` to create one", flush=True)
 
     if os.getenv("REIN_SHOW_NORMALIZED"):
