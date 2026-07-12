@@ -4,18 +4,37 @@ rein: sandbox preflight:
   [ok]   seccomp: apply-seccomp present (unix-socket block available)
   [ok]   bwrap userns: unprivileged user namespace works
   [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
+rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-clb37j5d (git -C /tmp/rein-itest-clb37j5d rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_expansion (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-b-j7pdrsji/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-H1udlEkdA0dGkUM7hxmGiQ/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-itest-2iiq280s
+  session: sess_journey_expansion (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-b-xjmowr1c/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-IaLTDtgTUqXmOcndlyTXcw/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-itest-clb37j5d
+  a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-3333237645
+    (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
+     never inside the working tree, where a nested clone can be committed into it).
+    map it under `worktrees:` to use your own checkout on the NEXT run.
   the agent sees NO real token; git/gh are injected at the proxy.
   credential stores, ~/.ssh, on-disk keyrings, and keyring/agent sockets are hidden.
+  $HOME is HIDDEN in-sandbox. Three different behaviors — know which one you get:
+    READS of a hidden path FAIL LOUDLY: ENOENT, or an empty listing for a dir.
+    WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
+      DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
+    WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-itest-clb37j5d
+    => work the agent must keep has to be written INTO the working tree.
+    allowed back read-only: /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.claude, /home/admin/.claude.json, /home/admin/.local/bin, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv
+    if a tool breaks on a hidden $HOME path, allow it back narrowly:
+      REIN_SANDBOX_ALLOW_READ=/abs/path[:/more] rein run --sandbox -- …
+    or (NOT recommended — exposes your whole home dir): REIN_SANDBOX_SHOW_HOME=1
   extra egress ALLOWED (direct TLS, NOT injected, no rein token): api.anthropic.com
   writes are LOCKED until the agent declares its issue:  rein declare <n>
   then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.
   to run bash WITHOUT rein for one command: `\bash` (bash/zsh) or `command bash` (fish)
+  agent contract PRINTED to the agent's output (this agent has no system-prompt channel, so it may or
+    may not reach the model's context; the REIN_IN_SANDBOX_* env vars carry the same facts machine-readably).
 rein: running: bash -c
 set +e
 emit() { printf '%s%s\n' 'SBX| ' "$*"; }
@@ -45,11 +64,42 @@ emit "@PHASE3_START  push agent/2/<nonce> to repo B (expect: lands)"
 echo "scope-expansion probe $(date -u +%FT%TZ)" >> expansion-probe.txt
 run git add -A
 run git commit -q -m "scope-expansion journey: push to repo B"
-run git push --progress origin HEAD:refs/heads/agent/2/exp-20260712-133328-50102f
+run git push --progress origin HEAD:refs/heads/agent/2/exp-20260712-143332-f500b2
 emit "@PHASE3_RC=$?"
 emit "@SCRIPT_DONE"
- /tmp/rein-itest-2iiq280s
+ /tmp/rein-itest-clb37j5d
 ---
+rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
+
+FILES
+- Your work persists ONLY in the working tree: /tmp/rein-itest-clb37j5d
+  Write anything that must outlive this run THERE. Nothing else survives.
+- $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
+  DISCARDED when the run ends. You will get no error. Do not keep work there.
+- Most of $HOME reads as empty/missing; a few paths are re-exposed READ-ONLY, where
+  writes fail with "Read-only file system". Caches work but start cold each run.
+
+CREDENTIALS
+- There are NO credentials in this environment. Tokens, keys, and credential stores
+  are hidden on purpose. Do not go looking for them, and do not ask the user for one.
+- git and gh still work anyway: a proxy OUTSIDE the sandbox injects a short-lived
+  GitHub token you never see. Just use them normally.
+
+GITHUB WRITES
+- Writes to GitHub (push, PRs, comments, any API mutation) are LOCKED until you
+  declare the issue this work is for:
+      rein declare <n>
+  That asks the human to approve, on their terminal. Reads work without it.
+- Once confirmed, push ONLY to a branch named:
+      agent/<n>/<nonce>
+  where <n> is the declared issue number and <nonce> is a short name you choose
+  (letters/digits, then letters/digits/./_/-). Any other ref is rejected.
+- One issue per push.
+
+NETWORK
+- Egress is restricted to GitHub plus: api.anthropic.com
+- Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.
+
 SBX| $ git clone --progress https://github.com/TomHennen/agentcreds-validation-a repo
 SBX| Cloning into 'repo'...
 SBX| remote: Enumerating objects: 57, done.
@@ -88,8 +138,8 @@ SBX|       working tree, where a nested repo can end up committed into the other
 SBX|       ephemeral; the durable artifact is the PUSH.
 SBX| @PHASE1_RC=0
 SBX| @PHASE2_START  clone repo B into scratch (scope grew, binds did not: use TMPDIR, not the working tree)
-SBX| $ git clone --progress https://github.com/TomHennen/agentcreds-validation-b /tmp/rein-agent-tmp-1793727454/rein-expansion-b
-SBX| Cloning into '/tmp/rein-agent-tmp-1793727454/rein-expansion-b'...
+SBX| $ git clone --progress https://github.com/TomHennen/agentcreds-validation-b /tmp/rein-agent-tmp-3333237645/rein-expansion-b
+SBX| Cloning into '/tmp/rein-agent-tmp-3333237645/rein-expansion-b'...
 SBX| remote: Enumerating objects: 3, done.
 SBX| remote: Counting objects: 100% (3/3), done.
 SBX| remote: Total 3 (delta 0), reused 3 (delta 0), pack-reused 0 (from 0)
@@ -98,19 +148,19 @@ SBX| @PHASE2_RC=0
 SBX| @PHASE3_START  push agent/2/<nonce> to repo B (expect: lands)
 SBX| $ git add -A
 SBX| $ git commit -q -m scope-expansion journey: push to repo B
-SBX| $ git push --progress origin HEAD:refs/heads/agent/2/exp-20260712-133328-50102f
+SBX| $ git push --progress origin HEAD:refs/heads/agent/2/exp-20260712-143332-f500b2
 SBX| Enumerating objects: 5, done.
 SBX| Counting objects: 100% (5/5), done.
 SBX| Delta compression using up to 8 threads
 SBX| Compressing objects: 100% (2/2), done.
-SBX| Writing objects: 100% (3/3), 377 bytes | 377.00 KiB/s, done.
+SBX| Writing objects: 100% (3/3), 379 bytes | 379.00 KiB/s, done.
 SBX| Total 3 (delta 0), reused 0 (delta 0), pack-reused 0
 SBX| remote:
-SBX| remote: Create a pull request for 'agent/2/exp-20260712-133328-50102f' on GitHub by visiting:
-SBX| remote:      https://github.com/TomHennen/agentcreds-validation-b/pull/new/agent/2/exp-20260712-133328-50102f
+SBX| remote: Create a pull request for 'agent/2/exp-20260712-143332-f500b2' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-b/pull/new/agent/2/exp-20260712-143332-f500b2
 SBX| remote:
 SBX| To https://github.com/TomHennen/agentcreds-validation-b
-SBX|  * [new branch]      HEAD -> agent/2/exp-20260712-133328-50102f
+SBX|  * [new branch]      HEAD -> agent/2/exp-20260712-143332-f500b2
 SBX| @PHASE3_RC=0
 SBX| @SCRIPT_DONE
 rein: revoked 1 of 1 write token(s) on exit
