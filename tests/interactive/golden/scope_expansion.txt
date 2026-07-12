@@ -7,9 +7,9 @@ rein: sandbox preflight:
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_expansion (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-b-7yp_s7vp/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-PCk6cnHNed09JDjB4jhOSw/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-itest-3epehkwy
+  session: sess_journey_expansion (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-b-j7pdrsji/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-H1udlEkdA0dGkUM7hxmGiQ/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-itest-2iiq280s
   the agent sees NO real token; git/gh are injected at the proxy.
   credential stores, ~/.ssh, on-disk keyrings, and keyring/agent sockets are hidden.
   extra egress ALLOWED (direct TLS, NOT injected, no rein token): api.anthropic.com
@@ -45,10 +45,10 @@ emit "@PHASE3_START  push agent/2/<nonce> to repo B (expect: lands)"
 echo "scope-expansion probe $(date -u +%FT%TZ)" >> expansion-probe.txt
 run git add -A
 run git commit -q -m "scope-expansion journey: push to repo B"
-run git push --progress origin HEAD:refs/heads/agent/2/exp-20260712-105510-efcd9c
+run git push --progress origin HEAD:refs/heads/agent/2/exp-20260712-133328-50102f
 emit "@PHASE3_RC=$?"
 emit "@SCRIPT_DONE"
- /tmp/rein-itest-3epehkwy
+ /tmp/rein-itest-2iiq280s
 ---
 SBX| $ git clone --progress https://github.com/TomHennen/agentcreds-validation-a repo
 SBX| Cloning into 'repo'...
@@ -88,8 +88,8 @@ SBX|       working tree, where a nested repo can end up committed into the other
 SBX|       ephemeral; the durable artifact is the PUSH.
 SBX| @PHASE1_RC=0
 SBX| @PHASE2_START  clone repo B into scratch (scope grew, binds did not: use TMPDIR, not the working tree)
-SBX| $ git clone --progress https://github.com/TomHennen/agentcreds-validation-b /tmp/rein-agent-tmp-1613601761/rein-expansion-b
-SBX| Cloning into '/tmp/rein-agent-tmp-1613601761/rein-expansion-b'...
+SBX| $ git clone --progress https://github.com/TomHennen/agentcreds-validation-b /tmp/rein-agent-tmp-1793727454/rein-expansion-b
+SBX| Cloning into '/tmp/rein-agent-tmp-1793727454/rein-expansion-b'...
 SBX| remote: Enumerating objects: 3, done.
 SBX| remote: Counting objects: 100% (3/3), done.
 SBX| remote: Total 3 (delta 0), reused 3 (delta 0), pack-reused 0 (from 0)
@@ -98,20 +98,19 @@ SBX| @PHASE2_RC=0
 SBX| @PHASE3_START  push agent/2/<nonce> to repo B (expect: lands)
 SBX| $ git add -A
 SBX| $ git commit -q -m scope-expansion journey: push to repo B
-SBX| $ git push --progress origin HEAD:refs/heads/agent/2/exp-20260712-105510-efcd9c
+SBX| $ git push --progress origin HEAD:refs/heads/agent/2/exp-20260712-133328-50102f
 SBX| Enumerating objects: 5, done.
 SBX| Counting objects: 100% (5/5), done.
 SBX| Delta compression using up to 8 threads
 SBX| Compressing objects: 100% (2/2), done.
-SBX| Writing objects: 100% (3/3), 379 bytes | 379.00 KiB/s, done.
+SBX| Writing objects: 100% (3/3), 377 bytes | 377.00 KiB/s, done.
 SBX| Total 3 (delta 0), reused 0 (delta 0), pack-reused 0
 SBX| remote:
-SBX| remote: Create a pull request for 'agent/2/exp-20260712-105510-efcd9c' on GitHub by visiting:
-SBX| remote:      https://github.com/TomHennen/agentcreds-validation-b/pull/new/agent/2/exp-20260712-105510-efcd9c
+SBX| remote: Create a pull request for 'agent/2/exp-20260712-133328-50102f' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-b/pull/new/agent/2/exp-20260712-133328-50102f
 SBX| remote:
 SBX| To https://github.com/TomHennen/agentcreds-validation-b
-SBX|  * [new branch]      HEAD -> agent/2/exp-20260712-105510-efcd9c
+SBX|  * [new branch]      HEAD -> agent/2/exp-20260712-133328-50102f
 SBX| @PHASE3_RC=0
 SBX| @SCRIPT_DONE
-rein: warning: exit-revoke of a write token failed (best-effort; it expires on its own): revoke: unexpected status 404
-rein: revoked 1 of 2 write token(s) on exit
+rein: revoked 1 of 1 write token(s) on exit
