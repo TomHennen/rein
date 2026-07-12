@@ -29,9 +29,10 @@ in ONE run. This is it.)
   * WRITE to B — the second-issue confirm IS part of this path, shown, not routed
     around. `rein declare <issueB> --repo B` is the SECOND issue confirmed in the
     same run, so grant renders the distinct header "agent wants to ALSO work on an
-    issue (scope expansion)" (grant.go: expansion = the run already holds a
-    confirmed issue — purely issue-count, NOT repo-gated). It is NOT a REPO
-    scope-expansion prompt: B is already in the static ceiling, so `resolveRepo`
+    issue" (grant.go: expansion = the run already holds a confirmed issue — purely
+    issue-count, NOT repo-gated). The header deliberately does NOT say "scope
+    expansion": that phrase is reserved for a REPO scope-expansion. B is already in
+    the static ceiling, so `resolveRepo`
     returns expansion=false and NO `SCOPE EXPANSION requested` / `agent asks to ADD
     repo` text renders (an OUT-of-scope repo would trip THAT — journey_scope_expansion
     covers it). A human approves; the verified push to B's `agent/<issueB>/<nonce>`
