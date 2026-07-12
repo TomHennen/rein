@@ -62,8 +62,6 @@ import subprocess
 import sys
 import tempfile
 
-import pexpect
-
 import reinharness as H
 
 GOLDEN_NAME = "sandbox_filesystem.txt"
@@ -187,35 +185,36 @@ def _rc(text: str, name: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def run_journey(env, repo, workdir):
-    """Drive the live sandboxed run; return (transcript_text, rcs)."""
-    script = sandbox_script()
-    session = _pinned_session(repo)
-    run = H.spawn_rein_run(
-        ["bash", "-c", script], workdir=workdir, env=env,
-        extra_env={"REIN_SESSION_FILE": session},
+def drive_journey(env, repo, workdir):
+    """Drive the ONE sandboxed `rein run` through the shared runner (#82 / Tom's
+    "run_journey is THE interface, single-run sandbox included" ruling).
+
+    The sandbox launch is declared as a normal JourneyStep whose argv is the full
+    `rein run -- bash -c <script> <workdir>`; a per-step `extra_env` points rein
+    at the writable checkout (REIN_SANDBOX_WORKDIR) and pins the session, and a
+    per-step `timeout` (180s) covers the slow srt launch. The in-sandbox script's
+    `sandbox_preamble()`/`run` SBX| output is captured as session content, so the
+    runner returns the COMPLETE session — banner, injected contract, and every
+    tagged agent line — as `.transcript`, with no hand-slicing. This agent never
+    declares, so the step has no answers (a declaring agent would list its
+    Form-A (expect, answer) pairs here exactly like any other step).
+    """
+    step = H.JourneyStep(
+        argv=["run", "--", "bash", "-c", sandbox_script(), workdir],
+        # rein re-echoes the full script right below its banner, so keep the
+        # boundary line concise instead of dumping the whole bash body twice.
+        label=f"rein run -- bash -c <sandbox agent script> {workdir}",
+        extra_env={
+            "REIN_SESSION_FILE": _pinned_session(repo),
+            "REIN_SANDBOX_WORKDIR": workdir,
+        },
+        timeout=180,
     )
-    try:
-        # expect -> act -> expect, one phase at a time. A pexpect EOF/TIMEOUT here
-        # means a live step didn't happen; catch it and return the PARTIAL text so
-        # main() reports a clean "boundary broke" (exit 2) with the transcript.
-        run.child.expect(r"@SANDBOX_FACTS", timeout=180)
-        run.child.expect(r"@CREDS_HIDDEN", timeout=60)
-        run.child.expect(r"@HOME_EPHEMERAL", timeout=60)
-        run.child.expect(r"@GIT_ESCAPE_CLOSED", timeout=60)
-        run.child.expect(r"@CFG_RC=\d+", timeout=60)
-        run.child.expect(r"@ORDINARY_WORK", timeout=60)
-        run.child.expect(r"@COMMIT_RC=\d+", timeout=60)
-        run.child.expect(r"@SCRIPT_DONE", timeout=60)
-        run.wait(timeout=120)
-    except (pexpect.EOF, pexpect.TIMEOUT):
-        pass
-    finally:
-        try:
-            run.child.close(force=True)
-        except Exception:
-            pass
-    return run.text()
+    result = H.run_journey([step], env=env)
+    # result.transcript is the whole session (already build_raw_transcript'd, with
+    # the `$ rein run …` boundary line). result.steps[0].text is this step's raw
+    # pty capture — used for the invariant scans below.
+    return result, result.steps[0].text
 
 
 def main() -> int:
@@ -232,7 +231,7 @@ def main() -> int:
     workdir = None
     try:
         workdir = clone_checkout(repo, env)
-        text = run_journey(env, repo, workdir)
+        result, text = drive_journey(env, repo, workdir)
 
         # ---- 1) The boundary must hold, independent of the golden. ----
         mv_rc = _rc(text, "MV")
@@ -272,6 +271,8 @@ def main() -> int:
             ("agent/<n>/<nonce>" in text, "the contract's branch convention must be shown"),
         ]
         broken = [msg for ok, msg in invariants if not ok]
+        if not result.reached_eof:
+            broken.append("the sandbox step did not run to EOF (timed out / prompt missed)")
         if broken:
             print("BOUNDARY BROKE:", flush=True)
             for m in broken:
@@ -281,8 +282,11 @@ def main() -> int:
             print(text, flush=True)
             return 2
 
-        # ---- 2) Build the RAW transcript and compare NORMALIZED. ----
-        raw = H.build_raw_transcript(text)
+        # ---- 2) Compare the WHOLE captured session NORMALIZED. ----
+        # run_journey already returns the complete session build_raw_transcript'd
+        # (banner + injected contract + tagged agent output, no slicing) as
+        # .transcript — that IS the golden, straight from the ONE interface.
+        raw = result.transcript
         print()
         print(raw, flush=True)
         print("--- outcomes (asserted; not in the golden) ---", flush=True)

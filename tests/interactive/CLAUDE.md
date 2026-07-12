@@ -83,13 +83,33 @@ the `SBX| `-tagged agent lines and rein's untagged host prompt already show the
 two views inline — the faithful "one terminal" artifact. There is **no whitelist**
 and no brand-new-line blind spot: everything is kept, so a new line survives.
 
-## Use the shared journey runner — complete capture is STRUCTURAL (#82)
+## Use the shared journey runner — it is THE interface for EVERY journey (#82)
 
-For a **host-command** journey (one or more `rein <argv>` invocations), use
-`reinharness.run_journey`. You declare only **steps** — each step's `argv` and the
+`reinharness.run_journey` is the ONE interface for ALL journeys — host-command,
+single-run in-sandbox, AND multi-run in-sandbox. There is no `spawn_rein_run`
+carve-out any more. You declare only **steps** — each step's `argv` and the
 ordered `(expect_pattern, answer)` pairs for its prompts — and the runner captures
 the **complete pty session** of everything it drove, returning it as one raw
 transcript (`JourneyResult.transcript`). Pass that straight to `compare_golden`.
+
+**A `rein run` (sandbox) launch is just a step.** Its `argv` is the full
+`["run", "--", …inner…, <workdir>]`; a per-step override points rein at the
+writable checkout, and a per-step `timeout` covers the slow srt launch. Each
+`JourneyStep` carries three per-step fields, each WINNING over the journey-level
+value of the same name (so one slow sandbox step raises just its own budget):
+
+- `cwd` — the directory rein is spawned in. A sandbox step points it (or
+  `REIN_SANDBOX_WORKDIR` via `extra_env`) at the writable tree so rein binds the
+  intended checkout. (Same name/semantics as parallel branch #78, which the
+  runner converges with.)
+- `extra_env` — env overlaid for THIS step only (e.g. `REIN_SESSION_FILE`, or
+  `REIN_SANDBOX_WORKDIR` to name the sandbox working tree).
+- `timeout` — seconds for the step's spawn + every expect. A sandbox launch needs
+  ~120-180s vs the fast host-command default; set it on the sandbox step alone.
+
+The in-sandbox script keeps `sandbox_preamble()`/`run` SBX| tagging — that output
+is captured as ordinary session content, so the golden is built from the WHOLE
+session (banner + injected contract + every tagged agent line), no slicing.
 
 **Do NOT hand-assemble the golden.** You never call `.text()` and slice, you never
 pick which sections land in the golden. A section is in the golden because its
@@ -100,10 +120,20 @@ omit a section.) Volatiles are handled downstream by **normalize-on-compare**
 (add a rule to `_NORMALIZE_RULES`); you **normalize** machine-variable values,
 you do **not** drop output. `journey_onboarding.py` is the exemplar.
 
-An **in-sandbox** journey (the write ceremony) keeps `spawn_rein_run` +
-`sandbox_preamble` — those already capture the full pty the same way (the tagged
-`SBX| ` lines ARE the complete agent output); the slicing footgun only existed for
-hand-written host-command capture, which `run_journey` now owns.
+An **in-sandbox** journey drives its `rein run` as a step too — no carve-out.
+`journey_sandbox_filesystem.py` is the exemplar (#63's migration): one
+`JourneyStep(argv=["run", "--", "bash", "-c", <script>, <workdir>],
+extra_env={"REIN_SANDBOX_WORKDIR": <workdir>, ...}, timeout=180)`, and
+`run_journey` captures the complete session — banner, injected contract, and every
+`SBX| `-tagged agent line — as `.transcript`. It replaced the old
+`spawn_rein_run(...); run.expect...; text=run.text()` pattern. Because the inner
+`bash -c` body is large and rein re-echoes it under its own banner, give the step
+a concise `label` (e.g. `rein run -- bash -c <sandbox agent script> <workdir>`) so
+the golden's boundary line stays readable; the full script still appears once, in
+rein's own `rein: running:` echo. `spawn_rein_run`/`ReinRun` stay in the module
+(other tests use the wrapper directly), but every JOURNEY goes through
+`run_journey`. A multi-run in-sandbox journey is the same, one step per `rein run`
+— the `$ rein run` echoes ARE the run boundaries.
 
 ## Prefer inline literals over constants for EXPECTED values (#82)
 
@@ -141,10 +171,12 @@ in `reinharness.py`, so a new journey is mostly wiring:
 - `branch_exists` / `delete_branch` — HOST-side verify + cleanup (operator's gh).
 - `resolve_throwaway_repo` — the repo, resolved the rein-init way (see below).
 - `spawn_rein_run` / `ReinRun` — the pty wrapper, transcript, prompt matchers.
-- `run_journey(steps)` / `JourneyStep` / `JourneyResult` — the host-command
-  journey runner (#82): declare steps (argv + prompt answers), get the COMPLETE
-  captured session back as `.transcript` for `compare_golden`. Use this for any
-  new host-command journey; it makes complete capture structural.
+- `run_journey(steps)` / `JourneyStep` / `JourneyResult` — THE journey runner
+  (#82), for host-command AND sandbox journeys alike: declare steps (argv + prompt
+  answers, plus per-step `cwd`/`extra_env`/`timeout` when a step drives a `rein
+  run` sandbox launch), get the COMPLETE captured session back as `.transcript`
+  for `compare_golden`. Use this for EVERY new journey; it makes complete capture
+  structural.
 
 ## Running & refreshing goldens: `run-journeys.sh`
 
