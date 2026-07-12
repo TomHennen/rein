@@ -99,39 +99,47 @@ def main() -> int:
     os.chmod(agent_sh, 0o755)
 
     approved = pr = False
-    with H.tmux_popup_session(width=COLS, height=ROWS) as sess:
-        tsw = TSWriter()
-        sess.client.logfile_read = tsw
-        # Launch the agent INSIDE the session so its TUI + the popup share this pty.
-        subprocess.run(["tmux", "-L", sess.socket, "send-keys", "-t", "w",
-                        f"bash {agent_sh}", "Enter"], check=True)
-        buf, hard = "", time.time() + HARD_SECONDS
-        while time.time() < hard:
-            try:
-                d = sess.client.read_nonblocking(4096, timeout=0.2)
-                buf += H.strip_ansi(d)
-            except pexpect.TIMEOUT:
-                if not sess.client.isalive():
-                    break
-            except pexpect.EOF:
-                break
-            if not approved and "type the issue number" in buf:
-                time.sleep(0.6)
-                sess.client.send(str(issue) + "\r")
-                approved = True
-                print("==> approved the popup", flush=True)
-            if "/pull/" in buf:
-                pr = True
-            if approved and pr:
-                # let the final frames (PR url + claude's wrap-up) land
-                t = time.time() + 2.5
-                while time.time() < t:
-                    try:
-                        sess.client.read_nonblocking(4096, timeout=0.2)
-                    except (pexpect.TIMEOUT, pexpect.EOF):
-                        pass
-                break
-        events = tsw.events
+    sock = f"reindemo-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+    subprocess.run(["tmux", "-L", sock, "kill-server"], capture_output=True)
+    # Spawn the tmux client DIRECTLY under pexpect so the client OWNS this pty from
+    # birth. (Creating the session detached and then `tmux attach`-ing from pexpect
+    # makes the attached client drop when srt starts its --new-session sandbox —
+    # that is what truncated earlier takes.)
+    client = pexpect.spawn("tmux", ["-L", sock, "new-session", f"bash {agent_sh}"],
+                           env=env, encoding="utf-8", codec_errors="replace",
+                           dimensions=(ROWS, COLS), timeout=None)
+    tsw = TSWriter()
+    client.logfile_read = tsw
+    buf, hard = "", time.time() + HARD_SECONDS
+    while time.time() < hard:
+        try:
+            d = client.read_nonblocking(4096, timeout=0.3)
+            buf += H.strip_ansi(d)
+        except pexpect.TIMEOUT:
+            pass          # claude thinking; do NOT bail on a quiet moment
+        except pexpect.EOF:
+            break
+        if not approved and "type the issue number" in buf:
+            time.sleep(0.8)
+            client.send(str(issue) + "\r")
+            approved = True
+            print("==> approved the popup", flush=True)
+        if "/pull/" in buf:
+            pr = True
+        if approved and pr:
+            t = time.time() + 3.0
+            while time.time() < t:
+                try:
+                    client.read_nonblocking(4096, timeout=0.3)
+                except (pexpect.TIMEOUT, pexpect.EOF):
+                    pass
+            break
+    events = tsw.events
+    try:
+        client.close(force=True)
+    except Exception:
+        pass
+    subprocess.run(["tmux", "-L", sock, "kill-server"], capture_output=True)
 
     with open(CAST, "w") as f:
         f.write(json.dumps({"version": 2, "width": COLS, "height": ROWS,

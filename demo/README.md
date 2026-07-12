@@ -1,48 +1,52 @@
 # rein demo recording
 
-`record-demo.sh` records a **real `claude` session under rein** and renders it to
-a GIF for the README: the agent writes a one-line joke about credentials, tries to
-push, hits the **write-approval tmux popup**, **you approve it**, and it pushes and
-opens a PR. You drive the popup yourself — a human approving the agent's writes IS
-the demo.
+Records a **real `claude` session under rein** and renders it to a GIF for the
+README: the agent writes a one-line joke about credentials, tries to push, hits
+the **write-approval tmux popup**, **you approve it**, and it pushes + opens a PR.
+A human approving the agent's writes IS the demo.
 
-## Run it
+## Run it (in this Linux VM — rein is Linux-only)
+
+`record-demo.sh` is **zero-install**: it uses `script(1)` (util-linux) + `agg`,
+both already present. You drive the approval at a real terminal — which is what
+makes it reliable (see "Why not automated?" below).
 
 ```sh
-# deps (macOS): brew install asciinema agg tmux
-# rein must be configured (`rein init`) with a dev-session naming a THROWAWAY repo
 ./demo/record-demo.sh
-# or: REIN_DEMO_REPO=you/throwaway ./demo/record-demo.sh
+# or:  REIN_DEMO_REPO=you/throwaway ./demo/record-demo.sh
 ```
 
 It creates a fresh demo issue, drops you into `rein run -- claude` inside a
-dedicated tmux server, and records. When the popup appears, type the issue number
-+ Enter to approve; when claude is done, type `exit` to stop. The GIF renders to
-`demo/creds-joke.gif` automatically.
+dedicated tmux server, and records with `script(1)`. During the take:
+
+- if claude asks **"Is this a project you trust?"**, press `1` then Enter;
+- when the **popup** appears, type the issue number + Enter to approve;
+- when claude is done, type `exit` to end — the GIF renders to
+  `demo/creds-joke.gif` automatically (`script(1)` → `script2cast.py` → `agg`).
 
 ## Why this toolchain
 
-- **asciinema → agg**, not vhs/terminalizer: those render via headless Chromium,
-  which has **no linux-arm64 build** (Google publishes no arm64 Chromium
-  snapshots), so they can't render on an Apple-silicon Linux VM. `agg` rasterizes
-  straight from a font — no browser, no ffmpeg — so it works everywhere.
+- **`agg`, not vhs/terminalizer.** Those render via headless Chromium, which has
+  **no linux-arm64 build** (Google publishes no arm64 Chromium snapshots) — so
+  they cannot render on an Apple-silicon Linux VM (e.g. Tart). `agg` rasterizes
+  straight from a font: no browser, no ffmpeg.
+- **`script(1)`, not asciinema.** No pip on the VM, and none needed — util-linux
+  `script` records the pty; `script2cast.py` converts its `--log-out`/`--log-timing`
+  to asciicast v2 for `agg`.
 - **The tmux popup IS captured.** A `tmux display-popup` is drawn by the tmux
-  *client* to its terminal; recording that client's pty (which is what asciinema
-  does when it wraps `tmux`) captures the overlay. Verified: firing a popup while
-  recording the client pty puts the popup text in the stream and renders it in the
-  gif. (This is the same reason rein's own tmux-popup journey can drive the popup
-  by attaching a pexpect client.)
-- **Dedicated tmux socket** (`-L reindemo`): never touches your real tmux server,
-  and avoids nested-session weirdness if you're already in tmux.
+  *client* to its terminal; recording that client's pty (what `script` wraps)
+  captures the overlay. Verified: firing a popup while recording puts its text in
+  the stream and renders it in the gif.
+- **Dedicated tmux socket** (`-L reindemo`): never touches your real tmux server.
 
-## Fully-automated variant (harness is in `main`)
+## Why not automated? (`record_demo.py`)
 
-`record-demo.sh` is human-driven (you approve the popup live). To drive it
-*without* a human — for a re-runnable capture — reuse the proven tmux-popup
-harness (#88, now merged): `reinharness.tmux_popup_session()` stands up the
-dedicated-socket tmux + attached client, and `drive_popup(pattern, answer)` waits
-for the Form A and sends the approval. Run `rein run -- claude "<prompt>"` **inside
-that session** (so claude's TUI and the popup share one client pty and both get
-captured), record the client pty with asciicast timestamps, and render with `agg`.
-The one non-deterministic part is real claude itself — re-run until you get a
-clean take. `record_demo.py` (alongside this file) is that automated recorder.
+`record_demo.py` is an automated variant (pexpect + the #88 tmux-popup harness,
+answers the popup itself). It launches the real flow correctly but does **not**
+finish a clean take in a *headless* VM: (1) claude's folder-trust dialog blocks a
+fresh scratch dir, and (2) the pexpect-owned tmux client hits EOF the moment srt
+starts its `--new-session` sandbox, truncating the capture at the banner. Both are
+terminal-control edges a **real attached terminal doesn't have** — which is why the
+runnable path (`record-demo.sh`) is human-driven. It's kept as the starting point
+for a future fully-automated take, and it's a concrete motivator for #100 (assert
+on a rendered screen via pyte/`capture-pane` instead of scraping the pty).
