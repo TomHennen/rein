@@ -28,6 +28,12 @@ func TestMint_RequestBodyPinsScopeCeiling(t *testing.T) {
 		name      string
 		mint      func(*Client, context.Context) (string, time.Time, error)
 		wantPerms map[string]string
+		// readTier marks a read-only TIER: the tier-split invariant says such
+		// a token must carry NO "write" permission on ANY resource, so a
+		// token cached/exfiltrated on the read path grants read-only
+		// capability only. Asserted explicitly below (in addition to the
+		// exact-map check) so the split is a named, self-documenting invariant.
+		readTier bool
 	}{
 		{
 			name: "read-only",
@@ -36,6 +42,7 @@ func TestMint_RequestBodyPinsScopeCeiling(t *testing.T) {
 				"contents": "read",
 				"metadata": "read",
 			},
+			readTier: true,
 		},
 		{
 			name: "write",
@@ -54,6 +61,7 @@ func TestMint_RequestBodyPinsScopeCeiling(t *testing.T) {
 				"pull_requests": "read",
 				"metadata":      "read",
 			},
+			readTier: true,
 		},
 		{
 			name: "gh-session",
@@ -156,6 +164,15 @@ func TestMint_RequestBodyPinsScopeCeiling(t *testing.T) {
 			for k, v := range tc.wantPerms {
 				if got.Permissions[k] != v {
 					t.Errorf("permissions[%q] = %q, want %q", k, got.Permissions[k], v)
+				}
+			}
+
+			// Tier-split invariant: a read tier must confer NO write anywhere.
+			if tc.readTier {
+				for k, v := range got.Permissions {
+					if v == "write" {
+						t.Errorf("read tier %q leaked a write permission on the wire: %q=write (tier split broken)", tc.name, k)
+					}
 				}
 			}
 		})

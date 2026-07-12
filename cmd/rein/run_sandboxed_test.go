@@ -6,15 +6,63 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/TomHennen/rein/internal/approvals"
+	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/srt"
 	"github.com/TomHennen/rein/internal/worktree"
 )
+
+// funcID returns a comparable identity for a mint method value. Go func
+// values are not comparable with ==, but two method expressions naming the
+// SAME method share a code pointer, so this pins "which tier the sandbox
+// selected" without a live mint. The wire-level proof that each tier carries
+// the right PERMISSIONS lives in internal/githubapp/mint_scope_test.go (which
+// has the httptest seam); this test proves the sandbox WIRES those tiers.
+func funcID(f interface{}) uintptr { return reflect.ValueOf(f).Pointer() }
+
+// TestSandboxMintTiersAreGhCapable pins the fix for the in-sandbox gh bug: the
+// sandbox injecting proxy carries EVERY github request (git AND gh/REST/
+// GraphQL), so its read/write tiers must be the gh-capable ones
+// (issues+pull_requests), not the contents-only git tiers. With the
+// contents-only tiers, `git push` landed but `gh pr create`/`gh issue
+// comment`/any issue-or-PR API write 403'd, and even issue/PR READS failed —
+// while the injected contract promised approving covers ALL writes.
+//
+// It also pins the read/write TIER SPLIT: the read tier must be a READ mint
+// (never MintGhSessionToken), so a token cached/exfiltrated on the read path
+// grants read-only capability.
+func TestSandboxMintTiersAreGhCapable(t *testing.T) {
+	// The write tier is the implement-role write mint (contents+issues+
+	// pull_requests write) — matches direct mode's gh write path.
+	if funcID(sandboxWriteMint) != funcID((*githubapp.Client).MintGhSessionToken) {
+		t.Error("sandbox WRITE tier is not MintGhSessionToken; gh issue/PR writes will 403 in-sandbox")
+	}
+	// The read tier is the all-read gh mint (contents+issues+pull_requests read).
+	if funcID(sandboxReadMint) != funcID((*githubapp.Client).MintGhReadOnlyToken) {
+		t.Error("sandbox READ tier is not MintGhReadOnlyToken; gh issue/PR reads will 403 in-sandbox")
+	}
+
+	// Regression guard: neither tier is the contents-only git mint — that is
+	// the exact pre-fix state that broke gh in-sandbox.
+	if funcID(sandboxReadMint) == funcID((*githubapp.Client).MintReadOnlyToken) {
+		t.Error("sandbox READ tier reverted to the contents-only MintReadOnlyToken (no issues:read)")
+	}
+	if funcID(sandboxWriteMint) == funcID((*githubapp.Client).MintWriteToken) {
+		t.Error("sandbox WRITE tier reverted to the contents-only MintWriteToken (no issues/pull_requests:write)")
+	}
+
+	// TIER SPLIT: the read tier must never be the write mint — a read-path
+	// token must not confer write capability.
+	if funcID(sandboxReadMint) == funcID((*githubapp.Client).MintGhSessionToken) {
+		t.Error("sandbox READ tier is the WRITE mint; the read/write split is broken")
+	}
+}
 
 // TestPreflightGateFailsClosed asserts the launch gate: any hard (StatusFail)
 // check makes printPreflightAndOK return false, which runSandboxed turns into a
