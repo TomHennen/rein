@@ -1,12 +1,12 @@
 """journey_onboarding — THE FIRST-RUN `rein init` GUIDED FLOW (onboarding slices).
 
-This is ONE journey. For what a journey IS, the golden-transcript rule, and how
-to author the next one, read tests/interactive/CLAUDE.md — none of that lives
-here.
+This is ONE journey. For what a journey IS, the golden-transcript rule, the
+shared runner, and how to author the next one, read tests/interactive/CLAUDE.md
+— none of that lives here.
 
 WHAT THIS WALKS (onboarding-ux-design.md §3): the interactive `rein init` a new
-user runs, exercising the two onboarding slices this journey exists to
-demonstrate —
+user runs, then `rein doctor` to verify — exercising the onboarding slices this
+journey demonstrates:
 
   * §4/§8.1 MACHINE-LABEL PROMPT — init asks "Name this machine", PRE-FILLED with
     the detected hostname and editable; the label is woven into the App name
@@ -14,32 +14,37 @@ demonstrate —
   * §5 INSTALL-ON-REPO — after scaffolding the session, init prints the install
     deep-link (no ssh -L needed), degrading to the generic installations URL
     when it doesn't yet know the App slug. The golden SHOWS that link.
+  * §2/§6 then `rein doctor` — the post-onboarding verification. Its FULL output
+    is in the golden (issue #82: the runner captures the complete session, so no
+    section is hand-dropped); machine-variable paths and the mint expiry are
+    normalized at compare time, not curated out.
 
 THE UNDRIVEABLE SEAM (marked, not faked): the App-CREATION step (§3 step 4) is a
 real browser/OAuth-callback flow (~25 minutes) and CANNOT run in a suite. This
 journey stays on the ENV path by keeping REIN_APP_* present, so init NEVER routes
-into RunManifestFlow — App creation is bypassed, and the driveable segments
-(machine-label prompt, session scaffold, install-on-repo link) are captured
-around that seam. The golden therefore shows the env-managed install URL, not a
-per-App deep-link; the manifest-path deep-link is exercised by the separate,
-genuinely browser-bound manifest walkthrough (scripts/cp5-manifest-manual-test.sh).
+into RunManifestFlow — App creation is bypassed, and everything around that seam
+is captured. The golden shows the env-managed install URL, not a per-App
+deep-link; the manifest-path deep-link is exercised by the separate, genuinely
+browser-bound manifest walkthrough (scripts/cp5-manifest-manual-test.sh).
 
-DETERMINISM (portable golden): the run is fully self-contained and uses
-ILLUSTRATIVE fixed inputs — no live GitHub interaction on this path (no mint, no
-push). REIN_MACHINE_HOSTNAME pins the pre-filled hostname; the repo answer is a
-fixed demo slug; the operator's real client_id/installation_id are normalized at
-compare time (reinharness._NORMALIZE_RULES). So the golden reproduces on any
-box. Every write is confined to a throwaway HOME/XDG tempdir
-(reinharness.isolated_home_env) — hard-constraint #1: nothing touches the dev's
-real home or any real repo.
+CAPTURE IS STRUCTURAL: this journey uses reinharness.run_journey — it declares
+STEPS (the commands + the answers to their prompts) and the runner captures the
+COMPLETE pty session. The journey never slices the transcript; the golden is the
+whole thing, with volatiles handled by normalize-on-compare.
+
+DETERMINISM: REIN_MACHINE_HOSTNAME pins the pre-filled hostname; the repo answer
+is a fixed demo slug; per-run volatiles (session id, mint expiry, tmp dirs, App
+identifiers) and machine-variable paths (running binary, home, srt) are
+normalized at compare time (reinharness._NORMALIZE_RULES). Every write is
+confined to a throwaway HOME/XDG tempdir — hard-constraint #1: nothing touches
+the dev's real home or any real repo.
 
     python3 tests/interactive/journey_onboarding.py            # exit 0 == matches (normalized)
     REIN_UPDATE_GOLDEN=1 python3 tests/interactive/journey_onboarding.py   # write the RAW golden
     REIN_SHOW_NORMALIZED=1 python3 tests/interactive/journey_onboarding.py  # also print the compare lens
 
 Exit 0 = the flow ran AND the normalized transcript matches the golden. Exit 1 =
-drift (RAW fresh transcript dropped to a scratch path; NORMALIZED diff printed).
-Exit 2 = the flow itself broke.
+drift. Exit 2 = the flow itself broke.
 """
 
 from __future__ import annotations
@@ -48,82 +53,9 @@ import os
 import sys
 import tempfile
 
-import pexpect
-
 import reinharness as H
 
 GOLDEN_NAME = "onboarding.txt"
-
-# Fixed, illustrative inputs so the golden is deterministic and portable.
-# DEMO_HOSTNAME stays within the ~10-char App-name label budget so it is shown
-# verbatim (a longer hostname would be truncated — see appsetup.maxLabelLen).
-DEMO_HOSTNAME = "demo-box"             # pins the pre-filled "Name this machine" default
-DEMO_REPO = "octo-example/demo-repo"   # the repo the user "picks"; scaffolds the session
-
-# init flags that keep the run inert (no ~/.local/bin symlink, no network mint).
-# --no-alias is DROPPED on purpose: we drive the alias [y/N] prompt live and
-# decline it, so the golden shows the opt-in default holding. The isolated HOME
-# keeps that safe. --yes is NOT passed: it would suppress every prompt, and the
-# prompts ARE the artifact.
-INIT_FLAGS = ["--no-symlink", "--skip-mint-check", "--shell", "bash"]
-
-REPO_PROMPT = "Which repo should the agent work on"
-LABEL_PROMPT = r"(?i)name this machine"
-ALIAS_PROMPT = r"\[y/N\]"
-
-
-def drive_init(env, home):
-    """Drive `rein init` through its three interactive prompts on a live pty;
-    return (transcript_text, exit_status). expect -> act -> expect, one prompt
-    at a time — each answer sent only AFTER its prompt is seen."""
-    extra = dict(H.isolated_home_env(home))
-    extra["REIN_MACHINE_HOSTNAME"] = DEMO_HOSTNAME  # deterministic pre-fill (test seam)
-
-    run = H.spawn_rein(["init", *INIT_FLAGS], env=env, extra_env=extra, timeout=60)
-    try:
-        # 1) machine-label prompt, pre-filled with the hostname -> accept default.
-        run.child.expect(LABEL_PROMPT, timeout=30)
-        run.answer("")  # bare Enter keeps the pre-filled "demo-laptop"
-        # 2) repo prompt -> pick the demo repo (scaffolds the session).
-        run.child.expect(REPO_PROMPT, timeout=30)
-        run.answer(DEMO_REPO)
-        # 3) alias [y/N] -> decline (opt-in default holds).
-        run.child.expect(ALIAS_PROMPT, timeout=30)
-        run.answer("")  # bare Enter = N
-        run.child.expect(pexpect.EOF, timeout=30)
-    except (pexpect.EOF, pexpect.TIMEOUT):
-        # A prompt that never arrived -> the flow broke; return the partial
-        # transcript so main() reports a clean "flow broke" (exit 2) rather than
-        # a pexpect traceback a runner would mislabel as drift.
-        pass
-    finally:
-        try:
-            run.child.close()
-        except Exception:
-            pass
-    rc = run.child.exitstatus if run.child.exitstatus is not None else 1
-    return run.text(), rc
-
-
-def drive_doctor(env, home):
-    """Drive `rein doctor` in the just-onboarded HOME and return a one-line
-    verdict. NOT part of the golden: doctor's table carries per-box values (srt
-    path, App-key path, mint expiry, sandbox health) that vary by operator, so
-    it is reported as an outcome, not a reviewable transcript. This exists to
-    show the flow continues past init into verification (design §2)."""
-    extra = dict(H.isolated_home_env(home))
-    run = H.spawn_rein(["doctor"], env=env, extra_env=extra, timeout=60)
-    try:
-        run.child.expect(pexpect.EOF, timeout=45)
-    except (pexpect.EOF, pexpect.TIMEOUT):
-        pass
-    try:
-        run.child.close()
-    except Exception:
-        pass
-    text = run.text()
-    verdict = "ok" if "rein doctor: ok" in text else "some checks not green (expected: box-dependent)"
-    return run.child.exitstatus, verdict
 
 
 def main() -> int:
@@ -131,63 +63,83 @@ def main() -> int:
     H.build_binaries(env)
 
     home = H.isolated_home()
-    text, rc = drive_init(env, home)
+    # One throwaway HOME/XDG world, shared by both commands: `rein init` sets it
+    # up, `rein doctor` inspects it. REIN_MACHINE_HOSTNAME pins the pre-filled
+    # label so the golden is deterministic.
+    extra = dict(H.isolated_home_env(home))
+    extra["REIN_MACHINE_HOSTNAME"] = "demo-box"
 
-    # 1) The flow itself must hold — independent of the golden. These are the
-    #    driveable segments around the undriveable App-creation seam.
+    # DECLARE STEPS ONLY — argv + the ordered answers to each prompt. The runner
+    # captures the COMPLETE session (issue #82); this journey never slices it.
+    # --no-alias is DROPPED on purpose so the alias [y/N] prompt fires live and
+    # we decline it (the golden then shows the opt-in default holding). --yes is
+    # NOT passed: it would suppress every prompt, and the prompts ARE the artifact.
+    result = H.run_journey(
+        [
+            H.JourneyStep(
+                argv=["init", "--no-symlink", "--skip-mint-check", "--shell", "bash"],
+                answers=[
+                    (r"(?i)name this machine", ""),               # accept the pre-filled "demo-box"
+                    ("Which repo should the agent work on", "octo-example/demo-repo"),
+                    (r"\[y/N\]", ""),                             # decline the alias (bare Enter = N)
+                ],
+            ),
+            H.JourneyStep(argv=["doctor"]),                       # post-onboarding verify; no prompts
+        ],
+        env=env,
+        extra_env=extra,
+    )
+    text = result.transcript
+
+    # 1) The flow must hold — independent of the golden. Expected values are
+    #    INLINE LITERALS (issue #82 review: a reviewer reads what's expected here,
+    #    not a chased-down constant).
     checks = [
-        ("Name this machine [%s]" % DEMO_HOSTNAME in text,
-         "the machine-label prompt must be pre-filled with the detected hostname"),
-        ("machine:    %s" % DEMO_HOSTNAME in text,
-         "the resolved machine label must be displayed"),
-        ("session:    scaffolded" in text and DEMO_REPO in text,
+        (result.reached_eof, "every driven command must run to completion (no missed prompt)"),
+        ("Name this machine [demo-box]" in text, "machine-label prompt must be pre-filled with the hostname"),
+        ("machine:    demo-box" in text, "the resolved machine label must be displayed"),
+        ("session:    scaffolded" in text and "octo-example/demo-repo" in text,
          "the session must scaffold against the picked repo"),
-        ("install on repo:" in text and "visit this URL" in text,
-         "the install-on-repo link (§5) must be printed"),
-        ("rein init: done." in text,
-         "init must run to completion"),
-        (rc == 0, "init must exit 0 on the happy env path"),
+        ("install on repo:" in text and "visit this URL" in text, "the install-on-repo link (§5) must be printed"),
+        ("rein init: done." in text, "init must run to completion"),
+        (result.steps[0].exitstatus == 0, "init must exit 0 on the happy env path"),
+        # doctor's output is now IN the captured session (not dropped).
+        ("rein doctor: ok" in text, "`rein doctor` output must be captured in the session"),
+        ("sandbox: srt present" in text, "doctor's full check table must be present (complete capture)"),
     ]
     broken = [msg for ok, msg in checks if not ok]
     if broken:
         print("ONBOARDING FLOW BROKE:", flush=True)
         for m in broken:
             print(f"  - {m}", flush=True)
-        print(f"  rc={rc}", flush=True)
         print("--- transcript ---", flush=True)
-        print(H.build_raw_transcript(text), flush=True)
+        print(text, flush=True)
         return 2
 
-    # 2) Build the RAW transcript (real values) and compare NORMALIZED.
-    raw = H.build_raw_transcript(text)
     print()
-    print(raw, flush=True)
+    print(text, flush=True)
     print("--- driveable seam (asserted; not a golden claim) ---", flush=True)
     print("  App CREATION (browser/OAuth) is UNDRIVEABLE and was bypassed "
           "(REIN_APP_* present => env path).", flush=True)
-    print("  Driven: machine-label prompt, session scaffold, install-on-repo link.", flush=True)
-
-    # Continue past init into verification (design §2). doctor's table is
-    # box-dependent, so it is reported here, NOT baked into the golden.
-    drc, dverdict = drive_doctor(env, home)
-    print(f"  Then `rein doctor` (post-onboarding verify): exit={drc} — {dverdict}", flush=True)
+    print("  Driven + captured whole: `rein init` (machine-label prompt, session, "
+          "install link) and `rein doctor`.", flush=True)
 
     if os.getenv("REIN_SHOW_NORMALIZED"):
         print("\n--- normalized (the comparison lens) ---", flush=True)
-        print(H.normalize_for_compare(raw), flush=True)
+        print(H.normalize_for_compare(text), flush=True)
 
     if os.getenv("REIN_UPDATE_GOLDEN"):
-        p = H.update_golden(GOLDEN_NAME, raw)
+        p = H.update_golden(GOLDEN_NAME, text)
         print(f"[golden UPDATED] {p} (raw)", flush=True)
         return 0
 
-    ok, diff = H.compare_golden(GOLDEN_NAME, raw)
+    ok, diff = H.compare_golden(GOLDEN_NAME, text)
     if ok:
         print(f"[golden OK] fresh run matches golden/{GOLDEN_NAME} (normalized)", flush=True)
         return 0
     scratch = os.path.join(tempfile.gettempdir(), "onboarding.fresh.txt")
     with open(scratch, "w") as f:
-        f.write(raw)
+        f.write(text)
     print(f"[golden DRIFT] fresh run != golden/{GOLDEN_NAME} (normalized) — re-review:", flush=True)
     print(diff, flush=True)
     print(f"raw fresh transcript written to {scratch}", flush=True)
