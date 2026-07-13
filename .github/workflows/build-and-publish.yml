@@ -75,24 +75,14 @@ jobs:
       # unsupported, so re-enabling applies to the NEXT tag. rein has published
       # no v* release yet, so nothing shipped is affected today.
       attest-and-verify: disabled
-      # Source-scan tools. wrangle's default is
-      # "osv zizmor scorecard:info dependency-review wrangle-lint". One
-      # adjustment, forced by rein being a PRIVATE repo without GitHub Advanced
-      # Security (no code scanning):
-      #   - dependency-review DROPPED: it calls GitHub's dependency-graph
-      #     compare API, which a private repo only exposes with GHAS — without
-      #     it the call 403s and the scan fails closed, reddening every
-      #     PR-to-main. Re-add it (blocking) once rein enables GHAS or goes
-      #     public.
-      # zizmor is BLOCKING again as of wrangle v0.4.0: its Security-tab SARIF
-      # upload is `continue-on-error`, so a missing code-scanning license no
-      # longer hard-fails the scan the way it did on v0.2.1 (which is why we
-      # had pinned zizmor to :info). Findings gate via the step summary.
+      # wrangle's default scan-tools, minus dependency-review — the one tool a
+      # private repo can't run. It needs the dependency-graph API, which GitHub
+      # exposes only with Advanced Security, so it hard-fails ("Dependency
+      # review is not supported on this repository") and reddens every PR;
+      # tested on this branch, not assumed. Deleting this line to take the
+      # default is exactly what #105 does once rein enables GHAS or goes public.
+      # Everything else, including blocking zizmor, is wrangle's default.
       scan-tools: "osv zizmor scorecard:info wrangle-lint"
-      # `policy` is left at wrangle's default. It only governs the verify job,
-      # which is skipped while attest-and-verify is disabled — so the default's
-      # provenance requirement is inert, and stays correct for when we re-enable.
-      #
       # release-events defaults to tag-only — the cheapest setting and the
       # one that matches rein's "publish only on v* tags" model.
       #
