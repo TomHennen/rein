@@ -191,12 +191,24 @@ approved run's `git push` may only target `refs/heads/agent/<issue>/<nonce>` for
 an issue you confirmed, one issue per push, and any other ref is refused on the
 wire (`internal/proxy/gate.go`).
 
-The **REST/GraphQL write channel is gated by your approval, but not by the ref
-convention.** An approved run holds `contents: write` for the session's repos, so
-it can still commit through the API — including to `main` — without going through
-a declared branch ([#108](https://github.com/TomHennen/rein/issues/108)). The ref
-binding constrains the git *transport*, not the token. Stated plainly because the
-approval, not the branch name, is what actually bounds an approved run.
+Your approval is what bounds an approved run — not the branch name. The run holds
+`contents: write` for the session's repos for its window, so it can also write
+through the GitHub **API**, which the branch convention does not constrain. That
+is deliberate: rein's control for everything the transport check doesn't cover is
+**audit, not prevention** (design §4.2.7). Every request the proxy relays —
+method, path, tier, decision, status — is recorded in a per-run append-only log
+that lives *outside* the sandbox's reach, so an agent can neither read it nor edit
+what it says about them:
+
+```bash
+cat ~/.local/state/rein/audit/sandbox-<run-id>.log   # every write, including API writes
+```
+
+The design's durable version of this is writeback to the originating issue, posted
+by a **separate identity the agent's token cannot prune** — the audit App `rein
+init` creates. That App exists but is **not yet posting**; until it does, the local
+log above is your audit surface. Read the [Known limits](#known-limits) with that
+in mind.
 
 ### The session sets the scope ceiling
 
@@ -327,8 +339,7 @@ ambient credentials, so it is weaker by design and rein prints a loud banner. Th
 same declare-and-confirm ceremony applies, but two properties are lost: the
 credential helper never sees push refs, so the `agent/<issue>/<nonce>` cross-check
 **does not hold even for `git push`** (an approved direct-mode run can push any
-ref — note the API channel is unbound in *both* modes, see
-[above](#the-write-ceremony)), and pre-declaration writes reach GitHub carrying a
+ref), and pre-declaration writes reach GitHub carrying a
 placeholder credential (GitHub rejects them) rather than being refused locally.
 
 ## What rein does and doesn't protect (stated plainly)
@@ -361,10 +372,13 @@ placeholder credential (GitHub rejects them) rather than being refused locally.
   `pull_requests: write`, which GitHub also treats as review/approve/merge
   capability. Branch protection that requires an approval does not stop it
   ([#86](https://github.com/TomHennen/rein/issues/86)).
-- **The issue binding covers `git push`, not the API.** An approved run can commit
-  through REST/GraphQL — including to `main` — without a declared branch
-  ([#108](https://github.com/TomHennen/rein/issues/108)). Your approval still
-  bounds *whether* it writes and *which repos*; it does not bound the branch.
+- **Audit is detection, not prevention — and the durable half isn't live yet.**
+  The branch convention constrains `git push`; everything else an approved run does
+  with its write token (notably API writes, which can touch `main`) is **caught by
+  the audit log, not blocked**. That's the design's choice (§4.2.7). But the
+  agent-unprunable surface — audit comments posted to the issue by the separate
+  audit App — is **not yet posting**, so today that audit lives only in a local
+  file on your machine. Nobody reviewing the PR on GitHub sees it.
 
 ## Headless / remote machines
 
