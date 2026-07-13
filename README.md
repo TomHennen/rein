@@ -374,8 +374,9 @@ placeholder credential (GitHub rejects them) rather than being refused locally.
   ([#86](https://github.com/TomHennen/rein/issues/86)).
 - **Audit is detection, not prevention — and the durable half isn't live yet.**
   The branch convention constrains `git push`; everything else an approved run does
-  with its write token (notably API writes, which can touch `main`) is **caught by
-  the audit log, not blocked**. That's the design's choice (§4.2.7). But the
+  with its write token (notably API writes, which can touch `main`
+  — [#109](https://github.com/TomHennen/rein/issues/109)) is **caught by the audit
+  log, not blocked**. That's the design's choice (§4.2.7). But the
   agent-unprunable surface — audit comments posted to the issue by the separate
   audit App — is **not yet posting**, so today that audit lives only in a local
   file on your machine. Nobody reviewing the PR on GitHub sees it.
