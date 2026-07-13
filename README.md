@@ -186,10 +186,17 @@ One confirmation covers the run. The run's write capability expires on idle
 
 **What the issue actually binds.** GitHub installation tokens cannot be scoped to
 an issue, so the token rein mints is scoped to your session's **repos**. The issue
-binding is enforced separately, **at the proxy**: an approved run may only push to
-`refs/heads/agent/<issue>/<nonce>` for the issue you confirmed, and any other ref
-is refused on the wire. Two mechanisms, stated separately, because they have
-different failure modes — see `internal/proxy/receivepack.go` and design §4.2.
+binding is enforced separately, **at the proxy, on the git push path**: an
+approved run's `git push` may only target `refs/heads/agent/<issue>/<nonce>` for
+an issue you confirmed, one issue per push, and any other ref is refused on the
+wire (`internal/proxy/gate.go`).
+
+The **REST/GraphQL write channel is gated by your approval, but not by the ref
+convention.** An approved run holds `contents: write` for the session's repos, so
+it can still commit through the API — including to `main` — without going through
+a declared branch ([#108](https://github.com/TomHennen/rein/issues/108)). The ref
+binding constrains the git *transport*, not the token. Stated plainly because the
+approval, not the branch name, is what actually bounds an approved run.
 
 ### The session sets the scope ceiling
 
@@ -225,9 +232,9 @@ less than the App itself:
 
 The read token is cached for its lifetime. The write token only exists once you
 approve, and is **revoked** when the run ends or its window expires (idle 30
-minutes, hard cap 4 hours); on the `gh` path it is minted per call and revoked as
-soon as `gh` exits. Both are scoped to your session's repos — never to your
-account.
+minutes, hard cap 4 hours). (In `--direct` mode only, the `gh` shim mints per call
+and revokes as soon as `gh` exits.) Both are scoped to your session's repos —
+never to your account.
 
 > **Note:** `pull_requests: write` also confers PR *review, approve, and merge*
 > capability, so a run holding the write token could approve or merge its own PR.
@@ -262,9 +269,12 @@ account.
   `hooks/` and `config` are read-only, and `.git` itself is a bind mountpoint, so
   the agent cannot rename it aside and rebuild a fresh one carrying a malicious
   `pre-commit` hook that would later run **as you, on your host**. rein cannot
-  currently harden submodule gitdirs or linked worktrees whose `.git` is a file,
-  so it **refuses to launch** on those rather than pretending — override with
-  `REIN_SANDBOX_ALLOW_UNHARDENED_GIT` if you accept the risk.
+  harden submodule gitdirs or linked worktrees whose `.git` is a *file*. A
+  **mapped** worktree in that shape **fails the launch closed**; if your **current
+  directory** is in that shape, rein launches but **does not bind your real tree**
+  — the agent gets a fresh ephemeral working tree instead, and your tree is
+  untouched. `REIN_SANDBOX_ALLOW_UNHARDENED_GIT` overrides both, binding the real
+  tree with only partial (top-level) hardening.
 - **Writes are locked until declare.** Commits are authored as `<your name> (via
   rein)` with the App's identity, so a push is attributable to the App, not to you
   personally.
@@ -316,9 +326,10 @@ credential-helper path instead. The agent runs **unsandboxed** and can reach you
 ambient credentials, so it is weaker by design and rein prints a loud banner. The
 same declare-and-confirm ceremony applies, but two properties are lost: the
 credential helper never sees push refs, so the `agent/<issue>/<nonce>` cross-check
-**does not hold** (an approved direct-mode run can push any ref), and
-pre-declaration writes reach GitHub carrying a placeholder credential (GitHub
-rejects them) rather than being refused locally.
+**does not hold even for `git push`** (an approved direct-mode run can push any
+ref — note the API channel is unbound in *both* modes, see
+[above](#the-write-ceremony)), and pre-declaration writes reach GitHub carrying a
+placeholder credential (GitHub rejects them) rather than being refused locally.
 
 ## What rein does and doesn't protect (stated plainly)
 
@@ -350,6 +361,10 @@ rejects them) rather than being refused locally.
   `pull_requests: write`, which GitHub also treats as review/approve/merge
   capability. Branch protection that requires an approval does not stop it
   ([#86](https://github.com/TomHennen/rein/issues/86)).
+- **The issue binding covers `git push`, not the API.** An approved run can commit
+  through REST/GraphQL — including to `main` — without a declared branch
+  ([#108](https://github.com/TomHennen/rein/issues/108)). Your approval still
+  bounds *whether* it writes and *which repos*; it does not bound the branch.
 
 ## Headless / remote machines
 
