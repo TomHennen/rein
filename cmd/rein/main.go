@@ -217,8 +217,8 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  rein init [--owner=<login>] [--port=<n>] [--skip-audit] [--force] [--skip-mint-check] [--no-symlink] [--no-alias] [--shell=bash|zsh|fish]")
-	fmt.Fprintln(os.Stderr, "  rein doctor")
+	fmt.Fprintln(os.Stderr, "  rein init [--owner=<login>] [--repo=<owner/name>] [--port=<n>] [--skip-audit] [--force] [--skip-mint-check] [--no-symlink] [--alias|--no-alias] [--shell=bash|zsh|fish] [--require-sandbox] [--yes]")
+	fmt.Fprintln(os.Stderr, "  rein doctor [--fix]                       (--fix applies the safe, no-privilege remediations)")
 	fmt.Fprintln(os.Stderr, "  rein credential-helper {get|store|erase}")
 	fmt.Fprintln(os.Stderr, "  rein install-shim")
 	fmt.Fprintln(os.Stderr, "  rein gh-auth")
