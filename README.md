@@ -188,8 +188,14 @@ sequenceDiagram
    sees it.
 5. The push lands.
 
-One confirmation covers the run. The run's write capability expires on idle
-(30 minutes) or at a hard cap (4 hours), whichever comes first.
+Confirming an issue covers **that issue** for the rest of the run — the agent can
+push to it again without re-prompting you. Declaring a *different* issue prompts
+you again.
+
+Write capability is revoked when the run ends, after **30 minutes with no GitHub
+traffic**, or **4 hours** in total, whichever comes first. Note the idle clock is
+reset by *any* request the agent makes, reads included — so an agent that keeps
+working stays approved until the 4-hour cap.
 
 **What the issue actually binds.** GitHub tokens can't be scoped to an issue, so
 the token is scoped to your session's **repos**. What the issue binds is the
@@ -242,8 +248,8 @@ less than the App itself:
 | **Audit App** — writeback, created but not yet posting | — | write | — | read |
 
 The write token only exists once you approve, and is revoked when the run ends or
-expires (idle 30 minutes, hard cap 4 hours). Both tokens are scoped to your
-session's repos — never to your account.
+[expires](#the-write-ceremony). Both tokens are scoped to your session's repos —
+never to your account.
 
 > **Note:** on GitHub, `pull_requests: write` also means review, approve, and
 > merge — so an approved run could approve or merge its own PR. Branch protection
