@@ -262,10 +262,13 @@ never to your account.
 [`sandbox-runtime`](https://github.com/anthropic-experimental/sandbox-runtime)
 (`srt`). Inside it:
 
-- **No network egress except GitHub** (through rein's proxy, which injects the
-  token on the wire) **and the agent's own API** — `api.anthropic.com` is allowed
-  by default so `rein run -- claude` works out of the box. A different agent's API
-  needs [allowing explicitly](#allowing-extra-network-egress).
+- **No network of its own.** The agent runs in an isolated network namespace with
+  **no interface at all** — it can't reach an arbitrary IP because there's no route
+  to one. Its only way out is rein's proxy, which allows just GitHub (injecting the
+  token on the wire) and the agent's own API (`api.anthropic.com`, so `rein run --
+  claude` works out of the box; a different agent's API needs
+  [allowing explicitly](#allowing-extra-network-egress)). The *isolation* is
+  enforced by the kernel; the *allowlist* is enforced by the proxy.
 - **Your `$HOME` is hidden.** rein denies your home directory wholesale and allows
   back only what the agent needs to run (its install chain and config, a toolchain
   set). Your credential stores are denied on top of that — `~/.config/gh`,
