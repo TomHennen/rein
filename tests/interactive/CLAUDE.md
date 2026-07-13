@@ -59,6 +59,103 @@ additionally asserts every journey has a golden and that `normalize_for_compare`
 is IDEMPOTENT on it (a well-formed, fixpoint comparator) — a cheap, stack-free CI
 catch. It no longer flags real values: raw goldens are supposed to show reality.
 
+## Two ways to read a pty: RENDERED SCREEN vs RAW LINE TRANSCRIPT (#100)
+
+A pty is not one kind of thing, and reading it the wrong way is the bug class #100
+retired. Pick by asking **does this surface REDRAW?**
+
+| the surface | how to assert | why |
+|---|---|---|
+| **REDRAWS** — a TUI (`claude`), a **tmux popup** | the **rendered screen** (`reinharness.RenderedScreen`, a pyte terminal emulator) | it PAINTS CELLS: homes the cursor, overwrites regions, repaints per keystroke. The byte stream is a *history of paint operations*, not a picture. |
+| **LINE-ORIENTED** — git, rein's banner/prompts, the `SBX|`-tagged agent script | the **raw transcript** (`build_raw_transcript`), as before | a line, once printed, is final. Scrollback IS the artifact. |
+
+**Every journey golden stays on the raw-transcript path.** A rendered screen is a
+point-in-time FRAME (cols x rows of cells) — content that scrolled off is GONE — so
+routing `write_ceremony` / `gh_write` / `sandbox_filesystem` / `onboarding` through
+a screen would silently truncate the golden to its last N lines. Screen-rendering
+applies ONLY to the redrawing surfaces, and (in the popup journey) only to the
+*popup's own* Form A block, which is then FOLDED into the raw transcript as `POPUP| `
+lines. Don't "helpfully" render a line-oriented golden.
+
+What the emulator buys you, concretely: **the "is the frame complete?" question
+becomes a screen state instead of a timer.** The popup driver used to match a
+substring in the byte stream and then *drain to quiescence* (read until N ms passed
+with no new bytes) and hope the rest of the paint had landed. Now `drive_popup`
+waits for a condition — Form A painted through its trailing `>` prompt line
+(`popup_forma_complete`), the last thing rein writes before it BLOCKS on input, so
+the frame provably cannot change. Same for `ReinRun.read_until_ready` /
+`send_and_collect` (the real-agent TUI): they pump the pty into ONE persistent
+screen and match what is ON it. Redraws, cursor moves, and read-chunk boundaries
+stop being our problem, because resolving them is the emulator's whole job. This
+also *shrinks* the hand-modelling: pyte let us DELETE the CUP-splitting /
+box-art-stripping / last-write-per-row extractor (`_CUP`, `_BOX_DRAWING`,
+`_TMUX_MISC_ESC`, `_clean_popup_segment`, `extract_popup_forma`) outright.
+
+The API (all lazy — see the skip rule below):
+
+- `RenderedScreen(cols, rows)` — `feed(text)`, `display()` (the grid), `text()`
+  (grid joined, trailing blanks trimmed), `contains(needle)`.
+- `screen_for_child(child)` — a screen sized to that pty (`getwinsize()`), so pyte
+  wraps exactly where the real terminal does. **Never hardcode 80x24.**
+- `render_stream(text, cols, rows)` — render an already-captured stream (e.g. a
+  pexpect `logfile_read` StringIO's value).
+- `wait_for_screen(child, pattern, timeout, screen=…)` — THE primitive: pump the
+  child's bytes into the screen and return once `pattern` (a regex, or a
+  `screen -> bool` predicate for a richer screen state) appears **on the render**.
+- `popup_forma_from_screen(screen, answer)` / `popup_forma_complete(screen)` — the
+  popup box's content, extracted by GEOMETRY (find the border rows, slice the
+  columns inside them), not by parsing escape codes.
+
+### A REAL agent's TUI is neither: collapse it (`journey_realagent_write`, #101)
+
+A deterministic bash "agent" is line-oriented, so its output belongs in the golden
+verbatim. A **real LLM's TUI is not**: it redraws AND its content genuinely varies
+run to run (prose, tool order, spinners, token counts, promo banners). There is no
+token-level normalization for that — it is noise of the same kind
+`build_raw_transcript` already drops (progress ticks). So the one journey that drives
+a real `claude` **collapses that region at BUILD time** (`reinharness.collapse_agent_tui`),
+and the golden keeps what actually matters and is stable: **rein's own host output
+verbatim** (banner, injected contract, exit token accounting — a new rein line still
+trips drift), the popup's Form A (`POPUP| `), and a ground-truth `MILESTONE| ` block
+read from `helper.log` + the GitHub API. This is the ONE sanctioned exception to
+"never drop output", and it is kept honest two ways:
+
+- **Two anchors that MUST both be found** — rein's `running:` echo (start) and its exit
+  token accounting (end: `revoked N of N write token(s) on exit`, or the per-token
+  `exit-revoke … failed` warning that structurally precedes it). A miss is a CEREMONY
+  BREAK (exit 2), never a silently smaller golden.
+- **The collapse is a FILTER, not a delete.** rein has call sites that write to its own
+  host pty *inside* that window (`printExpiryBanner`'s `rein: SESSION EXPIRED` block;
+  the non-interactive install-NOTICE surface) — the region is NOT "pure agent TUI". So
+  any line in it matching `AGENT_TUI_KEEP_RE` (a column-0 `rein: …` / `=== rein: …`) is
+  **preserved**, and only the agent-TUI runs around it collapse to a placeholder. The
+  doctrine above ("a brand-new rein line — especially a security-relevant one — survives
+  into the normalized diff") therefore holds INSIDE this window too. It costs nothing:
+  rein prints nothing there on the happy path, and a real claude never paints flush-left
+  with rein's prefix (its output sits behind box art — verified on captured pty streams).
+
+Do not generalize the collapse to a line-oriented agent.
+
+Driving a real agent alongside a second pty has one hard requirement:
+**`drain_children`**. A pty's buffer is ~64KB and a TUI repaints constantly, so if you
+block on the tmux client (waiting for the popup) without reading the agent's pty, the
+agent BLOCKS on write and the run deadlocks. `wait_for_screen(..., drain=[child])` and
+`drive_popup(..., drain=[child])` take it; discarded bytes are still captured by
+`logfile_read`, so the transcript stays complete.
+
+**`tmux capture-pane` is NOT usable for the popup** — verified empirically, don't
+retry it: with a real attached client rendering Form A, `list-panes` reports only
+the base pane and capturing every pane finds no Form A anywhere. A tmux popup is a
+**client-owned OVERLAY**, not an addressable pane. The attached client's own pty is
+the only surface it exists on; run THAT through the emulator.
+
+**pyte is a TEST-ONLY dependency** (`sudo apt install python3-pyte`; LGPLv3,
+approved on the test-only basis under hard-constraint #4 — it is never linked into
+or shipped with the Go binary). It is imported **lazily**, so `reinharness` imports
+fine without it and every line-oriented journey plus `test_golden_shape.py` keeps
+working. A journey that needs a rendered screen checks `H.pyte_available()` up front
+and **SKIPs with exit 3** (never 0 — see the exit-3 rule below).
+
 ## Splitting one terminal into two views (the principled way)
 
 The human sees ONE terminal where the sandboxed agent's output and rein's
@@ -169,8 +266,15 @@ in `reinharness.py`, so a new journey is mostly wiring:
   BOTH sides, then diffs).
 - `create_issue` / `issue_title` / `close_issue` — a throwaway issue to declare.
 - `branch_exists` / `delete_branch` — HOST-side verify + cleanup (operator's gh).
+- `list_matching_refs` / `list_prs_for_branch` / `pr_author` — HOST-side ground truth
+  (a REAL agent names its own branch, so DISCOVER it under `agent/<n>/`; `pr_author`
+  is the delegated-bot check).
+- `collapse_agent_tui` / `drain_children` — the real-agent pair (see above).
 - `resolve_throwaway_repo` — the repo, resolved the rein-init way (see below).
 - `spawn_rein_run` / `ReinRun` — the pty wrapper, transcript, prompt matchers.
+- `RenderedScreen` / `screen_for_child` / `render_stream` / `wait_for_screen` /
+  `popup_forma_from_screen` — the pyte rendered-screen layer for REDRAWING
+  surfaces (#100); `pyte_available()` / `PyteMissing` for the exit-3 skip.
 - `run_journey(steps)` / `JourneyStep` / `JourneyResult` — THE journey runner
   (#82), for host-command AND sandbox journeys alike: declare steps (argv + prompt
   answers, plus per-step `cwd`/`extra_env`/`timeout` when a step drives a `rein

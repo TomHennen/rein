@@ -34,6 +34,16 @@ from itest_base import ReinTestCase
 
 
 class RealAgentEndToEnd(ReinTestCase):
+    # A TUI REDRAWS, so both helpers below assert on a pyte-RENDERED SCREEN (#100):
+    # `read_until_ready` / `send_and_collect` pump this pty into a RenderedScreen,
+    # which raises PyteMissing without pyte. pyte is an OPTIONAL, TEST-ONLY dep
+    # (README: "everything else runs without it"), and this file IS swept by run.sh
+    # — so on a box with `claude` but no pyte it must SKIP, not hard-ERROR.
+    @unittest.skipUnless(
+        H.pyte_available(),
+        f"pyte is not installed — a real agent's TUI can only be read off a RENDERED "
+        f"screen (#100). {H.PYTE_INSTALL_HINT}",
+    )
     def test_claude_starts_in_sandbox_and_answers(self):
         """`rein run -- claude` starts a real agent in-sandbox (no EROFS/hang) and
         answers 2+2 -> '4'."""

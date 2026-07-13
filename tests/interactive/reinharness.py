@@ -22,12 +22,19 @@ WHAT THE HELPERS GIVE YOU
 - ``unique_branch()``   — a timestamped disposable branch name (throwaway repo).
 - ``ReinRun``           — a pexpect wrapper around ``rein run`` with a captured
                           transcript, prompt matchers, and both-sides sentinels.
+- ``RenderedScreen``    — a pyte terminal emulator over a pty (issue #100): for
+                          anything that REDRAWS (a TUI, a tmux popup) you assert
+                          on the rendered SCREEN, not on ANSI-stripped bytes.
+                          Line-oriented output keeps the raw-transcript path.
 - ``branch_exists`` / ``delete_branch`` — HOST-side verification + cleanup via
                           the host's authed ``gh`` (the developer/operator, NOT
                           the sandbox).
 
 Prereqs: a live throwaway repo + a working App (see README). ``python3`` +
 ``pexpect`` 4.9.0. The sandbox stack (srt/bwrap/socat/ripgrep) must be healthy.
+``pyte`` (``apt install python3-pyte``) is needed ONLY for the rendered-screen
+surfaces (the popup journey, the real-agent TUI test); it is imported lazily, so
+everything else runs without it.
 """
 
 from __future__ import annotations
@@ -294,6 +301,79 @@ def delete_issue_comment(repo: str, comment_id: int, env: dict | None = None) ->
     return r.returncode == 0
 
 
+def list_prs_for_branch(repo: str, branch: str, env: dict | None = None) -> list[dict]:
+    """HOST-side: PRs (any state) whose head is `branch`, via the operator's OWN
+    authed gh — the GROUND TRUTH a gh-write journey checks a sandboxed `gh pr
+    create` against (did the PR actually land at GitHub, distinct from the
+    in-sandbox command merely exiting 0?). Legitimate host action: the
+    developer/operator, NOT the sandboxed agent (which never holds a token).
+    """
+    env = env or rein_env()
+    import json as _json
+
+    out = subprocess.check_output(
+        ["gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "all",
+         "--json", "number,url,state"],
+        cwd=REPO_ROOT, env=env, text=True,
+    ).strip()
+    return _json.loads(out) if out else []
+
+
+def list_matching_refs(repo: str, prefix: str, env: dict | None = None) -> list[str]:
+    """HOST-side: branch names under `prefix` (e.g. `agent/<issue>/`), via the
+    operator's OWN authed gh (`git/matching-refs/heads/<prefix>`).
+
+    DISCOVERY, not assumption: a REAL agent picks its own branch name — the ref
+    cross-check only requires the `agent/<issue>/` PREFIX, so a journey driving a
+    live LLM cannot know the suffix in advance (a deterministic bash agent can,
+    because the test chose it). Returns the short names (no `refs/heads/`), so the
+    caller can verify + clean up whatever the agent actually pushed.
+    """
+    env = env or rein_env()
+    import json as _json
+
+    r = subprocess.run(
+        ["gh", "api", f"repos/{repo}/git/matching-refs/heads/{prefix}",
+         "--jq", "[.[].ref]"],
+        cwd=REPO_ROOT, env=env, capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return []
+    out = r.stdout.strip()
+    refs = _json.loads(out) if out else []
+    return [ref[len("refs/heads/"):] for ref in refs if ref.startswith("refs/heads/")]
+
+
+def pr_author(repo: str, number: int, env: dict | None = None) -> dict:
+    """HOST-side: a PR's author as {"login": str, "is_bot": bool} via the operator's
+    OWN authed gh — the GROUND TRUTH for the DELEGATED identity (#101): a PR a
+    sandboxed agent opened must be authored by the App's bot
+    (`app/<slug>`, is_bot=true), NEVER by the developer. The commit-side twin of
+    this is journey_git_author's `<name> (via rein)` author stamp.
+    """
+    env = env or rein_env()
+    import json as _json
+
+    out = subprocess.check_output(
+        ["gh", "pr", "view", str(number), "--repo", repo, "--json", "author",
+         "--jq", "{login: .author.login, is_bot: .author.is_bot}"],
+        cwd=REPO_ROOT, env=env, text=True,
+    ).strip()
+    return _json.loads(out) if out else {}
+
+
+def close_pr(repo: str, number: int, env: dict | None = None) -> bool:
+    """Best-effort HOST-side cleanup of a single PR via the host's gh (closes it;
+    does NOT delete its branch — pair with delete_branch for that)."""
+    env = env or rein_env()
+    r = subprocess.run(
+        ["gh", "pr", "close", str(number), "--repo", repo],
+        cwd=REPO_ROOT, env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    return r.returncode == 0
+
+
 # --------------------------------------------------------------------------
 # In-sandbox script generation (the SANDBOX-side of the loop)
 # --------------------------------------------------------------------------
@@ -439,6 +519,207 @@ def cross_owner_declare_script(issue: int, cross_repo: str) -> str:
 
 
 # --------------------------------------------------------------------------
+# RENDERED SCREEN (pyte) — assert on the PICTURE, not on the paint history (#100)
+# --------------------------------------------------------------------------
+#
+# WHY. Everything else in this harness reads a pty as a LINE STREAM: strip the
+# ANSI, split on newlines, substring-match. That is exactly right for output
+# that is genuinely line-oriented (git, rein's banner, the SBX|-tagged agent
+# script) — a line, once printed, is final.
+#
+# It is structurally wrong for anything that REDRAWS. A TUI (`claude`) and a
+# tmux popup do not "print lines"; they PAINT CELLS: home the cursor, overwrite
+# a region, repaint on every keystroke and resize. The byte stream is therefore
+# a *history of paint operations*, and reconstructing "what was on screen" from
+# it means hand-modelling a terminal — which is precisely what this harness used
+# to do (a CUP-splitting, box-art-stripping, last-write-per-row extractor) and
+# what #100 got rid of. The answer is prior art: pexpect drives the pty, a real
+# in-memory terminal emulator (pyte) consumes the stream and maintains the
+# screen buffer, and we assert on THAT. Redraws, cursor moves and read-chunk
+# boundaries stop being our problem, because resolving them is the emulator's
+# entire job.
+#
+# WHERE IT APPLIES — and where it must NOT. A rendered screen is a point-in-time
+# FRAME (80x24-ish of cells), not linear scrollback: content that scrolled off is
+# GONE. So:
+#   * REDRAWING surfaces (the tmux popup, the real-agent TUI)  -> rendered screen.
+#   * LINE-ORIENTED transcripts (every journey golden: write_ceremony, gh_write,
+#     sandbox_filesystem, onboarding …)                        -> build_raw_transcript.
+# Routing a line-oriented golden through a screen would silently truncate it to
+# the last N lines. Don't.
+#
+# pyte is a TEST-ONLY dependency (LGPLv3; approved under hard-constraint #4 on
+# that basis). It is NEVER linked into or shipped with the Go binary. It is
+# imported LAZILY, inside this section only, so the line-oriented journeys and
+# test_golden_shape.py keep working on a box with no pyte: a journey that needs a
+# rendered screen SKIPs (exit 3) with an install hint instead of exploding.
+
+PYTE_INSTALL_HINT = "install it with: sudo apt install python3-pyte"
+
+
+class PyteMissing(RuntimeError):
+    """pyte is not installed, so no rendered-screen surface can be driven.
+
+    A JOURNEY that catches this must SKIP (exit 3), never exit 0 — a green run
+    for a path nothing exercised is the #68 footgun (tests/interactive/CLAUDE.md).
+    """
+
+
+def _pyte():
+    """Import pyte, or raise PyteMissing with an actionable hint. Lazy on purpose
+    (see the section header): importing reinharness must not require pyte."""
+    try:
+        import pyte  # noqa: PLC0415  (deliberately lazy)
+    except ImportError as e:  # pragma: no cover - depends on the box
+        raise PyteMissing(
+            f"pyte is not installed, so a rendered-screen surface (TUI / tmux "
+            f"popup) cannot be driven — {PYTE_INSTALL_HINT}"
+        ) from e
+    return pyte
+
+
+def pyte_available() -> bool:
+    """Is the rendered-screen layer usable on this box? Journeys check this up
+    front and SKIP (exit 3) if not."""
+    try:
+        _pyte()
+    except PyteMissing:
+        return False
+    return True
+
+
+class RenderedScreen:
+    """A real terminal emulator (pyte) fed a pty's bytes: feed(text) -> display().
+
+    ONE screen per pty, mutated by every byte — the same model the physical
+    terminal uses. `display()` is the rendered grid (a list of `cols`-wide lines,
+    space-padded); `text()` is that grid joined, with each line right-trimmed and
+    the trailing all-blank lines dropped, which is the form assertions want.
+
+    Size it to the pty that feeds it (`screen_for_child`): pyte wraps at `cols`
+    exactly as the real terminal does, so a mismatched width renders line breaks
+    the human never saw.
+    """
+
+    def __init__(self, cols: int = 200, rows: int = 50):
+        pyte = _pyte()
+        self.cols = cols
+        self.rows = rows
+        self._screen = pyte.Screen(cols, rows)
+        self._stream = pyte.Stream(self._screen)
+
+    def feed(self, text: str) -> None:
+        """Apply pty output (str; pexpect is spawned with encoding='utf-8')."""
+        if text:
+            self._stream.feed(text)
+
+    def display(self) -> list[str]:
+        """The rendered grid: `rows` lines of `cols` chars, exactly as painted."""
+        return list(self._screen.display)
+
+    def text(self) -> str:
+        """The rendered screen as text (lines right-trimmed, trailing blanks cut)."""
+        lines = [ln.rstrip() for ln in self.display()]
+        while lines and not lines[-1]:
+            lines.pop()
+        return "\n".join(lines)
+
+    def contains(self, needle: str, *, ignore_case: bool = False) -> bool:
+        hay = self.text()
+        return (needle.lower() in hay.lower()) if ignore_case else (needle in hay)
+
+
+def screen_for_child(child: pexpect.spawn) -> RenderedScreen:
+    """A RenderedScreen sized to `child`'s pty (getwinsize() -> (rows, cols)), so
+    the emulator wraps exactly where the child's terminal does."""
+    rows, cols = child.getwinsize()
+    return RenderedScreen(cols=cols, rows=rows)
+
+
+def render_stream(text: str, *, cols: int = 200, rows: int = 50) -> RenderedScreen:
+    """Render an ALREADY-CAPTURED pty stream (e.g. a pexpect `logfile_read`
+    StringIO's value) into a screen — the after-the-fact form of feed()."""
+    scr = RenderedScreen(cols=cols, rows=rows)
+    scr.feed(text)
+    return scr
+
+
+def drain_children(children, *, poll: float = 0.05) -> None:
+    """ONE `read_nonblocking` per child: take whatever is available RIGHT NOW and
+    throw it away. Call it in a loop.
+
+    WHY: a pty's kernel buffer is small (~64KB) and a REAL agent TUI (`claude`)
+    repaints continuously, so if nobody reads its pty while we wait on, say, the
+    tmux client the popup renders on, the agent BLOCKS on write — it can never
+    reach the declare whose popup we are waiting for. Reading keeps it moving.
+
+    WHAT THIS IS NOT: it is not a full drain and it gives no structural guarantee.
+    It issues a single bounded read per child per call, so it is a RATE MITIGATION:
+    it holds only because every caller returns to it promptly (`wait_for_screen`
+    calls it once per poll iteration; `await_landing` calls it around each `gh api`
+    subprocess). A caller that goes away for long enough can still let the buffer
+    fill and stall the agent — transiently, not permanently, since the loop always
+    comes back and reads. The STRUCTURAL fix would be a background reader thread
+    per child; we deliberately do not have one, so keep the gaps between calls short.
+
+    Discarding the bytes is safe: they are still captured by the child's
+    `logfile_read` (every ReinRun installs one), so the raw transcript stays
+    COMPLETE. This only stops the pipe from filling.
+    """
+    for ch in children or ():
+        try:
+            ch.read_nonblocking(size=65536, timeout=poll)
+        except (pexpect.TIMEOUT, pexpect.EOF, OSError, ValueError):
+            pass
+
+
+def wait_for_screen(child: pexpect.spawn, pattern, *, timeout: float = 60.0,
+                    screen: RenderedScreen | None = None,
+                    poll: float = 0.5, drain=None) -> tuple[bool, RenderedScreen]:
+    """Pump `child`'s bytes into a rendered screen until `pattern` appears ON IT.
+
+    THE primitive that makes redraws / cursor moves / chunk boundaries a
+    non-issue: unlike `pexpect.expect`, which matches a moving window of the raw
+    byte stream (so a repaint that splits the text, or a chunk boundary, can miss
+    it), this matches the RENDERED result — and it keeps matching once the text is
+    on screen, no matter how it got there.
+
+    `pattern` is a regex string searched (MULTILINE) against the screen text, or a
+    callable `screen -> bool` for a richer screen-state condition (e.g. "the popup
+    box is fully painted"). Returns (found, screen) — the screen either way, so a
+    caller can report what WAS on it when it gave up. Bytes read here still land
+    in the child's `logfile_read`, so the raw transcript is unaffected.
+
+    `drain` — OTHER live pexpect children to keep reading while we wait (see
+    `drain_children`). Pass the agent's pty here when waiting on the tmux client,
+    or the whole run deadlocks on a full pty buffer.
+    """
+    scr = screen if screen is not None else screen_for_child(child)
+    if callable(pattern):
+        hit = pattern
+    else:
+        rx = re.compile(pattern, re.MULTILINE)
+
+        def hit(s: RenderedScreen) -> bool:
+            return bool(rx.search(s.text()))
+
+    deadline = time.time() + timeout
+    if hit(scr):
+        return True, scr
+    while time.time() < deadline:
+        drain_children(drain)
+        try:
+            scr.feed(child.read_nonblocking(size=4096, timeout=poll))
+        except pexpect.TIMEOUT:
+            pass
+        except pexpect.EOF:
+            return hit(scr), scr
+        if hit(scr):
+            return True, scr
+    return hit(scr), scr
+
+
+# --------------------------------------------------------------------------
 # ReinRun — a pexpect wrapper with a captured transcript
 # --------------------------------------------------------------------------
 
@@ -450,6 +731,10 @@ class ReinRun:
     child: pexpect.spawn
     transcript: io.StringIO
     workdir: str
+    # Lazily built by .screen() — the pyte-rendered view of this pty (#100).
+    # Only the TUI-facing helpers touch it, so a line-oriented test never needs
+    # pyte installed.
+    _screen: "RenderedScreen | None" = None
 
     def text(self) -> str:
         return self.transcript.getvalue()
@@ -521,31 +806,51 @@ class ReinRun:
         return self.child.expect("Also save", timeout=timeout)
 
     # -- interactive (TUI) helpers, for the real-agent e2e ------------------
+    #
+    # These assert on a RENDERED SCREEN (pyte), not on strip_ansi(raw bytes)
+    # — issue #100. A TUI repaints: it moves the cursor, overwrites cells and
+    # re-emits the same region many times, so the raw stream is a *history of
+    # paint operations*, not a picture. Substring-matching that history is
+    # sensitive to redraw order and to where a read chunk happened to split.
+    # Feeding it to a terminal emulator instead gives the picture the human is
+    # looking at, which is what the assertions are actually about.
+
+    def screen(self) -> RenderedScreen:
+        """This run's persistent rendered screen, sized to the pty (lazily made).
+
+        Persistent on purpose: a real terminal keeps ONE screen that every byte
+        mutates, so a repaint updates cells rather than appending text. Every
+        helper below pumps the child's bytes into this one screen.
+        """
+        if self._screen is None:
+            self._screen = screen_for_child(self.child)
+        return self._screen
 
     def read_until_ready(self, ready_markers, dialog_markers=None, timeout=60):
-        """Drain the pty until a ready marker appears (ANSI-stripped match).
+        """Pump the pty into the RENDERED SCREEN until a ready marker is ON IT.
 
-        A TUI redraws constantly, so `expect` on a single banner is brittle;
-        instead we accumulate bytes and substring-match the stripped buffer.
         Returns (ready: bool, dialog: bool, exited: bool). `dialog` flags a
         startup dialog (trust/theme/login) so the caller never misreads one as
-        a hang.
+        a hang. Markers are matched case-insensitively against the rendered
+        screen text, so a marker that a redraw split across two writes — or
+        that got overwritten and repainted — still matches exactly once it is
+        actually visible.
         """
         import pexpect as _px
 
         dialog_markers = dialog_markers or []
-        buf = ""
+        scr = self.screen()
         ready = dialog = exited = False
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                buf += self.child.read_nonblocking(size=4096, timeout=3)
+                scr.feed(self.child.read_nonblocking(size=4096, timeout=3))
             except _px.TIMEOUT:
                 pass
             except _px.EOF:
                 exited = True
                 break
-            low = strip_ansi(buf).lower()
+            low = scr.text().lower()
             if any(m.lower() in low for m in ready_markers):
                 ready = True
                 break
@@ -554,18 +859,25 @@ class ReinRun:
         return ready, dialog, exited
 
     def send_and_collect(self, line: str, settle: float = 12.0, timeout: float = 10.0) -> str:
-        """Send a line to the TUI, wait `settle`s, drain the reply; return it
-        ANSI-stripped."""
+        """Send a line to the TUI, let it settle, drain the reply into the
+        rendered screen, and return the SCREEN TEXT — what the human now sees.
+
+        Not "the bytes that arrived": a TUI's answer may be painted, scrolled
+        and repainted, so the delta of raw bytes is not the answer. The screen
+        after the reply lands is.
+        """
         import pexpect as _px
 
+        scr = self.screen()
         self.child.send(line + "\r")
         time.sleep(settle)
-        out = ""
-        try:
-            out = self.child.read_nonblocking(size=16384, timeout=timeout)
-        except (_px.TIMEOUT, _px.EOF):
-            pass
-        return strip_ansi(out)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                scr.feed(self.child.read_nonblocking(size=16384, timeout=1))
+            except (_px.TIMEOUT, _px.EOF):
+                break
+        return scr.text()
 
     def quit_tui(self):
         """Best-effort teardown of an interactive claude session."""
@@ -982,92 +1294,111 @@ def get_views(text: str) -> tuple[list[str], list[str], list[str]]:
     callers still CURATE the views for the golden (dropping git object-count
     noise, masking pty line-wrap), so "tag-split + curation" — not the split
     alone — is what a human reviews.
+
+    A tagged line whose CONTENT is blank appears in a transcript as the bare tag
+    with its trailing space stripped (`SBX|`, `POPUP|`) — build_raw_transcript
+    rstrips every line, and a golden must not carry trailing whitespace (an editor
+    stripping it would read as drift). Such a line is still its view's, not the
+    host's, so the split accepts the bare tag too.
     """
     host: list[str] = []
     agent: list[str] = []
     popup: list[str] = []
     for ln in _pty_lines(text):
-        if ln.startswith(SBX_TAG):
+        if ln.startswith(SBX_TAG) or ln.rstrip() == SBX_TAG.rstrip():
             agent.append(ln[len(SBX_TAG):].rstrip())
-        elif ln.startswith(POPUP_TAG):
+        elif ln.startswith(POPUP_TAG) or ln.rstrip() == POPUP_TAG.rstrip():
             popup.append(ln[len(POPUP_TAG):].rstrip())
         else:
             host.append(ln.rstrip())
     return host, agent, popup
 
 
-# Box-drawing glyphs (U+2500..U+257F) tmux paints the popup border with. Stripped
-# when we extract Form A CONTENT from the client render — a segment that is only
-# border/whitespace after this collapses to empty and is dropped.
-_BOX_DRAWING = re.compile(r"[─-╿]")
-# Charset-designation + keypad-mode escapes tmux emits that _ANSI (which only
-# matches CSI `\x1b[…`) does not: `\x1b(B`, `\x1b)0`, `\x1b=`, `\x1b>`.
-_TMUX_MISC_ESC = re.compile(r"\x1b[()][AB0]|\x1b[=>]")
-# Absolute cursor-position (CUP) escape: `\x1b[<row>;<col>H`. tmux writes each
-# popup line by first homing the cursor to its row/col, then the clean text.
-_CUP = re.compile(r"\x1b\[(\d+);(\d+)H")
+# The popup box's corners, as tmux paints them (it picks a style depending on
+# terminal/config: square, rounded, or heavy). Used ONLY to locate the box on the
+# RENDERED screen — we no longer strip box art out of a byte stream, because we no
+# longer read a byte stream (#100). A row is the top/bottom border iff it carries
+# the matching left+right corner glyph.
+_BOX_TOP = re.compile(r"[┌╭┏].*[┐╮┓]")
+_BOX_BOTTOM = re.compile(r"[└╰┗].*[┘╯┛]")
 
 
-def _clean_popup_segment(seg: str) -> str:
-    """One CUP-positioned write, reduced to its READABLE text (or "" if it was
-    pure border/cursor noise). Strips CSI + OSC (strip_ansi), the charset/keypad
-    escapes strip_ansi misses, and the box-drawing glyphs, then trims. Form A
-    content (plain ASCII like `=== rein: …`) survives; a border/blank write does
-    not."""
-    s = _TMUX_MISC_ESC.sub("", strip_ansi(seg))
-    s = _BOX_DRAWING.sub("", s)
-    # Trim the line breaks tmux/rein put at a segment's edges and any trailing
-    # padding, but KEEP leading spaces: they are rein's own Form A indentation
-    # (`   issue:` / `             in …`), part of what the human read.
-    return s.strip("\r\n").rstrip()
+def popup_forma_from_screen(screen: RenderedScreen,
+                            answer: str | None = None) -> list[str]:
+    """Extract the popup's Form A from a RENDERED client screen (#100).
 
+    A tmux popup is a CLIENT-OWNED OVERLAY drawn ON TOP of the client's screen —
+    it is NOT an addressable pane (it never appears in `list-panes`, and
+    `capture-pane` over every pane finds no trace of it; verified empirically, so
+    capture-pane is NOT an option here — see tests/interactive/CLAUDE.md). The only
+    surface that has the popup on it is the ATTACHED CLIENT's pty, and once that
+    pty's bytes are run through a terminal emulator, the popup is simply *there*,
+    boxed, exactly as the human sees it:
 
-def extract_popup_forma(raw: str, answer: str | None = None) -> list[str]:
-    """Clean the tmux popup's client-render bytes down to the Form A text lines.
+        ┌────────────────────────────────────────────┐
+        │=== rein: agent declares work on an issue ===│
+        │   issue:    #100 "…"  [open]                │
+        │ …                                           │
+        │> │                                          │
+        └────────────────────────────────────────────┘
 
-    The popup pty is a SEPARATE, client-owned surface; tmux paints Form A into a
-    box by homing the cursor to each line's row (`\\x1b[row;colH`) and writing the
-    clean text, wrapped in box-art borders and repainted on redraw. This recovers
-    the semantic content DETERMINISTICALLY, independent of paint order:
+    So extraction is geometry, not parsing: find the border rows, slice the
+    columns strictly INSIDE them, and everything outside the box — the shell
+    prompt painted above, the tmux status bar below — is excluded by construction.
+    Leading spaces inside the box are KEPT: they are rein's own Form A indentation
+    (`   issue:` / `             in …`), part of what the human read.
 
-      * split the stream on CUP escapes; each segment is one positioned write;
-      * clean each (drop border/cursor/charset noise — `_clean_popup_segment`);
-      * key the survivors by ROW, last CONTENT write winning (a later border/empty
-        repaint cleans to "" and is skipped, so it never clobbers real content);
-      * emit rows in ascending order — the on-screen top-to-bottom Form A.
+    The result is bounded to rein's own Form A: the `=== rein: …` header down to
+    the `> ` prompt line (writePrompt, internal/ui/prompt) — stable anchors rein
+    writes verbatim, so the slice is deterministic, not curation. Returns [] if the
+    box (or the header) is not on screen yet, which is what `popup_forma_complete`
+    uses to decide the frame is done.
 
-    Because rein writes each Form A line exactly once and the popup then BLOCKS on
-    input, a drained capture is quiescent and identical every run; only the issue
-    number / title / repo vary, and those are handled by normalize-on-compare.
-
-    `answer` (the number the human typed) is appended to the trailing `>` prompt
-    line, so the block reads `> <n>` — what the human saw AND did. The echo itself
-    is not in the captured bytes (pexpect stops reading at the prompt, before the
-    popup-close redraw that would wipe Form A), so recording the sent keystroke is
-    both faithful and the deterministic choice.
+    `answer` (the number the human typed) is recorded onto the trailing `>` prompt
+    line, so the block reads `> <n>` — what the human saw AND did. The keystroke's
+    echo is not captured (we snapshot BEFORE sending, since answering closes the
+    popup and repaints over Form A), so recording what we sent is both faithful and
+    deterministic.
     """
-    matches = list(_CUP.finditer(raw))
-    rows: dict[int, str] = {}
-    for i, m in enumerate(matches):
-        row = int(m.group(1))
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
-        text = _clean_popup_segment(raw[m.end():end])
-        if text:
-            rows[row] = text  # last CONTENT write for this row wins
-    lines = [rows[r] for r in sorted(rows)]
-    # Bound to rein's OWN Form A: it starts at the `=== rein: …` header and ends
-    # at the `> ` prompt (writePrompt, internal/ui/prompt). Everything the client
-    # painted OUTSIDE the popup box — the underlying shell prompt above, the tmux
-    # status bar below — is chrome, not Form A; drop it. The anchors are stable
-    # (rein writes them verbatim) so the slice is deterministic, not curation.
+    display = screen.display()
+    top = next((i for i, ln in enumerate(display) if _BOX_TOP.search(ln)), None)
+    if top is None:
+        return []
+    left = min(display[top].find(c) for c in "┌╭┏" if c in display[top])
+    right = max(display[top].rfind(c) for c in "┐╮┓" if c in display[top])
+    bottom = next(
+        (i for i in range(top + 1, len(display)) if _BOX_BOTTOM.search(display[i])),
+        len(display),
+    )
+    # Strictly INSIDE the border columns and rows == the popup's content.
+    lines = [ln[left + 1:right].rstrip() for ln in display[top + 1:bottom]]
+
     start = next((i for i, ln in enumerate(lines) if ln.startswith("=== rein:")), None)
     if start is None:
         return []
-    end = next((i for i in range(start, len(lines)) if lines[i].startswith(">")), len(lines) - 1)
+    end = next((i for i in range(start, len(lines)) if lines[i].startswith(">")), None)
+    if end is None:
+        return lines[start:]  # still painting: no `>` prompt line yet
     lines = lines[start:end + 1]
     if answer is not None:
         lines = [f"> {answer}" if ln.rstrip() == ">" else ln for ln in lines]
     return lines
+
+
+def popup_forma_complete(screen: RenderedScreen) -> bool:
+    """Is the popup's Form A FULLY painted on this screen — header through the
+    `>` prompt rein blocks on?
+
+    This is the SCREEN-STATE replacement for the old drain-to-quiescence timer.
+    The old code matched "type the issue number" in the byte stream and then read
+    until N ms passed with no new bytes, hoping the rest of the frame had landed —
+    a timing bet. Here the completeness condition is stated directly: rein writes
+    Form A once and then BLOCKS on input, so the final `>` prompt line being on
+    screen IS the proof the frame is whole and will not change. No timer, no
+    guess, and a snapshot taken at that moment is identical every run.
+    """
+    lines = popup_forma_from_screen(screen)
+    return bool(lines) and lines[-1].startswith(">")
 
 
 def fold_popup(transcript: str, popup_lines: list[str],
@@ -1085,7 +1416,11 @@ def fold_popup(transcript: str, popup_lines: list[str],
     echoes it as `SBX| $ rein declare <n>`; rein's banner echo of the script body
     is `run rein declare <n>`, no `$`, so it does not match).
     """
-    block = [""] + [POPUP_TAG + ln for ln in popup_lines]
+    # rstrip the TAGGED line, not the content: Form A contains a genuinely blank
+    # line (rein prints one before "To approve"), which must still carry the tag to
+    # stay on the popup side of get_views — but must not leave trailing whitespace
+    # in the checked-in golden, where an editor stripping it would read as drift.
+    block = [""] + [(POPUP_TAG + ln).rstrip() for ln in popup_lines]
     out: list[str] = []
     injected = False
     for ln in transcript.split("\n"):
@@ -1094,6 +1429,136 @@ def fold_popup(transcript: str, popup_lines: list[str],
             out.extend(block)
             injected = True
     return "\n".join(out)
+
+
+# The line that STANDS IN for a real agent's TUI region in a golden (see
+# collapse_agent_tui). Fixed text, so it is deterministic AND usable as the
+# fold_popup anchor for a journey whose declare happens inside the agent's TUI.
+AGENT_TUI_PLACEHOLDER = (
+    "[claude's TUI — the real agent's prose, tool calls, spinners and token "
+    "counts. NON-DETERMINISTIC, collapsed: what it SAID is not golden material. "
+    "What it OBSERVABLY DID is asserted below and in the invariants.]"
+)
+
+# The rein line that ENDS the agent's region: rein's own exit accounting, printed
+# on the host pty after the agent process is gone. Anchoring the collapse's end on
+# it guarantees that security-relevant line survives the collapse verbatim.
+#
+# It ALSO matches the per-token `exit-revoke … failed` WARNING, because
+# revokeRunWriteTokens (cmd/rein/run.go) prints that warning immediately before its
+# own summary line — so on a partial-revoke run the warning is STRUCTURALLY the
+# first exit-accounting line rein prints. Matching it here puts it OUTSIDE the
+# collapsed region (and everything after it is preserved verbatim), rather than
+# leaving a security-relevant line to be handled by the in-region keep filter alone.
+AGENT_TUI_END_RE = (
+    r"^rein: (?:revoked \d+ of \d+ write token"
+    r"|warning: exit-revoke of a write token failed)"
+)
+
+# The lines INSIDE the agent's region that are rein's OWN host output and must
+# therefore SURVIVE the collapse (see collapse_agent_tui). rein writes them to
+# os.Stderr — i.e. the host pty — at column 0:
+#   * `rein: …`      — e.g. the `rein: SESSION EXPIRED` banner headline
+#                      (cmd/rein/run_sandboxed.go:printExpiryBanner)
+#   * `=== rein: …`  — the banner form, e.g. the install NOTICE block
+#                      (internal/ui/grant/notice.go:WriteInstallNotice, its
+#                      non-interactive "plain stderr on the run terminal" surface)
+# Anchored at column 0 on purpose: a real agent's TUI paints its content behind box
+# art / glyphs / indentation, never flush-left with rein's own prefix (verified
+# against captured real-claude pty streams — see the docstring below).
+AGENT_TUI_KEEP_RE = r"^(?:=+ )?rein: "
+
+
+def collapse_agent_tui(transcript: str, start_needle: str, *,
+                       placeholder: str = AGENT_TUI_PLACEHOLDER,
+                       end_pattern: str = AGENT_TUI_END_RE,
+                       keep_pattern: str = AGENT_TUI_KEEP_RE) -> tuple[str, bool]:
+    """Collapse a REAL agent's TUI region to a placeholder, KEEPING rein's own
+    lines. Returns (transcript, anchors_found).
+
+    WHY THIS IS NOT "DROPPING OUTPUT" (the doctrine question, #101). The golden
+    model says: keep every line, normalize the volatile TOKENS at compare time. It
+    holds because every other journey's agent is a deterministic bash script whose
+    output is LINE-ORIENTED — a line, once printed, is final, and only tokens
+    inside it vary. A REAL LLM's TUI is neither: it REDRAWS (so the ANSI-stripped
+    byte stream is a paint history, not a picture — #100) and its content is
+    genuinely non-deterministic (different prose, tool order, spinners, token
+    counts, promo banners, timing). There is no token-level normalization of that;
+    it is redraw+prose NOISE, of exactly the kind `build_raw_transcript` already
+    drops when it discards sub-100% progress ticks. So this collapses it — once, at
+    BUILD time, so the checked-in golden stays a HUMAN-REVIEWABLE artifact showing
+    rein's own security surface (banner, injected contract, Form A, exit accounting)
+    rather than 5000 lines of ANSI soup a reviewer would never read and that would
+    be rewritten wholesale on every adopt.
+
+    WHAT KEEPS IT HONEST — two anchors AND a keep filter:
+
+    1. The region is bounded by two anchors that MUST both be found, and the caller
+       treats a miss as a CEREMONY BREAK (exit 2), never as a silently smaller golden.
+         start — the first line CONTAINING `start_needle` (use something rein itself
+                 prints and the journey controls: the tail of rein's `rein: running:
+                 <cmdline>` echo, i.e. the agent's own prompt text). The collapse
+                 begins on the line AFTER it, so the whole banner + injected contract
+                 echo is preserved verbatim — as is rein's `---` banner separator,
+                 which it prints immediately after that echo and which is rein's own
+                 line, not the agent's (a collapse that ate it would be dropping rein
+                 output, the one thing the golden model never allows).
+         end   — the first line after that matching `end_pattern` (rein's exit
+                 accounting — the `revoked N of N` summary, or the per-token
+                 `exit-revoke … failed` warning that structurally precedes it).
+                 Everything rein prints from there on is preserved.
+
+    2. This is a FILTER, not a delete. rein DOES have call sites that write to its
+       OWN host pty (os.Stderr) strictly inside that window — `printExpiryBanner`'s
+       `rein: SESSION EXPIRED` block (cmd/rein/run_sandboxed.go) and the
+       non-interactive install-NOTICE surface (internal/ui/grant/notice.go) — so the
+       region is NOT "pure agent TUI" (an earlier version of this comment claimed it
+       was; it was false). Any line inside the region matching `keep_pattern`
+       (`AGENT_TUI_KEEP_RE`: a column-0 `rein: …` or `=== rein: …`) is PRESERVED
+       verbatim; only the runs of agent-TUI lines AROUND them collapse (one
+       placeholder per contiguous run). So the doctrine holds inside this window
+       exactly as everywhere else: a NEW rein line — especially a security-relevant
+       one — lands in the golden and TRIPS DRIFT. It is not deleted at build time.
+
+       Determinism is not weakened: rein prints nothing here on the happy path (the
+       declare's Form A is routed to the tmux popup and the broker writes to
+       helper.log), so a healthy run keeps exactly one placeholder and no kept lines.
+       And a real claude TUI does not paint over the filter: it renders shell output
+       and prose behind box art / glyphs / indentation, never flush-left with rein's
+       own prefix. Verified against captured real-claude pty streams (an 893-line
+       full session incl. a `rein declare` tool call, which renders as `⎿  $ rein
+       declare <n>`): the only column-0 `rein: ` lines in them are rein's own
+       pre-TUI banner lines, all OUTSIDE the region.
+    """
+    lines = transcript.split("\n")
+    start = next((i for i, ln in enumerate(lines) if start_needle in ln), None)
+    if start is None:
+        return transcript, False
+    if start + 1 < len(lines) and lines[start + 1].strip() == "---":
+        start += 1  # rein's own banner separator — keep it on rein's side
+    end_rx = re.compile(end_pattern)
+    end = next((i for i in range(start + 1, len(lines)) if end_rx.search(lines[i])), None)
+    if end is None:
+        return transcript, False
+
+    keep_rx = re.compile(keep_pattern)
+    region: list[str] = []
+    pending = False  # a contiguous run of agent-TUI lines awaiting its placeholder
+    for ln in lines[start + 1:end]:
+        if keep_rx.search(ln):
+            if pending:
+                region.append(placeholder)
+                pending = False
+            region.append(ln)  # rein's OWN line: survives, so it can trip drift
+        else:
+            pending = True
+    if pending:
+        region.append(placeholder)  # the trailing run of TUI lines
+    elif placeholder not in region:
+        # A (pathological) region with no collapsible line at all: still emit the
+        # placeholder, which is ALSO this journey's fold_popup anchor for Form A.
+        region.insert(0, placeholder)
+    return "\n".join(lines[:start + 1] + region + lines[end:]), True
 
 
 def normalize_transcript(text: str, subs: list[tuple[str, str]] | None = None) -> str:
@@ -1146,6 +1611,15 @@ _NORMALIZE_RULES = [
     # DIFFERENT issue numbers still match. Bare digits, so the letter-requiring
     # hash rule below never eats it.
     (r"/issues/\d+", "/issues/<ISSUE>"),
+    # PR number inside a `gh pr create` URL/path, e.g. the gh-write journey's
+    # `https://github.com/<owner>/<repo>/pull/<n>`. Generic (not a per-journey
+    # whitelist): any `/pull/<digits>` collapses so two runs that mint DIFFERENT
+    # PR numbers still match. BEFORE the hash rule for the same reason as
+    # /issues/ above (bare digits, so the letter-requiring hash rule never eats
+    # it). Distinct placeholder from <ISSUE> since a PR and an issue number are
+    # different objects even though both also print as a bare `#<n>` elsewhere
+    # (that bare form is already covered, and collapsed, by the `#\\d+` rule).
+    (r"/pull/\d+", "/pull/<PR>"),
     (r"\bdeclare \d+", "declare <ISSUE>"),
     (r"issue number \(\d+\)", "issue number (<ISSUE>)"),
     (r"(?m)^> \d+$", "> <ISSUE>"),
@@ -1404,12 +1878,21 @@ def read_log_since(path: Path, offset: int) -> str:
 #   3. The rein process on a SEPARATE plain pty whose $TMUX/$TMUX_PANE point at
 #      this session (see `tmux_env`). That keeps rein's OWN output clean and
 #      deterministic (the golden), while the popup renders on the attached
-#      client (finicky full-screen box-art, deliberately NOT in the golden).
-#      This mirrors reality: `rein run -- <agent>` runs inside the operator's
-#      tmux pane, and the broker it hosts launches the popup on that same client.
+#      client. This mirrors reality: `rein run -- <agent>` runs inside the
+#      operator's tmux pane, and the broker it hosts launches the popup on that
+#      same client.
 #
-# If tmux is not installed the popup surface cannot be driven at all; a journey
-# should SKIP gracefully (see journey_tmux_popup_approval.py), never fake it.
+# WHY NOT `tmux capture-pane`? Because it CANNOT SEE THE POPUP — verified, not
+# assumed: with a real attached client rendering Form A in a popup, `list-panes`
+# reports only the base pane, and capturing every pane finds no Form A anywhere. A
+# popup is a client-owned OVERLAY, not an addressable pane, so the pane-snapshot
+# route (#100's original proposal) is a dead end. The client's own pty IS the
+# surface — and running THAT through a terminal emulator (RenderedScreen, above)
+# gives the popup exactly as the human sees it, box and all.
+#
+# If tmux (or pyte) is not installed the popup surface cannot be driven at all; a
+# journey must SKIP with exit 3 (see journey_tmux_popup_approval.py), never fake it
+# and never exit 0.
 
 
 def tmux_available() -> bool:
@@ -1433,6 +1916,7 @@ class TmuxPopupSession:
     log: io.StringIO
     sockpath: str
     pane: str
+    screen: RenderedScreen  # the attached client's pty, run through a terminal
     forma: list[str] = field(default_factory=list)
 
     def tmux_env(self) -> dict:
@@ -1441,45 +1925,54 @@ class TmuxPopupSession:
         non-empty) and $TMUX_PANE. Pass it as spawn_rein_run(extra_env=...)."""
         return {"TMUX": f"{self.sockpath},0,0", "TMUX_PANE": self.pane}
 
-    def drive_popup(self, expect_pattern: str, answer: str, *, settle: float = 0.5,
-                    timeout: int = 90, quiesce: float = 0.4,
-                    drain_max: float = 6.0) -> list[str]:
-        """Wait for the popup's Form A to RENDER on the attached client, CAPTURE it,
-        then type the answer. Returns the cleaned Form A lines (also stored on
-        `self.forma`) for folding into the transcript.
+    def drive_popup(self, expect_pattern: str, answer: str, *, settle: float = 0.3,
+                    timeout: int = 90, drain=None) -> list[str]:
+        """Wait for the popup's Form A to be FULLY RENDERED on the attached client's
+        SCREEN, read it off that screen, then type the answer. Returns the Form A
+        lines (also stored on `self.forma`) for folding into the transcript.
 
-        The popup grabs the client keyboard, so keys written to the client pty
+        The popup grabs the client keyboard, so keys written to the client's pty
         reach `rein approval grant` inside the popup. `expect_pattern` must be text
         the popup PRINTS (e.g. "type the issue number"), not text from the command
         line that opened it.
 
-        Capture order matters for DETERMINISM. After the pattern matches, the
-        render arrives in a burst and the popup then BLOCKS on input; we DRAIN the
-        client (read until `quiesce` seconds pass with no new bytes) so the log
-        holds the WHOLE Form A at a quiescent, identical-every-run state — not a
-        timing-dependent read-chunk boundary. We snapshot and clean it BEFORE
-        sending the answer, because typing it makes `rein approval grant` exit,
-        which closes the popup and repaints over Form A. `answer` is recorded onto
-        the trailing `>` prompt line (`> <n>`) — the keystroke we send, faithful
-        and deterministic, since the echo is never read back."""
-        self.client.expect(expect_pattern, timeout=timeout)
-        # Drain to quiescence: the popup is now blocked on input, so once no bytes
-        # arrive for `quiesce` seconds the full Form A is in the log and stable.
-        deadline = time.time() + drain_max
-        while time.time() < deadline:
-            try:
-                self.client.read_nonblocking(size=4096, timeout=quiesce)
-            except (pexpect.TIMEOUT, pexpect.EOF):
-                break
-        self.forma = extract_popup_forma(self.log.getvalue(), answer=answer)
+        DETERMINISM, without a timer (#100). We pump the client's bytes into a real
+        terminal emulator and wait for a SCREEN STATE: `expect_pattern` visible AND
+        the Form A box painted through its trailing `>` prompt — the last thing rein
+        writes before it BLOCKS on input, hence proof the frame is complete and
+        stable. (The old code matched the pattern in the raw byte stream and then
+        drained until N ms passed with no new bytes — a timing bet on the rest of
+        the frame having arrived, which is exactly the fragility #100 is about.)
+
+        We snapshot BEFORE sending the answer, because answering makes `rein
+        approval grant` exit, which closes the popup and repaints over Form A.
+
+        `drain` — other live ptys to keep reading while we block here. With a
+        deterministic bash agent this is unnecessary (the agent is idle inside
+        `rein declare`, printing nothing). With a REAL agent TUI it is REQUIRED:
+        claude repaints while it waits for the declare to return, and an unread pty
+        buffer fills and blocks it — see `drain_children`.
+        """
+        def ready(scr: RenderedScreen) -> bool:
+            return scr.contains(expect_pattern) and popup_forma_complete(scr)
+
+        found, _ = wait_for_screen(self.client, ready, timeout=timeout,
+                                   screen=self.screen, drain=drain)
+        if not found:
+            raise RuntimeError(
+                "the popup's Form A never fully rendered on the attached tmux "
+                f"client within {timeout}s. Client screen was:\n{self.screen.text()}"
+            )
+        self.forma = popup_forma_from_screen(self.screen, answer=answer)
         time.sleep(settle)
         self.client.send(answer + "\r")
         return self.forma
 
     def render(self) -> str:
-        """ANSI-stripped bytes the client received — what the human SAW in the
-        popup. Useful to show a reviewer; too box-art/cursor-driven to golden."""
-        return strip_ansi(self.log.getvalue())
+        """The attached client's RENDERED screen — what the human SAW (box art and
+        all). Useful to show a reviewer; the popup's Form A alone (the part that
+        goes in the golden) is `self.forma`."""
+        return self.screen.text()
 
     def close(self) -> None:
         _tmux(self.socket, "kill-server")
@@ -1493,10 +1986,16 @@ class TmuxPopupSession:
 def tmux_popup_session(*, width: int = 200, height: int = 50, attach_settle: float = 1.0):
     """Stand up a dedicated-socket tmux session with a pexpect-attached client for
     a popup to render on, yield a TmuxPopupSession, and ALWAYS kill the server on
-    exit. Raises RuntimeError if tmux is absent (the caller should have checked
-    `tmux_available()` and skipped)."""
+    exit. Raises RuntimeError if tmux is absent, or PyteMissing if the rendered-
+    screen layer is unavailable (the caller should have checked `tmux_available()`
+    + `pyte_available()` and SKIPped with exit 3)."""
     if not tmux_available():
         raise RuntimeError("tmux not on PATH — the popup approval surface cannot be driven")
+    # The client's pty, run through a real terminal emulator: THE surface the popup
+    # exists on (it is not a pane, so capture-pane cannot see it). Sized to the
+    # client exactly, so pyte wraps where tmux wraps. Built FIRST so a missing pyte
+    # raises before we start a tmux server we would then have to reap.
+    screen = RenderedScreen(cols=width, rows=height)
     socket = f"reinjourney-{os.getpid()}-{uuid.uuid4().hex[:6]}"
     _tmux(socket, "kill-server")  # clean slate on OUR socket only
     time.sleep(0.2)
@@ -1532,7 +2031,8 @@ def tmux_popup_session(*, width: int = 200, height: int = 50, attach_settle: flo
         )
         client.logfile_read = log
         time.sleep(attach_settle)  # the client must be attached before a popup can render
-        sess = TmuxPopupSession(socket=socket, client=client, log=log, sockpath=sockpath, pane=pane)
+        sess = TmuxPopupSession(socket=socket, client=client, log=log,
+                                sockpath=sockpath, pane=pane, screen=screen)
         yield sess
     finally:
         if sess is not None:

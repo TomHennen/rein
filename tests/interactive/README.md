@@ -91,6 +91,8 @@ a new `golden/*.txt`). See `tests/interactive/CLAUDE.md` for the authoring rules
 | 16 | **Delegated commit author "(via rein)"** — a sandboxed agent's commit is NON-impersonating: rein stamps `GIT_AUTHOR_*`/`GIT_COMMITTER_*` (internal/srt/env.go, from internal/gitidentity) to `<developer name> (via rein)` + the App-bot NOREPLY email (`<id>+<slug>[bot]@users.noreply.github.com`), NEVER the developer's real email. The agent prints `git log -1 --format='%an <%ae>'` (visible in the golden) and, after the push, the HOST asserts the same identity on the pushed commit via the API — and that it is NOT the developer. Direct mode differs (it layers the real `~/.gitconfig`, so commits author as the developer), which is why this runs sandboxed | **COVERED** | `journey_git_author.py` → **`golden/git_author.txt`** |
 | 17 | **Multi-repo: REAL cross-repo work in ONE run** — a session statically scoped to TWO same-owner, App-installed throwaway repos, where ONE `rein run` does real work in BOTH: the launch banner names the full ceiling `repos=[A B]` (the #68 gate cleared BOTH — no separate launch-gate demo needed), the agent CLONES both (reads flow, no declaration), then `declare <issueA> --repo A` → approve → push LANDS on A, and `declare <issueB> --repo B` → the SECOND declare in the run renders the "agent wants to ALSO work on an issue" confirm (an additional-ISSUE confirm within scope — B is already in the ceiling, so session.Contains → NOT the AddRepo SCOPE-EXPANSION prompt an out-of-scope repo would trip, row 6) → approve → push LANDS on B. BOTH branches are then verified host-side as actually landed on GitHub. This proves the brokered run genuinely spans the ceiling and writes across BOTH repos in one run — not merely that a 2-repo session launches | **COVERED** | `journey_multi_repo.py` → **`golden/multi_repo.txt`** (runs SANDBOXED — the default. It ran `--direct` only while #95 blocked the sandboxed SECOND declare; that fix landed, so it is back on sandboxed. This is the multi-repo HAPPY PATH, not the #95 guard — see row 18) |
 | 18 | **#95 regression guard: cross-run gh-read staleness** — the load-bearing sandboxed guard for issue **#95**. A session statically scoped to `[A, B]`, but BEFORE the run a REAL, currently-valid, repo-A-ONLY-scoped gh-read token is SEEDED at the LEGACY untagged cache path in the run's state dir — the leftover a prior single-repo-A run wrote. PRE-FIX the scope-blind broker serves that stale token for the SECOND declare and `declare <issueB> --repo B` 404s ("issue not found in B"); POST-FIX the scope-tagged cache MISSES it, re-mints at `[A,B]`, fetches B's issue, and the push to B LANDS. The guard assertions (declare B rc=0, the second Form A rendered, push-to-B landed) are exactly the surfaces #95 breaks — proven load-bearing: RED on 780a7fb, GREEN on the fix. Unlike row 17 (which passes clean-state with or without the fix), the seed is what makes THIS a regression guard | **COVERED** | `journey_sandbox_gh_read_staleness.py` → **`golden/sandbox_gh_read_staleness.txt`**. Seeds via the test-support `seedghread` mint (same as `cmd/rein/issue95_live_test.go`); NOT a rein subcommand |
+| 19 | **The gh / REST + GraphQL write boundary** — the in-sandbox `gh` twin of row 2's git-push boundary (issue **#91**, and #101 "gap 1"): the SAME `gh api -X POST .../issues/<n>/comments` write is DENIED before the declare (rein's declare gate, a local 403 — GitHub never contacted) and LANDS after declare+approve (HTTP 201, the body echoed back); then, on the same post-declare token, a push to `agent/<n>/<nonce>` and a **`gh pr create`** — which needs BOTH `pull_requests: write` AND the **GraphQL read** `gh pr create` performs first (rein's proxy classifies/gates GraphQL separately from REST). Host-side ground truth confirms the comment, the branch and the PR really exist at GitHub | **COVERED** | `journey_gh_write.py` → **`golden/gh_write.txt`**. The regression proof for the #91 contents-only-token bug (before it, every in-sandbox issue/PR write 403'd "Resource not accessible by integration" while `git push` worked, falsifying the contract's promise that approving covers ALL writes) |
+| 20 | **REAL claude walks the whole write path** — the #101 "gap 2" journey: every other journey's "agent" is a deterministic bash script we wrote, and `test_realagent_e2e` runs a real claude but only asks it `2+2`. Here a **live LLM** gets a one-line task and does the whole thing itself: reads the injected contract, runs `rein declare <n>` **up front** (it does NOT need to discover the gate from a locked push — a design correction to #101, see the journey's docstring), gets approved via the tmux **popup**, writes/commits/pushes `agent/<n>/<its own suffix>` (discovered host-side via `matching-refs` — a real agent names its own branch) and opens a **PR**, whose author is asserted to be the **delegated App bot** (`app/<slug>`, `is_bot=true`), never the developer. Also the demo consumer of **#100**: claude's folder-trust dialog fires on the fresh checkout and would block the run FOREVER — it is unfindable in the raw ANSI byte soup and trivially matched on a **rendered screen** (`wait_for_screen`) | **COVERED** | `journey_realagent_write.py` → **`golden/realagent_write.txt`**. The golden keeps rein's own host output VERBATIM (banner, injected contract, exit token accounting) + the popup's Form A + a ground-truth `MILESTONE\|` block, with claude's non-deterministic TUI collapsed to ONE placeholder line (`reinharness.collapse_agent_tui`, bounded by two anchors that MUST be found — a miss is exit 2, never a silently truncated golden). SKIPs with exit 3 if `claude`, `tmux` or `pyte` is absent. Spends real API tokens: run it deliberately |
 
 Statuses: **COVERED** (a file drives it), **PARTIAL** (some of it), **GAP** (real
 journey, no demo yet), **UNDRIVEABLE** (needs a browser — say so and move on).
@@ -106,6 +108,15 @@ journey, no demo yet), **UNDRIVEABLE** (needs a browser — say so and move on).
 - **A healthy sandbox stack:** `srt`, `bwrap`, `socat`, `ripgrep`, and working
   unprivileged user namespaces. (`rein doctor` checks these.)
 - **`python3` + `pexpect`** (developed against 4.9.0).
+- **`pyte`** (`sudo apt install python3-pyte`) — a TEST-ONLY, in-memory terminal
+  emulator, needed only by the surfaces that REDRAW: `journey_realagent_write.py`
+  (its biggest consumer — a real claude's TUI *and* the popup), the tmux-popup
+  journey, and `test_realagent_e2e`. Everything else runs without it (the import is
+  lazy): a **journey** that needs it SKIPs with **exit 3**, and the one **plain
+  test** that needs it (`test_realagent_e2e`, swept by `run.sh`) is guarded with
+  `unittest.skipUnless(H.pyte_available(), …)` — so `run.sh` stays green on a box
+  without pyte. LGPLv3, test-only — never linked into or shipped with the Go binary
+  (hard-constraint #4).
 - **Host `gh` authed** as the repo owner — used only for host-side branch
   *verification* and *cleanup* (the operator's own token, never the sandbox).
 - **No pytest needed.** The suite uses the stdlib `unittest`. (This VM has no
@@ -344,21 +355,27 @@ Driving a popup under pexpect (`reinharness.tmux_popup_session`, a context manag
   own sessions; it kills only its own socket on teardown;
 - an ATTACHED pexpect client the popup renders on and grabs the keyboard of — a
   popup is a client-owned OVERLAY, not an addressable pane (it never appears in
-  `list-panes`, and `send-keys` cannot reach it), so the only way to answer it is
-  to write keys to the attached client's pty (`drive_popup`);
+  `list-panes`, `send-keys` cannot reach it, and **`capture-pane` cannot see it**:
+  capturing every pane while a popup is up finds no trace of it), so the only way
+  to read it is the attached client's pty and the only way to answer it is to write
+  keys to that same pty (`drive_popup`);
+- that client's pty run through a **real terminal emulator** (pyte;
+  `reinharness.RenderedScreen`, issue #100) — the popup repaints, so its Form A is
+  read off the RENDERED SCREEN, where the box is simply *there*, rather than
+  reconstructed from ANSI cursor-move bytes;
 - rein on a SEPARATE plain pty whose `$TMUX`/`$TMUX_PANE` (`tmux_env`) point at the
-  session — keeping rein's OWN output clean and deterministic (the golden), while
-  the popup's finicky box-art render stays OFF the golden. This mirrors reality:
-  `rein run -- <agent>` runs inside the operator's tmux pane and the broker it
-  hosts launches the popup on that same client.
+  session — keeping rein's OWN output clean and deterministic (the golden). This
+  mirrors reality: `rein run -- <agent>` runs inside the operator's tmux pane and
+  the broker it hosts launches the popup on that same client.
 
 Positive proof of the surface (asserted; some in the golden, some as outcomes):
 the golden shows `$ rein declare <n>` going straight to `confirmed` with the Form A
 block ABSENT (contrast the write-ceremony golden's inline `=== rein: agent declares
 work … > <n> [approved]`), `prompt_count()==0` on rein's terminal, and rein's
 `helper.log` records `grant: launching tmux popup (… approval grant --run-id …)`
-then `grant: issue #<n> CONFIRMED via tmux popup`. SKIPs cleanly (exit 0) if `tmux`
-is not on PATH — the surface is undriveable without it.
+then `grant: issue #<n> CONFIRMED via tmux popup`. SKIPs with **exit 3** if `tmux`
+or `pyte` is missing — the surface is undriveable without either, and a skip must
+never look like a pass.
 
 ```sh
 python3 tests/interactive/journey_tmux_popup_approval.py   # one journey; exit 0 == matches golden
@@ -382,8 +399,10 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
   `build_raw_transcript`,
   `normalize_for_compare`, `compare_golden`, `create_issue`/`close_issue`,
   `resolve_throwaway_repo`), plus `tmux_popup_session`/`TmuxPopupSession` (drive a
-  REAL tmux popup on a dedicated socket — the #37 default approval surface) and
-  `helper_log_path`/`read_log_since` (read rein's forensic log delta).
+  REAL tmux popup on a dedicated socket — the #37 default approval surface),
+  `RenderedScreen`/`wait_for_screen` (the pyte terminal emulator the REDRAWING
+  surfaces assert on — #100) and `helper_log_path`/`read_log_since` (read rein's
+  forensic log delta).
 - `itest_base.py` — `ReinTestCase` (one-time build, env + throwaway repo,
   disposable-branch cleanup) and the unittest/xfail/skip rationale.
 - `test_write_approval.py`, `test_init_interactive.py`, `test_realagent_e2e.py`,
@@ -434,6 +453,19 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
   path sandboxed: pre-fix the stale token 404s the SECOND declare (`declare <issueB>
   --repo B`), post-fix the scope-tagged cache misses it and re-mints. Proven RED on
   780a7fb / GREEN on the fix. Seeds via `seedghread` (below).
+- `journey_gh_write.py` + `golden/gh_write.txt` — journey #19 (the in-sandbox `gh` /
+  REST + GraphQL write boundary): the SAME issue-comment write denied before the
+  declare and landing after it, plus the push + **`gh pr create`** leg (#101 "gap 1")
+  that needs `pull_requests: write` AND the GraphQL read `gh pr create` does first.
+  The regression proof for the #91 contents-only-token bug.
+- `journey_realagent_write.py` + `golden/realagent_write.txt` — journey #20 (#101 "gap
+  2"): a REAL `claude` walks the whole write path — contract → `rein declare <n>` →
+  tmux-popup approval → push `agent/<n>/<its own suffix>` → PR, with the PR author
+  asserted to be the DELEGATED App bot. The demo consumer of **#100**: claude's
+  folder-trust dialog (which blocks the run forever if ignored) is matched on a
+  RENDERED SCREEN, and its non-deterministic TUI is collapsed to one placeholder line
+  so the golden stays rein's own security surface. SKIPs (exit 3) without `claude` /
+  `tmux` / `pyte`. Spends real API tokens — run it deliberately.
 - `seedghread/main.go` — TEST-SUPPORT standalone (NOT a `rein` subcommand, never
   shipped by the release build): mints a REAL gh-read token scoped to ONE repo and
   writes it as a `tokencache.Entry` to `--out`, the stale leftover the #95 guard

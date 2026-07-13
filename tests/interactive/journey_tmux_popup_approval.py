@@ -39,20 +39,23 @@ its separate client-owned pty. That adjacency (popup content beside rein's own
 Form-A-less declare) IS the reviewable proof the surface was the popup, not the
 inline tty — the same "capture is structural" doctrine as SBX| vs host lines (#82).
 
-The popup pty carries box-art borders and cursor-positioning redraws; those are
-stripped down to the readable Form A text (reinharness.extract_popup_forma) —
-DETERMINISTICALLY, because rein writes each Form A line once and the popup then
-blocks on input, so a drained capture is identical every run (only issue #/title/
-repo vary, handled by normalize-on-compare). The positive routing facts
-(helper.log launched/CONFIRMED, prompt_count()==0) are ALSO asserted as outcomes.
+The popup REDRAWS (box-art borders, cursor-positioned paints), so its Form A is
+read off a RENDERED SCREEN — the attached client's pty run through a real terminal
+emulator (pyte; reinharness.RenderedScreen + popup_forma_from_screen), issue #100.
+The box is then simply THERE, and the Form A is the columns inside its border. It
+is DETERMINISTIC without any timer: rein writes Form A once and BLOCKS on input, so
+the trailing `>` prompt line appearing on screen IS the proof the frame is complete
+(popup_forma_complete) — only issue #/title/repo vary, handled by
+normalize-on-compare. The positive routing facts (helper.log launched/CONFIRMED,
+prompt_count()==0) are ALSO asserted as outcomes.
 
     python3 tests/interactive/journey_tmux_popup_approval.py            # exit 0 == matches (normalized)
     REIN_UPDATE_GOLDEN=1 python3 tests/interactive/journey_tmux_popup_approval.py  # write the RAW golden
     REIN_SHOW_NORMALIZED=1 python3 tests/interactive/journey_tmux_popup_approval.py
 
-Exit 0 = ceremony held AND the normalized transcript matches the golden (or tmux
-is absent, in which case it SKIPs cleanly — the popup surface is undriveable
-without tmux). Exit 1 = golden drift. Exit 2 = the ceremony itself broke.
+Exit 0 = ceremony held AND the normalized transcript matches the golden. Exit 1 =
+golden drift. Exit 2 = the ceremony itself broke. Exit 3 = SKIPPED (tmux or pyte
+absent — the popup surface is undriveable, and a skip must never look like a pass).
 
 SELF-CONTAINED: creates its own throwaway issue via gh, and in a `finally` deletes
 both branches and closes the issue. Touches only the throwaway (hard-constraint
@@ -160,10 +163,10 @@ def run_ceremony(env, repo, issue):
 
             run.child.expect(r"@PHASE2_START", timeout=30)
             # The declare BLOCKS. Because $TMUX is set, approval routes to a tmux
-            # POPUP (NOT the inline host tty). drive_popup waits for Form A to
-            # render on the attached client, CAPTURES it (cleaned, for folding into
-            # the transcript), then types the DISPLAYED number exactly as a human
-            # would in the popup.
+            # POPUP (NOT the inline host tty). drive_popup waits until Form A is
+            # FULLY PAINTED on the attached client's RENDERED SCREEN (pyte), reads
+            # it off that screen (for folding into the transcript), then types the
+            # DISPLAYED number exactly as a human would in the popup.
             forma = tmux_sess.drive_popup(H.PROMPT_HINT, str(issue), timeout=120)
             run.child.expect(r"@PHASE2_RC=(\d+)", timeout=90)
             rcs[2] = _rc(run.child.match)
@@ -208,14 +211,26 @@ def run_ceremony(env, repo, issue):
 def main() -> int:
     env = H.rein_env()
 
-    # tmux is a hard prerequisite for the popup surface — without it there is
-    # nothing to drive. SKIP cleanly (exit 0) rather than fake success.
+    # tmux and pyte are hard prerequisites for the popup surface: without tmux
+    # there is no popup to drive, and without pyte there is no terminal emulator
+    # to READ the popup off the attached client's pty (the popup is a client-owned
+    # overlay, so nothing else can see it). Missing either => SKIP with exit 3, so
+    # the runner reports "this journey did NOT run" — NEVER exit 0, which would
+    # report green for a path nothing exercised (the #68 footgun; see
+    # tests/interactive/CLAUDE.md).
     if not H.tmux_available():
         print("SKIP: tmux is not on PATH — the popup approval surface cannot be "
               "driven, so this journey has nothing to exercise. Install tmux to "
-              "run it. (Exit 0: a missing optional prerequisite is not a failure.)",
-              flush=True)
-        return 0
+              "run it. (Exit 3 = SKIPPED: no coverage, and it must not look like "
+              "a pass.)", flush=True)
+        return 3
+    if not H.pyte_available():
+        print(f"SKIP: pyte is not installed — the popup renders on the attached "
+              f"tmux client's pty and can only be read back through a terminal "
+              f"emulator, so this journey has nothing to exercise. "
+              f"{H.PYTE_INSTALL_HINT}. (Exit 3 = SKIPPED: no coverage, and it must "
+              f"not look like a pass.)", flush=True)
+        return 3
 
     repo = H.resolve_throwaway_repo(env)  # rein-init way first; #40
     H.build_binaries(env)

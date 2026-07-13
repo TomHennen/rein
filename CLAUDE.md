@@ -33,6 +33,14 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 - Key storage: hand-rolled `internal/keystore` file backend (PEMs under ConfigDir with uid + mode `0o077` + O_NOFOLLOW checks). `github.com/99designs/keyring` (MIT) was planned but never adopted — it is NOT in go.mod; `internal/keystore` is the swap point for future backends (hard-constraint #6).
 - Hardware keys (Phase 1+): `github.com/facebookincubator/sks` (Apache 2.0). Not used in Phase 0.
 - CLI: `github.com/spf13/cobra`
+- Terminal emulation in TESTS ONLY: `pyte` (LGPLv3), installed as the system package
+  `python3-pyte` (`sudo apt install python3-pyte`), same as `pexpect`. It renders a pty's
+  bytes into a SCREEN, which is how `tests/interactive/` asserts on anything that REDRAWS
+  (the tmux approval popup, a real `claude` TUI) instead of regex-stripping ANSI out of the
+  raw byte stream (issue #100). **Test-only is load-bearing for hard-constraint #4**: it is
+  a Python dev/test dependency, never linked into or shipped with the Go binary, and Tom
+  approved it explicitly on that basis. It is imported LAZILY in `reinharness.py`, so the
+  line-oriented journeys run without it. Rules: `tests/interactive/CLAUDE.md`.
 
 ## Dev environment
 
