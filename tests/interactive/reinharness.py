@@ -2215,8 +2215,13 @@ class TmuxPaneSession:
 
     def send_pane_literal(self, text: str) -> None:
         """Type LITERAL text into the pane (`send-keys -l`), no Enter — so a
-        command's own characters are never interpreted as tmux key names."""
-        _tmux(self.socket, "send-keys", "-t", self.session, "-l", text)
+        command's own characters are never interpreted as tmux key names.
+
+        The trailing `--` is LOAD-BEARING: without it tmux parses text that STARTS with
+        a dash as its own options, so typing `rein run -- claude …` a chunk at a time
+        silently loses the `--` separator and the command runs mangled (observed while
+        recording the demo). `--` ends tmux's option parsing; text is text."""
+        _tmux(self.socket, "send-keys", "-t", self.session, "-l", "--", text)
 
     def run_in_pane(self, command: str) -> None:
         """Type `command` into the pane's shell and press Enter — exactly what a

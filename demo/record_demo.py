@@ -24,9 +24,12 @@ than re-implementing it, and adds only what a RECORDING needs:
     content AND the popup composited on top — a tmux popup is a client-owned overlay,
     invisible to `capture-pane`/`pipe-pane` — so it is the only surface a recording of
     THIS story can come from.
-  * a deliberate HOLD on Form A (`pane.hold`, which keeps draining — a bare sleep would
-    stall tmux's attach), so a viewer can READ the approval screen. That screen is the
-    whole point of rein; the gif must linger on it.
+  * HUMAN PACING (`pane.hold`, which keeps draining — a bare sleep would stall tmux's
+    attach and record nothing). The command is TYPED, in chunks, at a clean prompt; Form
+    A is held long enough to READ; the issue number is typed as DIGITS, held so it is
+    visibly IN the box, and only THEN answered with Enter. The first take skipped that
+    middle beat — it wrote `202\\r` in one call, so the popup echoed and closed inside a
+    single repaint and NO captured frame ever showed the number being typed.
   * `/exit` rather than Ctrl-C: SIGINT is untrapped by design, so rein would die without
     printing `rein: revoked N of N write token(s) on exit` — the closing beat.
 
@@ -57,6 +60,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -82,10 +86,23 @@ SCRATCH: list[str] = []
 # the tmux popup's default 50% sizing, not by taste.
 WIDTH, HEIGHT = 160, 32
 
-# How long Form A sits on screen before the "human" answers. Generous ON PURPOSE:
-# `agg --speed`/`--idle-time-limit` can always SHORTEN a pause at render time, but
-# nothing can lengthen one that was never recorded. This is the money shot.
-FORMA_HOLD = 10.0
+# THE APPROVAL BEATS, in RECORDED seconds. The shape is deliberate and was learned from
+# the first take: it held Form A for 10s with an EMPTY `>` prompt and then wrote the
+# answer AND the carriage return in ONE `send()`. The popup echoed the digits and closed
+# inside a single repaint, so the typed answer was never in ANY captured read — zero
+# frames of the whole cast ever showed `> <issue>`. A viewer saw a long dead pause and
+# then a popup that vanished with nothing in it.
+#
+# So the answer is typed the way a human types it — digits first, a beat, THEN Enter —
+# and every beat is a DRAINING `pane.hold` (a bare sleep stalls tmux's attach and records
+# nothing). The middle beat is the one that has to exist: it is what makes the echo land
+# in a captured read.
+PROMPT_HOLD = 1.0    # the empty prompt, before a key is pressed: the demo starts at zero
+COMMAND_HOLD = 1.3   # the typed command, sitting there, readable, before Enter
+FORMA_HOLD = 3.5     # Form A up, prompt still empty — long enough to read, not to bore
+DIGIT_GAP = 0.2      # between keystrokes, so the digits appear the way a human types them
+TYPED_HOLD = 1.8     # digits on screen, BEFORE Enter — the frames the first take lacked
+DISMISS_HOLD = 2.5   # after Enter: the popup goes, claude resumes underneath
 
 # The task. One line, and it says nothing about declaring or about branch names: the
 # agent learns THOSE from rein's injected contract — which is exactly what the demo is
@@ -109,23 +126,55 @@ def session_file(repo: str) -> str:
     return path
 
 
-def launcher(workdir: str, issue: int, session: str) -> str:
-    """The one command a developer types in their pane, as a tiny shell file — so the
-    gif opens on `$ rein run -- claude …` and not on a wall of exported env. rein ECHOES
-    the full command line under its own banner anyway, so nothing is hidden."""
-    d = tempfile.mkdtemp(prefix="rein-demo-launch-")
-    SCRATCH.append(d)
-    path = os.path.join(d, "rein-run.sh")
-    env = {"REIN_SESSION_FILE": session, "REIN_SANDBOX_WORKDIR": workdir}
-    lines = [f"cd {shlex.quote(workdir)}"]
-    lines += [f"export {k}={shlex.quote(v)}" for k, v in env.items()]
-    lines.append("exec " + " ".join(shlex.quote(a) for a in [
-        str(H.REIN_BIN), "run", "--", "claude",
-        "--dangerously-skip-permissions", task_for(issue),
-    ]))
-    with open(path, "w") as f:
-        f.write("\n".join(lines) + "\n")
-    return path
+def demo_command(issue: int) -> str:
+    """THE command the viewer watches being typed. It is the whole setup for everything
+    that follows, so it must be what a developer would REALLY type: a bare `rein`, the
+    agent, and the task in plain English. Nothing cosmetic is hidden and nothing is
+    faked — the machinery it needs (`REIN_SESSION_FILE`, the sandbox working tree, the
+    `bin/` that makes `rein` a bare word) is EXPORTED INTO THE PANE'S SHELL BEFORE the
+    recording starts (`prepare_pane`), which is exactly where a developer's own
+    environment would already have it. rein then ECHOES the full argv under its own
+    banner, so the viewer can check it against what was typed.
+
+    `--dangerously-skip-permissions` stays: it is genuinely required (claude would
+    otherwise prompt per tool call and the unattended take would block). Honesty beats
+    prettiness — and rein's point is precisely that even a claude with its OWN gates
+    turned off still cannot write without the human at rein's gate.
+    """
+    return f'rein run -- claude --dangerously-skip-permissions "{task_for(issue)}"'
+
+
+def prepare_pane(pane, workdir: str, issue: int, session: str) -> None:
+    """Put the pane in the state a developer's pane is already in — BEFORE t=0.
+
+    Everything here is environment, not story: the session file, the sandbox working
+    tree, `bin/` on PATH, and the cwd. Doing it in the shell (rather than wrapping it
+    into the command line, as the first take did with a `bash /tmp/…/rein-run.sh`
+    launcher) is what lets the recording open on the honest one-liner of `demo_command`
+    instead of on a wall of exported env or an opaque path that tells the viewer nothing.
+
+    Then C-l — readline's clear-screen, which repaints the prompt WITHOUT typing a
+    visible `clear` — is sent by `record()` AFTER the recorder is armed, so the cast's
+    first frame is a clean `$ ` prompt with a human's hands not yet on the keyboard.
+    """
+    exports = " ; ".join([
+        f"export REIN_SESSION_FILE={shlex.quote(session)}",
+        f"export REIN_SANDBOX_WORKDIR={shlex.quote(workdir)}",
+        f"export PATH={shlex.quote(str(H.REIN_BIN.parent))}:$PATH",
+        f"cd {shlex.quote(workdir)}",
+    ])
+    pane.run_in_pane(exports)
+    pane.wait_stable(300, timeout=15)
+
+
+def type_in_pane(pane, text: str, *, chunk: int = 3, gap: float = 0.06) -> None:
+    """Type `text` into the pane the way a HUMAN does — in small chunks with a beat
+    between them — so the gif shows a command being typed, not pasted. The gaps are
+    draining holds (`pane.hold`), never `time.sleep`: an unread client pty stalls tmux's
+    attach, and a stalled attach records nothing."""
+    for i in range(0, len(text), chunk):
+        pane.send_pane_literal(text[i:i + chunk])
+        pane.hold(gap)
 
 
 def await_landing(pane, repo: str, issue: int, env: dict, timeout: float = 600.0,
@@ -153,15 +202,22 @@ def await_landing(pane, repo: str, issue: int, env: dict, timeout: float = 600.0
 
 def record(env: dict, repo: str, issue: int, workdir: str) -> tuple[str | None, list]:
     """One live take, into `CAST`. Returns (branch, prs)."""
-    launch = launcher(workdir, issue, session_file(repo))
+    session = session_file(repo)
     branch, prs = None, []
 
     with H.tmux_pane_session(env=env, width=WIDTH, height=HEIGHT) as pane:
-        # t=0 is HERE — the cast opens on the command being typed, not on the harness's
-        # attach/priming keystrokes.
+        # Environment, not story — and therefore BEFORE t=0 (see prepare_pane).
+        prepare_pane(pane, workdir, issue, session)
+
+        # t=0 is HERE. The cast opens on a clean prompt and a human typing the command,
+        # not mid-story on rein's banner already spilling out.
         pane.start_recording(str(CAST))
         try:
-            pane.run_in_pane(f"bash {launch}")
+            pane.send_pane("C-l")   # readline clear-screen: a clean prompt, no `clear`
+            pane.hold(PROMPT_HOLD)
+            type_in_pane(pane, demo_command(issue))
+            pane.hold(COMMAND_HOLD)  # the typed command, readable, before it is run
+            pane.send_pane("Enter")
 
             # claude's folder-trust dialog: PLUMBING (rein gives the agent an ephemeral
             # $HOME, so claude sees an untrusted folder and BLOCKS forever if unanswered).
@@ -189,8 +245,21 @@ def record(env: dict, repo: str, issue: int, workdir: str) -> tuple[str | None, 
                 )
             print(f"[rec] Form A is up — holding {FORMA_HOLD}s so a viewer can read it",
                   flush=True)
-            pane.hold(FORMA_HOLD)          # drains + records throughout; never time.sleep
-            pane.send_client(f"{issue}\r")  # the human approves
+            pane.hold(FORMA_HOLD)   # drains + records throughout; never time.sleep
+
+            # THE HUMAN APPROVES — as a human does: digits, a beat, THEN Enter. Splitting
+            # the send is the entire reason this take was re-recorded (see the beats
+            # above): with `send(answer + "\r")` the popup echoed and closed inside one
+            # repaint and the digits landed in NO captured read, so the gif showed a
+            # popup dismissed with nothing ever typed into it. Each beat is a DRAINING
+            # hold, so the echo, the dismissal and the TUI resuming underneath are all
+            # genuinely read off the client — and therefore genuinely in the cast.
+            for digit in str(issue):
+                pane.send_client(digit)
+                pane.hold(DIGIT_GAP)
+            pane.hold(TYPED_HOLD)   # `> <issue>` ON SCREEN — the frames the first take lacked
+            pane.send_client("\r")
+            pane.hold(DISMISS_HOLD)  # the popup goes; claude resumes underneath
 
             print("[rec] approved — waiting for the branch + PR to land at GitHub…",
                   flush=True)
@@ -226,58 +295,108 @@ def record(env: dict, repo: str, issue: int, workdir: str) -> tuple[str | None, 
 # Pacing + render (free, local, and where you should iterate — NOT on claude)
 # --------------------------------------------------------------------------
 
-# The two beats a VIEWER needs and the RUN cannot give them, in cast seconds (they are
-# then divided by --speed on screen). See pace_cast for why they have to be inserted.
-BANNER_BEAT = 9.0   # hold on rein's launch banner: what it sandboxed, locked, injected
-FORMA_BEAT = 8.0    # extra hold on Form A, ON TOP of the 10s actually recorded
+# The five beats a VIEWER needs and the RUN cannot give them, in CAST seconds (they are
+# divided by --speed on screen, so at 3x a 9.0 beat is 3s of viewing). See pace_cast.
+COMMAND_BEAT = 4.5  # the typed command, sitting at the prompt, before Enter
+BANNER_BEAT = 9.0   # rein's launch banner: what it sandboxed, locked, injected
+FORMA_BEAT = 7.0    # Form A up, prompt still EMPTY — the "read it" beat
+TYPED_BEAT = 6.0    # the issue number VISIBLY in the box, before Enter — the fixed beat
+DISMISS_BEAT = 3.0  # the popup gone, claude resuming underneath
 
 
 def pace_cast(src: Path, dst: Path) -> float:
-    """Lengthen TWO PAUSES in the recording. Timing only — not one byte of screen
+    """Lengthen FIVE PAUSES in the recording. Timing only — not one byte of screen
     content is added, removed or reordered; the take is exactly the take.
 
     WHY IT IS NEEDED (and why `agg --idle-time-limit` cannot do it): the cast has NO
-    dead air to trim. claude's TUI animates a spinner throughout, and tmux repaints the
-    popup about once a second, so the longest real gap in a 120s take is 1.3s — even the
-    10s Form A hold arrives as ~10 one-second repaints. `--idle-time-limit` therefore
-    has nothing to bite on, and the ONLY lever left for the long LLM-thinking stretches
-    is `--speed` — which divides the good pauses along with the boring ones. At 3x the
-    banner flashes past in 1.5s and Form A in 3.3s: not readable.
+    dead air to trim. claude's TUI animates a spinner throughout and tmux repaints the
+    popup about once a second, so `--idle-time-limit` has nothing to bite on, and the
+    ONLY lever left for the long LLM-thinking stretches is `--speed` — which divides the
+    good pauses along with the boring ones. At 3x, every beat below is a third of what
+    the take recorded: readable becomes unreadable.
 
-    Neither beat can be recorded instead. rein prints its banner and immediately execs
-    claude, which repaints over it — nothing in the run can pause there. And a longer
-    Form A hold trades an API-token-spending re-run for something that is purely a
-    presentation choice.
+    ANCHORED ON THE RENDERED SCREEN, NOT ON BYTES (tests/interactive/CLAUDE.md's rule:
+    a REDRAWING surface is asserted on the render). Replaying the cast through pyte is
+    the only way to tell the two popup beats APART: every popup repaint carries the whole
+    Form A box, so "Form A with an EMPTY prompt" and "Form A with the issue number typed
+    into it" are the SAME BYTES in different frames. A substring anchor cannot see the
+    difference — and the difference is the entire point of this pass.
 
-    So: insert idle AFTER two anchor events, shifting everything later by the same
-    amount — the screen simply STAYS on the frame it was already showing.
-      1. rein's `running:` echo — the last line of its launch banner. Holds on the
-         sandbox/egress/write-lock/contract summary: rein's whole security posture, in
-         one frame.
-      2. the last repaint of the popup's Form A, i.e. the moment before the human
-         answers. THE money shot.
+    The beats, each inserted AFTER the last event that paints that state (so the screen
+    simply STAYS on the frame it was already showing):
+      1. the typed command, complete, before Enter — the setup for everything after: a
+         human typing `rein run -- claude "…"`, not a gif that opens mid-story.
+      2. rein's `running:` echo, the last line of its launch banner — sandbox, egress,
+         write-lock, injected contract: its whole security posture in one frame.
+      3. Form A, prompt still empty — long enough to READ, and no longer (the first take
+         sat here for 10s of dead air, which is exactly what the maintainer flagged).
+      4. the issue number VISIBLE in the box, before Enter. This beat could not be paced
+         into the first take at all: it wrote the digits and the Enter in one call, so no
+         captured frame EVER showed the number. That is why the demo was re-recorded.
+      5. the dismissal — the popup gone, claude live underneath, unblocked.
     Returns the paced duration in cast seconds.
     """
     lines = src.read_text().splitlines()
     header, events = lines[0], [json.loads(l) for l in lines[1:]]
+    hdr = json.loads(header)
 
-    def last_index(needle: str, default: int | None = None) -> int | None:
-        hits = [i for i, e in enumerate(events) if needle in e[2]]
-        return hits[-1] if hits else default
+    # Cumulative replay: frames[i] is the SCREEN after event i (see the docstring —
+    # bytes cannot tell the two popup beats apart; the render can).
+    screen = H.RenderedScreen(hdr["width"], hdr["height"])
+    frames = []
+    for _, _, data in events:
+        screen.feed(data)
+        frames.append(screen.text())
+
+    def last_frame(pred) -> int | None:
+        hits = [i for i, f in enumerate(frames) if pred(f)]
+        return hits[-1] if hits else None
+
+    def first_frame(pred) -> int | None:
+        return next((i for i, f in enumerate(frames) if pred(f)), None)
+
+    def first_frame_after(fs, after: int, pred) -> int | None:
+        return next((i for i in range(after + 1, len(fs)) if pred(fs[i])), None)
+
+    # The issue number is READ BACK off Form A itself, so pacing needs no argument from
+    # the recording (and `--render-only` can re-pace an old cast years later).
+    m = next((m for f in frames if (m := re.search(r"issue:\s+#(\d+)", f))), None)
+    if m is None:
+        raise RuntimeError(f"{src}: no Form A anywhere in the cast — not a usable take")
+    issue = m.group(1)
+    typed = f"> {issue}"
+    forma_up = "To approve, type the issue"
+
+    # The dismissal is held on the FIRST frame the popup is GONE from — one past the last
+    # Form A frame, not the last Form A frame itself (that one is `typed`).
+    last_forma = last_frame(lambda f: forma_up in f)
+    gone = (None if last_forma is None else
+            first_frame_after(frames, last_forma, lambda f: forma_up not in f))
 
     beats: dict[int, float] = {}
-    # `rein: running:` reaches the screen twice (the launch echo, and again when the TUI
-    # tears down and the scrollback under it is exposed) — take the FIRST, the launch
-    # one, not one that lands after the agent has already finished.
-    banner = next((i for i, e in enumerate(events) if "rein: running:" in e[2]), None)
-    if banner is not None:
-        beats[banner] = BANNER_BEAT
-    forma = last_index("To approve, type the issue")
-    if forma is not None:
-        beats[forma] = FORMA_BEAT
-    if len(beats) < 2:
-        print(f"[pace] WARNING: only found {len(beats)}/2 anchors — is this a full take?",
-              flush=True)
+    anchors = {
+        # the complete command on screen, at the prompt, rein not yet started
+        "command": (last_frame(lambda f: f'issue #{issue}."' in f and "rein:" not in f),
+                    COMMAND_BEAT),
+        # rein's `running:` echo lands TWICE (the launch echo, and again when the TUI
+        # tears down and the scrollback under it is exposed) — take the FIRST.
+        "banner": (first_frame(lambda f: "rein: running:" in f), BANNER_BEAT),
+        "forma": (last_frame(lambda f: forma_up in f and typed not in f), FORMA_BEAT),
+        "typed": (last_frame(lambda f: forma_up in f and typed in f), TYPED_BEAT),
+        "dismiss": (gone, DISMISS_BEAT),
+    }
+    missing = [name for name, (i, _) in anchors.items() if i is None]
+    if missing:
+        # HARD, never a warning. A missing `typed` anchor silently reproduces the exact
+        # defect this re-record exists to fix (a popup that pauses on nothing, then
+        # vanishes with the answer never seen), and a GIF that LOOKS fine is the worst
+        # possible outcome.
+        raise RuntimeError(
+            f"{src}: pacing anchors not found on the rendered screen: {missing}. "
+            f"The take is unusable as-is — re-record (see the beats in record())."
+        )
+    for name, (i, beat) in anchors.items():
+        beats[i] = beats.get(i, 0.0) + beat
 
     shift = 0.0
     out = [header]
@@ -293,12 +412,15 @@ def render() -> None:
     local: iterate HERE, never by re-running claude.
 
     `--speed 3` compresses the long LLM-thinking stretches (which are ANIMATED, so only
-    speed touches them; the two beats pace_cast inserts are divided by it too, which is
-    why they are sized in cast seconds). `--idle-time-limit 12` is a safety valve for a
-    future take that DOES stall — it is deliberately larger than the inserted beats, so
-    it never eats them. `--last-frame-duration` holds the ending — the merged-in PR and
+    speed touches them; the beats pace_cast inserts are divided by it too, which is why
+    they are sized in cast seconds). `--idle-time-limit 12` is a safety valve for a
+    future take that DOES stall — it is deliberately larger than every inserted beat, so
+    it never eats one. `--last-frame-duration` holds the ending — the merged-in PR and
     rein's `revoked 1 of 1 write token(s) on exit` — long enough to read.
     """
+    if not H.pyte_available():  # pace_cast anchors on the RENDER, so rendering needs it
+        print(f"cannot render: pyte is not installed. {H.PYTE_INSTALL_HINT}", flush=True)
+        return
     if shutil.which("agg") is None:
         print("agg is not on PATH — install it to render (see demo/README.md); the "
               f".cast is at {CAST}", flush=True)

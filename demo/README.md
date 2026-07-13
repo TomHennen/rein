@@ -66,15 +66,29 @@ out of the box entirely. 160 is the narrowest pane at which Form A renders whole
 unwrapped (its widest line, `session:  demo (role=…, repos=[…])`, is 77 columns). The
 demo's session id (`demo`) and issue title are short for the same reason.
 
-**Two pauses are lengthened at render time** (`pace_cast` in `record_demo.py`), on rein's
-launch banner and on Form A. This is *timing only* — no screen content is added, removed
-or reordered. It is needed because the take has **no dead air** to trim: claude animates
-a spinner throughout and tmux repaints the popup about once a second, so the longest real
-gap in a 120s take is 1.3s. `agg --idle-time-limit` therefore has nothing to bite on, and
-the only lever left for the long LLM-thinking stretches is `--speed` — which would divide
-the good pauses along with the boring ones (at 3x, the banner flashes past in 1.5s and
-Form A in 3.3s: not readable). Neither beat can be recorded instead: rein prints its
-banner and immediately execs claude, which repaints over it.
+**The human beats are RECORDED; five of them are then LENGTHENED at render time**
+(`pace_cast` in `record_demo.py`): the typed command before Enter, rein's launch banner,
+Form A with an empty prompt, **the issue number visibly typed into Form A**, and the
+dismissal. Lengthening is *timing only* — no screen content is added, removed or
+reordered. It is needed because the take has **no dead air** to trim: claude animates a
+spinner throughout and tmux repaints the popup about once a second, so `agg
+--idle-time-limit` has nothing to bite on, and the only lever left for the long
+LLM-thinking stretches is `--speed` — which divides the good pauses along with the boring
+ones (at 3x every beat is a third of what was recorded: readable becomes unreadable).
+
+But a beat can only be lengthened if it was **captured**, and that is the lesson of the
+first take: it wrote the issue number and the Enter in **one** `send()`, so the popup
+echoed the digits and closed inside a single repaint — **no frame of that cast ever showed
+the number being typed**, and no amount of re-pacing could conjure one. The recorder now
+types the digits, **holds while draining**, and only then sends Enter. Same rule for the
+command: it is typed in chunks at a clean prompt and held, so the gif opens on a human
+starting the run rather than mid-story on rein's banner.
+
+`pace_cast` therefore anchors on the **rendered screen** (pyte), not on bytes: every popup
+repaint carries the whole Form A box, so "Form A empty" and "Form A with the number typed
+in" are the *same bytes* in different frames, and only the render can tell them apart. A
+missing anchor is a **hard error** — a silently-skipped beat would reproduce the exact
+defect this pass fixed.
 
 **`/exit`, never Ctrl-C.** Terminal SIGINT is untrapped by design, so rein would die
 without running its exit-revoke and never print the accounting line — and that line is
@@ -92,8 +106,8 @@ is the only one that sees the popup.
 **`python3 demo/record_demo.py --render-only` is the only command that reproduces the
 checked-in GIF** — because `agg` runs on the **paced** cast (`pace_cast`, above), not on
 `creds-joke.cast` directly. Running the `agg` line below against the raw cast yourself
-gives you a *different*, worse gif: the two beats collapse (banner ~1.5s, Form A ~3.3s).
-It is shown only so the knobs are visible; tune them in `record_demo.py`'s `render()`.
+gives you a *different*, worse gif: every beat collapses to a third of itself. It is shown
+only so the knobs are visible; tune them in `record_demo.py`'s `render()`.
 
 ```
 # what render() actually runs, on the PACED cast (a temp file, not the checked-in one)
@@ -106,14 +120,20 @@ If the GIF grows past ~8 MB (README-friendly), the big levers, in order: `--fps-
 
 ## Verifying a new take
 
-You cannot eyeball a GIF from a terminal, so extract frames and look at them:
-
-```sh
-ffmpeg -i demo/creds-joke.gif -vf fps=1 /tmp/frames/f_%03d.png
-```
-
-A good take shows, legibly: rein's launch banner (what it sandboxed, that the agent sees
+You cannot eyeball a GIF from a terminal, so extract frames and look at them (an agent can
+READ a PNG). A good take shows, legibly, in order: a **clean prompt** and the command being **typed**
+(`rein run -- claude "…"`); rein's launch banner (what it sandboxed, that the agent sees
 **no real token**, that writes are **LOCKED** until it declares); claude's TUI doing the
 work; **Form A, whole, on screen long enough to read**, with the live TUI underneath it
-blocked on `rein declare`; the push to `agent/<issue>/…` and the PR; and the final
-`rein: revoked 1 of 1 write token(s) on exit`.
+blocked on `rein declare`; **the issue number visibly typed into Form A** before Enter (if
+no frame shows it, the take is a re-record, not a re-pace — see above); the dismissal; the
+push to `agent/<issue>/…` and the PR; and the final `rein: revoked 1 of 1 write token(s)
+on exit`.
+
+`ffmpeg -ss` seeks a GIF by its *average* frame rate and will land on the wrong beat.
+Dump every frame and index it by its real timestamp instead:
+
+```sh
+ffmpeg -i demo/creds-joke.gif -vsync 0 /tmp/frames/f_%03d.png     # every frame
+ffmpeg -i demo/creds-joke.gif -vf showinfo -f null - 2>&1 | grep -o 'pts_time:[0-9.]*'
+```
