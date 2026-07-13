@@ -106,7 +106,7 @@ The API (all lazy — see the skip rule below):
   popup box's content, extracted by GEOMETRY (find the border rows, slice the
   columns inside them), not by parsing escape codes.
 
-### A REAL agent's TUI is neither: collapse it (`journey_realagent_write`, #101)
+### A REAL agent's TUI is neither: collapse it, then SHOW it as FRAMES (`journey_realagent_write`, #101)
 
 A deterministic bash "agent" is line-oriented, so its output belongs in the golden
 verbatim. A **real LLM's TUI is not**: it redraws AND its content genuinely varies
@@ -135,6 +135,49 @@ read from `helper.log` + the GitHub API. This is the ONE sanctioned exception to
   with rein's prefix (its output sits behind box art — verified on captured pty streams).
 
 Do not generalize the collapse to a line-oriented agent.
+
+#### `AGENT| ` frames: SHOWN, not COMPARED (the record of what the agent did)
+
+A collapse alone leaves the reviewer with nothing to READ — and the maintainer's ask
+is exactly that: *"I don't love not having any record of what the agent did… most
+importantly I want to see it. It helps me understand if the agent is confused."* So
+the real-agent journey also folds in **`AGENT| `-tagged RENDERED SCREEN FRAMES** — the
+fourth view, beside untagged host / `SBX| ` / `POPUP| ` / `MILESTONE| `:
+
+- **Source: `capture-pane -p -J`**, the tmux server's own authoritative render of the
+  pane claude runs in — unobscured by the popup (a popup is a client overlay, not part
+  of the pane). Not a pexpect screen; not the raw stream.
+- **At MILESTONES** (`H.fold_agent_frames`, `H.agent_frames_block`): after the
+  folder-trust dialog is handled, while the popup is up, just after it closes, and the
+  final settled screen. Each frame is labelled with which moment it is.
+- **SHOWN, not COMPARED.** `normalize_for_compare` **DROPS** every `AGENT| ` line
+  (`H.drop_agent_frames`), so the frames live in the checked-in golden for a human to
+  read but never enter the diff. A real LLM's prose / turn count / tool ordering is
+  **not a regression signal**, and a chronically-red journey trains everyone to ignore
+  drift. Diagnostic for a human; noise for a comparator. (The drop runs FIRST, before
+  `build_raw_transcript`, so the blank lines around each frame collapse and both sides
+  land on the same shape; it is trivially idempotent, which `test_golden_shape.py`
+  requires.)
+- **It cannot hide a rein line.** A frame is built from `capture-pane` and folded in
+  only AFTER `collapse_agent_tui` has run over the raw pane stream — and that collapse
+  is a FILTER: a column-0 `rein: …` / `=== rein: …` (`AGENT_TUI_KEEP_RE`) stays
+  UNTAGGED and stays COMPARED. Nothing ever MOVES a rein line into a frame, so a new
+  (possibly security-relevant) rein line still trips drift. **Do not simplify that
+  regex**: the `(?:=+ )?` arm exists for `grant.ShowInstallNotice`'s `=== rein: NOTICE`.
+- **DO NOT try full scrollback.** Tested: `pyte.HistoryScreen` replaying a real
+  captured claude session is **garbage** — claude repaints its transcript region in
+  place while scrolling, so history accumulates torn, overlapping half-frames.
+  Frames-at-milestones is the decided approach *because* of that. Don't retry it.
+
+**claude's folder-trust dialog is PLUMBING, not ceremony.** It fires only because
+rein's sandbox gives claude an ephemeral `$HOME` (no persisted trust), and it blocks
+the session forever if unanswered — there is no way to disable it for an *interactive*
+session (only `-p`/non-TTY skips it). So `H.dismiss_claude_trust_dialog(pane)` answers
+it on the pane's RENDER and returns; **no invariant asserts it fired** and it is **not
+a step in the golden's narrative**. It is claude's UX, not rein's story: asserting on
+it would make the journey hostage to a third-party dialog, and a future claude that
+stops asking must not turn a healthy run red. The journey works either way (the helper
+stops waiting as soon as the dialog OR claude's live TUI is on the pane).
 
 Driving a real agent alongside a second pty has one hard requirement:
 **`drain_children`**. A pty's buffer is ~64KB and a TUI repaints constantly, so if you
@@ -167,11 +210,14 @@ and then tags every line of its output (piping through `tr '\r' '\n'` so even
 git's progress redraws stay tagged). So the transcript reads like a real terminal
 session — `$ command` then its output then the next `$ command` — and everything
 the agent produced carries `reinharness.SBX_TAG` (`SBX| `). Then
-`reinharness.get_views(text) -> (host, agent)` is a single pass — a line is the
-agent's iff it **starts with** the tag (rein's banner echoes the script body, so a
-*substring* test would mis-file those host lines; `startswith` is deliberate).
-Everything else is rein's own host output. Use `sandbox_preamble()` in a new
-journey's in-sandbox script so it inherits this exact shape.
+`reinharness.get_views(text) -> (host, sandbox, popup, agent_frames)` is a single pass
+— a line belongs to a tagged view iff it **starts with** that view's tag (rein's banner
+echoes the script body, so a *substring* test would mis-file those host lines;
+`startswith` is deliberate), and a tagged line whose content is blank arrives as the
+**bare tag** (`SBX|`, `POPUP|`, `AGENT|` — `build_raw_transcript` rstrips), which the
+split accepts by exact equality. Everything else is rein's own host output. Use
+`sandbox_preamble()` in a new journey's in-sandbox script so it inherits this exact
+shape.
 
 `get_views` is available when a journey wants the two sides *separately* (e.g. to
 assert an invariant about only the agent's output). The golden itself does NOT
@@ -305,10 +351,19 @@ shows the live `SBX| $ rein declare <n>` the popup is blocking on — the popup
 **overlays** a live pane rather than printing into it — and after the popup closes
 the pane repaints and the run carries on, with no Form A residue on the client.
 
-The synthesized-`$TMUX` shape (`TmuxPopupSession`/`tmux_popup_session`) is still in
-the module, but ONLY because `journey_realagent_write.py` has not been flipped yet;
-it goes away with that flip. **Do not write a new journey against it.** If a surface
-can't be driven for real, SKIP with exit 3 — never fake it.
+`journey_realagent_write.py` is the same shape with a **REAL agent** in the pane, and
+that is where it matters most: claude is a full-screen TUI, so only here do the agent's
+TUI and the popup genuinely share one terminal. It asserts the three things only the
+real configuration can show — Form A is on `client_screen()` and **absent from**
+`pane_text()`, claude's TUI is **live underneath** while the popup is up (blocked on
+its `rein declare` tool call), and the TUI **repaints** once the popup closes
+(`wait_stable`, since that assertion has no anchor string).
+
+The synthesized-`$TMUX` shape (`TmuxPopupSession` / `tmux_popup_session` / `tmux_env`)
+is **DELETED** — it was the empty-pane cheat, it could not see a popup-over-live-content
+bug, and its empty-sockpath fallback could have fired a popup onto the *operator's* own
+tmux server. **Do not reintroduce it.** If a surface can't be driven for real, SKIP with
+exit 3 — never fake it.
 
 ## Prefer inline literals over constants for EXPECTED values (#82)
 
@@ -348,6 +403,12 @@ in `reinharness.py`, so a new journey is mostly wiring:
   (a REAL agent names its own branch, so DISCOVER it under `agent/<n>/`; `pr_author`
   is the delegated-bot check).
 - `collapse_agent_tui` / `drain_children` — the real-agent pair (see above).
+- `AGENT_TAG` / `agent_frames_block` / `fold_agent_frames` / `drop_agent_frames` — the
+  real agent's RENDERED milestone frames: folded into the golden to be READ, dropped by
+  `normalize_for_compare` so they are never diffed (shown, not compared).
+- `MILESTONE_TAG` — the ground-truth view (helper.log + the GitHub API), COMPARED.
+- `dismiss_claude_trust_dialog(pane)` — claude's folder-trust dialog, as PLUMBING
+  (dismissed, never asserted, never in the narrative).
 - `resolve_throwaway_repo` — the repo, resolved the rein-init way (see below).
 - `spawn_rein_run` / `ReinRun` — the pty wrapper, transcript, prompt matchers.
 - `RenderedScreen` / `screen_for_child` / `render_stream` / `wait_for_screen` /

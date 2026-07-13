@@ -1234,6 +1234,30 @@ SBX_TAG = "SBX| "
 # "one transcript, two views" model as SBX| vs untagged host lines (#82).
 POPUP_TAG = "POPUP| "
 
+# The tag for RENDERED SNAPSHOTS of a REAL agent's TUI (`capture-pane -p -J` of the
+# pane claude is running in), folded into the one transcript at each MILESTONE — the
+# third view, after SBX| (the sandbox child) and POPUP| (the client-owned overlay).
+#
+# SHOWN, NOT COMPARED. These frames exist because a human reviewing the golden wants
+# to SEE what the agent actually did ("it helps me understand if the agent is
+# confused"). They are the ONE thing in a golden that `normalize_for_compare` DROPS
+# (see drop_agent_frames): a real LLM's prose, turn count and tool ordering are not a
+# regression signal, and a chronically-red journey trains everyone to ignore drift.
+# Diagnostic for a human; noise for a comparator.
+#
+# The security property that makes this safe: a frame is built from `capture-pane`,
+# NEVER from the transcript, and it is FOLDED IN only AFTER `collapse_agent_tui` has
+# already run over the raw stream — so rein's own lines in that region (matched by
+# AGENT_TUI_KEEP_RE at column 0) stay UNTAGGED, PRESERVED and COMPARED. Nothing ever
+# MOVES a rein line into an AGENT| frame, so no rein line can escape the comparator.
+AGENT_TAG = "AGENT| "
+
+# The tag for the GROUND-TRUTH view: what the agent OBSERVABLY DID, read back from
+# rein's helper.log + the GitHub API after the run (never scraped off the agent's
+# screen — a real agent's screen is not evidence). Not terminal output, and the block
+# says so on its own first line. COMPARED like every other untagged/SBX|/POPUP| line.
+MILESTONE_TAG = "MILESTONE| "
+
 
 def sandbox_preamble() -> str:
     """Bash helper functions every in-sandbox journey script prepends (shared so
@@ -1271,11 +1295,13 @@ def _pty_lines(text: str) -> list[str]:
     return strip_ansi(text).replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
 
-def get_views(text: str) -> tuple[list[str], list[str], list[str]]:
-    """Split ONE interleaved transcript into (host_lines, agent_lines, popup_lines).
+def get_views(text: str) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Split ONE interleaved transcript into
+    (host_lines, sandbox_lines, popup_lines, agent_frame_lines).
 
-    A line belongs to the AGENT iff it STARTS with SBX_TAG, and to the POPUP iff
-    it STARTS with POPUP_TAG. `emit`/`runtagged` (and the popup fold) write the tag
+    A line belongs to the SANDBOX child iff it STARTS with SBX_TAG, to the POPUP iff
+    it STARTS with POPUP_TAG, and to the real agent's RENDERED FRAMES iff it STARTS
+    with AGENT_TAG. `emit`/`runtagged` (and the popup fold) write the tag
     at column 0, so real tagged output always leads with it — whereas rein's own
     startup banner ECHOES the script body (`rein: running: bash -c …`), and those
     HOST lines contain the literal `SBX| ` *mid-line* (inside the emit/runtagged
@@ -1284,11 +1310,13 @@ def get_views(text: str) -> tuple[list[str], list[str], list[str]]:
     agent output. One pass, so the views can never disagree about a line; the tag is
     stripped from tagged lines.
 
-    Three views because the popup approval journey folds a SECOND, client-owned pty
-    (the Form A the human read in the tmux popup) into the same transcript under
-    POPUP_TAG — the mirror of SBX_TAG for the sandbox child. A caller wanting the
-    Form A alone reads `popup`; the routing invariant "no inline Form A on rein's
-    own terminal" is `PROMPT_HINT not in "\\n".join(host)`.
+    FOUR views because a transcript can carry three tagged sources beside rein's own
+    host output: the sandbox child (SBX_TAG), the client-owned tmux popup the human
+    read Form A in (POPUP_TAG), and the RENDERED milestone frames of a real agent's
+    TUI (AGENT_TAG). A caller wanting the Form A alone reads `popup`; the routing
+    invariant "no inline Form A on rein's own terminal" is
+    `PROMPT_HINT not in "\\n".join(host)`. The AGENT_TAG view is the one the
+    comparator DROPS (drop_agent_frames) — shown to a human, never diffed.
 
     Tag-split is exact for whole, unwrapped lines. It is NOT the whole artifact:
     callers still CURATE the views for the golden (dropping git object-count
@@ -1304,14 +1332,17 @@ def get_views(text: str) -> tuple[list[str], list[str], list[str]]:
     host: list[str] = []
     agent: list[str] = []
     popup: list[str] = []
+    frames: list[str] = []
     for ln in _pty_lines(text):
         if ln.startswith(SBX_TAG) or ln.rstrip() == SBX_TAG.rstrip():
             agent.append(ln[len(SBX_TAG):].rstrip())
         elif ln.startswith(POPUP_TAG) or ln.rstrip() == POPUP_TAG.rstrip():
             popup.append(ln[len(POPUP_TAG):].rstrip())
+        elif ln.startswith(AGENT_TAG) or ln.rstrip() == AGENT_TAG.rstrip():
+            frames.append(ln[len(AGENT_TAG):].rstrip())
         else:
             host.append(ln.rstrip())
-    return host, agent, popup
+    return host, agent, popup, frames
 
 
 # The popup box's corners, as tmux paints them (it picks a style depending on
@@ -1435,9 +1466,10 @@ def fold_popup(transcript: str, popup_lines: list[str],
 # collapse_agent_tui). Fixed text, so it is deterministic AND usable as the
 # fold_popup anchor for a journey whose declare happens inside the agent's TUI.
 AGENT_TUI_PLACEHOLDER = (
-    "[claude's TUI — the real agent's prose, tool calls, spinners and token "
-    "counts. NON-DETERMINISTIC, collapsed: what it SAID is not golden material. "
-    "What it OBSERVABLY DID is asserted below and in the invariants.]"
+    "[claude's TUI — a REDRAWING surface, so its raw byte stream is a paint HISTORY, "
+    "not a picture. Collapsed here; rendered SNAPSHOTS of what the agent actually did "
+    "are folded in below as AGENT| frames (SHOWN, not compared), and what it "
+    "OBSERVABLY produced is the MILESTONE| ground truth.]"
 )
 
 # The rein line that ENDS the agent's region: rein's own exit accounting, printed
@@ -1559,6 +1591,79 @@ def collapse_agent_tui(transcript: str, start_needle: str, *,
         # placeholder, which is ALSO this journey's fold_popup anchor for Form A.
         region.insert(0, placeholder)
     return "\n".join(lines[:start + 1] + region + lines[end:]), True
+
+
+def agent_frames_block(frames: list[tuple[str, str]]) -> list[str]:
+    """Turn [(milestone_label, rendered_screen_text), …] into AGENT|-tagged lines.
+
+    A frame is a `capture-pane -p -J` RENDER of the pane the real agent's TUI is
+    running in — the tmux server's OWN authoritative picture of that screen, taken at
+    a MILESTONE (trust handled / popup up / settled). Each frame is labelled, so a
+    reviewer reading the golden knows WHICH moment they are looking at.
+
+    WHY FRAMES AND NOT SCROLLBACK. There is no honest full-scrollback option: claude
+    REPAINTS its transcript region in place while scrolling, so replaying the pane
+    stream through a scrollback-keeping emulator (pyte.HistoryScreen) yields torn,
+    overlapping half-frames — tested on a real captured claude session; it is garbage.
+    A frame at a milestone is a picture the terminal really showed. (And a `capture-
+    pane` render is the right source, not a pexpect screen: it is tmux's own render of
+    the PANE, so it shows claude UNOBSCURED even while the popup overlay is up.)
+
+    Trailing blank rows are dropped (a 50-row grid is mostly empty); interior blank
+    rows are kept and appear as the BARE tag (`AGENT|`) once rstripped — which
+    `get_views` accepts by exact equality, exactly as it does for SBX|/POPUP|.
+    """
+    out: list[str] = []
+    for i, (label, render) in enumerate(frames, start=1):
+        rows = [ln.rstrip() for ln in (render or "").split("\n")]
+        while rows and not rows[-1]:
+            rows.pop()
+        out.append("")
+        out.append(f"{AGENT_TAG}---- frame {i}/{len(frames)}: {label} ----".rstrip())
+        out.extend((AGENT_TAG + r).rstrip() for r in rows)
+    return out
+
+
+def fold_agent_frames(transcript: str, frames: list[tuple[str, str]],
+                      *, after_tag: str = MILESTONE_TAG) -> str:
+    """Fold the AGENT| frames into the ONE transcript, after the last `after_tag`
+    line (the ground-truth MILESTONE| block) — so the artifact reads in the order it
+    happened: rein's launch surface, the collapsed TUI, the Form A the human answered
+    inside it, what that produced, and finally the rendered record of the agent at
+    work. Falls back to appending before rein's exit accounting if the tag is absent.
+    """
+    block = agent_frames_block(frames)
+    if not block:
+        return transcript
+    lines = transcript.split("\n")
+    anchor = max((i for i, ln in enumerate(lines)
+                  if ln.startswith(after_tag.rstrip())), default=None)
+    if anchor is None:
+        anchor = max((i for i, ln in enumerate(lines)
+                      if ln.startswith(AGENT_TUI_PLACEHOLDER[:20])), default=None)
+    if anchor is None:
+        return transcript
+    return "\n".join(lines[:anchor + 1] + block + lines[anchor + 1:])
+
+
+def drop_agent_frames(text: str) -> str:
+    """The comparator's ONE exemption: remove every AGENT|-tagged line.
+
+    Applied inside `normalize_for_compare`, to BOTH sides, so the rendered frames are
+    IN the checked-in golden (a human reads them) but OUT of the diff (a real LLM's
+    prose / turn count / tool ordering is not a regression signal, and a permanently
+    red journey trains everyone to ignore drift).
+
+    It CANNOT hide a rein line. A frame is a `capture-pane` render, folded in only
+    AFTER `collapse_agent_tui` has run over the raw pane stream — and that collapse is
+    a FILTER: any column-0 `rein: …` / `=== rein: …` line (AGENT_TUI_KEEP_RE) stays
+    UNTAGGED in the transcript and is COMPARED. Nothing ever moves a rein line into a
+    frame, so a new (possibly security-relevant) rein line still trips drift.
+
+    Idempotent by construction: a second pass finds no AGENT| lines and is a no-op.
+    """
+    return "\n".join(ln for ln in text.split("\n")
+                     if not (ln.startswith(AGENT_TAG) or ln.rstrip() == AGENT_TAG.rstrip()))
 
 
 def normalize_transcript(text: str, subs: list[tuple[str, str]] | None = None) -> str:
@@ -1716,9 +1821,16 @@ def normalize_for_compare(text: str) -> str:
     but a genuinely new or changed line trips drift. Idempotent: re-normalizing an
     already-normalized transcript is a no-op (test_golden_shape asserts this).
 
+    ONE thing is DROPPED rather than normalized: the AGENT| rendered frames of a real
+    agent's TUI (drop_agent_frames) — shown in the golden for a human to READ, never
+    diffed, because an LLM's prose is not a regression signal. Dropped FIRST, so the
+    blank lines the fold left around each frame collapse in build_raw_transcript and
+    both sides land on the same shape. rein's OWN lines are never inside a frame (see
+    drop_agent_frames), so nothing security-relevant escapes the compare.
+
     Use REIN_SHOW_NORMALIZED=1 on a journey to eyeball this form directly.
     """
-    return normalize_transcript(build_raw_transcript(text))
+    return normalize_transcript(build_raw_transcript(drop_agent_frames(text)))
 
 
 def read_golden(name: str) -> str | None:
@@ -1881,20 +1993,19 @@ def read_log_since(path: Path, offset: int) -> str:
 # surface — and running THAT through a terminal emulator (RenderedScreen, above)
 # gives the popup exactly as the human sees it, box and all.
 #
-# TWO SHAPES live here, and a new journey must pick the REAL one:
+# ONE SHAPE, and it is the REAL one: `tmux_pane_session` / `TmuxPaneSession` (BELOW)
+# — rein runs INSIDE a REAL tmux pane, launched the way a developer launches it
+# (typed into the pane's shell), so $TMUX/$TMUX_PANE are INHERITED from tmux. rein's
+# own output and the popup overlay SHARE ONE TERMINAL, exactly as they do on a
+# developer's box.
 #
-#   * `tmux_pane_session` / `TmuxPaneSession` (BELOW) — rein runs INSIDE a REAL
-#     tmux pane, launched the way a developer launches it (typed into the pane's
-#     shell), so $TMUX/$TMUX_PANE are INHERITED from tmux. rein's own output and
-#     the popup overlay SHARE ONE TERMINAL, exactly as they do on a developer's
-#     box. USE THIS.
-#   * `tmux_popup_session` / `TmuxPopupSession` (immediately below) — the LEGACY
-#     shape: rein on a SEPARATE pty with a SYNTHESIZED $TMUX aimed at a tmux
-#     session whose pane is EMPTY. It proves the popup surface, but it is not the
-#     real configuration and structurally CANNOT see a popup-over-live-content bug
-#     (the popup has nothing to overlay). It survives only because
-#     `journey_realagent_write.py` still uses it; that journey flips to the real
-#     pane next, and this shape goes with it. DO NOT write a new journey against it.
+# There USED to be a second shape (`tmux_popup_session`/`TmuxPopupSession`): rein on a
+# SEPARATE pty with a SYNTHESIZED $TMUX aimed at a session whose pane was EMPTY. It is
+# DELETED, deliberately and permanently. It proved the popup surface but could not see
+# a popup-over-live-content bug (the popup had nothing to overlay), and it carried a
+# real hazard (an empty sockpath makes $TMUX ",0,0" — still non-empty, so rein would
+# fire a popup onto the OPERATOR's own default server). Do not reintroduce it: if a
+# surface can't be driven for real, SKIP with exit 3.
 #
 # If tmux (or pyte) is not installed the popup surface cannot be driven at all; a
 # journey must SKIP with exit 3 (see journey_tmux_popup_approval.py), never fake it
@@ -1922,155 +2033,14 @@ def _tmux(socket: str, *args: str, env: dict | None = None) -> subprocess.Comple
     )
 
 
-@dataclass
-class TmuxPopupSession:
-    """LEGACY (see the section header): a live tmux session on a dedicated socket
-    with an EMPTY pane, a pexpect-attached client a popup can render on, and a
-    SYNTHESIZED $TMUX (`tmux_env`) for a rein process running on a SEPARATE pty.
-
-    Not the real configuration — a developer runs `rein run` INSIDE the pane, so
-    the popup overlays LIVE content. Use `tmux_pane_session` instead. This shape
-    remains only for `journey_realagent_write.py`, which flips to the real pane
-    next; it goes away with that flip. Build it via `tmux_popup_session()`."""
-
-    socket: str
-    client: pexpect.spawn
-    log: io.StringIO
-    sockpath: str
-    pane: str
-    screen: RenderedScreen  # the attached client's pty, run through a terminal
-    forma: list[str] = field(default_factory=list)
-
-    def tmux_env(self) -> dict:
-        """Env overlay that routes a SEPARATE rein process's approval to THIS
-        session's popup: $TMUX (socket_path,pid,session — rein only checks it is
-        non-empty) and $TMUX_PANE. Pass it as spawn_rein_run(extra_env=...)."""
-        return {"TMUX": f"{self.sockpath},0,0", "TMUX_PANE": self.pane}
-
-    def drive_popup(self, expect_pattern: str, answer: str, *, settle: float = 0.3,
-                    timeout: int = 90, drain=None) -> list[str]:
-        """Wait for the popup's Form A to be FULLY RENDERED on the attached client's
-        SCREEN, read it off that screen, then type the answer. Returns the Form A
-        lines (also stored on `self.forma`) for folding into the transcript.
-
-        The popup grabs the client keyboard, so keys written to the client's pty
-        reach `rein approval grant` inside the popup. `expect_pattern` must be text
-        the popup PRINTS (e.g. "type the issue number"), not text from the command
-        line that opened it.
-
-        DETERMINISM, without a timer (#100). We pump the client's bytes into a real
-        terminal emulator and wait for a SCREEN STATE: `expect_pattern` visible AND
-        the Form A box painted through its trailing `>` prompt — the last thing rein
-        writes before it BLOCKS on input, hence proof the frame is complete and
-        stable. (The old code matched the pattern in the raw byte stream and then
-        drained until N ms passed with no new bytes — a timing bet on the rest of
-        the frame having arrived, which is exactly the fragility #100 is about.)
-
-        We snapshot BEFORE sending the answer, because answering makes `rein
-        approval grant` exit, which closes the popup and repaints over Form A.
-
-        `drain` — other live ptys to keep reading while we block here. With a
-        deterministic bash agent this is unnecessary (the agent is idle inside
-        `rein declare`, printing nothing). With a REAL agent TUI it is REQUIRED:
-        claude repaints while it waits for the declare to return, and an unread pty
-        buffer fills and blocks it — see `drain_children`.
-        """
-        def ready(scr: RenderedScreen) -> bool:
-            return scr.contains(expect_pattern) and popup_forma_complete(scr)
-
-        found, _ = wait_for_screen(self.client, ready, timeout=timeout,
-                                   screen=self.screen, drain=drain)
-        if not found:
-            raise RuntimeError(
-                "the popup's Form A never fully rendered on the attached tmux "
-                f"client within {timeout}s. Client screen was:\n{self.screen.text()}"
-            )
-        self.forma = popup_forma_from_screen(self.screen, answer=answer)
-        time.sleep(settle)
-        self.client.send(answer + "\r")
-        return self.forma
-
-    def render(self) -> str:
-        """The attached client's RENDERED screen — what the human SAW (box art and
-        all). Useful to show a reviewer; the popup's Form A alone (the part that
-        goes in the golden) is `self.forma`."""
-        return self.screen.text()
-
-    def close(self) -> None:
-        _tmux(self.socket, "kill-server")
-        try:
-            self.client.close(force=True)
-        except Exception:
-            pass
-
-
-@contextlib.contextmanager
-def tmux_popup_session(*, width: int = 200, height: int = 50, attach_settle: float = 1.0):
-    """Stand up a dedicated-socket tmux session with a pexpect-attached client for
-    a popup to render on, yield a TmuxPopupSession, and ALWAYS kill the server on
-    exit. Raises RuntimeError if tmux is absent, or PyteMissing if the rendered-
-    screen layer is unavailable (the caller should have checked `tmux_available()`
-    + `pyte_available()` and SKIPped with exit 3)."""
-    if not tmux_available():
-        raise RuntimeError("tmux not on PATH — the popup approval surface cannot be driven")
-    # The client's pty, run through a real terminal emulator: THE surface the popup
-    # exists on (it is not a pane, so capture-pane cannot see it). Sized to the
-    # client exactly, so pyte wraps where tmux wraps. Built FIRST so a missing pyte
-    # raises before we start a tmux server we would then have to reap.
-    screen = RenderedScreen(cols=width, rows=height)
-    socket = f"reinjourney-{os.getpid()}-{uuid.uuid4().hex[:6]}"
-    _tmux(socket, "kill-server")  # clean slate on OUR socket only
-    time.sleep(0.2)
-    # Everything from new-session onward is inside the try, so ANY failure during
-    # setup (a raise, a failed attach) still kills the dedicated server in the
-    # finally — the unique socket name means the next call's kill-server would
-    # NOT reap an orphan, so we must not leak one here.
-    sess = None
-    server_up = False
-    try:
-        r = _tmux(socket, "new-session", "-d", "-s", "w", "-x", str(width), "-y", str(height))
-        if r.returncode != 0:
-            raise RuntimeError(f"tmux new-session failed: {r.stderr.strip() or r.stdout.strip()}")
-        server_up = True
-        pane = _tmux(socket, "list-panes", "-t", "w", "-F", "#{pane_id}").stdout.strip()
-        sockpath = _tmux(socket, "display-message", "-p", "#{socket_path}").stdout.strip()
-        # tmux_env() feeds `sockpath` into the rein process's $TMUX, and rein's
-        # own `tmux popup` (DefaultTmuxRunner) has NO -L — it lands on THIS server
-        # only because it inherits that $TMUX. An empty sockpath would make $TMUX
-        # ",0,0" (still non-empty, so rein still fires the popup) whose fallback
-        # could be the operator's real default server. Fail closed instead.
-        if not pane or not sockpath:
-            raise RuntimeError(
-                f"tmux did not report a pane id / socket path (pane={pane!r} "
-                f"sockpath={sockpath!r}); refusing to proceed — an empty $TMUX "
-                "socket could fall back to the operator's own tmux server"
-            )
-        log = io.StringIO()
-        client = pexpect.spawn(
-            "tmux", ["-L", socket, "attach", "-t", "w"],
-            encoding="utf-8", codec_errors="replace",
-            timeout=30, dimensions=(height, width),
-        )
-        client.logfile_read = log
-        time.sleep(attach_settle)  # the client must be attached before a popup can render
-        sess = TmuxPopupSession(socket=socket, client=client, log=log,
-                                sockpath=sockpath, pane=pane, screen=screen)
-        yield sess
-    finally:
-        if sess is not None:
-            sess.close()  # kills the server AND closes the client
-        elif server_up:
-            _tmux(socket, "kill-server")  # setup raised before sess existed; don't leak it
-
-
 # --------------------------------------------------------------------------
 # TmuxPaneSession — rein INSIDE a REAL tmux pane (the developer's actual config)
 # --------------------------------------------------------------------------
 #
 # THE CONFIGURATION. A developer runs `rein run -- <agent>` INSIDE a tmux pane, so
 # the agent's output (a full-screen TUI, for a real agent) and rein's approval
-# popup SHARE ONE TERMINAL. TmuxPopupSession (above) faked that: rein ran on a
-# SEPARATE pty with a SYNTHESIZED $TMUX aimed at a session whose pane was EMPTY. It
+# popup SHARE ONE TERMINAL. The now-DELETED TmuxPopupSession faked that: rein ran on
+# a SEPARATE pty with a SYNTHESIZED $TMUX aimed at a session whose pane was EMPTY. It
 # proved the popup surface — but with nothing running in the pane, there was
 # nothing for the popup to OVERLAY, so a popup-over-live-TUI bug (a popup that
 # corrupts the pane, a pane that never repaints, a popup that fails to take the
@@ -2447,3 +2417,52 @@ def tmux_pane_session(*, env: dict | None = None, width: int = 200, height: int 
         elif server_up:
             _tmux(socket, "kill-server")  # setup raised before sess existed; don't leak it
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+# claude's folder-trust dialog, as it renders ("Quick safety check: Is this a project
+# you created or one you trust?" / "❯ 1. Yes, I trust this folder").
+CLAUDE_TRUST_DIALOG_RE = re.compile(
+    r"(?i)(quick safety check|trust this folder|project you created or one you trust)"
+)
+
+
+def dismiss_claude_trust_dialog(pane: TmuxPaneSession, *, timeout: float = 45.0) -> bool:
+    """PLUMBING, not ceremony: answer claude's folder-trust dialog if it appears in
+    the pane, and carry on if it does not. Returns whether it fired.
+
+    WHY IT MUST BE HANDLED: rein gives the agent an EPHEMERAL $HOME, so claude has no
+    persisted config and treats the fresh /tmp checkout as an unknown folder. The
+    dialog then BLOCKS the session forever if nobody answers (a spike sat on it for
+    420s). There is no way to skip it for an INTERACTIVE session — only `-p` /
+    non-TTY invocations bypass it, and this journey needs a real TUI.
+
+    WHY IT IS NOT A JOURNEY STEP: it is claude's UX, not rein's story. Asserting on it
+    would make the journey hostage to a third-party dialog — a future claude (or a
+    persisted claude config dir) that stops asking would turn a healthy run red. So it
+    is dismissed here, silently, with a SHORT timeout (it paints within seconds of
+    startup if at all), and it never appears in the golden's narrative.
+
+    Detected on the pane's RENDER (`until_pane`, which also drains the client), never
+    in the raw byte soup: a dialog is a redrawing surface. Enter takes the highlighted
+    default, `1. Yes, I trust this folder`.
+
+    The wait ends as soon as EITHER the dialog paints (dismiss it) OR claude's main TUI
+    is up without it (nothing to dismiss — carry straight on). So a claude that stops
+    asking costs the journey nothing, and the `timeout` is only ever paid if claude
+    never comes up at all — the window is generous because the dialog can only paint
+    after rein's sandbox preflight + srt launch have brought claude up.
+    """
+    seen = {"dialog": False}
+
+    def ready(scr: str) -> bool:
+        if CLAUDE_TRUST_DIALOG_RE.search(scr):
+            seen["dialog"] = True
+            return True
+        # claude's own prompt hint: the main TUI is live and it never asked.
+        return "? for shortcuts" in scr
+
+    pane.until_pane(ready, timeout=timeout)
+    if not seen["dialog"]:
+        return False
+    pane.send_pane("Enter")
+    return True
