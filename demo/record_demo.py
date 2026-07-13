@@ -100,9 +100,21 @@ WIDTH, HEIGHT = 160, 32
 PROMPT_HOLD = 1.0    # the empty prompt, before a key is pressed: the demo starts at zero
 COMMAND_HOLD = 1.3   # the typed command, sitting there, readable, before Enter
 FORMA_HOLD = 3.5     # Form A up, prompt still empty — long enough to read, not to bore
-DIGIT_GAP = 0.2      # between keystrokes, so the digits appear the way a human types them
 TYPED_HOLD = 1.8     # digits on screen, BEFORE Enter — the frames the first take lacked
 DISMISS_HOLD = 2.5   # after Enter: the popup goes, claude resumes underneath
+
+# One keystroke to the next, in CAST seconds — so ~1/SPEED of this ON SCREEN. At 0.45
+# and --speed 3 the digits land ~150ms apart in the gif: a human's typing cadence, EVEN.
+#
+# "Even" is the whole point, and it is enforced in TWO places, because the first
+# re-record got the recording right and the RENDER wrong. The take itself was already
+# evenly paced (measured: 0.309s / 0.308s between digits) — and the gif still showed
+# "20", a long pause, then "6". The gap was INSERTED by pace_cast, whose `forma` anchor
+# matched "Form A without the COMPLETE number", which is also true of a frame showing a
+# PARTIAL number. So the 7s "read Form A" beat landed between the "0" and the "6". The
+# anchor is now the EMPTY prompt (`popup_answer`), and `no_beat_mid_typing` asserts no
+# beat can ever land mid-number again. Pace here; PROVE there.
+DIGIT_GAP = 0.45
 
 # The task. One line, and it says nothing about declaring or about branch names: the
 # agent learns THOSE from rein's injected contract — which is exactly what the demo is
@@ -288,6 +300,14 @@ def record(env: dict, repo: str, issue: int, workdir: str) -> tuple[str | None, 
             pane.hold(3.0)
         finally:
             pane.stop_recording()
+            # The pane's COMPLETE byte stream (`pipe-pane`), for diagnosing a take. The
+            # .cast is the CLIENT's pty — what a viewer saw — and claude's TUI truncates
+            # its own tool-call lines to fit the box, so the cast cannot always tell you
+            # WHICH command the agent ran. The raw stream can. Off by default (it is a
+            # debugging artifact, not an output of the demo).
+            if dump := os.getenv("REIN_DEMO_RAWDUMP"):
+                Path(dump).write_text(pane.raw_stream())
+                print(f"[rec] raw pane stream -> {dump}", flush=True)
     return branch, prs
 
 
@@ -302,6 +322,22 @@ BANNER_BEAT = 9.0   # rein's launch banner: what it sandboxed, locked, injected
 FORMA_BEAT = 7.0    # Form A up, prompt still EMPTY — the "read it" beat
 TYPED_BEAT = 6.0    # the issue number VISIBLY in the box, before Enter — the fixed beat
 DISMISS_BEAT = 3.0  # the popup gone, claude resuming underneath
+
+# Form A's `>` prompt row, as the CLIENT renders it: `│> 206      │`. The digits echoed
+# so far are group 1 — "" while the prompt is still empty. Read off the RENDER (the box
+# is drawn with box characters, so the row is unambiguous) rather than by searching the
+# frame for `> <issue>`, which is what the previous anchor did and why it mis-fired:
+# `"> 206" not in frame` is TRUE of a frame showing `> 20`, so "Form A, prompt empty"
+# silently included "Form A, half the number typed".
+_POPUP_PROMPT_ROW = re.compile(r"[│|]\s*>\s*(\d*)\s*[│|]")
+
+
+def popup_answer(frame: str) -> str | None:
+    """The digits currently echoed in Form A's `>` prompt on this rendered frame, or
+    None when Form A is not up. `""` means the prompt is up and EMPTY — which is the
+    state the `forma` beat is allowed to hold on, and the ONLY one."""
+    m = _POPUP_PROMPT_ROW.search(frame)
+    return m.group(1) if m else None
 
 
 def pace_cast(src: Path, dst: Path) -> float:
@@ -364,11 +400,10 @@ def pace_cast(src: Path, dst: Path) -> float:
     if m is None:
         raise RuntimeError(f"{src}: no Form A anywhere in the cast — not a usable take")
     issue = m.group(1)
-    typed = f"> {issue}"
     forma_up = "To approve, type the issue"
 
     # The dismissal is held on the FIRST frame the popup is GONE from — one past the last
-    # Form A frame, not the last Form A frame itself (that one is `typed`).
+    # Form A frame, not the last Form A frame itself (that one still shows the answer).
     last_forma = last_frame(lambda f: forma_up in f)
     gone = (None if last_forma is None else
             first_frame_after(frames, last_forma, lambda f: forma_up not in f))
@@ -381,8 +416,13 @@ def pace_cast(src: Path, dst: Path) -> float:
         # rein's `running:` echo lands TWICE (the launch echo, and again when the TUI
         # tears down and the scrollback under it is exposed) — take the FIRST.
         "banner": (first_frame(lambda f: "rein: running:" in f), BANNER_BEAT),
-        "forma": (last_frame(lambda f: forma_up in f and typed not in f), FORMA_BEAT),
-        "typed": (last_frame(lambda f: forma_up in f and typed in f), TYPED_BEAT),
+        # Form A up and the prompt genuinely EMPTY — NOT merely "the complete number is
+        # absent", which is also true of `> 20` and is what put a 2.3s pause between the
+        # "0" and the "6" (see DIGIT_GAP).
+        "forma": (last_frame(lambda f: forma_up in f and popup_answer(f) == ""),
+                  FORMA_BEAT),
+        "typed": (last_frame(lambda f: forma_up in f and popup_answer(f) == issue),
+                  TYPED_BEAT),
         "dismiss": (gone, DISMISS_BEAT),
     }
     missing = [name for name, (i, _) in anchors.items() if i is None]
@@ -397,6 +437,27 @@ def pace_cast(src: Path, dst: Path) -> float:
         )
     for name, (i, beat) in anchors.items():
         beats[i] = beats.get(i, 0.0) + beat
+
+    # THE TYPING IS ONE GESTURE — nothing may be inserted INSIDE it. This is the
+    # invariant the whole re-record exists to establish, so it is CHECKED, not trusted:
+    # the take was already evenly paced and the gif still stuttered, because a beat was
+    # inserted between two digits. Anchoring on the empty prompt fixes that; this proves
+    # it, and would catch any future beat (or a re-tuned anchor) landing mid-number.
+    typing_start = first_frame(lambda f: forma_up in f and (popup_answer(f) or "") != "")
+    typing_end = first_frame(lambda f: forma_up in f and popup_answer(f) == issue)
+    if typing_start is None or typing_end is None:
+        raise RuntimeError(
+            f"{src}: the issue number is never seen being typed into Form A — the take "
+            f"is unusable (this is the exact defect the demo was re-recorded to fix)."
+        )
+    inside = [i for i in beats if typing_start <= i < typing_end]
+    if inside:
+        raise RuntimeError(
+            f"{src}: a pacing beat lands INSIDE the typing of the issue number "
+            f"(frames {typing_start}..{typing_end}, offending {inside}). That is what "
+            f"made the digits read as '20' … long pause … '6'. Fix the anchor; do not "
+            f"paper over it by shortening the beat."
+        )
 
     shift = 0.0
     out = [header]

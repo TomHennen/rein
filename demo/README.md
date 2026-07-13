@@ -90,6 +90,23 @@ in" are the *same bytes* in different frames, and only the render can tell them 
 missing anchor is a **hard error** — a silently-skipped beat would reproduce the exact
 defect this pass fixed.
 
+### An anchor must be EXACT, or it lands mid-word
+
+The second take typed evenly (measured on the cast: 0.309s / 0.308s between digits) and the
+gif *still* showed the number going in as **"20" … long pause … "6"**. The recording was not
+at fault; the **pacing** was. `forma` — the "Form A is up, read it" beat — was anchored on
+*"Form A without the COMPLETE number"*, and that predicate is **also true of a frame showing
+`> 20`**. So the 7-second beat was inserted between the "0" and the "6".
+
+The anchor is now the **empty prompt**, read off the render by `popup_answer()` (the box's
+`>` row: `""` while nothing is typed). And because "the take was even and the render still
+stuttered" is exactly the kind of bug that silently comes back, `pace_cast` now **asserts**
+it: **no beat may land between the first digit appearing and the number being complete** —
+a hard error, like a missing anchor. Pace in the recorder, *prove* it in the pacer.
+
+`DIGIT_GAP` is sized in **cast** seconds and divided by `--speed`, so 0.45 lands the digits
+~150ms apart **on screen** — a human's typing cadence.
+
 **`/exit`, never Ctrl-C.** Terminal SIGINT is untrapped by design, so rein would die
 without running its exit-revoke and never print the accounting line — and that line is
 the closing beat: the credential does not outlive the task.
@@ -129,6 +146,16 @@ blocked on `rein declare`; **the issue number visibly typed into Form A** before
 no frame shows it, the take is a re-record, not a re-pace — see above); the dismissal; the
 push to `agent/<issue>/…` and the PR; and the final `rein: revoked 1 of 1 write token(s)
 on exit`.
+
+**Known and ACCEPTED in the current take — do not re-record chasing it (issue #119):** the
+agent narrates a `.git/config` write error ("the `.git/config` write errors are sandbox
+noise — the push itself succeeded"). `git push -u` writes `branch.<x>.remote` + `.merge`
+into the sandbox's read-only `.git/config`. #103 strips `-u` in the **`rein-git` shim** —
+but that shim is installed under `$HOME/.local/state/rein/shim`, and **$HOME is hidden in
+the sandbox**: the only dir prepended to the sandboxed agent's PATH is the run tmpdir, which
+stages `rein` and **not** `git`. So in-sandbox `git` is the real `/usr/bin/git` and the strip
+never runs (it only takes effect under `rein run --direct`). This is a **product** bug, not a
+recording defect — no take can avoid it until #119 lands.
 
 `ffmpeg -ss` seeks a GIF by its *average* frame rate and will land on the wrong beat.
 Dump every frame and index it by its real timestamp instead:
