@@ -69,27 +69,30 @@ done. For the full design and threat model, see [`docs/design.md`](docs/design.m
 
 ## Prerequisites
 
-**Core:**
-- **Go** — the version in [`go.mod`](go.mod) (currently 1.26.5+).
-- A **GitHub account** that can create GitHub Apps (any personal account can).
-- One or more **throwaway repositories** to point the agent at. Do not use a real
-  repo yet. Clone them over **HTTPS** — rein brokers `https://github.com` remotes.
-  An **SSH remote will not work** from inside the sandbox: rein has nothing to
-  inject into it, there's no egress for it, and the ssh-agent socket is blocked.
-- A browser for the one-time App creation. On a headless/SSH box, see
-  [Headless setup](#headless--remote-machines).
+Linux, Go (see [`go.mod`](go.mod)), a GitHub account that can create Apps, a
+throwaway repo cloned over HTTPS, and the sandbox stack:
 
-**The sandbox stack (Linux)** — required for the default `rein run`. `rein doctor`
-checks `srt` (presence and pinned version), its seccomp filter, bwrap's userns, and
-the system CA bundle. It does **not** check `ripgrep`/`socat` (srt needs both),
-Node, Go, or your clock — a bad clock shows up later as `app credentials: 401`.
-- **`srt`** — pinned to `@anthropic-ai/sandbox-runtime@0.0.63` (other versions
-  may move the injection hook; rein re-verifies on bump). srt needs Node 20+:
-  `npm install -g @anthropic-ai/sandbox-runtime@0.0.63`
-- **`bubblewrap`, `ripgrep`, `socat`** —
-  `sudo apt-get install -y bubblewrap ripgrep socat` (or your distro's
-  equivalent).
-- **Ubuntu 23.10+ only:** an AppArmor profile granting `userns` to `bwrap`, or the
+```bash
+npm install -g @anthropic-ai/sandbox-runtime@0.0.63   # needs Node 20+
+sudo apt-get install -y bubblewrap ripgrep socat      # or your distro's equivalent
+```
+
+`rein doctor` tells you what's missing. On Ubuntu you'll also need an AppArmor
+profile for `bwrap` — details below.
+
+<details>
+<summary>The full list, and the AppArmor fix</summary>
+
+- **A throwaway repo.** Do not point rein at a real one yet. Clone over **HTTPS** —
+  an SSH remote won't work from inside the sandbox: rein has nothing to inject into
+  it, there's no egress for it, and the ssh-agent socket is blocked.
+- **A browser** for the one-time App creation. On a headless or SSH-only box, see
+  [Headless / remote machines](#headless--remote-machines).
+- **`srt`** is pinned to `0.0.63` — other versions may move the injection hook, and
+  rein re-verifies on every bump.
+- **Healthy NTP.** App token mints fail with a misleading `401 Bad credentials`
+  when the clock drifts more than ~60s.
+- **Ubuntu 23.10+ needs an AppArmor profile** granting `userns` to `bwrap`, or the
   sandbox won't start. Check with:
 
   ```bash
@@ -109,9 +112,14 @@ Node, Go, or your clock — a bad clock shows up later as `app credentials: 401`
   }
   ```
 
-  Then `sudo apparmor_parser -r /etc/apparmor.d/bwrap` and re-run the check.
-- **Healthy NTP** — App token mints fail with a misleading `401 Bad credentials`
-  when the clock drifts more than ~60s.
+  Then run `sudo apparmor_parser -r /etc/apparmor.d/bwrap` and re-check.
+
+**What `rein doctor` does and doesn't check.** It checks `srt` (presence and pinned
+version), its seccomp filter, bwrap's userns, and the system CA bundle. It does
+**not** check `ripgrep`/`socat` (srt needs both), Node, Go, or your clock — a bad
+clock shows up later as `app credentials: 401`.
+
+</details>
 
 ## Quick start
 
@@ -179,46 +187,33 @@ sequenceDiagram
   A->>G: push — proxy checks the branch is the declared issue's, lands
 ```
 
-1. The agent runs `rein declare <issue-number>`. Every blocked write tells it to.
-2. rein fetches the issue and shows you its title, state, and home repo. You
-   confirm by typing the number back. The agent cannot reach or forge this prompt:
-   it has no controlling terminal. rein asks in a `tmux` popup if you're in tmux,
-   otherwise on your tty; failing both, it tells you to run `rein approval grant`
-   from another terminal.
-3. rein mints a short-lived write token from your App key.
-4. The proxy injects the token into the agent's traffic. The agent never sees it.
-5. The push goes through.
+rein shows you the issue's title, state, and home repo, and you confirm by typing
+the number back. The agent can't reach or forge that prompt — it has no
+controlling terminal. (rein asks in a `tmux` popup if you're in tmux, otherwise on
+your tty; failing both it tells you to run `rein approval grant` from another
+terminal.)
 
-Confirming an issue covers that issue for the rest of the run — the agent can push
-to it again without re-prompting. Declaring a different issue prompts you again.
-
-Write access is revoked when the run ends, after 30 minutes with no GitHub
-traffic, or after 4 hours, whichever comes first. Any request resets the idle
-clock, reads included, so a busy agent stays approved until the 4-hour cap. (The
-idle clock is a sandboxed-mode thing: `--direct` has no proxy, so it gets the
-run-exit revoke and the 4-hour cap, but nothing in between.)
+Confirming covers that issue for the rest of the run; a different issue prompts
+you again. Write access is revoked when the run ends, after 30 minutes with no
+GitHub traffic, or after 4 hours — whichever comes first. Reads reset the idle
+clock too, so a busy agent stays approved until the 4-hour cap.
 
 **What the issue binds.** GitHub tokens can't be scoped to an issue, so the token
-is scoped to your session's repos. The issue constrains the *push*: an approved
-run can only push to `agent/<issue>/<nonce>` for an issue you confirmed, and any
-other branch — including `main` — is refused.
+is scoped to your session's repos. The issue constrains the *push*: an approved run
+can only push to `agent/<issue>/<nonce>` for an issue you confirmed — any other
+branch, `main` included, is refused.
 
-The token can do more than the branch rule allows. It carries `contents: write` on
-your repos, so the agent can also write through GitHub's API, which the branch rule
-doesn't cover. rein records those writes rather than blocking them: every request
-it relays goes to a log the agent can't read or edit.
-
-```bash
-cat ~/.local/state/rein/audit/sandbox-<run-id>.log
-```
-
-Posting that history back to the issue, from an identity the agent can't touch, is
-coming soon. For now the log is local. See [Known limits](#known-limits).
+The token can still do more than that. It carries `contents: write` on your repos,
+so the agent can also write through GitHub's API, which the branch rule doesn't
+cover. rein records those writes rather than blocking them, to a per-run log under
+`~/.local/state/rein/audit/` that the agent can't read or edit. Posting that
+history back to the issue is coming soon; for now it's local. See
+[Known limits](#known-limits).
 
 ### The session
 
-A session lists the repos the agent may touch. No token rein mints can exceed it.
-`rein init` scaffolds one; edit it to change the repo set:
+A session lists the repos the agent may touch — no token can exceed it. `rein init`
+scaffolds one; edit it to change the repo set:
 
 ```yaml
 id: my-session
@@ -227,11 +222,8 @@ repos:
   - your-name/your-throwaway-repo   # the token is scoped to this whole set
 ```
 
-There's no issue field: the issue is bound at run time, not at setup
-([#35](https://github.com/TomHennen/rein/issues/35)). A file with a legacy
-`issue:` line still loads, but the field is ignored with a warning — remove it.
-`rein session show` prints the current repo set; `rein session add-repo
-<owner/name>` widens it.
+`rein session show` prints the current set; `rein session add-repo <owner/name>`
+widens it.
 
 ### Token scopes
 
@@ -247,10 +239,7 @@ the narrowest set the operation needs:
 
 The write token only exists once you approve, and is revoked when the run ends or
 [expires](#declaring-an-issue). Both are scoped to your session's repos, not to
-your account.
-
-Those are the tiers the sandbox proxy mints. In `--direct` mode the git tokens are
-narrower — `contents` only — and just the `gh` path gets the full write tier.
+your account. (`--direct` mints narrower git tokens — `contents` only.)
 
 Note that on GitHub `pull_requests: write` also means review, approve, and merge,
 so an approved run can approve or merge its own PR. Branch protection requiring an
@@ -277,17 +266,14 @@ approval won't stop it ([#86](https://github.com/TomHennen/rein/issues/86)).
   blocked. A credential scanner run inside the sandbox finds none of your real
   credentials.
 - **`.git` is protected** ([#64](https://github.com/TomHennen/rein/issues/64)).
-  `hooks/` and `config` are read-only, and `.git` can't be renamed aside and
-  rebuilt — otherwise the agent could plant a `pre-commit` hook that later runs as
-  you, on your host. rein can't protect a submodule or a linked worktree this way,
-  so it won't bind one: a mapped worktree fails the launch, and if it's your
-  current directory the agent gets a scratch clone and your tree is untouched.
-- **Writes are locked until declare.** Commits are authored `<your name> (via
-  rein)` under the App's identity, so a push is attributable to the App rather than
-  to you.
+  `hooks/` and `config` are read-only and `.git` can't be swapped out, so the agent
+  can't plant a `pre-commit` hook that would later run as you, on your host. Where
+  rein can't guarantee that (submodules, linked worktrees) it won't bind your tree
+  at all — it gives the agent a scratch clone, or refuses to launch.
 - **No credential in the environment.** The sandbox environment is an allowlist,
   and the `GH_TOKEN` the agent sees is a stub. The real token only exists on the
-  wire.
+  wire. Commits are authored `<your name> (via rein)` under the App's identity, so
+  a push is attributable to the App rather than to you.
 
 If hiding `$HOME` breaks a tool you need, `REIN_SANDBOX_ALLOW_READ` allows
 specific paths back read-only (never a credential store — rein rejects those), and
@@ -306,14 +292,12 @@ allow_domains:
   - pypi.org
 ```
 
-Allowed hosts are egress-only: rein never injects a credential on them, only on
-GitHub. Entries are bare hosts (`pypi.org`) or a strict wildcard
-(`*.example.com`). Every host you add is somewhere the agent can send your data, so
-keep the list short. rein warns on wildcards and on large sets.
+Allowed hosts are egress-only — rein never injects a credential on them, only on
+GitHub. Every host you add is somewhere the agent can send your data, so keep the
+list short; rein warns on wildcards and large sets.
 
 MCP servers follow the same rule: local stdio servers work out of the box, remote
-ones connect only if you allow their hosts. The claude.ai account connectors also
-need `claude.ai`; `REIN_DISABLE_CLAUDE_MCP=1` turns them off.
+ones connect only if you allow their hosts.
 
 ### `--direct` mode
 
@@ -368,43 +352,28 @@ handling of the App private key** section before moving a key by hand.
 wrong. `rein doctor --fix` applies the repairs it can make safely; anything
 privileged (apt, npm, AppArmor, NTP) it shows you but never runs.
 
-- **`sandbox: ...` check fails** — install the missing piece from
-  [Prerequisites](#prerequisites); on Ubuntu 24.04 the usual culprit is the
-  `bwrap` AppArmor profile. `rein run` won't launch until these pass.
+- **`sandbox:` check fails** — install the missing piece from
+  [Prerequisites](#prerequisites); on Ubuntu the usual culprit is the `bwrap`
+  AppArmor profile. `rein run` won't launch until these pass.
 - **`app credentials: 401`** — almost always clock skew; check `chronyc tracking`.
-- **`claude` doesn't go through rein** — open a new shell, or `source` your rc;
-  confirm with `type claude`.
-- **`rein: command not found`** — `~/.local/bin` isn't on your `$PATH`.
-- **A git op fails, mentioning `rein doctor`** — rein refused rather than letting
-  the agent silently re-auth. Usually the App isn't installed on that repo, or the
-  repo is outside your session's ceiling.
-- **Write prompt never appears** — the agent must run `rein declare <n>` first.
-  If it did and no prompt reached you, you may be in `--direct` from a shell with
-  no tty; run from a real terminal, or approve from another with `rein approval
-  grant --run-id <id>`.
-- **Logs** — what the agent did, per run: `~/.local/state/rein/audit/`.
+- **A git op fails, mentioning `rein doctor`** — usually the App isn't installed on
+  that repo, or the repo is outside your session.
+- **The write prompt never appears** — the agent has to run `rein declare <n>`
+  first. If it did, approve from another terminal with `rein approval grant
+  --run-id <id>`.
+- **What did the agent do?** — `~/.local/state/rein/audit/`, one log per run.
 
 ## Running the tests
 
-Three layers, hermetic to live:
-
 ```bash
-go test ./...                                  # unit — no network, no sandbox, no secrets
-go test -race ./...                            # the concurrency-sensitive packages
-
+go test ./...                                        # unit; no network, no sandbox, no secrets
 REIN_SANDBOX_E2E=1 go test ./internal/srt -run E2E   # launches real srt; needs the stack healthy
-
-tests/interactive/run-journeys.sh              # journeys: real pty, real repo, golden transcripts
-tests/interactive/run.sh                       # the rest of the interactive suite
+tests/interactive/run-journeys.sh                    # drives real runs against a live throwaway repo
 ```
 
-The **journeys** are the ones that matter: each drives a real user path against a
-live throwaway repo and checks the transcript against a committed golden, so any
-drift shows up as a failure. Regenerate them in any PR that changes behavior. They
-need `rein init` run on the box, the sandbox stack, host `gh` authed, and
-`python3` + `pexpect`; see
-[`tests/interactive/README.md`](tests/interactive/README.md). The interactive
-suite is **never** run by `go test ./...`, so the Go suite stays fast and offline.
+The journeys need a working setup (`rein init`, the sandbox stack, host `gh`
+authed, `python3` + `pexpect`) and are never run by `go test ./...`. See
+[`tests/interactive/README.md`](tests/interactive/README.md).
 
 ## Cleanup
 
