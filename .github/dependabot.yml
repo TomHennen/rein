@@ -1,5 +1,9 @@
-# Dependabot config for rein. See wrangle v0.2.1's recommended baseline:
-# https://github.com/TomHennen/wrangle/blob/v0.2.1/gh_workflow_examples/dependabot.yml
+# Dependabot config for rein. See wrangle v0.4.0's recommended baseline:
+# https://github.com/TomHennen/wrangle/blob/v0.4.0/gh_workflow_examples/dependabot.yml
+#
+# (We skip that baseline's `groups: across-directories` for github-actions: it
+# exists to stop one action pinned in SEVERAL files from diverging, and rein
+# pins wrangle in exactly one workflow and ships no composite actions.)
 #
 # The github-actions entry raises update PRs for the action pins in our
 # workflows -- including the `uses: TomHennen/wrangle/...@vX.Y.Z` tag pin in
