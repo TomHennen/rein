@@ -232,6 +232,84 @@ rein's own `rein: running:` echo. `spawn_rein_run`/`ReinRun` stay in the module
 `run_journey`. A multi-run in-sandbox journey is the same, one step per `rein run`
 — the `$ rein run` echoes ARE the run boundaries.
 
+## Drive tmux for REAL: rein runs INSIDE the pane (`tmux_pane_session`)
+
+A developer runs `rein run -- <agent>` **inside a tmux pane**, so the agent's
+output and rein's approval popup **share one terminal**. The popup journey used to
+fake that: rein ran on a separate pexpect pty with a **synthesized `$TMUX`** aimed
+at a tmux session whose pane was **EMPTY**. It proved the popup surface — and it
+structurally could not see a popup-over-live-content bug, because the popup had
+nothing to overlay. `reinharness.tmux_pane_session()` is the real configuration and
+is what a tmux journey must use: a dedicated-socket tmux server (never the
+operator's), a **real pane** whose shell the command is typed into (`run_in_pane`),
+so `$TMUX`/`$TMUX_PANE` are **INHERITED from tmux** — nothing is synthesized, and
+the "an empty sockpath could fall back to the operator's real server" hazard of the
+synthesis is gone with it.
+
+**Three surfaces. Each answers a question only it can answer — do not mix them up:**
+
+| surface | what it is | use it for |
+|---------|-----------|------------|
+| `raw_stream()` | the **`pipe-pane`** byte stream: everything the pane's program WROTE, append-only and complete | **the line-oriented golden transcript**, and waiting on flow markers (`until_raw`) |
+| `pane_text()` | `capture-pane -p -J` — the **rendered** pane, right now (`-J` joins wrapped lines; add `-e` only if you assert attributes, it makes goldens escape-noisy) | what the pane LOOKS like; the proof a popup is **not** in it |
+| `client_screen()` | the attached client's pty, **pyte**-rendered (`RenderedScreen`) | the **only** surface a tmux popup exists on |
+
+- **A tmux popup can never be captured by its own server.** `popup.c` holds a
+  standalone `struct screen` registered via `server_client_set_overlay()` — no
+  `window_pane`, so it never appears in `list-panes`, has no `#{popup_*}` format,
+  and `capture-pane` cannot see it. It renders on, and grabs the keyboard of, the
+  **attached client**; the only way to answer it is to write keys to that client's
+  pty (`send_client`), never `send-keys`.
+- **The golden comes from `pipe-pane`, not `capture-pane`.** `capture-pane` shows
+  only the visible screen — and while a TUI holds the **alternate screen**, even
+  `capture-pane -S -` gives **no scrollback at all**. The raw stream is the only
+  complete, line-oriented record. (That alt-screen limit is *why* the golden is
+  sourced from `pipe-pane`; a deterministic bash agent never enters the alternate
+  screen, so Stage-1's `pane_text()` assertions are safe — it is the **real-agent**
+  journey that would be bitten.) Start `pipe-pane` AFTER `new-session -d` but
+  BEFORE anything is typed, or the first bytes are raced away.
+- **Read the popup off the RENDER, never the client's raw bytes.** With a live pane
+  underneath, the client's byte stream interleaves the pane's own writes, and a row
+  the popup paints blank lets stale pane text bleed *inside* the Form A box. On the
+  pyte render the overlay is genuinely on top, so `popup_forma_from_screen`'s
+  geometry slice is truthful.
+
+**Two rules, both learned the hard way:**
+
+1. **DRAIN THE CLIENT, ALWAYS.** pexpect only yields bytes when you READ from the
+   child. If a long wait (a slow sandbox clone) polls the pane without reading the
+   client, the client's pty fills, tmux's attach blocks on write, the popup render
+   never lands, nobody answers it, `rein approval grant` times out at 60s and rein
+   **degrades to the inline prompt** — which looks exactly like a rein bug and is
+   not one. So draining is not a discipline: it lives inside the ONE shared poll
+   primitive (`TmuxPaneSession.until`) that `until_raw` / `until_pane` /
+   `until_client` / `wait_stable` / `drive_popup` all go through, and the same read
+   that drains the client also feeds its `RenderedScreen`. Keep the main thread the
+   sole reader; do not add a drain thread racing `send()`.
+2. **NEVER ASSERT ON A SINGLE `capture-pane` SHOT** — it races the redraw. Retry
+   the predicate (`until_pane`, ~50ms poll; fzf's `Tmux#until` shape). For an
+   assertion with **no anchor string** ("the pane repainted after the popup
+   closed"), wait for **quiescence**: `wait_stable(ms)` returns the render once it
+   has stopped changing.
+
+**Pin the geometry** (`-x`/`-y` **plus** `window-size manual` **and** `status off`)
+or a client attach resizes the window and reflows every wrapped line in the golden;
+set `TERM`/`default-terminal` deliberately (the popup's box-drawing depends on it);
+and give the pane's shell a **fixed `PS1` via `--rcfile`** (bash ignores an exported
+`PS1` and would otherwise bake `bash-5.2$` — its own version — into the golden).
+
+`journey_tmux_popup_approval.py` is the exemplar. Because it runs for real it can
+assert what the empty-pane cheat could not: while Form A is up it is on
+`client_screen()` and **absent from `pane_text()`**, which at that moment still
+shows the live `SBX| $ rein declare <n>` the popup is blocking on — the popup
+**overlays** a live pane rather than printing into it — and after the popup closes
+the pane repaints and the run carries on, with no Form A residue on the client.
+
+The synthesized-`$TMUX` shape (`TmuxPopupSession`/`tmux_popup_session`) is still in
+the module, but ONLY because `journey_realagent_write.py` has not been flipped yet;
+it goes away with that flip. **Do not write a new journey against it.** If a surface
+can't be driven for real, SKIP with exit 3 — never fake it.
+
 ## Prefer inline literals over constants for EXPECTED values (#82)
 
 In journeys and tests, write the expected string/value **inline at the assertion**
@@ -275,6 +353,11 @@ in `reinharness.py`, so a new journey is mostly wiring:
 - `RenderedScreen` / `screen_for_child` / `render_stream` / `wait_for_screen` /
   `popup_forma_from_screen` — the pyte rendered-screen layer for REDRAWING
   surfaces (#100); `pyte_available()` / `PyteMissing` for the exit-3 skip.
+- `tmux_pane_session()` / `TmuxPaneSession` — rein INSIDE a real tmux pane (see
+  above): `run_in_pane`, the three surfaces (`raw_stream` / `pane_text` /
+  `client_screen`), the retry (`until_raw` / `until_pane` / `until_client`) and
+  quiescence (`wait_stable`) helpers, and `drive_popup` (answers the popup on the
+  attached client, and snapshots what `capture-pane` shows while it is up).
 - `run_journey(steps)` / `JourneyStep` / `JourneyResult` — THE journey runner
   (#82), for host-command AND sandbox journeys alike: declare steps (argv + prompt
   answers, plus per-step `cwd`/`extra_env`/`timeout` when a step drives a `rein

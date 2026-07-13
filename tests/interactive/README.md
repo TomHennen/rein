@@ -80,7 +80,7 @@ a new `golden/*.txt`). See `tests/interactive/CLAUDE.md` for the authoring rules
 | 5 | **Ref cross-check** — after approval, a non-`agent/<n>/<nonce>` ref is still rejected (#35 decision C) | **COVERED** | `test_write_approval.py::nonmatching_ref_rejected_after_approval` + phase 4 of the ceremony golden |
 | 6 | **Scope expansion** — agent (scoped to repo A) declares an issue that lives in repo B, OUTSIDE scope (`rein declare <n> --repo B`); the SCOPE EXPANSION prompt fires with its distinct "this ADDS a repo to the scope ceiling" header, the human approves + answers the persist `[y/N]`, and the widened token lets the agent clone + push to repo B | **COVERED** | `journey_scope_expansion.py` → **`golden/scope_expansion.txt`** (approve → run-only → push-to-B, ONE story) + `test_scope_expansion.py` (the DENY leg + the CROSS-OWNER structural rejection, as plain assertions — no golden) |
 | 7 | **Real agent in the sandbox** — interactive `claude` under `rein run`, reaching `api.anthropic.com` | **COVERED** | `test_realagent_e2e.py` (live since CP4.5 landed egress) |
-| 8 | **tmux-popup grant** — the DEFAULT TUI path (#37): with `$TMUX` set and `REIN_APPROVAL` unset the confirm prompt fires in a `tmux popup -E "rein approval grant"`, NOT inline; the operator answers there | **COVERED** | `journey_tmux_popup_approval.py` → **`golden/tmux_popup_approval.txt`**. Drives a REAL popup on a DEDICATED tmux socket (`reinharness.tmux_popup_session`, never the operator's own server): rein runs on a plain pty with `$TMUX`/`$TMUX_PANE` pointing at the session so its OWN output is a clean deterministic golden, while the popup renders on an ATTACHED pexpect client the harness answers through (a popup is a client-owned overlay — `send-keys` can't reach it; keys go to the client's pty). Positive proof of the surface: the golden shows the declare confirmed with the Form A block ABSENT (it rendered in the popup, unlike the write-ceremony golden's inline block), and rein's `helper.log` records `launching tmux popup` + `issue #<n> CONFIRMED via tmux popup`. SKIPs cleanly if `tmux` is absent |
+| 8 | **tmux-popup grant** — the DEFAULT TUI path (#37): with `$TMUX` set and `REIN_APPROVAL` unset the confirm prompt fires in a `tmux popup -E "rein approval grant"`, NOT inline; the operator answers there | **COVERED** | `journey_tmux_popup_approval.py` → **`golden/tmux_popup_approval.txt`**. Drives a REAL popup in the REAL configuration (`reinharness.tmux_pane_session`, a DEDICATED tmux socket, never the operator's own server): rein runs INSIDE a real tmux pane — typed into the pane's shell, so `$TMUX`/`$TMUX_PANE` are INHERITED from tmux, not synthesized — and the popup OVERLAYS that live pane, rendering on an ATTACHED pexpect client the harness answers through (a popup is a client-owned overlay — `send-keys` can't reach it, and `capture-pane` can't SEE it; keys go to the client's pty). The golden is the pane's own `pipe-pane` byte stream. Newly assertable because it runs for real: while Form A is up it is on the client's pyte render and ABSENT from `capture-pane` of the pane (which still shows the live `$ rein declare <n>` it is blocking on), and the pane repaints once the popup closes. Positive proof of the surface: the golden shows the declare confirmed with the Form A block ABSENT (it rendered in the popup, unlike the write-ceremony golden's inline block), and rein's `helper.log` records `launching tmux popup` + `issue #<n> CONFIRMED via tmux popup`. SKIPs (exit 3) if `tmux` or `pyte` is missing |
 | 9 | **Sandbox filesystem boundary** — from INSIDE (#59/#63/#64): credential stores + `~/.ssh` + `~/.aws` + rein's own app key read as *absent*; `$HOME` is ephemeral (a write succeeds into tmpfs, then never persists on the host); the `.git` host-exec escape is CLOSED (`mv .git`→"Device or resource busy", `.git/hooks` + `.git/config` read-only); ordinary edits still `add`/`commit`; and the injected agent contract is shown *verbatim* | **COVERED** | `journey_sandbox_filesystem.py` → **`golden/sandbox_filesystem.txt`** (a deterministic bash "agent" — reproducible, unlike real claude) + gated `test_git_hardening.py` (the `.git` escape, incl. the `config.worktree` edge) + `test_agent_contract.py` (real-claude contract read-back — LLM phrasing varies, so NOT golden material). **Complementary evidence:** `journey_credential_boundary.py` → **`golden/credential_boundary.txt`** proves the same hide with an INDEPENDENT third-party scanner (`bagel`) run as a differential — finds 4 planted creds `--direct`, 0 sandboxed — a sweep that catches un-enumerated paths the `cat`-checks can't (the #55 unknown-unknown class). Skips if `bagel` (GPL-3.0, external CLI only) is absent |
 | 10 | **Direct mode (`--direct`)** — the SAME #35 ceremony UNSANDBOXED: reads flow, a pre-declaration push is BLOCKED by the credential-helper channel (a non-secret PLACEHOLDER credential + a stderr hint naming `rein declare` — issues #45/#35 — then git's OWN `Authentication failed`, NOT a proxy `remote error: rein:` ERR), `rein declare <n>` prompts on the host terminal, the verified push LANDS. No proxy, so no ref cross-check (that stays a sandbox feature) | **COVERED** | `journey_direct_mode.py` → **`golden/direct_mode.txt`** (the direct twin of the write ceremony; contrast documented in its docstring) |
 | 11 | **Misconfig: App not installed on a session repo** | **GAP** — this is issue **#68** (the D4 install-coverage check is skipped entirely on the env-App path). A live journey here would have caught it; the unit tests didn't | — |
@@ -349,33 +349,53 @@ OTHER journey/test runs OUTSIDE tmux (or forces `REIN_APPROVAL=tty`), so this
 default surface was untested end to end. This journey drives the REAL popup on the
 same #35 loop as the write ceremony.
 
-Driving a popup under pexpect (`reinharness.tmux_popup_session`, a context manager):
+Driving a popup FOR REAL (`reinharness.tmux_pane_session`, a context manager):
 
 - a DEDICATED tmux server (`tmux -L <unique>`), so it NEVER touches the operator's
   own sessions; it kills only its own socket on teardown;
+- a REAL pane: the command is TYPED INTO the pane's shell (`run_in_pane`), so
+  `$TMUX`/`$TMUX_PANE` are INHERITED from tmux — nothing is faked, and rein's own
+  output and the popup overlay SHARE ONE TERMINAL, as they do on a developer's box.
+  (The old shape ran rein on a separate pty with a SYNTHESIZED `$TMUX` aimed at an
+  EMPTY pane: it proved the popup surface, but with nothing under the popup it could
+  not see a popup-over-live-content bug at all.);
 - an ATTACHED pexpect client the popup renders on and grabs the keyboard of — a
   popup is a client-owned OVERLAY, not an addressable pane (it never appears in
   `list-panes`, `send-keys` cannot reach it, and **`capture-pane` cannot see it**:
   capturing every pane while a popup is up finds no trace of it), so the only way
   to read it is the attached client's pty and the only way to answer it is to write
-  keys to that same pty (`drive_popup`);
+  keys to that same pty (`drive_popup`) — and that client must be DRAINED
+  continuously, or the popup never lands and rein degrades to the inline prompt;
 - that client's pty run through a **real terminal emulator** (pyte;
   `reinharness.RenderedScreen`, issue #100) — the popup repaints, so its Form A is
   read off the RENDERED SCREEN, where the box is simply *there*, rather than
-  reconstructed from ANSI cursor-move bytes;
-- rein on a SEPARATE plain pty whose `$TMUX`/`$TMUX_PANE` (`tmux_env`) point at the
-  session — keeping rein's OWN output clean and deterministic (the golden). This
-  mirrors reality: `rein run -- <agent>` runs inside the operator's tmux pane and
-  the broker it hosts launches the popup on that same client.
+  reconstructed from ANSI cursor-move bytes (with a live pane underneath, the raw
+  bytes interleave the pane's own writes and stale pane text can bleed inside the
+  box; the render cannot lie, because the overlay is genuinely on top);
+- the golden built from **`pipe-pane`** — the pane's complete, append-only byte
+  stream. A `capture-pane` shot shows only the visible screen, and under a TUI's
+  alternate screen it has no scrollback at all, so it can never be the transcript.
 
 Positive proof of the surface (asserted; some in the golden, some as outcomes):
 the golden shows `$ rein declare <n>` going straight to `confirmed` with the Form A
 block ABSENT (contrast the write-ceremony golden's inline `=== rein: agent declares
-work … > <n> [approved]`), `prompt_count()==0` on rein's terminal, and rein's
+work … > <n> [approved]`), ZERO Form A prompts in the pane's own stream, and rein's
 `helper.log` records `grant: launching tmux popup (… approval grant --run-id …)`
-then `grant: issue #<n> CONFIRMED via tmux popup`. SKIPs with **exit 3** if `tmux`
-or `pyte` is missing — the surface is undriveable without either, and a skip must
-never look like a pass.
+then `grant: issue #<n> CONFIRMED via tmux popup`.
+
+And what only the REAL pane makes assertable — the reason for the flip:
+
+- **the popup OVERLAYS a LIVE pane.** While Form A is up it is on the client's pyte
+  render and ABSENT from `capture-pane` of the pane, which at that same moment still
+  shows the live `SBX| $ rein declare <n>` the popup is blocking on. Those two halves
+  together are "it overlays, it does not print" — and neither is observable when the
+  pane underneath is empty.
+- **the pane survives it.** After the popup closes the pane REPAINTS and the run
+  carries on (its settled render, via `wait_stable`, reaches `SBX| @SCRIPT_DONE`),
+  with no Form A residue left on the client's screen.
+
+SKIPs with **exit 3** if `tmux` or `pyte` is missing — the surface is undriveable
+without either, and a skip must never look like a pass.
 
 ```sh
 python3 tests/interactive/journey_tmux_popup_approval.py   # one journey; exit 0 == matches golden
@@ -398,8 +418,13 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
   and the shared **journey** API (`sandbox_preamble`, `SBX_TAG`, `get_views`,
   `build_raw_transcript`,
   `normalize_for_compare`, `compare_golden`, `create_issue`/`close_issue`,
-  `resolve_throwaway_repo`), plus `tmux_popup_session`/`TmuxPopupSession` (drive a
-  REAL tmux popup on a dedicated socket — the #37 default approval surface),
+  `resolve_throwaway_repo`), plus `tmux_pane_session`/`TmuxPaneSession` (run rein
+  INSIDE a real tmux pane on a dedicated socket and drive the REAL popup that
+  overlays it — the #37 default approval surface; its three surfaces are
+  `raw_stream` / `pane_text` / `client_screen`. The older synthesized-`$TMUX`
+  `tmux_popup_session`/`TmuxPopupSession` survives only until
+  `journey_realagent_write.py` flips to the real pane — don't write new journeys
+  against it),
   `RenderedScreen`/`wait_for_screen` (the pyte terminal emulator the REDRAWING
   surfaces assert on — #100) and `helper_log_path`/`read_log_since` (read rein's
   forensic log delta).
@@ -439,10 +464,11 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
   404-at-expansion install NOTICE; the agent declares an expansion to an uninstalled
   same-owner repo → host-tty NOTICE, no approval, declare refuses).
 - `journey_tmux_popup_approval.py` + `golden/tmux_popup_approval.txt` — journey #8
-  (#37: the DEFAULT approval surface inside `$TMUX` — a REAL `tmux popup` driven via
-  `reinharness.tmux_popup_session` on a dedicated socket; the golden is rein's clean
-  terminal, the Form A block ABSENT because it rendered in the popup). Skips if
-  `tmux` is not on PATH.
+  (#37: the DEFAULT approval surface inside `$TMUX` — a REAL `tmux popup` overlaying
+  rein running INSIDE a REAL tmux pane, via `reinharness.tmux_pane_session` on a
+  dedicated socket; the golden is the pane's own `pipe-pane` stream, the Form A block
+  ABSENT from it because it rendered in the popup). Skips (exit 3) if `tmux` or `pyte`
+  is missing.
 - `journey_multi_repo.py` + `golden/multi_repo.txt` — journey #17 (ONE sandboxed
   `rein run` doing REAL work across TWO statically-scoped repos: clone both, declare
   + push A, declare + push B; both branches verified landed host-side). The multi-repo

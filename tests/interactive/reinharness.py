@@ -1865,22 +1865,13 @@ def read_log_since(path: Path, offset: int) -> str:
 # Every OTHER journey runs OUTSIDE tmux (so $TMUX is unset and the inline prompt
 # fires), so this default path was untested end to end — the coverage gap #37.
 #
-# Driving a real popup under pexpect needs three things, and this helper wires
-# all of them:
-#
-#   1. A DEDICATED tmux server (`tmux -L <unique>`), so the journey NEVER touches
-#      the operator's own sessions. It kills only its OWN socket on teardown.
-#   2. An ATTACHED client — a pexpect pty running `tmux attach`. A popup is a
-#      CLIENT-OWNED overlay (it is NOT an addressable pane: it never appears in
-#      `list-panes`, and `send-keys` cannot reach it). It renders on, and grabs
-#      the keyboard of, an attached client. So the ONLY way to answer it is to
-#      write keys to that client's pty — which this helper's `drive_popup` does.
-#   3. The rein process on a SEPARATE plain pty whose $TMUX/$TMUX_PANE point at
-#      this session (see `tmux_env`). That keeps rein's OWN output clean and
-#      deterministic (the golden), while the popup renders on the attached
-#      client. This mirrors reality: `rein run -- <agent>` runs inside the
-#      operator's tmux pane, and the broker it hosts launches the popup on that
-#      same client.
+# Driving a real popup needs a DEDICATED tmux server (`tmux -L <unique>`), so a
+# journey NEVER touches the operator's own sessions and kills only its OWN socket
+# on teardown — plus an ATTACHED client to answer the popup on. A popup is a
+# CLIENT-OWNED overlay: it is NOT an addressable pane (it never appears in
+# `list-panes`, and `send-keys` cannot reach it). It renders on, and grabs the
+# keyboard of, an attached client, so the ONLY way to answer it is to write keys to
+# that client's pty — which `drive_popup` does.
 #
 # WHY NOT `tmux capture-pane`? Because it CANNOT SEE THE POPUP — verified, not
 # assumed: with a real attached client rendering Form A in a popup, `list-panes`
@@ -1889,6 +1880,21 @@ def read_log_since(path: Path, offset: int) -> str:
 # route (#100's original proposal) is a dead end. The client's own pty IS the
 # surface — and running THAT through a terminal emulator (RenderedScreen, above)
 # gives the popup exactly as the human sees it, box and all.
+#
+# TWO SHAPES live here, and a new journey must pick the REAL one:
+#
+#   * `tmux_pane_session` / `TmuxPaneSession` (BELOW) — rein runs INSIDE a REAL
+#     tmux pane, launched the way a developer launches it (typed into the pane's
+#     shell), so $TMUX/$TMUX_PANE are INHERITED from tmux. rein's own output and
+#     the popup overlay SHARE ONE TERMINAL, exactly as they do on a developer's
+#     box. USE THIS.
+#   * `tmux_popup_session` / `TmuxPopupSession` (immediately below) — the LEGACY
+#     shape: rein on a SEPARATE pty with a SYNTHESIZED $TMUX aimed at a tmux
+#     session whose pane is EMPTY. It proves the popup surface, but it is not the
+#     real configuration and structurally CANNOT see a popup-over-live-content bug
+#     (the popup has nothing to overlay). It survives only because
+#     `journey_realagent_write.py` still uses it; that journey flips to the real
+#     pane next, and this shape goes with it. DO NOT write a new journey against it.
 #
 # If tmux (or pyte) is not installed the popup surface cannot be driven at all; a
 # journey must SKIP with exit 3 (see journey_tmux_popup_approval.py), never fake it
@@ -1900,16 +1906,32 @@ def tmux_available() -> bool:
     return shutil.which("tmux") is not None
 
 
-def _tmux(socket: str, *args: str) -> subprocess.CompletedProcess:
-    """Run `tmux -L <socket> <args>` on the DEDICATED server (never the default)."""
-    return subprocess.run(["tmux", "-L", socket, *args], capture_output=True, text=True)
+def _tmux(socket: str, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    """Run `tmux -L <socket> <args>` on the DEDICATED server (never the default).
+
+    `env` matters on the call that STARTS the server (`new-session`): the tmux
+    server captures that environment ONCE, and every pane shell inherits it. A
+    real-pane session therefore starts the server with `rein_env()`, so the rein
+    the pane launches can mint (REIN_APP_*) and writes its helper.log where
+    `helper_log_path(env)` will look for it (HOME / XDG_STATE_HOME). Every other
+    call (send-keys, capture-pane, …) just talks to the already-running server, so
+    it passes nothing.
+    """
+    return subprocess.run(
+        ["tmux", "-L", socket, *args], capture_output=True, text=True, env=env
+    )
 
 
 @dataclass
 class TmuxPopupSession:
-    """A live tmux session on a dedicated socket, with a pexpect-attached client
-    a popup can render on and be answered through. Build it via
-    `tmux_popup_session()` (a context manager that tears the server down)."""
+    """LEGACY (see the section header): a live tmux session on a dedicated socket
+    with an EMPTY pane, a pexpect-attached client a popup can render on, and a
+    SYNTHESIZED $TMUX (`tmux_env`) for a rein process running on a SEPARATE pty.
+
+    Not the real configuration — a developer runs `rein run` INSIDE the pane, so
+    the popup overlays LIVE content. Use `tmux_pane_session` instead. This shape
+    remains only for `journey_realagent_write.py`, which flips to the real pane
+    next; it goes away with that flip. Build it via `tmux_popup_session()`."""
 
     socket: str
     client: pexpect.spawn
@@ -2039,3 +2061,389 @@ def tmux_popup_session(*, width: int = 200, height: int = 50, attach_settle: flo
             sess.close()  # kills the server AND closes the client
         elif server_up:
             _tmux(socket, "kill-server")  # setup raised before sess existed; don't leak it
+
+
+# --------------------------------------------------------------------------
+# TmuxPaneSession — rein INSIDE a REAL tmux pane (the developer's actual config)
+# --------------------------------------------------------------------------
+#
+# THE CONFIGURATION. A developer runs `rein run -- <agent>` INSIDE a tmux pane, so
+# the agent's output (a full-screen TUI, for a real agent) and rein's approval
+# popup SHARE ONE TERMINAL. TmuxPopupSession (above) faked that: rein ran on a
+# SEPARATE pty with a SYNTHESIZED $TMUX aimed at a session whose pane was EMPTY. It
+# proved the popup surface — but with nothing running in the pane, there was
+# nothing for the popup to OVERLAY, so a popup-over-live-TUI bug (a popup that
+# corrupts the pane, a pane that never repaints, a popup that fails to take the
+# keyboard from a live program) was structurally invisible to it.
+#
+# Here the command is TYPED INTO THE PANE's shell (`run_in_pane`), so
+# $TMUX/$TMUX_PANE are INHERITED from tmux itself. Nothing is synthesized — and the
+# synthesis hazard goes with it (an empty sockpath would have made $TMUX ",0,0",
+# still non-empty, so rein would still fire a popup, but onto the OPERATOR's real
+# default server).
+#
+# THREE SURFACES, each answering a question only it can answer — do not mix them up:
+#
+#   raw_stream()    the `pipe-pane` byte stream — everything the pane's program
+#                   WROTE, append-only and COMPLETE. The LINE-ORIENTED source for
+#                   the golden transcript. capture-pane cannot do this job: it
+#                   shows only the VISIBLE screen, and while a TUI holds the
+#                   ALTERNATE screen even `capture-pane -S -` yields NO scrollback
+#                   at all. pipe-pane must start BEFORE anything runs in the pane,
+#                   or the first bytes are raced away.
+#   pane_text()     `capture-pane -p -J` — the RENDERED pane, right now (`-J` joins
+#                   wrapped lines; `-e` only if you assert ATTRIBUTES, since it makes
+#                   the output escape-noisy). What the pane LOOKS like — and the
+#                   proof a popup is NOT in it.
+#   client_screen() the attached client's pty, pyte-rendered — the ONLY surface a
+#                   tmux popup exists on. popup.c holds a standalone `struct screen`
+#                   registered via server_client_set_overlay(): no `window_pane`, so
+#                   it never appears in `list-panes`, has no `#{popup_*}` format, and
+#                   `capture-pane` cannot see it. Keys reach it only by writing to
+#                   the attached client's pty (`send_client`), NEVER `send-keys`.
+#
+# That split is itself ASSERTABLE, and it is the whole point of running for real:
+# while the popup is up, Form A is on client_screen() and ABSENT from pane_text(),
+# which still shows the live command the popup is blocking on.
+#
+# TWO RULES, both learned the hard way:
+#
+#   1. DRAIN THE CLIENT, ALWAYS. A pty only yields bytes when you READ it (pexpect's
+#      logfile_read fills on read, never on its own). If a long wait — a slow
+#      sandbox clone — polls the pane's raw stream without reading the CLIENT, the
+#      client's pty fills, tmux's attach blocks on write, the popup's render never
+#      lands, nobody answers it, `rein approval grant` times out at 60s and rein
+#      DEGRADES TO THE INLINE PROMPT. That looks exactly like a rein bug and is not
+#      one. So draining is not a discipline: it lives INSIDE the one shared poll
+#      primitive (`until`) that `until_raw` / `until_pane` / `until_client` /
+#      `wait_stable` / `drive_popup` ALL go through, and the same read that drains
+#      the client also feeds `self.screen`. The main thread stays the sole reader —
+#      do not add a drain thread racing `send()`.
+#   2. NEVER ASSERT ON A SINGLE `capture-pane` SHOT — it races the redraw. Retry the
+#      predicate (`until_pane`, ~50ms poll; fzf's `Tmux#until` shape). For an
+#      assertion with NO anchor string ("the pane repainted after the popup closed"),
+#      wait for QUIESCENCE instead: `wait_stable(ms)` returns the render once it has
+#      stopped changing.
+#
+# Geometry is PINNED (`-x`/`-y` PLUS `window-size manual` AND `status off`), or a
+# client attaching at another size resizes the window and reflows every wrapped line
+# in the golden. TERM is set deliberately (the popup's box-drawing depends on it).
+# The pane's shell gets a FIXED `PS1` via `--rcfile` — bash IGNORES an exported PS1
+# and would otherwise bake its own version (`bash-5.2$`) into the golden.
+
+
+@dataclass
+class TmuxPaneSession:
+    """A dedicated-socket tmux session running a REAL pane (a bare shell), with a
+    `pipe-pane` capture and a pexpect-attached client. Build it via
+    `tmux_pane_session()` (a context manager that ALWAYS kills the server). See the
+    section comment above for the three surfaces and the two rules."""
+
+    socket: str
+    session: str
+    pane: str
+    sockpath: str
+    width: int
+    height: int
+    pipe_path: str
+    client: pexpect.spawn
+    log: io.StringIO
+    screen: RenderedScreen  # the client's pty, run through a terminal (the popup's home)
+    forma: list[str] = field(default_factory=list)
+    pane_while_popup: str = ""
+    _final_raw: str | None = None
+
+    # -- the three surfaces --------------------------------------------------
+
+    def raw_stream(self) -> str:
+        """Everything the pane's program has written (`pipe-pane`), append-only —
+        the source `build_raw_transcript` turns into the golden.
+
+        `close()` snapshots the file first, so a caller can still read the WHOLE
+        stream after the context manager has torn the server (and its scratch dir)
+        down.
+        """
+        if self._final_raw is not None:
+            return self._final_raw
+        try:
+            with open(self.pipe_path, "r", errors="replace") as f:
+                return f.read()
+        except FileNotFoundError:
+            return ""
+
+    def pane_text(self) -> str:
+        """The RENDERED pane right now (`capture-pane -p -J`; `-J` joins wrapped
+        lines). A popup is NOT in here — that is the point, and it is assertable."""
+        return _tmux(self.socket, "capture-pane", "-p", "-J", "-t", self.session).stdout
+
+    def client_screen(self) -> str:
+        """The attached client's screen as TEXT — the pane's content WITH any popup
+        overlaid on top. Pumps first, so it is current. For a predicate that needs the
+        screen OBJECT (`popup_forma_complete`), use `until_client` with a callable."""
+        self.pump_client()
+        return self.screen.text()
+
+    # -- input ---------------------------------------------------------------
+
+    def send_pane(self, *keys: str) -> None:
+        """`tmux send-keys` into the PANE (its shell / the program it runs). Reaches
+        the pane's program; can NEVER reach a popup."""
+        _tmux(self.socket, "send-keys", "-t", self.session, *keys)
+
+    def send_pane_literal(self, text: str) -> None:
+        """Type LITERAL text into the pane (`send-keys -l`), no Enter — so a
+        command's own characters are never interpreted as tmux key names."""
+        _tmux(self.socket, "send-keys", "-t", self.session, "-l", text)
+
+    def run_in_pane(self, command: str) -> None:
+        """Type `command` into the pane's shell and press Enter — exactly what a
+        developer does. Whatever it starts INHERITS $TMUX/$TMUX_PANE from tmux."""
+        self.send_pane_literal(command)
+        self.send_pane("Enter")
+
+    def send_client(self, text: str) -> None:
+        """Write keys to the ATTACHED CLIENT's pty. The ONLY way to answer a popup
+        (it grabs the client's keyboard; `send-keys` cannot reach it)."""
+        self.client.send(text)
+
+    # -- draining + waiting --------------------------------------------------
+
+    def pump_client(self, seconds: float = 0.15) -> None:
+        """Read whatever the client's pty has RIGHT NOW and feed it into
+        `self.screen`. ONE act, TWO jobs: it is rule 1's drain (an unread pty fills
+        and stalls tmux's attach, and with it the popup) AND the render update. Every
+        poll step calls it; nothing else reads the client."""
+        deadline = time.time() + seconds
+        while True:
+            try:
+                self.screen.feed(self.client.read_nonblocking(size=65536, timeout=0.05))
+            except (pexpect.TIMEOUT, pexpect.EOF, OSError, ValueError):
+                break
+            if time.time() >= deadline:
+                break
+
+    def until(self, pred, *, timeout: float = 60.0, poll: float = 0.05) -> bool:
+        """THE poll primitive: re-evaluate `pred()` every `poll` seconds until it is
+        true or `timeout` expires (fzf's `Tmux#until` shape — never assert on a single
+        shot, a render races the predicate). EVERY wait goes through here, and every
+        iteration PUMPS THE CLIENT first, so rule 1's drain cannot be forgotten by a
+        caller that is waiting on something else entirely."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self.pump_client()
+            if pred():
+                return True
+            time.sleep(poll)
+        self.pump_client()
+        return bool(pred())
+
+    def until_raw(self, needle, *, timeout: float = 60.0, poll: float = 0.1) -> bool:
+        """Wait for `needle` (a str, or a compiled regex) in the `pipe-pane` byte
+        stream — the append-only surface, so a marker that has already SCROLLED OFF
+        the screen still counts. Use this for flow progress; `until_pane` for what is
+        ON screen."""
+        pat = needle if hasattr(needle, "search") else re.compile(re.escape(needle))
+        return self.until(lambda: bool(pat.search(strip_ansi(self.raw_stream()))),
+                          timeout=timeout, poll=poll)
+
+    def until_pane(self, pred_or_needle, *, timeout: float = 60.0,
+                   poll: float = 0.05) -> bool:
+        """Wait until the RENDERED pane satisfies a predicate (or contains a string).
+        Re-captures every poll — a single `capture-pane` shot races the redraw."""
+        pred = (pred_or_needle if callable(pred_or_needle)
+                else (lambda scr: pred_or_needle in scr))
+        return self.until(lambda: bool(pred(self.pane_text())), timeout=timeout, poll=poll)
+
+    def until_client(self, pred_or_needle, *, timeout: float = 60.0,
+                     poll: float = 0.1) -> bool:
+        """Wait until the CLIENT's rendered screen satisfies a predicate (or contains
+        a string) — the surface a popup lives on. A callable receives the
+        RenderedScreen itself, so a richer screen state (`popup_forma_complete`) is
+        expressible, not just a substring."""
+        if callable(pred_or_needle):
+            pred = (lambda: pred_or_needle(self.screen))
+        else:
+            pred = (lambda: self.screen.contains(pred_or_needle))
+        return self.until(pred, timeout=timeout, poll=poll)
+
+    def wait_stable(self, ms: int = 300, *, timeout: float = 20.0,
+                    poll: float = 0.05) -> str:
+        """QUIESCENCE: return the pane's render once it has STOPPED CHANGING for `ms`
+        milliseconds. The tool for an assertion with NO anchor string — "the pane
+        REPAINTED after the popup closed" has nothing to grep for, so you wait for the
+        redraw to settle and then look at the settled frame."""
+        need = ms / 1000.0
+        last = None
+        stable_since = time.time()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self.pump_client()
+            cur = self.pane_text()
+            if cur != last:
+                last, stable_since = cur, time.time()
+            elif time.time() - stable_since >= need:
+                return cur
+            time.sleep(poll)
+        return last if last is not None else self.pane_text()
+
+    # -- the popup -----------------------------------------------------------
+
+    def drive_popup(self, expect_pattern: str, answer: str, *, timeout: float = 120.0,
+                    settle: float = 0.3) -> list[str]:
+        """Wait for the popup's Form A to be FULLY PAINTED on the attached client's
+        RENDERED SCREEN (over the LIVE pane), snapshot it, then type the answer INTO
+        THE CLIENT — where the popup's keyboard is. Returns the Form A lines (also on
+        `self.forma`) for folding into the transcript.
+
+        Order is load-bearing, for determinism AND for the popup-over-live-pane proof:
+
+          * poll the CLIENT's screen (the popup is nowhere else) for a SCREEN STATE —
+            `expect_pattern` visible AND the box painted through its trailing `>`
+            prompt (`popup_forma_complete`), the last thing rein writes before it
+            BLOCKS on input, hence proof the frame is whole and will not change. No
+            timer, no drain-to-quiescence bet (#100). Polling through `until` (not
+            `client.expect`) also keeps ONE reader on the pty.
+          * snapshot `pane_while_popup` (`capture-pane`) BEFORE answering: with the
+            popup up, Form A is on the client and ABSENT from the pane, which still
+            shows the live command it is blocking on. That contrast is the direct
+            evidence the popup OVERLAYS rather than PRINTS — observable only because
+            something real is running in the pane.
+          * read Form A off the RENDERED screen (`popup_forma_from_screen`), NOT the
+            client's raw bytes: with a live pane those bytes interleave the pane's own
+            writes, and a row the popup paints blank lets stale pane text bleed INSIDE
+            the box. On the render the overlay is genuinely on top, so the geometry
+            slice is truthful.
+          * and only THEN send the answer — answering makes `rein approval grant`
+            exit, which closes the popup and repaints over Form A.
+        """
+        def ready(scr: RenderedScreen) -> bool:
+            return scr.contains(expect_pattern) and popup_forma_complete(scr)
+
+        if not self.until_client(ready, timeout=timeout):
+            raise RuntimeError(
+                f"the popup's Form A never fully rendered on the attached tmux client "
+                f"within {timeout}s. If rein fell back to the INLINE prompt, the usual "
+                f"cause is an UNDRAINED client pty (rule 1), not a rein bug. Client "
+                f"screen was:\n{self.screen.text()}"
+            )
+        self.pane_while_popup = self.pane_text()
+        self.forma = popup_forma_from_screen(self.screen, answer=answer)
+        time.sleep(settle)
+        self.send_client(answer + "\r")
+        return self.forma
+
+    def close(self) -> None:
+        # Snapshot the pipe-pane stream BEFORE the server (and the scratch dir it
+        # writes into) go away, so the transcript survives teardown.
+        if self._final_raw is None:
+            self._final_raw = self.raw_stream()
+        _tmux(self.socket, "kill-server")
+        try:
+            self.client.close(force=True)
+        except Exception:
+            pass
+        # kill-server does not always unlink the socket FILE, and a journey must not
+        # litter /tmp/tmux-<uid>/ with a dead socket per run. OURS only, by name.
+        if self.sockpath:
+            with contextlib.suppress(OSError):
+                os.unlink(self.sockpath)
+
+
+@contextlib.contextmanager
+def tmux_pane_session(*, env: dict | None = None, width: int = 200, height: int = 50,
+                      term: str = "tmux-256color", attach_timeout: float = 10.0):
+    """Stand up a dedicated-socket tmux session with a REAL pane (a bare shell), a
+    `pipe-pane` capture already running, and a pexpect-attached client; yield a
+    TmuxPaneSession; ALWAYS kill the server on exit.
+
+    - `env` seeds the tmux SERVER, and every pane shell inherits it — so pass
+      `rein_env()`: the rein the pane launches needs REIN_APP_* to mint, and
+      HOME/XDG_STATE_HOME so the helper.log it writes is the one a journey then
+      reads back via `helper_log_path(env)`.
+    - The pane's shell is `bash --noprofile --rcfile <tmp>` with a FIXED `PS1='$ '`.
+      Not cosmetic: bash IGNORES an exported PS1, and would otherwise bake its own
+      version into the golden (`bash-5.2$`), drifting across machines. The fixed
+      prompt also makes the pane read like a real terminal.
+    - `pipe-pane` starts AFTER `new-session -d` but BEFORE anything is typed, so the
+      first bytes of the first command are never raced away.
+
+    Raises RuntimeError if tmux is absent, PyteMissing if the rendered-screen layer
+    is unavailable (the caller should have checked `tmux_available()` +
+    `pyte_available()` and SKIPped with exit 3).
+    """
+    if not tmux_available():
+        raise RuntimeError("tmux not on PATH — a real tmux pane cannot be driven")
+    # Built FIRST so a missing pyte raises (PyteMissing) before we start a tmux
+    # server we would then have to reap. Sized to the pane/client exactly, so the
+    # emulator wraps where tmux wraps.
+    screen = RenderedScreen(cols=width, rows=height)
+    socket = f"reinpane-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+    _tmux(socket, "kill-server")  # clean slate on OUR socket only
+    time.sleep(0.2)
+    scratch = tempfile.mkdtemp(prefix="rein-pane-")
+    rcfile = os.path.join(scratch, "bashrc")
+    with open(rcfile, "w") as f:
+        f.write("PS1='$ '\n")
+    pipe_path = os.path.join(scratch, "pane.raw")
+
+    # Everything from new-session onward is inside the try, so ANY failure during
+    # setup still kills the dedicated server in the finally — the unique socket name
+    # means a later call's kill-server would NOT reap an orphan, so don't leak one.
+    sess = None
+    server_up = False
+    try:
+        r = _tmux(
+            socket, "new-session", "-d", "-s", "w",
+            "-x", str(width), "-y", str(height),
+            "-e", f"TERM={term}",
+            f"bash --noprofile --rcfile {rcfile}",
+            env=env,  # the SERVER's env; every pane shell inherits it
+        )
+        if r.returncode != 0:
+            raise RuntimeError(f"tmux new-session failed: {r.stderr.strip() or r.stdout.strip()}")
+        server_up = True
+        # PIN the geometry: without `window-size manual`, a client attaching at a
+        # different size RESIZES the window and reflows every wrapped line in the
+        # golden. `status off` keeps the status bar out of the client's render.
+        _tmux(socket, "set", "-g", "window-size", "manual")
+        _tmux(socket, "set", "-g", "status", "off")
+        _tmux(socket, "set", "-g", "default-terminal", term)
+        pane = _tmux(socket, "list-panes", "-t", "w", "-F", "#{pane_id}").stdout.strip()
+        sockpath = _tmux(socket, "display-message", "-p", "#{socket_path}").stdout.strip()
+        if not pane:
+            raise RuntimeError("tmux did not report a pane id; refusing to proceed")
+        # The pane's RAW byte stream, captured from before the first keystroke.
+        _tmux(socket, "pipe-pane", "-o", "-t", "w", f"cat >> {pipe_path}")
+        log = io.StringIO()
+        client = pexpect.spawn(
+            "tmux", ["-L", socket, "attach", "-t", "w"],
+            encoding="utf-8", codec_errors="replace",
+            timeout=30, dimensions=(height, width),
+            env={**(env or os.environ), "TERM": term},
+        )
+        client.logfile_read = log
+        sess = TmuxPaneSession(
+            socket=socket, session="w", pane=pane, sockpath=sockpath,
+            width=width, height=height, pipe_path=pipe_path,
+            client=client, log=log, screen=screen,
+        )
+        # The client must be ATTACHED before a popup can render. POLL for the pane's
+        # shell prompt on the client's screen rather than sleeping blind — and the
+        # poll drains the client, which is what attaching needs anyway.
+        if not sess.until_client("$", timeout=attach_timeout):
+            raise RuntimeError("the tmux client never rendered the pane's shell prompt")
+        # The shell printed its FIRST prompt before pipe-pane could attach (a race we
+        # cannot win: the pane's program starts with the session). Press Enter once so
+        # a prompt is emitted INTO the capture — then the transcript opens on
+        # `$ <the command the developer typed>`, like a real terminal, instead of a
+        # naked command line.
+        sess.send_pane("Enter")
+        if not sess.until_raw("$ ", timeout=10.0):
+            raise RuntimeError("the pane's shell prompt never reached the pipe-pane capture")
+        yield sess
+    finally:
+        if sess is not None:
+            sess.close()  # kills the server AND closes the client
+        elif server_up:
+            _tmux(socket, "kill-server")  # setup raised before sess existed; don't leak it
+        shutil.rmtree(scratch, ignore_errors=True)
