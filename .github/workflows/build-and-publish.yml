@@ -1,18 +1,21 @@
 # Build and publish rein via wrangle's Go build type.
 #
-# Calls TomHennen/wrangle's reusable Go workflow (v0.2.1) for:
+# Calls TomHennen/wrangle's reusable Go workflow (v0.4.0) for:
 #   - Source-stage checks (gofmt, go vet, go test -race, govulncheck) on
 #     every push/PR
-#   - Source scan (osv + wrangle-lint block publish on findings; zizmor and
-#     scorecard informational) — see scan-tools below for the private-repo
-#     adjustments (zizmor :info, dependency-review omitted)
-#   - Release: goreleaser publish + SPDX SBOM + SLSA L3 provenance on tag
-#     push
-#   - Attest + verify: GitHub-issued provenance and a signed SLSA VSA per
-#     artifact, verified fail-closed before the VSA is attached
+#   - Source scan (osv, zizmor, and wrangle-lint block publish on findings;
+#     scorecard informational) — see scan-tools below for the one private-repo
+#     adjustment (dependency-review omitted)
+#   - Release: goreleaser + SPDX SBOM, published on tag push
 #
 # Adopting wrangle's reusable workflow means rein gets supply-chain hygiene
 # from commit one. See https://github.com/TomHennen/wrangle for the design.
+#
+# NOT attested, for now. `attest-and-verify: disabled` below turns off the
+# SLSA provenance + signed VSA that wrangle would otherwise produce, because a
+# private repo cannot attest — see the input's comment for why and for the
+# conditions that turn it back on. docs/design.md describes the attested end
+# state; that remains the target, and this is the temporary deviation from it.
 #
 # Pin discipline: the `uses:` ref below pins wrangle's *release tag*
 # (`@vX.Y.Z`) with an inline zizmor exception. This is wrangle's recommended
@@ -21,8 +24,8 @@
 #     its commit and can't be moved or deleted — so a tag pin carries the same
 #     integrity as a SHA, but stays legible (you see the version).
 #   - The tag's keyless-VSA verify identity (`@refs/tags/vX.Y.Z`) is the one
-#     wrangle's documented `cosign` command expects by default, so rein's
-#     downstream consumers verify unedited.
+#     wrangle's documented `cosign` command expects by default, so once rein
+#     attests again its downstream consumers verify unedited.
 #   - The `# zizmor: ignore[unpinned-uses]` is required only because wrangle's
 #     bundled zizmor scan flags any tag-pinned `uses:` and can't tell the tag
 #     is immutable. It scopes the exception to this one line; every OTHER
@@ -47,32 +50,39 @@ permissions:
 jobs:
   build:
     permissions:
-      contents: write         # release job publishes on tag push; verify attaches the VSA
-      id-token: write         # OIDC for Sigstore keyless signing
-      attestations: write     # attest job writes GitHub-issued SLSA provenance
+      contents: write         # release job publishes on tag push
+      id-token: write         # OIDC for Sigstore keyless signing (scorecard; attest/verify when re-enabled)
+      attestations: write     # attest job writes GitHub-issued SLSA provenance (skipped while unattested)
       actions: read           # source scan: Scorecard reads the Actions API; SLSA generator inspects the run
       security-events: write  # source-scan SARIF -> Security tab (uploads are best-effort; no-op without Advanced Security)
-    uses: TomHennen/wrangle/.github/workflows/build_and_publish_go.yml@v0.2.1 # zizmor: ignore[unpinned-uses] - immutable
+    uses: TomHennen/wrangle/.github/workflows/build_and_publish_go.yml@v0.4.0 # zizmor: ignore[unpinned-uses] - immutable
     with:
       # Path to the Go module (default '.' is fine; rein lives at repo root)
       path: '.'
-      # Source-scan tools. wrangle's default is
-      # "osv zizmor scorecard:info dependency-review wrangle-lint". Two
-      # adjustments, both forced by rein being a PRIVATE repo without GitHub
-      # Advanced Security (no code scanning):
-      #   - dependency-review DROPPED: it calls GitHub's dependency-graph
-      #     compare API, which 403s without GHAS — a blocking run would redden
-      #     every PR-to-main.
-      #   - zizmor set to :info (non-blocking): the zizmor audit itself runs
-      #     clean, but wrangle's zizmor tool hardcodes advanced-security: true,
-      #     which uploads SARIF to code scanning. That upload hard-fails
-      #     ("Code scanning is not enabled for this repository") and wrangle
-      #     fails closed on it, so a :fail zizmor can never go green here.
-      #     :info keeps zizmor auditing every run (findings surface in the step
-      #     summary) without gating on the impossible upload.
-      # Promote zizmor back to blocking (and re-add dependency-review) once
-      # rein enables GHAS / code scanning or goes public.
-      scan-tools: "osv zizmor:info scorecard:info wrangle-lint"
+      # Publish the release UNATTESTED: no SLSA provenance, no signed VSA.
+      # Tests, scans, and the SBOM still gate it; the release is marked
+      # unattested. This is not a preference — a private repo cannot attest:
+      # GitHub's attestation store doesn't support a private personal repo at
+      # all, and keyless signing would publish rein's identity and build timing
+      # to the public Rekor transparency log. wrangle v0.4.0 fails the run fast
+      # (in `prep`) if we leave this `enabled` on a private repo, so the choice
+      # is unattested releases or no releases.
+      #
+      # Flip back to `enabled` — and delete this comment — the moment rein goes
+      # public, or when wrangle ships private-repo attestation
+      # (TomHennen/wrangle#600). Note wrangle's rule: pick one mode per tag;
+      # switching an existing release between attested and unattested is
+      # unsupported, so re-enabling applies to the NEXT tag. rein has published
+      # no v* release yet, so nothing shipped is affected today.
+      attest-and-verify: disabled
+      # wrangle's default scan-tools, minus dependency-review — the one tool a
+      # private repo can't run. It needs the dependency-graph API, which GitHub
+      # exposes only with Advanced Security, so it hard-fails ("Dependency
+      # review is not supported on this repository") and reddens every PR;
+      # tested on this branch, not assumed. Deleting this line to take the
+      # default is exactly what #105 does once rein enables GHAS or goes public.
+      # Everything else, including blocking zizmor, is wrangle's default.
+      scan-tools: "osv zizmor scorecard:info wrangle-lint"
       # release-events defaults to tag-only — the cheapest setting and the
       # one that matches rein's "publish only on v* tags" model.
       #
