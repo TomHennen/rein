@@ -23,17 +23,18 @@ rein removes the credential from the agent entirely:
   mint, rotate, or revoke. rein brokers human-gated, short-lived tokens from
   **your own GitHub App**; they never sit in the agent's environment, files, or
   memory.
-- **A blast radius you chose** — the only GitHub credential on the box is your
-  scoped App key, so even a full sandbox escape is capped at the App scope you
-  picked, never your account.
+- **A blast radius you chose** — make your App key the only GitHub credential on
+  the box, and even a full sandbox escape is capped at the scope you picked, never
+  your whole account.
 - **Yours, not ours** — the App is yours, the key stays on your machine, the
   tokens are minted locally. No rein service, no shared secret, nothing the rein
   authors can see, hold, or revoke.
-- **Autonomy without the babysitting** — because the agent is boxed (no
-  credentials, egress limited to GitHub), you can run it with permissions off
-  (`claude --dangerously-skip-permissions`) instead of approving every tool call.
-  rein moves the one approval that matters — writing to GitHub — to a single
-  per-issue gate. Containment replaces permission fatigue.
+- **Less babysitting** — because the agent is sandboxed (no credentials, egress
+  limited to GitHub), running it with permissions off
+  (`claude --dangerously-skip-permissions`) is **safer, though not safe** — it may
+  still have other credentials you left reachable, and it can still do damage
+  inside the scope you granted it. rein moves the approval that matters most —
+  writing to GitHub — to a single per-issue gate.
 
 ### Where the credential lives
 
@@ -63,12 +64,9 @@ boundary is an already-scoped, short-lived token, added at the network layer —
 a sandbox escape finds no token to steal, only the traffic it was already allowed
 to make.
 
-**Where it works today:** Linux, a terminal, and `tmux` for the approval popup.
-macOS is a separate, not-yet-done track. `rein run` **sandboxes by default**; a
-credential-helper **`--direct`** mode remains as a fallback where there's no
-sandbox. For the full design and threat model, see
-[`docs/design.md`](docs/design.md) and
-[`docs/phase1-design.md`](docs/phase1-design.md).
+**Today that means Linux, a terminal, and `tmux` for the approval popup** (macOS
+is a separate track, not yet done). For the full design and threat model, see
+[`docs/design.md`](docs/design.md).
 
 ## Prerequisites
 
@@ -90,10 +88,27 @@ doctor` checks every one of these and tells you exactly what's missing:
 - **`bubblewrap`, `ripgrep`, `socat`** —
   `sudo apt-get install -y bubblewrap ripgrep socat` (or your distro's
   equivalent).
-- **Ubuntu 24.04+ only:** an AppArmor profile granting `userns` to `bwrap`, or
-  the sandbox won't start. Check with
-  `bwrap --unshare-user --uid 0 --bind / / -- true`; if it errors, see the fix in
-  [`HANDOFF.md`](HANDOFF.md) (§1b).
+- **Ubuntu 24.04+ only:** an AppArmor profile granting `userns` to `bwrap`, or the
+  sandbox won't start. Check with:
+
+  ```bash
+  bwrap --unshare-user --uid 0 --bind / / -- true   # if this errors, you need the profile
+  ```
+
+  Create `/etc/apparmor.d/bwrap` (this grants `userns` to `bwrap` alone — don't
+  disable the sysctl system-wide, that weakens the whole box):
+
+  ```
+  abi <abi/4.0>,
+  include <tunables/global>
+
+  profile bwrap /usr/bin/bwrap flags=(unconfined) {
+    userns,
+    include if exists <local/bwrap>
+  }
+  ```
+
+  Then `sudo apparmor_parser -r /etc/apparmor.d/bwrap` and re-run the check.
 - **Healthy NTP** — App token mints fail with a misleading `401 Bad credentials`
   when the clock drifts more than ~60s.
 
@@ -111,32 +126,25 @@ go build -o bin/ ./...
 `rein init` walks you through the whole setup and is idempotent — safe to re-run.
 It:
 
-1. **Creates your GitHub App(s).** A browser opens to GitHub's "Create GitHub
-   App" page with the permissions pre-filled (see [Token
-   scopes](#what-your-app-and-its-tokens-can-do)). You click **Create**, then
-   **Install** it on your throwaway repo(s). rein creates a **primary** App
-   (mints your tokens) and, unless you pass `--skip-audit`, an **audit** App
-   (reserved for audit-comment writeback — created now, not yet posting).
-2. **Stores the keys.** Private keys land in `~/.config/rein/{primary,audit}.pem`
-   (mode `0600`) and the App details in `~/.config/rein/state.json`. You never
-   copy a key by hand, and you need **no `REIN_APP_*` environment variables** —
-   those are a legacy/dev override, not part of this path.
-3. **Wires up your shell.** rein installs its git/`gh` shims and puts `rein` on
-   your `PATH` (`~/.local/bin/rein`). The `alias claude='rein run -- claude'` is
-   **opt-in** — init asks, defaulting to **No**. Without it, launch with `rein run
-   -- claude`.
-4. **Scaffolds your session** (`~/.config/rein/dev-session.yaml`) — the scope
-   ceiling described [below](#the-session-sets-the-scope-ceiling). `rein run` will
-   not start without one.
+1. **Creates your GitHub App(s)** — a **primary** App that mints your tokens, and
+   an **audit** App (`--skip-audit` to skip; audit comments are coming soon). A
+   browser opens to GitHub's "Create GitHub App" page with the permissions
+   pre-filled (see [Token scopes](#what-your-app-and-its-tokens-can-do)); you click
+   **Create**, then **Install** on your throwaway repo(s).
 
-Run `rein init --help` for the full flag set (`--owner`, `--repo`, `--alias`,
-`--require-sandbox`, `--yes`, …). If the sandbox stack is unhealthy, init
-**soft-blocks**: it finishes the rest of its setup, warns loudly, and exits 0
-(`--require-sandbox` makes it hard-fail instead). The real enforcement is at `rein
-run`, which **fails closed** and refuses to launch on a broken stack.
+   **The browser has to reach rein on `127.0.0.1`** — that's how the App's key gets
+   back to you. Working on a remote box over SSH? Set up the port-forward
+   *first*: [Headless / remote machines](#headless--remote-machines).
+2. **Stores the keys** in `~/.config/rein/` (mode `0600`). You never copy a key by
+   hand.
+3. **Wires up your shell** — the git/`gh` shims and `rein` on your `PATH`. It also
+   offers to alias `claude` to `rein run -- claude` (off by default).
+4. **Scaffolds your session** — the [scope
+   ceiling](#the-session-sets-the-scope-ceiling). `rein run` won't start without
+   one.
 
-After init, **install the App on the repos you want** using the deep-links rein
-prints (`https://github.com/apps/<slug>/installations/new`).
+Then **install the App on the repos you want**, using the deep-links rein prints.
+Run `rein init --help` for the full flag set.
 
 ## Daily use
 
@@ -146,10 +154,9 @@ Open a new shell and run your agent:
 rein run -- claude     # or just `claude`, if you installed the alias
 ```
 
-That's the whole loop. The agent works read-only until it needs to write; then it
-runs `rein declare <issue>`, **you** get a confirmation prompt on your terminal,
-and from there its pushes land. Everything below explains what's happening
-underneath.
+That's it. The agent works read-only until it needs to write; then it runs `rein
+declare <issue>`, **you** get a confirmation prompt on your terminal, and from
+there its pushes land. Everything below explains what's happening underneath.
 
 ## How rein works
 
@@ -184,31 +191,23 @@ sequenceDiagram
 One confirmation covers the run. The run's write capability expires on idle
 (30 minutes) or at a hard cap (4 hours), whichever comes first.
 
-**What the issue actually binds.** GitHub installation tokens cannot be scoped to
-an issue, so the token rein mints is scoped to your session's **repos**. The issue
-binding is enforced separately, **at the proxy, on the git push path**: an
-approved run's `git push` may only target `refs/heads/agent/<issue>/<nonce>` for
-an issue you confirmed, one issue per push, and any other ref is refused on the
-wire (`internal/proxy/gate.go`).
+**What the issue actually binds.** GitHub tokens can't be scoped to an issue, so
+the token is scoped to your session's **repos**. What the issue binds is the
+*push*: an approved run's `git push` can only target
+`agent/<issue>/<nonce>` for an issue you confirmed. Any other branch — including
+`main` — is refused on the wire.
 
-Your approval is what bounds an approved run — not the branch name. The run holds
-`contents: write` for the session's repos for its window, so it can also write
-through the GitHub **API**, which the branch convention does not constrain. That
-is deliberate: rein's control for everything the transport check doesn't cover is
-**audit, not prevention** (design §4.2.7). Every request the proxy relays —
-method, path, tier, decision, status — is recorded in a per-run append-only log
-that lives *outside* the sandbox's reach, so an agent can neither read it nor edit
-what it says about them:
+The token itself can still do more than that. It carries `contents: write` for
+your repos, so the agent could also write through GitHub's **API**, which the
+branch rule doesn't cover. rein's answer there is to **record, not block**: every
+request it relays is written to a log the agent can't reach or edit.
 
 ```bash
-cat ~/.local/state/rein/audit/sandbox-<run-id>.log   # every write, including API writes
+cat ~/.local/state/rein/audit/sandbox-<run-id>.log
 ```
 
-The design's durable version of this is writeback to the originating issue, posted
-by a **separate identity the agent's token cannot prune** — the audit App `rein
-init` creates. That App exists but is **not yet posting**; until it does, the local
-log above is your audit surface. Read the [Known limits](#known-limits) with that
-in mind.
+Posting that history back to the issue (from an identity the agent can't touch) is
+coming soon; for now the log is local. See [Known limits](#known-limits).
 
 ### The session sets the scope ceiling
 
@@ -242,17 +241,14 @@ less than the App itself:
 | **Write tier** — after you approve (`git push`, `gh pr create`, …) | write | write | write | read |
 | **Audit App** — writeback, created but not yet posting | — | write | — | read |
 
-The read token is cached for its lifetime. The write token only exists once you
-approve, and is **revoked** when the run ends or its window expires (idle 30
-minutes, hard cap 4 hours). (In `--direct` mode only, the `gh` shim mints per call
-and revokes as soon as `gh` exits.) Both are scoped to your session's repos —
-never to your account.
+The write token only exists once you approve, and is revoked when the run ends or
+expires (idle 30 minutes, hard cap 4 hours). Both tokens are scoped to your
+session's repos — never to your account.
 
-> **Note:** `pull_requests: write` also confers PR *review, approve, and merge*
-> capability, so a run holding the write token could approve or merge its own PR.
-> If you rely on branch protection requiring approvals, treat the App's identity
-> as a valid approver path
-> ([#86](https://github.com/TomHennen/rein/issues/86), design §4.2.8).
+> **Note:** on GitHub, `pull_requests: write` also means review, approve, and
+> merge — so an approved run could approve or merge its own PR. Branch protection
+> that requires an approval won't stop it
+> ([#86](https://github.com/TomHennen/rein/issues/86)).
 
 ### What the sandbox actually blocks
 
@@ -260,49 +256,31 @@ never to your account.
 [`sandbox-runtime`](https://github.com/anthropic-experimental/sandbox-runtime)
 (`srt`). Inside it:
 
-- **No direct network egress.** GitHub traffic goes through rein's proxy, which
-  TLS-terminates and injects the token on `github.com`, `api.github.com`, and
-  `uploads.github.com`. GitHub's CDN hosts (`codeload`, `raw.githubusercontent`,
-  …) are allowed through as **plain egress with no token injected**. One more host
-  is allowed by default: `api.anthropic.com`, so `rein run -- claude` works out of
-  the box. That default is a fixed constant, not derived from the agent you wrap —
-  a different agent's API needs
-  [allowing explicitly](#allowing-extra-network-egress).
-- **Your `$HOME` is hidden.** rein denies reads of your home directory
-  *wholesale* and allows back only a curated list (the agent's install chain, its
-  config, a toolchain set: `~/.cargo`, `~/go`, `~/.pyenv`, …). Credential stores
-  are **additionally** denied belt-and-suspenders — `~/.config/gh`, `~/.ssh`,
-  `~/.netrc`, git-credentials, `~/.gnupg`, the Secret Service and kwallet
-  keyrings, cargo credentials, and rein's own key dir — and the keyring/ssh-agent
-  **sockets** are blocked by a seccomp rule verified live before launch. It fails
-  closed: if rein can't resolve your home or config dir, it refuses to launch. A
-  credential scanner run *inside* the sandbox finds none of your real credentials.
-- **`.git` is pinned** ([#64](https://github.com/TomHennen/rein/issues/64)). Its
-  `hooks/` and `config` are read-only, and `.git` itself is a bind mountpoint, so
-  the agent cannot rename it aside and rebuild a fresh one carrying a malicious
-  `pre-commit` hook that would later run **as you, on your host**. rein cannot
-  harden submodule gitdirs or linked worktrees whose `.git` is a *file*. A
-  **mapped** worktree in that shape **fails the launch closed**; if your **current
-  directory** is in that shape, rein launches but **does not bind your real tree**
-  — the agent gets a fresh ephemeral working tree instead, and your tree is
-  untouched. `REIN_SANDBOX_ALLOW_UNHARDENED_GIT` overrides both, binding the real
-  tree with only partial (top-level) hardening.
-- **Writes are locked until declare.** Commits are authored as `<your name> (via
-  rein)` with the App's identity, so a push is attributable to the App, not to you
-  personally.
-- **The environment is an allowlist, not a passthrough.** Only `PATH`, `HOME`,
-  `LANG`, `TERM`, `LC_*`, the CA vars, and rein's own git identity cross in. `GH_TOKEN`
-  exists in the sandbox but is a **stub** — the real token is only ever on the wire.
-- **Scratch space just works.** rein wires a private, ephemeral per-run directory
-  in as `TMPDIR`, so builds and `npm` don't hit EROFS.
-
-When the `$HOME` deny is too aggressive, a tool breaks **loudly** (its path reads
-as empty) rather than silently. Two escape hatches: `REIN_SANDBOX_ALLOW_READ`
-allows specific paths back read-only (it can never re-expose a credential deny —
-rein rejects overlaps), and `REIN_SANDBOX_SHOW_HOME` disables the `$HOME` deny
-entirely, which rein warns loudly about. Note the allow-back list includes
-`~/.claude.json`, which carries per-project prompt history
-([#62](https://github.com/TomHennen/rein/issues/62)).
+- **No network egress except GitHub** (through rein's proxy, which injects the
+  token on the wire) **and the agent's own API** — `api.anthropic.com` is allowed
+  by default so `rein run -- claude` works out of the box. A different agent's API
+  needs [allowing explicitly](#allowing-extra-network-egress).
+- **Your `$HOME` is hidden.** rein denies your home directory wholesale and allows
+  back only what the agent needs to run (its install chain and config, a toolchain
+  set). Your credential stores are denied on top of that — `~/.config/gh`,
+  `~/.ssh`, `~/.netrc`, git-credentials, `~/.gnupg`, your keyrings, and rein's own
+  keys — and the keyring/ssh-agent sockets are blocked outright. A credential
+  scanner run inside the sandbox finds none of your real credentials.
+- **`.git` is protected** ([#64](https://github.com/TomHennen/rein/issues/64)):
+  `hooks/` and `config` are read-only, and `.git` can't be renamed aside and
+  rebuilt — otherwise a prompt-injected agent could plant a `pre-commit` hook that
+  later runs **as you, on your host**. rein can't protect a submodule or a linked
+  worktree this way, so it won't bind one: a mapped worktree fails the launch, and
+  if it's your current directory the agent gets a scratch clone instead and your
+  tree is untouched.
+- **Writes are locked until declare**, and commits are authored `<your name> (via
+  rein)` under the App's identity — so a push is attributable to the App, not to
+  you personally.
+- **No credential in the environment.** The sandbox env is an allowlist, and the
+  `GH_TOKEN` the agent sees is a stub. The real token only ever exists on the wire.
+If hiding `$HOME` breaks a tool you need, `REIN_SANDBOX_ALLOW_READ` allows
+specific paths back read-only (never a credential store — rein rejects those), and
+`REIN_SANDBOX_SHOW_HOME` turns the whole `$HOME` deny off.
 
 ### Allowing extra network egress
 
@@ -317,69 +295,47 @@ allow_domains:
   - pypi.org
 ```
 
-Allowed hosts get a **direct TLS tunnel to themselves** — rein injects **no**
-credential on them; only GitHub gets an injected token. Entries are bare hosts
-(`pypi.org`) or a strict wildcard (`*.example.com`). Because a sandboxed agent can
-send data to any allowed host, **widening egress is a data-exfiltration surface**:
-rein prints an `EGRESS WARNING` for each wildcard and for a large custom set. Keep
-the list minimal.
+Allowed hosts are egress-only — rein never injects a credential on them; only
+GitHub gets a token. Entries are bare hosts (`pypi.org`) or a strict wildcard
+(`*.example.com`). **Every host you add is somewhere the agent can send your
+data**, so keep the list short; rein warns on wildcards and on large sets.
 
-**MCP servers** follow the same rule. Local/stdio servers run as a subprocess
-inside the sandbox and need no egress — they work out of the box. Remote servers
-and the claude.ai account connectors reach network hosts, so they connect only if
-those hosts are in `allow_domains` (the connectors typically need `claude.ai` too).
-An unreachable one fails quietly rather than hanging startup. Set
-`REIN_DISABLE_CLAUDE_MCP=1` to turn the account connectors off entirely.
+**MCP servers** follow the same rule: local/stdio servers work out of the box,
+remote ones (and the claude.ai connectors, which also need `claude.ai`) connect
+only if you allow their hosts. `REIN_DISABLE_CLAUDE_MCP=1` turns the account
+connectors off.
 
 ### `--direct` mode (fallback, throwaway only)
 
-Where there's no working sandbox, `rein run --direct -- <cmd>` runs the
-credential-helper path instead. The agent runs **unsandboxed** and can reach your
-ambient credentials, so it is weaker by design and rein prints a loud banner. The
-same declare-and-confirm ceremony applies, but two properties are lost: the
-credential helper never sees push refs, so the `agent/<issue>/<nonce>` cross-check
-**does not hold even for `git push`** (an approved direct-mode run can push any
-ref), and pre-declaration writes reach GitHub carrying a
-placeholder credential (GitHub rejects them) rather than being refused locally.
-
-## What rein does and doesn't protect (stated plainly)
-
-- **Give the agent no standing GitHub credential.** That's the precondition that
-  makes the bounded-blast-radius property true — if you *also* keep a broad `gh`
-  login or PAT on the box, a sandbox escape gets those too. rein removes the
-  reason to.
-- **"Protected by the sandbox" means the agent can't reach the key** — it lives
-  outside the sandbox, used only by the broker.
-- **Not "hardware-protected" — yet.** Today the App key is a file protected by OS
-  permissions plus the sandbox keeping the agent away from it. Hardware /
-  host-keychain wrapping is defense-in-depth on the roadmap.
+Where there's no working sandbox, `rein run --direct -- <cmd>` uses a git
+credential helper instead. The agent runs **unsandboxed** and can reach your
+ambient credentials, so it's weaker by design — rein prints a loud banner, and you
+should only use it on throwaways. You still declare and confirm, but rein never
+sees the branch being pushed, so an approved direct-mode run can push **any** ref.
 
 ## Known limits
 
-- **Linux only.** macOS (a different sandbox backend and CA-trust path) is a
-  separate track, not yet done (design §5.4).
-- **Throwaway repos only, for now.** The sandbox closes the credential-
-  exfiltration gap, but the spine hasn't been dogfooded on a real repo yet;
-  crossing that line is a deliberate step, not a default.
-- **Same-UID residual.** The sandbox stops the *agent*. A separate process running
-  as **your own user** on the host can still reach rein's proxy socket and your
-  ambient credentials — that's outside rein's threat model (host hygiene). rein
-  defends against a prompt-injected agent, not against malware already running as
-  you. See design §5.3.
-- **The sandbox is defense-in-depth, not a hard boundary** — an `srt` escape
-  re-exposes the direct-mode surface. One layer, honestly stated.
-- **An approved run can approve or merge its own PR.** The write tier carries
-  `pull_requests: write`, which GitHub also treats as review/approve/merge
-  capability. Branch protection that requires an approval does not stop it
-  ([#86](https://github.com/TomHennen/rein/issues/86)).
-- **Audit is detection, not prevention — and the durable half isn't live yet.**
-  The branch convention constrains `git push`; everything else an approved run does
-  with its write token (notably API writes, which can touch `main`
-  — [#109](https://github.com/TomHennen/rein/issues/109)) is **caught by the audit
-  log, not blocked**. That's the design's choice (§4.2.7). But the
-  agent-unprunable surface — audit comments posted to the issue by the separate
-  audit App — is **not yet posting**, so today that audit lives only in a local
-  file on your machine. Nobody reviewing the PR on GitHub sees it.
+rein makes an agent **safer to run, not safe to trust.** Read these before you
+point it at anything.
+
+- **Linux only.** macOS is a separate track, not yet done.
+- **Throwaway repos only, for now.** The sandbox closes the credential-exfiltration
+  gap, but none of this has been dogfooded on a real repo yet.
+- **rein only helps if it's the *only* credential on the box.** If you also keep a
+  broad `gh` login or a PAT lying around, an escaped agent gets those instead —
+  rein just removes your reason to have them.
+- **The key is protected by file permissions and the sandbox, not by hardware.**
+  Hardware-backed keys are on the roadmap.
+- **The sandbox is defense-in-depth, not a hard boundary.** An escape re-exposes
+  the weaker `--direct` surface. And it only stops the *agent* — anything else
+  running as **you** on the host can still reach your credentials. rein defends
+  against a prompt-injected agent, not against malware already running as you.
+- **An approved run can approve or merge its own PR**
+  ([#86](https://github.com/TomHennen/rein/issues/86)), and can write through the
+  API to branches the push rule would block, including `main`
+  ([#109](https://github.com/TomHennen/rein/issues/109)). Those are **recorded, not
+  blocked** — and until audit writeback ships, that record is a local file, not
+  something a PR reviewer will ever see.
 
 ## Headless / remote machines
 
@@ -399,11 +355,9 @@ handling of the App private key** section before moving a key by hand.
 
 ## Troubleshooting
 
-**Start with `rein doctor`.** It runs read-only checks (rein on `PATH`, shim
-freshness, key readable, App credentials, session, the sandbox stack, `$TMUX`,
-caches) and tells you what's wrong. `rein doctor --fix` applies the safe,
-no-privilege repairs; privileged steps (apt, npm, AppArmor, NTP) are shown, never
-run.
+**Start with `rein doctor`** — it checks everything above and tells you what's
+wrong. `rein doctor --fix` applies the repairs it can make safely; anything
+privileged (apt, npm, AppArmor, NTP) it shows you but never runs.
 
 - **`sandbox: ...` check fails** — install the missing piece from
   [Prerequisites](#prerequisites); on Ubuntu 24.04 the usual culprit is the
@@ -436,11 +390,11 @@ tests/interactive/run-journeys.sh              # journeys: real pty, real repo, 
 tests/interactive/run.sh                       # the rest of the interactive suite
 ```
 
-The **journeys** are the ones that matter for review: each walks a major user path
-against a live throwaway repo and a working App, and its deliverable is a
-checked-in golden transcript — drift is a failure. Any behavior-changing PR
-regenerates them. They need `rein init` run on the box, the sandbox stack, host
-`gh` authed, and `python3` + `pexpect`; see
+The **journeys** are the ones that matter: each drives a real user path against a
+live throwaway repo and checks the transcript against a committed golden, so any
+drift shows up as a failure. Regenerate them in any PR that changes behavior. They
+need `rein init` run on the box, the sandbox stack, host `gh` authed, and
+`python3` + `pexpect`; see
 [`tests/interactive/README.md`](tests/interactive/README.md). The interactive
 suite is **never** run by `go test ./...`, so the Go suite stays fast and offline.
 
