@@ -138,9 +138,7 @@ It:
 2. **Stores the keys** in `~/.config/rein/` (mode `0600`). You never copy a key by
    hand.
 3. **Puts `rein` on your `PATH`** (`~/.local/bin/rein`) and offers to alias
-   `claude` to `rein run -- claude` (off by default). **Your own `git` and `gh` are
-   left alone** — rein does install shimmed copies, but into its own state
-   directory, which only ever goes on the *agent's* `PATH`, never yours.
+   `claude` to `rein run -- claude` (off by default).
 4. **Scaffolds your session** — the [scope
    ceiling](#the-session-sets-the-scope-ceiling). `rein run` won't start without
    one.
@@ -384,8 +382,7 @@ privileged (apt, npm, AppArmor, NTP) it shows you but never runs.
   If it did and no prompt reached you, you may be in `--direct` from a shell with
   no tty; run from a real terminal, or approve from another with `rein approval
   grant --run-id <id>`.
-- **Logs** — per-run audit log (token-redacted): `~/.local/state/rein/audit/`;
-  direct-mode credential helper: `~/.local/state/rein/helper.log`.
+- **Logs** — what the agent did, per run: `~/.local/state/rein/audit/`.
 
 ## Running the tests
 
@@ -413,8 +410,7 @@ suite is **never** run by `go test ./...`, so the Go suite stays fast and offlin
 
 - Delete the Apps you created at <https://github.com/settings/apps> (GitHub has no
   API to delete an App).
-- Remove `~/.config/rein/` (keys, CA, state, session) and `~/.local/state/rein/`
-  (shims, logs, audit, caches). Per-run proxy sockets live under
-  `$XDG_RUNTIME_DIR/rein/` and are removed when the run exits.
+- Remove `~/.config/rein/` (your keys and session) and `~/.local/state/rein/`
+  (logs and caches).
 - Remove the `~/.local/bin/rein` symlink and the `# BEGIN/END rein` alias block
   from your shell rc (or `~/.config/fish/functions/claude.fish`).
