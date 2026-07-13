@@ -69,27 +69,30 @@ done. For the full design and threat model, see [`docs/design.md`](docs/design.m
 
 ## Prerequisites
 
-**Core:**
-- **Go** — the version in [`go.mod`](go.mod) (currently 1.26.5+).
-- A **GitHub account** that can create GitHub Apps (any personal account can).
-- One or more **throwaway repositories** to point the agent at. Do not use a real
-  repo yet. Clone them over **HTTPS** — rein brokers `https://github.com` remotes.
-  An **SSH remote will not work** from inside the sandbox: rein has nothing to
-  inject into it, there's no egress for it, and the ssh-agent socket is blocked.
-- A browser for the one-time App creation. On a headless/SSH box, see
-  [Headless setup](#headless--remote-machines).
+Linux, Go (see [`go.mod`](go.mod)), a GitHub account that can create Apps, a
+throwaway repo cloned over HTTPS, and the sandbox stack:
 
-**The sandbox stack (Linux)** — required for the default `rein run`. `rein doctor`
-checks `srt` (presence and pinned version), its seccomp filter, bwrap's userns, and
-the system CA bundle. It does **not** check `ripgrep`/`socat` (srt needs both),
-Node, Go, or your clock — a bad clock shows up later as `app credentials: 401`.
-- **`srt`** — pinned to `@anthropic-ai/sandbox-runtime@0.0.63` (other versions
-  may move the injection hook; rein re-verifies on bump). srt needs Node 20+:
-  `npm install -g @anthropic-ai/sandbox-runtime@0.0.63`
-- **`bubblewrap`, `ripgrep`, `socat`** —
-  `sudo apt-get install -y bubblewrap ripgrep socat` (or your distro's
-  equivalent).
-- **Ubuntu 23.10+ only:** an AppArmor profile granting `userns` to `bwrap`, or the
+```bash
+npm install -g @anthropic-ai/sandbox-runtime@0.0.63   # needs Node 20+
+sudo apt-get install -y bubblewrap ripgrep socat      # or your distro's equivalent
+```
+
+`rein doctor` tells you what's missing. On Ubuntu you'll also need an AppArmor
+profile for `bwrap` — details below.
+
+<details>
+<summary>The full list, and the AppArmor fix</summary>
+
+- **A throwaway repo.** Do not point rein at a real one yet. Clone over **HTTPS** —
+  an SSH remote won't work from inside the sandbox: rein has nothing to inject into
+  it, there's no egress for it, and the ssh-agent socket is blocked.
+- **A browser** for the one-time App creation. On a headless or SSH-only box, see
+  [Headless / remote machines](#headless--remote-machines).
+- **`srt`** is pinned to `0.0.63` — other versions may move the injection hook, and
+  rein re-verifies on every bump.
+- **Healthy NTP.** App token mints fail with a misleading `401 Bad credentials`
+  when the clock drifts more than ~60s.
+- **Ubuntu 23.10+ needs an AppArmor profile** granting `userns` to `bwrap`, or the
   sandbox won't start. Check with:
 
   ```bash
@@ -109,9 +112,14 @@ Node, Go, or your clock — a bad clock shows up later as `app credentials: 401`
   }
   ```
 
-  Then `sudo apparmor_parser -r /etc/apparmor.d/bwrap` and re-run the check.
-- **Healthy NTP** — App token mints fail with a misleading `401 Bad credentials`
-  when the clock drifts more than ~60s.
+  Then run `sudo apparmor_parser -r /etc/apparmor.d/bwrap` and re-check.
+
+**What `rein doctor` does and doesn't check.** It checks `srt` (presence and pinned
+version), its seccomp filter, bwrap's userns, and the system CA bundle. It does
+**not** check `ripgrep`/`socat` (srt needs both), Node, Go, or your clock — a bad
+clock shows up later as `app credentials: 401`.
+
+</details>
 
 ## Quick start
 
