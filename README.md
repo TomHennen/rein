@@ -223,9 +223,11 @@ less than the App itself:
 | **Write tier** — after you approve (`git push`, `gh pr create`, …) | write | write | write | read |
 | **Audit App** — writeback, created but not yet posting | — | write | — | read |
 
-The read token is cached for its lifetime; the write token is minted
-just-in-time and **revoked as soon as the call finishes**. Both are scoped to
-your session's repos — never to your account.
+The read token is cached for its lifetime. The write token only exists once you
+approve, and is **revoked** when the run ends or its window expires (idle 30
+minutes, hard cap 4 hours); on the `gh` path it is minted per call and revoked as
+soon as `gh` exits. Both are scoped to your session's repos — never to your
+account.
 
 > **Note:** `pull_requests: write` also confers PR *review, approve, and merge*
 > capability, so a run holding the write token could approve or merge its own PR.
