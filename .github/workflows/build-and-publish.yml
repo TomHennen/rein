@@ -16,7 +16,7 @@
 # attest, and nothing needs adjusting. (It couldn't while private — no
 # attestation store, and dependency-review needs an Advanced Security API — so
 # this file used to carry `attest-and-verify: disabled` and a trimmed
-# `scan-tools`. Both are gone as of rein#107; don't reintroduce them.)
+# `scan-tools`. Both are gone as of rein#114; don't reintroduce them.)
 #
 # Pin discipline: the `uses:` ref below pins wrangle's *release tag*
 # (`@vX.Y.Z`) with an inline zizmor exception. This is wrangle's recommended
