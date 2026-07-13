@@ -137,8 +137,10 @@ It:
    *first*: [Headless / remote machines](#headless--remote-machines).
 2. **Stores the keys** in `~/.config/rein/` (mode `0600`). You never copy a key by
    hand.
-3. **Wires up your shell** — the git/`gh` shims and `rein` on your `PATH`. It also
-   offers to alias `claude` to `rein run -- claude` (off by default).
+3. **Puts `rein` on your `PATH`** (`~/.local/bin/rein`) and offers to alias
+   `claude` to `rein run -- claude` (off by default). **Your own `git` and `gh` are
+   left alone** — rein does install shimmed copies, but into its own state
+   directory, which only ever goes on the *agent's* `PATH`, never yours.
 4. **Scaffolds your session** — the [scope
    ceiling](#the-session-sets-the-scope-ceiling). `rein run` won't start without
    one.
