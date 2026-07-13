@@ -1,4 +1,4 @@
-$ rein run -- bash -c <sandbox agent script> /tmp/rein-sbxfs-vjrns9xb
+$ rein run -- bash -c <sandbox agent script> /tmp/rein-sbxfs-07kyaksw
 rein: sandbox preflight:
   [ok]   srt present: /home/admin/.npm-global/bin/srt
   [ok]   srt version: 0.0.63 (package.json; note `srt --version` misreports 1.0.0)
@@ -8,11 +8,11 @@ rein: sandbox preflight:
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_sandbox_fs (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-z5y2okdl/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-xQy0UwwEoJyeZ9PHbN7e_A/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-sbxfs-vjrns9xb  [TomHennen/agentcreds-validation-a]
+  session: sess_journey_sandbox_fs (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-hpdgzyfy/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-rAPI2pGtS6SfddST20nuSA/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-sbxfs-07kyaksw  [TomHennen/agentcreds-validation-a]
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-832968166
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-3951356717
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -23,7 +23,7 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-sbxfs-vjrns9xb
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-sbxfs-07kyaksw
     => work the agent must keep has to be written INTO the working tree.
     allowed back read-only: /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.claude, /home/admin/.claude.json, /home/admin/.local/bin, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
@@ -64,6 +64,10 @@ emit "@HOOK_RC=$?"
 run git config --local core.pager 'sh -c pwned'
 emit "@CFG_RC=$?"
 
+emit "@CLEAN_TREE  git status is clean — srt's injected dotfiles are HIDDEN (#102)"
+run git status --porcelain
+emit "@UNTRACKED=$(git status --porcelain 2>/dev/null | grep -c '^??' || true)"
+
 emit "@ORDINARY_WORK  (edit a tracked file, add, commit — all still work)"
 run sh -c 'echo "// rein sandbox-filesystem journey: an ordinary agent edit" >> README.md'
 run git add -A
@@ -72,12 +76,12 @@ run git commit -q -m "sandbox-filesystem journey: an ordinary edit"
 emit "@COMMIT_RC=$?"
 run git log --oneline -1
 emit "@SCRIPT_DONE"
- /tmp/rein-sbxfs-vjrns9xb
+ /tmp/rein-sbxfs-07kyaksw
 ---
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/rein-sbxfs-vjrns9xb
+- Your work persists ONLY in the working tree: /tmp/rein-sbxfs-07kyaksw
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
@@ -109,7 +113,7 @@ SBX| @SANDBOX_FACTS  (the machine-readable mirror of the contract rein injected)
 SBX| $ sh -c env | grep ^REIN_IN_SANDBOX | sort
 SBX| REIN_IN_SANDBOX=1
 SBX| REIN_IN_SANDBOX_HOME=ephemeral
-SBX| REIN_IN_SANDBOX_WORKTREE=/tmp/rein-sbxfs-vjrns9xb
+SBX| REIN_IN_SANDBOX_WORKTREE=/tmp/rein-sbxfs-07kyaksw
 SBX| @CREDS_HIDDEN  (real host secrets read as absent in-sandbox)
 SBX| $ cat /home/admin/.ssh/id_rsa
 SBX| cat: /home/admin/.ssh/id_rsa: No such file or directory
@@ -132,6 +136,9 @@ SBX| @HOOK_RC=2
 SBX| $ git config --local core.pager sh -c pwned
 SBX| error: could not write config file .git/config: Device or resource busy
 SBX| @CFG_RC=4
+SBX| @CLEAN_TREE  git status is clean — srt's injected dotfiles are HIDDEN (#102)
+SBX| $ git status --porcelain
+SBX| @UNTRACKED=0
 SBX| @ORDINARY_WORK  (edit a tracked file, add, commit — all still work)
 SBX| $ sh -c echo "// rein sandbox-filesystem journey: an ordinary agent edit" >> README.md
 SBX| $ git add -A
@@ -139,5 +146,5 @@ SBX| @ADD_RC=0
 SBX| $ git commit -q -m sandbox-filesystem journey: an ordinary edit
 SBX| @COMMIT_RC=0
 SBX| $ git log --oneline -1
-SBX| 5a0e954 sandbox-filesystem journey: an ordinary edit
+SBX| a2fdb9c sandbox-filesystem journey: an ordinary edit
 SBX| @SCRIPT_DONE

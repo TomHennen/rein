@@ -119,6 +119,10 @@ emit "@HOOK_RC=$?"
 run git config --local core.pager 'sh -c pwned'
 emit "@CFG_RC=$?"
 
+emit "@CLEAN_TREE  git status is clean — srt's injected dotfiles are HIDDEN (#102)"
+run git status --porcelain
+emit "@UNTRACKED=$(git status --porcelain 2>/dev/null | grep -c '^??' || true)"
+
 emit "@ORDINARY_WORK  (edit a tracked file, add, commit — all still work)"
 run sh -c 'echo "// rein sandbox-filesystem journey: an ordinary agent edit" >> {TRACKED}'
 run git add -A
@@ -239,6 +243,8 @@ def main() -> int:
         cfg_rc = _rc(text, "CFG")
         add_rc = _rc(text, "ADD")
         commit_rc = _rc(text, "COMMIT")
+        m_unt = re.search(r"@UNTRACKED=(\d+)", text)
+        untracked = int(m_unt.group(1)) if m_unt else None
 
         # $HOME ephemerality: the write must have SUCCEEDED in-sandbox (scratch read
         # back) but left NOTHING on the host.
@@ -259,6 +265,9 @@ def main() -> int:
             ("Device or resource busy" in text, "mv .git must fail EBUSY (a pinned mountpoint)"),
             (hook_rc not in (None, 0), ".git/hooks/pre-commit must NOT be writable"),
             (cfg_rc not in (None, 0), "git config --local must fail (.git/config is pinned)"),
+            (untracked == 0, "git status must be CLEAN — srt's injected dotfiles (.bashrc, "
+                             ".gitconfig, .mcp.json, …) hidden so they aren't noise or an "
+                             "accidental `git add -A` commit (#102)"),
             (add_rc == 0, "ordinary `git add` must still succeed in a hardened tree"),
             (commit_rc == 0, "ordinary `git commit` must still succeed in a hardened tree"),
             # The injected contract must have reached the agent's own output.
