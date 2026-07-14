@@ -106,68 +106,71 @@ The API (all lazy — see the skip rule below):
   popup box's content, extracted by GEOMETRY (find the border rows, slice the
   columns inside them), not by parsing escape codes.
 
-### A REAL agent's TUI is neither: collapse it, then SHOW it as FRAMES (`journey_realagent_write`, #101)
+### A REAL agent (a live LLM) gets its OWN shape — do NOT force it into the composite
 
-A deterministic bash "agent" is line-oriented, so its output belongs in the golden
-verbatim. A **real LLM's TUI is not**: it redraws AND its content genuinely varies
-run to run (prose, tool order, spinners, token counts, promo banners). There is no
-token-level normalization for that — it is noise of the same kind
-`build_raw_transcript` already drops (progress ticks). So the one journey that drives
-a real `claude` **collapses that region at BUILD time** (`reinharness.collapse_agent_tui`),
-and the golden keeps what actually matters and is stable: **rein's own host output
-verbatim** (banner, injected contract, exit token accounting — a new rein line still
-trips drift), the popup's Form A (`POPUP| `), and a ground-truth `MILESTONE| ` block
-read from `helper.log` + the GitHub API. This is the ONE sanctioned exception to
-"never drop output", and it is kept honest two ways:
+**This is the rule. It is the whole doctrine for this area:**
 
-- **Two anchors that MUST both be found** — rein's `running:` echo (start) and its exit
-  token accounting (end: `revoked N of N write token(s) on exit`, or the per-token
-  `exit-revoke … failed` warning that structurally precedes it). A miss is a CEREMONY
-  BREAK (exit 2), never a silently smaller golden.
-- **The collapse is a FILTER, not a delete.** rein has call sites that write to its own
-  host pty *inside* that window (`printExpiryBanner`'s `rein: SESSION EXPIRED` block;
-  the non-interactive install-NOTICE surface) — the region is NOT "pure agent TUI". So
-  any line in it matching `AGENT_TUI_KEEP_RE` (a column-0 `rein: …` / `=== rein: …`) is
-  **preserved**, and only the agent-TUI runs around it collapse to a placeholder. The
-  doctrine above ("a brand-new rein line — especially a security-relevant one — survives
-  into the normalized diff") therefore holds INSIDE this window too. It costs nothing:
-  rein prints nothing there on the happy path, and a real claude never paints flush-left
-  with rein's prefix (its output sits behind box art — verified on captured pty streams).
+> **Deterministic agent (a bash script) -> ONE composite golden; the interleaving IS
+> the story.** Line-oriented output, stable run to run. `write_ceremony`, `gh_write`,
+> `tmux_popup_approval`. Leave them exactly as they are.
+>
+> **Non-deterministic agent (a real LLM) -> THREE separate things, each doing ONE job:**
+> **invariants in code** + **a golden of rein's OWN lines** + **a separate, uncompared
+> session artifact.**
 
-Do not generalize the collapse to a line-oriented agent.
+We learned this the expensive way. A full-screen, non-deterministic TUI does not want to
+be a line-oriented composite, and every bit of the complexity that used to live here — a
+collapse-with-a-keep-filter, a placeholder line, an anchor pair, `AGENT| ` frames that
+the comparator had to remember to drop — was scar tissue from forcing one into that
+shape. All of it is deleted. `journey_realagent_write.py` is the exemplar of the new one:
 
-#### `AGENT| ` frames: SHOWN, not COMPARED (the record of what the agent did)
+1. **Invariants — plain `assert`-style checks in the journey.** Branch under
+   `agent/<issue>/` (DISCOVERED, not assumed — a real agent picks its own suffix),
+   exactly one PR, PR author `is_bot=true`, `helper.log` shows popup launched + issue
+   CONFIRMED + write-tier mint, zero inline approval prompts of either kind, the popup
+   overlaid a live TUI, the TUI repainted. **These are the regression oracle for
+   behavior.** A break is exit 2. Nothing about the LLM's prose is asserted.
 
-A collapse alone leaves the reviewer with nothing to READ — and the maintainer's ask
-is exactly that: *"I don't love not having any record of what the agent did… most
-importantly I want to see it. It helps me understand if the agent is confused."* So
-the real-agent journey also folds in **`AGENT| `-tagged RENDERED SCREEN FRAMES** — the
-fourth view, beside untagged host / `SBX| ` / `POPUP| ` / `MILESTONE| `:
+2. **The COMPARED golden — rein's OWN lines + the popup's Form A. No agent content.**
+   Built with **one boundary and one regex** (`H.split_at_agent_launch`): rein's launch
+   surface **verbatim** through its `rein: running:` echo, then column-0 `rein: …` lines
+   (`H.REIN_LINE_RE`) from there on. **Do not simplify that regex**: the `(?:=+ )?` arm
+   exists for `grant.ShowInstallNotice`'s `=== rein: NOTICE — App not installed ===`.
+   - **Why the launch surface is kept whole and not just grepped:** rein's banner body is
+     INDENTED continuation text, not `rein: `-prefixed. Most of it is redundantly
+     compared in the ten other sandbox goldens — but the **claude-specific** lines are
+     not, because no other journey runs claude as the agent: the
+     `--append-system-prompt` **contract injection** line appears in **no other compared
+     golden**. A pure `rein: `-prefix grep would silently stop comparing it.
+   - **This preserves the security property far more simply than the collapse did:**
+     EVERY rein-emitted line is in the compared golden. There is no longer any
+     uncompared region *inside* a compared file for a new (possibly security-relevant)
+     rein line to hide in — which is precisely why the keep-filter-inside-a-collapse is
+     no longer needed. A new rein line trips drift, as in every other journey.
+   - **The proof it works:** run the journey twice. The second run is a COMPLETELY
+     DIFFERENT claude session and must still report `[golden OK]`.
 
-- **Source: `capture-pane -p -J`**, the tmux server's own authoritative render of the
-  pane claude runs in — unobscured by the popup (a popup is a client overlay, not part
-  of the pane). Not a pexpect screen; not the raw stream.
-- **At MILESTONES** (`H.fold_agent_frames`, `H.agent_frames_block`): after the
-  folder-trust dialog is handled, while the popup is up, just after it closes, and the
-  final settled screen. Each frame is labelled with which moment it is.
-- **SHOWN, not COMPARED.** `normalize_for_compare` **DROPS** every `AGENT| ` line
-  (`H.drop_agent_frames`), so the frames live in the checked-in golden for a human to
-  read but never enter the diff. A real LLM's prose / turn count / tool ordering is
-  **not a regression signal**, and a chronically-red journey trains everyone to ignore
-  drift. Diagnostic for a human; noise for a comparator. (The drop runs FIRST, before
-  `build_raw_transcript`, so the blank lines around each frame collapse and both sides
-  land on the same shape; it is trivially idempotent, which `test_golden_shape.py`
-  requires.)
-- **It cannot hide a rein line.** A frame is built from `capture-pane` and folded in
-  only AFTER `collapse_agent_tui` has run over the raw pane stream — and that collapse
-  is a FILTER: a column-0 `rein: …` / `=== rein: …` (`AGENT_TUI_KEEP_RE`) stays
-  UNTAGGED and stays COMPARED. Nothing ever MOVES a rein line into a frame, so a new
-  (possibly security-relevant) rein line still trips drift. **Do not simplify that
-  regex**: the `(?:=+ )?` arm exists for `grant.ShowInstallNotice`'s `=== rein: NOTICE`.
-- **DO NOT try full scrollback.** Tested: `pyte.HistoryScreen` replaying a real
-  captured claude session is **garbage** — claude repaints its transcript region in
-  place while scrolling, so history accumulates torn, overlapping half-frames.
-  Frames-at-milestones is the decided approach *because* of that. Don't retry it.
+3. **The agent's session — `agent-sessions/realagent_write.txt`, COMMITTED, NEVER
+   COMPARED.** Rendered milestone frames so a human can read what the agent did — the
+   maintainer's ask: *"it helps me understand if the agent is confused."*
+   - **Source: `capture-pane -p -J`**, the tmux server's own authoritative render of the
+     pane claude runs in — unobscured by the popup (a popup is a client overlay, not part
+     of the pane). Not a pexpect screen; not the raw stream.
+   - **It is not in `golden/`, so nothing diffs it.** That is what makes "never compared"
+     structural instead of a promise: `test_golden_shape.py` only globs `golden/*.txt`,
+     so the session file is never diffed, never required to be normalize-idempotent, and
+     never flagged as an orphan golden. An LLM's prose/turn count/tool ordering is not a
+     regression signal, and a chronically-red journey trains everyone to ignore drift.
+   - Regenerated on each `REIN_UPDATE_GOLDEN=1` adopt, alongside the golden.
+   - **DO NOT try full scrollback.** Tested: `pyte.HistoryScreen` replaying a real
+     captured claude session is **garbage** — claude repaints its transcript region in
+     place while scrolling, so history accumulates torn, overlapping half-frames.
+     Frames-at-milestones is the decided approach *because* of that. Don't retry it.
+
+**Ground truth (helper.log + the GitHub API) is NOT terminal output**, so it is not in
+the golden — it used to be, as a `MILESTONE| ` block, which was assertions masquerading
+as a transcript. It is printed as run **outcomes** and heads the session artifact as
+context. If you want to assert it, assert it (1); don't narrate it into an artifact.
 
 **claude's folder-trust dialog is PLUMBING, not ceremony.** It fires only because
 rein's sandbox gives claude an ephemeral `$HOME` (no persisted trust), and it blocks
@@ -210,14 +213,13 @@ and then tags every line of its output (piping through `tr '\r' '\n'` so even
 git's progress redraws stay tagged). So the transcript reads like a real terminal
 session — `$ command` then its output then the next `$ command` — and everything
 the agent produced carries `reinharness.SBX_TAG` (`SBX| `). Then
-`reinharness.get_views(text) -> (host, sandbox, popup, agent_frames)` is a single pass
-— a line belongs to a tagged view iff it **starts with** that view's tag (rein's banner
-echoes the script body, so a *substring* test would mis-file those host lines;
-`startswith` is deliberate), and a tagged line whose content is blank arrives as the
-**bare tag** (`SBX|`, `POPUP|`, `AGENT|` — `build_raw_transcript` rstrips), which the
-split accepts by exact equality. Everything else is rein's own host output. Use
-`sandbox_preamble()` in a new journey's in-sandbox script so it inherits this exact
-shape.
+`reinharness.get_views(text) -> (host, sandbox, popup)` is a single pass — a line
+belongs to a tagged view iff it **starts with** that view's tag (rein's banner echoes
+the script body, so a *substring* test would mis-file those host lines; `startswith` is
+deliberate), and a tagged line whose content is blank arrives as the **bare tag**
+(`SBX|`, `POPUP|` — `build_raw_transcript` rstrips), which the split accepts by exact
+equality. Everything else is rein's own host output. Use `sandbox_preamble()` in a new
+journey's in-sandbox script so it inherits this exact shape.
 
 `get_views` is available when a journey wants the two sides *separately* (e.g. to
 assert an invariant about only the agent's output). The golden itself does NOT
@@ -402,11 +404,12 @@ in `reinharness.py`, so a new journey is mostly wiring:
 - `list_matching_refs` / `list_prs_for_branch` / `pr_author` — HOST-side ground truth
   (a REAL agent names its own branch, so DISCOVER it under `agent/<n>/`; `pr_author`
   is the delegated-bot check).
-- `collapse_agent_tui` / `drain_children` — the real-agent pair (see above).
-- `AGENT_TAG` / `agent_frames_block` / `fold_agent_frames` / `drop_agent_frames` — the
-  real agent's RENDERED milestone frames: folded into the golden to be READ, dropped by
-  `normalize_for_compare` so they are never diffed (shown, not compared).
-- `MILESTONE_TAG` — the ground-truth view (helper.log + the GitHub API), COMPARED.
+- `split_at_agent_launch` / `REIN_LINE_RE` — the REAL-agent golden: rein's launch
+  surface verbatim, then rein's own lines only. One boundary, one regex; no agent
+  content reaches the compared file (see above).
+- `write_agent_session` / `AGENT_SESSION_DIR` — the real agent's session artifact:
+  committed and human-readable, never compared (it is not in `golden/`).
+- `drain_children` — the real-agent drain rule (see above).
 - `dismiss_claude_trust_dialog(pane)` — claude's folder-trust dialog, as PLUMBING
   (dismissed, never asserted, never in the narrative).
 - `resolve_throwaway_repo` — the repo, resolved the rein-init way (see below).

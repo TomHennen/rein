@@ -1235,29 +1235,13 @@ SBX_TAG = "SBX| "
 # "one transcript, two views" model as SBX| vs untagged host lines (#82).
 POPUP_TAG = "POPUP| "
 
-# The tag for RENDERED SNAPSHOTS of a REAL agent's TUI (`capture-pane -p -J` of the
-# pane claude is running in), folded into the one transcript at each MILESTONE — the
-# third view, after SBX| (the sandbox child) and POPUP| (the client-owned overlay).
+# rein's OWN output lines, at column 0, as rein writes them to the run terminal.
+# The `(?:=+ )?` arm is LOAD-BEARING: grant.ShowInstallNotice prints its NOTICE as
+# `=== rein: NOTICE — App not installed ===`. Do not "simplify" it away.
 #
-# SHOWN, NOT COMPARED. These frames exist because a human reviewing the golden wants
-# to SEE what the agent actually did ("it helps me understand if the agent is
-# confused"). They are the ONE thing in a golden that `normalize_for_compare` DROPS
-# (see drop_agent_frames): a real LLM's prose, turn count and tool ordering are not a
-# regression signal, and a chronically-red journey trains everyone to ignore drift.
-# Diagnostic for a human; noise for a comparator.
-#
-# The security property that makes this safe: a frame is built from `capture-pane`,
-# NEVER from the transcript, and it is FOLDED IN only AFTER `collapse_agent_tui` has
-# already run over the raw stream — so rein's own lines in that region (matched by
-# AGENT_TUI_KEEP_RE at column 0) stay UNTAGGED, PRESERVED and COMPARED. Nothing ever
-# MOVES a rein line into an AGENT| frame, so no rein line can escape the comparator.
-AGENT_TAG = "AGENT| "
-
-# The tag for the GROUND-TRUTH view: what the agent OBSERVABLY DID, read back from
-# rein's helper.log + the GitHub API after the run (never scraped off the agent's
-# screen — a real agent's screen is not evidence). Not terminal output, and the block
-# says so on its own first line. COMPARED like every other untagged/SBX|/POPUP| line.
-MILESTONE_TAG = "MILESTONE| "
+# Used by the REAL-AGENT journey to pull rein's own lines back out of a pane stream
+# that is otherwise a full-screen, non-deterministic LLM TUI (see split_at_agent_launch).
+REIN_LINE_RE = re.compile(r"^(?:=+ )?rein: ")
 
 
 def sandbox_preamble() -> str:
@@ -1296,13 +1280,11 @@ def _pty_lines(text: str) -> list[str]:
     return strip_ansi(text).replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
 
-def get_views(text: str) -> tuple[list[str], list[str], list[str], list[str]]:
-    """Split ONE interleaved transcript into
-    (host_lines, sandbox_lines, popup_lines, agent_frame_lines).
+def get_views(text: str) -> tuple[list[str], list[str], list[str]]:
+    """Split ONE interleaved transcript into (host_lines, sandbox_lines, popup_lines).
 
-    A line belongs to the SANDBOX child iff it STARTS with SBX_TAG, to the POPUP iff
-    it STARTS with POPUP_TAG, and to the real agent's RENDERED FRAMES iff it STARTS
-    with AGENT_TAG. `emit`/`runtagged` (and the popup fold) write the tag
+    A line belongs to the SANDBOX child iff it STARTS with SBX_TAG, and to the POPUP
+    iff it STARTS with POPUP_TAG. `emit`/`runtagged` (and the popup fold) write the tag
     at column 0, so real tagged output always leads with it — whereas rein's own
     startup banner ECHOES the script body (`rein: running: bash -c …`), and those
     HOST lines contain the literal `SBX| ` *mid-line* (inside the emit/runtagged
@@ -1311,13 +1293,11 @@ def get_views(text: str) -> tuple[list[str], list[str], list[str], list[str]]:
     agent output. One pass, so the views can never disagree about a line; the tag is
     stripped from tagged lines.
 
-    FOUR views because a transcript can carry three tagged sources beside rein's own
-    host output: the sandbox child (SBX_TAG), the client-owned tmux popup the human
-    read Form A in (POPUP_TAG), and the RENDERED milestone frames of a real agent's
-    TUI (AGENT_TAG). A caller wanting the Form A alone reads `popup`; the routing
+    THREE views because a transcript carries two tagged sources beside rein's own host
+    output: the sandbox child (SBX_TAG) and the client-owned tmux popup the human read
+    Form A in (POPUP_TAG). A caller wanting the Form A alone reads `popup`; the routing
     invariant "no inline Form A on rein's own terminal" is
-    `PROMPT_HINT not in "\\n".join(host)`. The AGENT_TAG view is the one the
-    comparator DROPS (drop_agent_frames) — shown to a human, never diffed.
+    `PROMPT_HINT not in "\\n".join(host)`.
 
     Tag-split is exact for whole, unwrapped lines. It is NOT the whole artifact:
     callers still CURATE the views for the golden (dropping git object-count
@@ -1333,17 +1313,14 @@ def get_views(text: str) -> tuple[list[str], list[str], list[str], list[str]]:
     host: list[str] = []
     agent: list[str] = []
     popup: list[str] = []
-    frames: list[str] = []
     for ln in _pty_lines(text):
         if ln.startswith(SBX_TAG) or ln.rstrip() == SBX_TAG.rstrip():
             agent.append(ln[len(SBX_TAG):].rstrip())
         elif ln.startswith(POPUP_TAG) or ln.rstrip() == POPUP_TAG.rstrip():
             popup.append(ln[len(POPUP_TAG):].rstrip())
-        elif ln.startswith(AGENT_TAG) or ln.rstrip() == AGENT_TAG.rstrip():
-            frames.append(ln[len(AGENT_TAG):].rstrip())
         else:
             host.append(ln.rstrip())
-    return host, agent, popup, frames
+    return host, agent, popup
 
 
 # The popup box's corners, as tmux paints them (it picks a style depending on
@@ -1393,28 +1370,45 @@ def popup_forma_from_screen(screen: RenderedScreen,
     deterministic.
     """
     display = screen.display()
-    top = next((i for i, ln in enumerate(display) if _BOX_TOP.search(ln)), None)
-    if top is None:
-        return []
-    left = min(display[top].find(c) for c in "┌╭┏" if c in display[top])
-    right = max(display[top].rfind(c) for c in "┐╮┓" if c in display[top])
-    bottom = next(
-        (i for i in range(top + 1, len(display)) if _BOX_BOTTOM.search(display[i])),
-        len(display),
-    )
-    # Strictly INSIDE the border columns and rows == the popup's content.
-    lines = [ln[left + 1:right].rstrip() for ln in display[top + 1:bottom]]
 
-    start = next((i for i, ln in enumerate(lines) if ln.startswith("=== rein:")), None)
-    if start is None:
-        return []
-    end = next((i for i in range(start, len(lines)) if lines[i].startswith(">")), None)
-    if end is None:
-        return lines[start:]  # still painting: no `>` prompt line yet
-    lines = lines[start:end + 1]
-    if answer is not None:
-        lines = [f"> {answer}" if ln.rstrip() == ">" else ln for ln in lines]
-    return lines
+    # THE POPUP IS NOT THE ONLY BOX ON THE SCREEN. Under it sits whatever the pane is
+    # painting — and when that pane is a full-screen TUI, it is FULL of box art (claude
+    # draws `╭─── Claude Code v… ───╮` around its welcome panel and its input). Taking
+    # the FIRST box-top on the render therefore locked onto CLAUDE's box, sliced its
+    # columns, found no `=== rein:` header, and returned [] — so Form A never read as
+    # complete, the popup went unanswered until `rein approval grant` timed out at 60s,
+    # and rein (correctly) degraded to the inline /dev/tty prompt. That looks exactly
+    # like a rein bug and is NOT one; it is this extractor picking the wrong box. It
+    # only ever showed up under a REAL agent (a bash pane paints no box art), and it
+    # cleared up "by itself" once claude's welcome box scrolled off — which is what made
+    # it read as flaky. So: scan EVERY box on the screen and take the one that actually
+    # CONTAINS rein's Form A header. Geometry still, just not the first-match kind.
+    for top in (i for i, ln in enumerate(display) if _BOX_TOP.search(ln)):
+        left = min(display[top].find(c) for c in "┌╭┏" if c in display[top])
+        right = max(display[top].rfind(c) for c in "┐╮┓" if c in display[top])
+        # This box's OWN bottom: the corner glyphs must sit in ITS left/right columns.
+        # (A bare _BOX_BOTTOM match would stop at the underlying TUI's border row and
+        # truncate the popup's content mid-box.)
+        bottom = next(
+            (i for i in range(top + 1, len(display))
+             if len(display[i]) > right
+             and display[i][left] in "└╰┗" and display[i][right] in "┘╯┛"),
+            len(display),
+        )
+        # Strictly INSIDE the border columns and rows == this box's content.
+        lines = [ln[left + 1:right].rstrip() for ln in display[top + 1:bottom]]
+
+        start = next((i for i, ln in enumerate(lines) if ln.startswith("=== rein:")), None)
+        if start is None:
+            continue  # a box the PANE painted, not rein's popup — keep looking.
+        end = next((i for i in range(start, len(lines)) if lines[i].startswith(">")), None)
+        if end is None:
+            return lines[start:]  # still painting: no `>` prompt line yet
+        lines = lines[start:end + 1]
+        if answer is not None:
+            lines = [f"> {answer}" if ln.rstrip() == ">" else ln for ln in lines]
+        return lines
+    return []
 
 
 def popup_forma_complete(screen: RenderedScreen) -> bool:
@@ -1433,6 +1427,17 @@ def popup_forma_complete(screen: RenderedScreen) -> bool:
     return bool(lines) and lines[-1].startswith(">")
 
 
+def popup_block(popup_lines: list[str]) -> list[str]:
+    """The popup's Form A as POPUP|-tagged lines, with a blank line before it.
+
+    rstrips the TAGGED line, not the content: Form A contains a genuinely blank line
+    (rein prints one before "To approve"), which must still carry the tag to stay on
+    the popup side of get_views — but must not leave trailing whitespace in the
+    checked-in golden, where an editor stripping it would read as drift.
+    """
+    return [""] + [(POPUP_TAG + ln).rstrip() for ln in popup_lines]
+
+
 def fold_popup(transcript: str, popup_lines: list[str],
                anchor_prefix: str = SBX_TAG + "$ rein declare ") -> str:
     """Interleave the POPUP| Form A block into the ONE transcript, right after the
@@ -1448,11 +1453,7 @@ def fold_popup(transcript: str, popup_lines: list[str],
     echoes it as `SBX| $ rein declare <n>`; rein's banner echo of the script body
     is `run rein declare <n>`, no `$`, so it does not match).
     """
-    # rstrip the TAGGED line, not the content: Form A contains a genuinely blank
-    # line (rein prints one before "To approve"), which must still carry the tag to
-    # stay on the popup side of get_views — but must not leave trailing whitespace
-    # in the checked-in golden, where an editor stripping it would read as drift.
-    block = [""] + [(POPUP_TAG + ln).rstrip() for ln in popup_lines]
+    block = popup_block(popup_lines)
     out: list[str] = []
     injected = False
     for ln in transcript.split("\n"):
@@ -1463,208 +1464,63 @@ def fold_popup(transcript: str, popup_lines: list[str],
     return "\n".join(out)
 
 
-# The line that STANDS IN for a real agent's TUI region in a golden (see
-# collapse_agent_tui). Fixed text, so it is deterministic AND usable as the
-# fold_popup anchor for a journey whose declare happens inside the agent's TUI.
-AGENT_TUI_PLACEHOLDER = (
-    "[claude's TUI — a REDRAWING surface, so its raw byte stream is a paint HISTORY, "
-    "not a picture. Collapsed here; rendered SNAPSHOTS of what the agent actually did "
-    "are folded in below as AGENT| frames (SHOWN, not compared), and what it "
-    "OBSERVABLY produced is the MILESTONE| ground truth.]"
-)
+def split_at_agent_launch(transcript: str, launch_needle: str) -> tuple[list[str], list[str], bool]:
+    r"""Split a REAL-agent pane stream into (rein's launch surface, rein's later lines,
+    found). Everything the agent painted is left OUT of both — by construction.
 
-# The rein line that ENDS the agent's region: rein's own exit accounting, printed
-# on the host pty after the agent process is gone. Anchoring the collapse's end on
-# it guarantees that security-relevant line survives the collapse verbatim.
-#
-# It ALSO matches the per-token `exit-revoke … failed` WARNING, because
-# revokeRunWriteTokens (cmd/rein/run.go) prints that warning immediately before its
-# own summary line — so on a partial-revoke run the warning is STRUCTURALLY the
-# first exit-accounting line rein prints. Matching it here puts it OUTSIDE the
-# collapsed region (and everything after it is preserved verbatim), rather than
-# leaving a security-relevant line to be handled by the in-region keep filter alone.
-AGENT_TUI_END_RE = (
-    r"^rein: (?:revoked \d+ of \d+ write token"
-    r"|warning: exit-revoke of a write token failed)"
-)
+    THE PROBLEM. Every other journey's "agent" is a bash script we wrote: it is
+    LINE-ORIENTED (a line, once printed, is final) and DETERMINISTIC, so its output
+    belongs in the golden verbatim and the interleaving with rein's prompts IS the
+    story. A REAL LLM is neither. It REDRAWS (so the pane's byte stream is a paint
+    HISTORY, not a picture — #100) and its content genuinely varies run to run: prose,
+    tool order, spinners, token counts, promo banners. There is no token-level
+    normalization for that. So the real-agent journey does NOT put agent content in its
+    compared golden at all; it compares rein's OWN output and shows the agent's session
+    in a separate, uncompared artifact (see write_agent_session).
 
-# The lines INSIDE the agent's region that are rein's OWN host output and must
-# therefore SURVIVE the collapse (see collapse_agent_tui). rein writes them to
-# os.Stderr — i.e. the host pty — at column 0:
-#   * `rein: …`      — e.g. the `rein: SESSION EXPIRED` banner headline
-#                      (cmd/rein/run_sandboxed.go:printExpiryBanner)
-#   * `=== rein: …`  — the banner form, e.g. the install NOTICE block
-#                      (internal/ui/grant/notice.go:WriteInstallNotice, its
-#                      non-interactive "plain stderr on the run terminal" surface)
-# Anchored at column 0 on purpose: a real agent's TUI paints its content behind box
-# art / glyphs / indentation, never flush-left with rein's own prefix (verified
-# against captured real-claude pty streams — see the docstring below).
-AGENT_TUI_KEEP_RE = r"^(?:=+ )?rein: "
+    THE SPLIT, which is the whole mechanism — one boundary, one regex:
 
+      launch  — every line up to and INCLUDING the one containing `launch_needle`
+                (the tail of rein's own `rein: running: <cmdline>` echo), plus the `---`
+                separator rein prints right after it. This is rein's launch surface,
+                VERBATIM: the sandbox preflight, the session/proxy/working-tree lines,
+                the egress allowlist, the $HOME-is-hidden semantics, the writes-are-
+                LOCKED notice, and the injected-agent-contract line. It is line-oriented
+                and printed before the agent's TUI exists, so it is safe to keep whole —
+                and it MUST be kept whole, because rein's banner body is INDENTED
+                continuation text, not `rein: `-prefixed, and this journey is the ONLY
+                compared golden that covers the claude-specific lines in it (the
+                `--append-system-prompt` contract injection and the `\claude` escape
+                hatch: no other journey runs claude as the sandboxed agent).
 
-def collapse_agent_tui(transcript: str, start_needle: str, *,
-                       placeholder: str = AGENT_TUI_PLACEHOLDER,
-                       end_pattern: str = AGENT_TUI_END_RE,
-                       keep_pattern: str = AGENT_TUI_KEEP_RE) -> tuple[str, bool]:
-    """Collapse a REAL agent's TUI region to a placeholder, KEEPING rein's own
-    lines. Returns (transcript, anchors_found).
+      tail    — from there on, ONLY rein's own lines (REIN_LINE_RE, a column-0
+                `rein: …` / `=== rein: …`). That is rein's exit token accounting, and
+                any line rein prints to its own terminal WHILE the agent runs — the
+                `rein: SESSION EXPIRED` banner (cmd/rein/run_sandboxed.go
+                printExpiryBanner) and the install NOTICE (internal/ui/grant/notice.go).
+                A real claude never paints flush-left with rein's prefix (its output
+                sits behind box art / glyphs / indentation — verified on captured pty
+                streams), so this catches rein and only rein.
 
-    WHY THIS IS NOT "DROPPING OUTPUT" (the doctrine question, #101). The golden
-    model says: keep every line, normalize the volatile TOKENS at compare time. It
-    holds because every other journey's agent is a deterministic bash script whose
-    output is LINE-ORIENTED — a line, once printed, is final, and only tokens
-    inside it vary. A REAL LLM's TUI is neither: it REDRAWS (so the ANSI-stripped
-    byte stream is a paint history, not a picture — #100) and its content is
-    genuinely non-deterministic (different prose, tool order, spinners, token
-    counts, promo banners, timing). There is no token-level normalization of that;
-    it is redraw+prose NOISE, of exactly the kind `build_raw_transcript` already
-    drops when it discards sub-100% progress ticks. So this collapses it — once, at
-    BUILD time, so the checked-in golden stays a HUMAN-REVIEWABLE artifact showing
-    rein's own security surface (banner, injected contract, Form A, exit accounting)
-    rather than 5000 lines of ANSI soup a reviewer would never read and that would
-    be rewritten wholesale on every adopt.
+    WHY THIS IS SAFE, and simpler than the collapse it replaced: EVERY rein-emitted line
+    lands in the compared golden — the banner whole, and every later rein line by regex.
+    There is no uncompared region INSIDE the compared artifact for a new (possibly
+    security-relevant) rein line to hide in, so no keep-vs-collapse filter is needed to
+    rescue one. A brand-new rein line trips drift, exactly as in every other journey.
 
-    WHAT KEEPS IT HONEST — two anchors AND a keep filter:
-
-    1. The region is bounded by two anchors that MUST both be found, and the caller
-       treats a miss as a CEREMONY BREAK (exit 2), never as a silently smaller golden.
-         start — the first line CONTAINING `start_needle` (use something rein itself
-                 prints and the journey controls: the tail of rein's `rein: running:
-                 <cmdline>` echo, i.e. the agent's own prompt text). The collapse
-                 begins on the line AFTER it, so the whole banner + injected contract
-                 echo is preserved verbatim — as is rein's `---` banner separator,
-                 which it prints immediately after that echo and which is rein's own
-                 line, not the agent's (a collapse that ate it would be dropping rein
-                 output, the one thing the golden model never allows).
-         end   — the first line after that matching `end_pattern` (rein's exit
-                 accounting — the `revoked N of N` summary, or the per-token
-                 `exit-revoke … failed` warning that structurally precedes it).
-                 Everything rein prints from there on is preserved.
-
-    2. This is a FILTER, not a delete. rein DOES have call sites that write to its
-       OWN host pty (os.Stderr) strictly inside that window — `printExpiryBanner`'s
-       `rein: SESSION EXPIRED` block (cmd/rein/run_sandboxed.go) and the
-       non-interactive install-NOTICE surface (internal/ui/grant/notice.go) — so the
-       region is NOT "pure agent TUI" (an earlier version of this comment claimed it
-       was; it was false). Any line inside the region matching `keep_pattern`
-       (`AGENT_TUI_KEEP_RE`: a column-0 `rein: …` or `=== rein: …`) is PRESERVED
-       verbatim; only the runs of agent-TUI lines AROUND them collapse (one
-       placeholder per contiguous run). So the doctrine holds inside this window
-       exactly as everywhere else: a NEW rein line — especially a security-relevant
-       one — lands in the golden and TRIPS DRIFT. It is not deleted at build time.
-
-       Determinism is not weakened: rein prints nothing here on the happy path (the
-       declare's Form A is routed to the tmux popup and the broker writes to
-       helper.log), so a healthy run keeps exactly one placeholder and no kept lines.
-       And a real claude TUI does not paint over the filter: it renders shell output
-       and prose behind box art / glyphs / indentation, never flush-left with rein's
-       own prefix. Verified against captured real-claude pty streams (an 893-line
-       full session incl. a `rein declare` tool call, which renders as `⎿  $ rein
-       declare <n>`): the only column-0 `rein: ` lines in them are rein's own
-       pre-TUI banner lines, all OUTSIDE the region.
+    `found` is False if the launch echo is not in the stream; the caller MUST treat that
+    as a CEREMONY BREAK, never as a silently truncated golden.
     """
     lines = transcript.split("\n")
-    start = next((i for i, ln in enumerate(lines) if start_needle in ln), None)
-    if start is None:
-        return transcript, False
-    if start + 1 < len(lines) and lines[start + 1].strip() == "---":
-        start += 1  # rein's own banner separator — keep it on rein's side
-    end_rx = re.compile(end_pattern)
-    end = next((i for i in range(start + 1, len(lines)) if end_rx.search(lines[i])), None)
-    if end is None:
-        return transcript, False
+    i = next((n for n, ln in enumerate(lines) if launch_needle in ln), None)
+    if i is None:
+        return [], [ln for ln in lines if REIN_LINE_RE.match(ln)], False
+    if i + 1 < len(lines) and lines[i + 1].strip() == "---":
+        i += 1  # rein's own banner separator — keep it on rein's side
+    return (lines[:i + 1],
+            [ln for ln in lines[i + 1:] if REIN_LINE_RE.match(ln)],
+            True)
 
-    keep_rx = re.compile(keep_pattern)
-    region: list[str] = []
-    pending = False  # a contiguous run of agent-TUI lines awaiting its placeholder
-    for ln in lines[start + 1:end]:
-        if keep_rx.search(ln):
-            if pending:
-                region.append(placeholder)
-                pending = False
-            region.append(ln)  # rein's OWN line: survives, so it can trip drift
-        else:
-            pending = True
-    if pending:
-        region.append(placeholder)  # the trailing run of TUI lines
-    elif placeholder not in region:
-        # A (pathological) region with no collapsible line at all: still emit the
-        # placeholder, which is ALSO this journey's fold_popup anchor for Form A.
-        region.insert(0, placeholder)
-    return "\n".join(lines[:start + 1] + region + lines[end:]), True
-
-
-def agent_frames_block(frames: list[tuple[str, str]]) -> list[str]:
-    """Turn [(milestone_label, rendered_screen_text), …] into AGENT|-tagged lines.
-
-    A frame is a `capture-pane -p -J` RENDER of the pane the real agent's TUI is
-    running in — the tmux server's OWN authoritative picture of that screen, taken at
-    a MILESTONE (trust handled / popup up / settled). Each frame is labelled, so a
-    reviewer reading the golden knows WHICH moment they are looking at.
-
-    WHY FRAMES AND NOT SCROLLBACK. There is no honest full-scrollback option: claude
-    REPAINTS its transcript region in place while scrolling, so replaying the pane
-    stream through a scrollback-keeping emulator (pyte.HistoryScreen) yields torn,
-    overlapping half-frames — tested on a real captured claude session; it is garbage.
-    A frame at a milestone is a picture the terminal really showed. (And a `capture-
-    pane` render is the right source, not a pexpect screen: it is tmux's own render of
-    the PANE, so it shows claude UNOBSCURED even while the popup overlay is up.)
-
-    Trailing blank rows are dropped (a 50-row grid is mostly empty); interior blank
-    rows are kept and appear as the BARE tag (`AGENT|`) once rstripped — which
-    `get_views` accepts by exact equality, exactly as it does for SBX|/POPUP|.
-    """
-    out: list[str] = []
-    for i, (label, render) in enumerate(frames, start=1):
-        rows = [ln.rstrip() for ln in (render or "").split("\n")]
-        while rows and not rows[-1]:
-            rows.pop()
-        out.append("")
-        out.append(f"{AGENT_TAG}---- frame {i}/{len(frames)}: {label} ----".rstrip())
-        out.extend((AGENT_TAG + r).rstrip() for r in rows)
-    return out
-
-
-def fold_agent_frames(transcript: str, frames: list[tuple[str, str]],
-                      *, after_tag: str = MILESTONE_TAG) -> str:
-    """Fold the AGENT| frames into the ONE transcript, after the last `after_tag`
-    line (the ground-truth MILESTONE| block) — so the artifact reads in the order it
-    happened: rein's launch surface, the collapsed TUI, the Form A the human answered
-    inside it, what that produced, and finally the rendered record of the agent at
-    work. Falls back to appending before rein's exit accounting if the tag is absent.
-    """
-    block = agent_frames_block(frames)
-    if not block:
-        return transcript
-    lines = transcript.split("\n")
-    anchor = max((i for i, ln in enumerate(lines)
-                  if ln.startswith(after_tag.rstrip())), default=None)
-    if anchor is None:
-        anchor = max((i for i, ln in enumerate(lines)
-                      if ln.startswith(AGENT_TUI_PLACEHOLDER[:20])), default=None)
-    if anchor is None:
-        return transcript
-    return "\n".join(lines[:anchor + 1] + block + lines[anchor + 1:])
-
-
-def drop_agent_frames(text: str) -> str:
-    """The comparator's ONE exemption: remove every AGENT|-tagged line.
-
-    Applied inside `normalize_for_compare`, to BOTH sides, so the rendered frames are
-    IN the checked-in golden (a human reads them) but OUT of the diff (a real LLM's
-    prose / turn count / tool ordering is not a regression signal, and a permanently
-    red journey trains everyone to ignore drift).
-
-    It CANNOT hide a rein line. A frame is a `capture-pane` render, folded in only
-    AFTER `collapse_agent_tui` has run over the raw pane stream — and that collapse is
-    a FILTER: any column-0 `rein: …` / `=== rein: …` line (AGENT_TUI_KEEP_RE) stays
-    UNTAGGED in the transcript and is COMPARED. Nothing ever moves a rein line into a
-    frame, so a new (possibly security-relevant) rein line still trips drift.
-
-    Idempotent by construction: a second pass finds no AGENT| lines and is a no-op.
-    """
-    return "\n".join(ln for ln in text.split("\n")
-                     if not (ln.startswith(AGENT_TAG) or ln.rstrip() == AGENT_TAG.rstrip()))
 
 
 def normalize_transcript(text: str, subs: list[tuple[str, str]] | None = None) -> str:
@@ -1822,16 +1678,13 @@ def normalize_for_compare(text: str) -> str:
     but a genuinely new or changed line trips drift. Idempotent: re-normalizing an
     already-normalized transcript is a no-op (test_golden_shape asserts this).
 
-    ONE thing is DROPPED rather than normalized: the AGENT| rendered frames of a real
-    agent's TUI (drop_agent_frames) — shown in the golden for a human to READ, never
-    diffed, because an LLM's prose is not a regression signal. Dropped FIRST, so the
-    blank lines the fold left around each frame collapse in build_raw_transcript and
-    both sides land on the same shape. rein's OWN lines are never inside a frame (see
-    drop_agent_frames), so nothing security-relevant escapes the compare.
+    NOTHING is dropped here. Every line in a golden is compared. (A real agent's
+    non-deterministic session is not IN a golden — it is a separate, uncompared
+    artifact; see split_at_agent_launch and write_agent_session.)
 
     Use REIN_SHOW_NORMALIZED=1 on a journey to eyeball this form directly.
     """
-    return normalize_transcript(build_raw_transcript(drop_agent_frames(text)))
+    return normalize_transcript(build_raw_transcript(text))
 
 
 def read_golden(name: str) -> str | None:
@@ -1844,6 +1697,25 @@ def update_golden(name: str, raw_text: str) -> Path:
     GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
     p = GOLDEN_DIR / name
     p.write_text(raw_text)
+    return p
+
+
+# The SESSION ARTIFACT directory — NOT goldens, and deliberately not under golden/.
+# A real LLM's session is committed and human-readable ("it helps me understand if the
+# agent is confused") but it is NEVER COMPARED: its prose, turn count and tool ordering
+# are not a regression signal, and a chronically-red journey trains everyone to ignore
+# drift. Keeping it out of golden/ is what makes that structural rather than a promise:
+# test_golden_shape only globs golden/*.txt, so nothing here is ever diffed, required to
+# be normalize-idempotent, or flagged as an orphan golden. Behavior is asserted in the
+# journey's own invariants (exit 2), not by reading this file.
+AGENT_SESSION_DIR = Path(__file__).resolve().parent / "agent-sessions"
+
+
+def write_agent_session(name: str, text: str) -> Path:
+    """Write the SHOWN-not-compared record of a real agent's session (see above)."""
+    AGENT_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    p = AGENT_SESSION_DIR / name
+    p.write_text(text)
     return p
 
 
@@ -2374,8 +2246,26 @@ class TmuxPaneSession:
           * and only THEN send the answer — answering makes `rein approval grant`
             exit, which closes the popup and repaints over Form A.
         """
+        nudged = [0.0]
+
         def ready(scr: RenderedScreen) -> bool:
-            return scr.contains(expect_pattern) and popup_forma_complete(scr)
+            if scr.contains(expect_pattern) and popup_forma_complete(scr):
+                return True
+            # ASK tmux TO REDRAW THE CLIENT while we wait. The popup is an OVERLAY the
+            # server composites onto the client; the pane under it here is a live,
+            # repainting TUI. A refresh forces the overlay to be drawn again, which is
+            # what a human pressing any key would cause — so a Form A that is up on the
+            # server cannot sit unread on a stale client render. That matters because an
+            # unread popup dies at `rein approval grant`'s 60s timeout and rein then
+            # (correctly) degrades to the inline /dev/tty prompt, which reads exactly like
+            # a rein bug and is NOT one. Slow cadence, so we never fight the paint; a
+            # no-op for a quiet pane (the deterministic popup journey).
+            now = time.time()
+            if now - nudged[0] > 1.0:
+                nudged[0] = now
+                with contextlib.suppress(Exception):
+                    _tmux(self.socket, "refresh-client")
+            return False
 
         if not self.until_client(ready, timeout=timeout):
             raise RuntimeError(
@@ -2547,11 +2437,27 @@ def dismiss_claude_trust_dialog(pane: TmuxPaneSession, *, timeout: float = 45.0)
         if CLAUDE_TRUST_DIALOG_RE.search(scr):
             seen["dialog"] = True
             return True
-        # claude's own prompt hint: the main TUI is live and it never asked.
-        return "? for shortcuts" in scr
+        # The main TUI is live and it never asked. Keyed on claude's INPUT BOX (its
+        # border art + the `❯` caret), NOT on a footer hint: the hints are WORDING and
+        # they move. This helper used to test only `? for shortcuts`, which a session
+        # started with --dangerously-skip-permissions never prints — and the current
+        # claude prints no `esc to interrupt` on this surface either. So when the dialog
+        # did not fire, the helper burned its FULL timeout; the agent then declared while
+        # nobody was armed at drive_popup, the popup went unanswered for its 60s, and rein
+        # (correctly) degraded to the inline /dev/tty prompt — which reads exactly like a
+        # rein bug and is not one. The dialog is claude's FIRST screen (it replaces the
+        # TUI), and it is checked above on the same render, so "TUI up" cannot mask it.
+        return any(m in scr for m in ("? for shortcuts", "esc to interrupt", "❯", "╭"))
 
     pane.until_pane(ready, timeout=timeout)
     if not seen["dialog"]:
-        return False
+        # Guard the one race the marker test cannot see: a dialog caught HALF-PAINTED
+        # (its box art up, its text not yet) would read as "TUI live" and we would never
+        # answer it — and an unanswered dialog blocks the session forever. Re-test
+        # briefly; if the text lands, dismiss it. Cheap, and it cannot hang.
+        pane.until_pane(lambda scr: bool(CLAUDE_TRUST_DIALOG_RE.search(scr)), timeout=3)
+        if not CLAUDE_TRUST_DIALOG_RE.search(pane.pane_text()):
+            return False
+        seen["dialog"] = True
     pane.send_pane("Enter")
     return True

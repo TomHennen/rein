@@ -57,46 +57,60 @@ TWO DESIGN CORRECTIONS TO ISSUE #101 (this is what a live spike actually showed)
      journey hostage to a third-party dialog, so a future claude (or a persisted claude
      config dir) that stops asking is not a red journey. The run works either way.
 
-THE GOLDEN — one transcript, FOUR views (Tom's decision, #100/#101):
+THREE ARTIFACTS, EACH DOING ONE JOB — do NOT merge them back together.
 
-  A real LLM's TUI cannot be a verbatim golden — different prose, tool ordering, token
-  counts, spinners, timing — and it REDRAWS, so its raw bytes are paint HISTORY, not a
-  picture. So the golden keeps:
+  A DETERMINISTIC agent (a bash script) is line-oriented, so it gets ONE composite
+  golden and the interleaving with rein's prompts IS the story (journey_write_ceremony,
+  journey_gh_write, journey_tmux_popup_approval — leave those alone). A REAL LLM is not
+  line-oriented and not deterministic. Forcing it into that same one-transcript shape is
+  where all the old complexity came from (a collapse-with-a-keep-filter, a placeholder,
+  an anchor pair, AGENT| frames the comparator had to remember to drop). It is gone:
 
-    * rein's OWN host output VERBATIM (untagged) — the banner, the sandbox/egress/
-      working-tree lines, the injected contract, the exit token accounting. That is the
-      security-relevant surface, it is line-oriented, and a new or changed rein line
-      still trips drift, exactly as in every other journey. The TUI collapse is a
-      FILTER (H.AGENT_TUI_KEEP_RE), so a rein line printed INSIDE the agent's window
-      survives it, stays UNTAGGED, and stays COMPARED.
-    * the popup's Form A, folded in as `POPUP| ` lines — what the human READ and
-      answered on the client's own surface (the same one-transcript / many-views model
-      as journey_tmux_popup_approval).
-    * a ground-truth `MILESTONE| ` block: what the agent OBSERVABLY DID, read from
-      rein's helper.log + the GitHub API rather than scraped off claude's screen.
-    * `AGENT| ` FRAMES — RENDERED SNAPSHOTS (`capture-pane -p -J`: the tmux server's
-      own authoritative picture of the pane, unobscured by the popup) at each
-      MILESTONE: claude's TUI live, the TUI while the popup overlays it, the repaint
-      after it closes, and the final settled screen. They are SHOWN, so a human can
-      READ what the agent did (and see whether it was confused) — and they are NOT
-      COMPARED (`normalize_for_compare` drops them): an LLM's prose is not a regression
-      signal, and a chronically-red journey trains everyone to ignore drift. FRAMES,
-      not scrollback: claude repaints its transcript region in place while scrolling,
-      so a scrollback-keeping emulator (pyte.HistoryScreen) yields torn, overlapping
-      half-frames — tested on a real captured session; it is garbage.
+  1. INVARIANTS — plain asserts, in code, below. The branch landed under agent/<issue>/
+     (DISCOVERED, not assumed — a real agent picks its own suffix), exactly one PR, its
+     author is the App bot (is_bot=true), helper.log shows the popup launched + the
+     issue CONFIRMED there + a write-tier mint, ZERO inline approval prompts of either
+     kind, the popup OVERLAID a live TUI, and the TUI repainted after it closed. These
+     are the regression oracle for BEHAVIOR. A break is exit 2. Nothing about the
+     agent's prose is asserted.
 
-DELIVERABLE: golden/realagent_write.txt.
+  2. THE COMPARED GOLDEN (golden/realagent_write.txt) — ONLY deterministic content:
+     rein's OWN output plus the popup's Form A. NO agent content whatsoever, so a
+     COMPLETELY DIFFERENT claude session still compares clean. rein's output is pulled
+     out with ONE boundary and ONE regex (H.split_at_agent_launch): its launch surface
+     verbatim through the `rein: running:` echo, then column-0 `rein: …` lines from
+     there on. EVERY rein-emitted line is therefore compared — there is no longer an
+     uncompared region inside the compared file for a new (possibly security-relevant)
+     rein line to hide in, which is exactly why the old keep-filter-inside-a-collapse is
+     unnecessary. A new rein line trips drift, as in every other journey.
+
+  3. THE AGENT'S SESSION (agent-sessions/realagent_write.txt) — RENDERED milestone
+     frames (`capture-pane -p -J`: the tmux server's own authoritative picture of the
+     pane, unobscured by the popup): claude's TUI live, the TUI while the popup overlays
+     it, the repaint after it closes, the final settled screen. COMMITTED and
+     HUMAN-READABLE, so a reviewer can see what the agent did and whether it was
+     confused — and NEVER COMPARED (it is not in golden/, so nothing diffs it). FRAMES,
+     not scrollback: claude repaints its transcript region in place while scrolling, so
+     a scrollback-keeping emulator (pyte.HistoryScreen) yields torn, overlapping
+     half-frames — tested on a real captured session; it is garbage. Don't retry it.
+
+  Ground truth about what the agent DID (helper.log + the GitHub API) is printed as run
+  OUTCOMES and heads the session artifact as context. It is NOT in the golden: it is an
+  assertion, not something a terminal ever printed.
+
+DELIVERABLES: golden/realagent_write.txt (compared) + agent-sessions/realagent_write.txt
+(shown). REIN_UPDATE_GOLDEN=1 regenerates BOTH.
 
     python3 tests/interactive/journey_realagent_write.py            # exit 0 == matches (normalized)
-    REIN_UPDATE_GOLDEN=1 python3 tests/interactive/journey_realagent_write.py   # write the RAW golden
+    REIN_UPDATE_GOLDEN=1 python3 tests/interactive/journey_realagent_write.py   # write BOTH artifacts
     REIN_SHOW_NORMALIZED=1 python3 tests/interactive/journey_realagent_write.py
 
 Exit 0 = the ceremony held AND the normalized transcript matches the golden. Exit 1 =
 golden drift. Exit 2 = the ceremony itself broke (the agent never declared, the popup
 never fired or never overlaid a live TUI, no branch/PR landed, the PR author was not
-the delegated bot, or a collapse anchor was missing). Exit 3 = SKIPPED (`claude`,
-`tmux` or `pyte` absent — without any of them there is nothing to drive, and a skip
-must never look like a pass).
+the delegated bot, or rein's launch echo was missing from the stream). Exit 3 = SKIPPED
+(`claude`, `tmux` or `pyte` absent — without any of them there is nothing to drive, and
+a skip must never look like a pass).
 
 QUOTA: this launches ONE real `claude` and spends real API tokens. The task is one
 line on purpose.
@@ -120,7 +134,8 @@ import time
 
 import reinharness as H
 
-GOLDEN_NAME = "realagent_write.txt"
+GOLDEN_NAME = "realagent_write.txt"       # golden/ — COMPARED (rein's lines + Form A)
+SESSION_NAME = "realagent_write.txt"      # agent-sessions/ — SHOWN, never compared
 ISSUE_ENV = "REIN_DEMO_ISSUE"
 
 
@@ -135,8 +150,9 @@ def task_for(issue: int) -> str:
 
 
 # The tail of rein's own `rein: running: <cmdline>` echo — a line rein prints and we
-# control, so it is a DETERMINISTIC anchor for where claude's TUI region begins.
-def tui_start_anchor(issue: int) -> str:
+# control, so it is a DETERMINISTIC boundary between rein's launch surface (kept
+# verbatim in the golden) and everything claude paints (kept out of it entirely).
+def launch_echo(issue: int) -> str:
     return f"--dangerously-skip-permissions {task_for(issue)}"
 
 
@@ -277,6 +293,14 @@ def run_agent(env: dict, repo: str, issue: int, workdir: str) -> dict:
             workdir, issue,
         ))
 
+    def note(msg: str) -> None:
+        """Progress, with a clock. This journey drives a live LLM for ~10 minutes; the
+        ONE thing that matters is that the harness reaches drive_popup BEFORE the agent
+        declares (else the popup goes unanswered for its 60s and rein degrades to the
+        inline prompt — which looks like a rein bug and is not one). Timestamping the
+        stages is what makes that race visible instead of mysterious."""
+        print(f"[drive {time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
     forma: list[str] = []
     frames: list[tuple[str, str]] = []
     branch, prs = None, []
@@ -290,6 +314,7 @@ def run_agent(env: dict, repo: str, issue: int, workdir: str) -> dict:
     with H.tmux_pane_session(env=env) as pane:
         try:
             # A developer types the command in their pane. $TMUX comes FROM TMUX.
+            note("typed `rein run -- claude …` into the pane")
             pane.run_in_pane(f"bash {launch_path}")
 
             # PLUMBING, not a step (see the docstring): claude's folder-trust dialog
@@ -297,7 +322,9 @@ def run_agent(env: dict, repo: str, issue: int, workdir: str) -> dict:
             # nothing about it is asserted, and nothing about it lands in the golden.
             # The window is generous because the dialog can only paint AFTER rein's
             # sandbox preflight + srt launch have brought claude up.
-            H.dismiss_claude_trust_dialog(pane, timeout=240)
+            fired = H.dismiss_claude_trust_dialog(pane, timeout=240)
+            note(f"folder-trust dialog: {'dismissed' if fired else 'never fired'} "
+                 f"(plumbing either way)")
 
             # FRAME 1 — claude's TUI, live in the pane. (until_pane re-captures on a
             # ~50ms poll and drains the client on every iteration.)
@@ -305,6 +332,7 @@ def run_agent(env: dict, repo: str, issue: int, workdir: str) -> dict:
                 lambda scr: any(m in scr for m in CLAUDE_TUI_MARKERS), timeout=120
             ):
                 raise RuntimeError("claude's TUI never appeared in the pane")
+            note("claude's TUI is live in the pane")
             frames.append(
                 ("claude's TUI is LIVE in the pane — rein launched it sandboxed, and "
                  "the agent is working the task",
@@ -318,7 +346,10 @@ def run_agent(env: dict, repo: str, issue: int, workdir: str) -> dict:
             # WHILE it is up (the overlay proof), reads Form A off the RENDER, and types
             # the number into the CLIENT — where the popup's keyboard is (`send-keys`
             # can never reach a client-owned overlay).
+            note("ARMED at drive_popup — waiting for the agent to `rein declare` "
+                 "(the popup must not fire before this line)")
             forma = pane.drive_popup(H.PROMPT_HINT, str(issue), timeout=600)
+            note("popup answered on the attached client")
 
             # FRAME 2 — the same moment, from the PANE: claude's TUI, and NO Form A.
             frames.append(
@@ -380,25 +411,36 @@ def run_agent(env: dict, repo: str, issue: int, workdir: str) -> dict:
 
 
 # --------------------------------------------------------------------------
-# The transcript
+# The two artifacts (see the docstring: one COMPARED, one SHOWN)
 # --------------------------------------------------------------------------
 
 
-def milestone_block(repo: str, issue: int, pr: int, author: dict) -> list[str]:
-    """The MILESTONE| view: what the agent OBSERVABLY DID, from ground truth.
+def compared_golden(pane_raw: str, forma: list[str], issue: int) -> tuple[str, bool]:
+    """ARTIFACT 2 — the COMPARED golden: rein's OWN output + the popup's Form A.
 
-    Every line is phrased to normalize CORRECTLY, which is why the PR is written as its
-    URL: a bare `#<n>` would be eaten by the generic `#\\d+` -> <ISSUE> rule (it runs
-    before the `/pull/\\d+` -> <PR> rule), so the one line whose whole point is the PR
-    number would read `PR #<ISSUE>`. Harmless in the compare (it hits both sides
-    identically) but wrong to a reader; the URL form takes the `/pull/` rule and
-    normalizes to `.../pull/<PR>`. The agent's SELF-CHOSEN branch suffix is deliberately
-    NOT pinned — it is an invariant (a branch exists under the prefix), not golden
-    material, because a real agent names it differently every run.
+    Deterministic content ONLY, so a completely different claude session still compares
+    clean. One boundary + one regex (H.split_at_agent_launch): rein's launch surface
+    verbatim through its `rein: running:` echo, then column-0 `rein: …` lines. The Form
+    A the human answered sits between them, which is where it happened — the declare
+    blocked inside claude's TUI and the popup fired over it. Returns (text, found): a
+    missing launch echo is a CEREMONY BREAK, never a silently truncated golden.
+    """
+    launch, rein_tail, found = H.split_at_agent_launch(
+        H.build_raw_transcript(pane_raw), launch_echo(issue),
+    )
+    lines = launch + H.popup_block(forma) + [""] + rein_tail
+    return "\n".join(lines).strip("\n") + "\n", found
+
+
+def ground_truth_lines(repo: str, issue: int, pr: int, author: dict) -> list[str]:
+    """What the agent OBSERVABLY DID, from rein's helper.log + the GitHub API — never
+    scraped off the agent's screen, because a real agent's screen is not evidence.
+
+    Printed as run outcomes and used as context at the top of the session artifact. The
+    agent's SELF-CHOSEN branch suffix is deliberately not pinned anywhere: that a branch
+    exists under the prefix is an invariant; which suffix it picked is not.
     """
     return [
-        "ground truth — NOT terminal output: read from rein's helper.log and the "
-        "GitHub API after the run, because a real agent's screen is not evidence.",
         "helper.log: approval was routed to the tmux POPUP (launched), and the issue "
         "was CONFIRMED there by the human — the sandboxed agent has no tty.",
         f"helper.log: rein then APPROVED the write to {repo} and minted a WRITE-TIER "
@@ -412,21 +454,37 @@ def milestone_block(repo: str, issue: int, pr: int, author: dict) -> list[str]:
     ]
 
 
-def fold_milestones(transcript: str, lines: list[str]) -> str:
-    """Fold the MILESTONE| block in after the popup's Form A (which itself was folded at
-    the TUI placeholder) — so the artifact reads in the order it happened: rein's launch
-    surface, the agent's collapsed TUI, the Form A the human answered inside it, then
-    what that produced. The AGENT| frames are folded in after THIS block
-    (H.fold_agent_frames), so the record of the agent at work reads last."""
-    block = [""] + [(H.MILESTONE_TAG + ln).rstrip() for ln in lines]
-    out = transcript.split("\n")
-    last_popup = max(
-        (i for i, ln in enumerate(out) if ln.startswith(H.POPUP_TAG.rstrip())),
-        default=None,
-    )
-    if last_popup is None:
-        return transcript
-    return "\n".join(out[: last_popup + 1] + block + out[last_popup + 1:])
+def agent_session(frames: list[tuple[str, str]], ground_truth: list[str]) -> str:
+    """ARTIFACT 3 — the agent's session: rendered milestone frames, COMMITTED but NEVER
+    COMPARED (it lives in agent-sessions/, not golden/, so nothing diffs it).
+
+    This is the record a human reads to see what the agent did — and whether it was
+    confused. Each frame is a `capture-pane -p -J` render: the tmux server's OWN picture
+    of the pane, so it shows claude UNOBSCURED even while the popup overlay is up. The
+    ground truth heads the file as CONTEXT for reading the frames (it is an assertion,
+    not terminal output, which is exactly why it is not in the golden).
+    """
+    out = [
+        "This is the REAL agent's session — SHOWN, NOT COMPARED.",
+        "",
+        "It is regenerated on every REIN_UPDATE_GOLDEN=1 adopt and is never diffed: a",
+        "live LLM's prose, turn count and tool ordering are not a regression signal, and",
+        "a permanently-red journey trains everyone to ignore drift. What the run must do",
+        "is asserted as INVARIANTS in journey_realagent_write.py (a break is exit 2), and",
+        "rein's own output is compared in golden/realagent_write.txt. This file is here",
+        "so a human can READ what the agent actually did.",
+        "",
+        "Rendered frames (`tmux capture-pane -p -J`) at each milestone.",
+        "",
+        "--- ground truth (helper.log + the GitHub API; asserted as invariants) ---",
+    ]
+    out += [f"  {ln}" for ln in ground_truth]
+    for i, (label, render) in enumerate(frames, start=1):
+        rows = [ln.rstrip() for ln in (render or "").split("\n")]
+        while rows and not rows[-1]:
+            rows.pop()
+        out += ["", f"---- frame {i}/{len(frames)}: {label} ----"] + rows
+    return "\n".join(out).strip("\n") + "\n"
 
 
 # --------------------------------------------------------------------------
@@ -487,9 +545,7 @@ def main() -> int:
         pr_numbers = [p["number"] for p in prs]
         author = H.pr_author(repo, pr_numbers[0], env) if pr_numbers else {}
 
-        raw, collapsed = H.collapse_agent_tui(
-            H.build_raw_transcript(r["text"]), tui_start_anchor(issue),
-        )
+        raw, launch_found = compared_golden(r["text"], forma, issue)
 
         # ---- 1) The ceremony must hold, independent of the golden. ----
         forma_text = "\n".join(forma)
@@ -543,9 +599,10 @@ def main() -> int:
             (bool(author.get("is_bot")) and str(author.get("login", "")).startswith("app/"),
              f"the PR author must be the DELEGATED App bot, not the developer "
              f"(got {author!r})"),
-            (collapsed,
-             "both TUI-collapse anchors must be found (rein's `running:` echo and its "
-             "exit token accounting) — a missing anchor would silently truncate the golden"),
+            (launch_found,
+             "rein's `running:` launch echo must be in the pane stream — it is the "
+             "boundary between rein's own output and the agent's TUI, and without it "
+             "the golden would be silently truncated"),
         ]
         broken = [msg for ok, msg in invariants if not ok]
         if broken:
@@ -553,7 +610,7 @@ def main() -> int:
             for m in broken:
                 print(f"  - {m}", flush=True)
             print(f"  prompts={r['prompts']} expansions={r['expansions']} branch={branch} "
-                  f"prs={pr_numbers} author={author} collapsed={collapsed} "
+                  f"prs={pr_numbers} author={author} launch_found={launch_found} "
                   f"quit_ok={r['quit_ok']}", flush=True)
             print(f"  tui_live_under_popup={tui_live_under_popup} "
                   f"forma_absent_from_pane={forma_absent_from_pane} "
@@ -563,16 +620,24 @@ def main() -> int:
             print("--- the pane's render WHILE the popup was up (capture-pane) ---",
                   flush=True)
             print(pane_while_popup, flush=True)
-            print("--- transcript (raw, from pipe-pane) ---", flush=True)
+            # The compared golden holds NO agent content, so on a break it cannot show
+            # what the agent was doing when things went wrong. Dump the session frames
+            # here instead — that is the whole point of keeping them.
+            print("--- the agent's session (rendered frames — what it was actually "
+                  "doing) ---", flush=True)
+            print(agent_session(r["frames"],
+                                ["(the run broke before ground truth could be read)"]),
+                  flush=True)
+            print("--- rein's own output (the compared golden's content) ---", flush=True)
             print(raw, flush=True)
             return 2
 
-        # ---- 2) Build the artifact: rein's own output + the collapsed TUI + the popup's
-        #         Form A + the ground-truth milestones + the RENDERED AGENT| frames, then
-        #         compare NORMALIZED (which DROPS the frames: shown, not compared). ----
-        raw = H.fold_popup(raw, forma, anchor_prefix=H.AGENT_TUI_PLACEHOLDER)
-        raw = fold_milestones(raw, milestone_block(repo, issue, pr_numbers[0], author))
-        raw = H.fold_agent_frames(raw, r["frames"])
+        # ---- 2) The two artifacts. The golden (COMPARED) is already built above and
+        #         holds rein's own output + Form A — no agent content. The agent's
+        #         session (SHOWN) is a separate file that is never diffed. ----
+        truth = ground_truth_lines(repo, issue, pr_numbers[0], author)
+        session = agent_session(r["frames"], truth)
+
         print()
         print(raw, flush=True)
         print("--- outcomes (asserted; not in the golden) ---", flush=True)
@@ -586,26 +651,32 @@ def main() -> int:
               "TUI blocked on its `rein declare` tool call", flush=True)
         print("  claude's TUI REPAINTED after the popup closed (settled render, no Form "
               "A residue) and the run carried on to branch + PR", flush=True)
+        for ln in truth:
+            print(f"  {ln}", flush=True)
         print(f"  branch the AGENT chose: {branch}", flush=True)
-        print(f"  PR(s) at GitHub: {pr_numbers}", flush=True)
-        print(f"  PR author: {author} (delegated identity, not the developer)", flush=True)
-        print(f"  AGENT| frames folded into the golden: {len(r['frames'])} "
-              f"(SHOWN for a human to read; NOT compared)", flush=True)
 
         if os.getenv("REIN_SHOW_NORMALIZED"):
-            print("\n--- normalized (the comparison lens; AGENT| frames dropped) ---",
-                  flush=True)
+            print("\n--- normalized (the comparison lens) ---", flush=True)
             print(H.normalize_for_compare(raw), flush=True)
 
         if os.getenv("REIN_UPDATE_GOLDEN"):
             p = H.update_golden(GOLDEN_NAME, raw)
-            print(f"[golden UPDATED] {p} (raw)", flush=True)
+            s = H.write_agent_session(SESSION_NAME, session)
+            print(f"[golden UPDATED] {p} (raw; COMPARED)", flush=True)
+            print(f"[session UPDATED] {s} ({len(r['frames'])} rendered frames; SHOWN, "
+                  f"never compared — read it to see what the agent did)", flush=True)
             return 0
+
+        # The committed session artifact is what a human READS to see what the agent did;
+        # it is only rewritten on an adopt, so point at it rather than diffing it.
+        print(f"  the agent's session ({len(r['frames'])} rendered frames, SHOWN not "
+              f"compared): {H.AGENT_SESSION_DIR / SESSION_NAME}", flush=True)
 
         ok, diff = H.compare_golden(GOLDEN_NAME, raw)
         if ok:
-            print(f"[golden OK] fresh run matches golden/{GOLDEN_NAME} (normalized)",
-                  flush=True)
+            print(f"[golden OK] fresh run matches golden/{GOLDEN_NAME} (normalized) — a "
+                  f"DIFFERENT claude session still compares clean: no agent content is "
+                  f"in the compared golden", flush=True)
             return 0
         scratch = os.path.join(tempfile.gettempdir(), "realagent_write.fresh.txt")
         with open(scratch, "w") as f:
