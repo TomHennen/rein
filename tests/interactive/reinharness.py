@@ -1211,7 +1211,7 @@ def run_journey(steps, *, env=None, extra_env=None, timeout: int = 60) -> Journe
 # journey mostly declarative; journey_write_ceremony.py is the exemplar that
 # proved the shape. The four moving parts:
 #
-#   SBX_TAG / get_views  — EXACT host-vs-agent split. The in-sandbox script tags
+#   SBX_TAG / POPUP_TAG  — EXACT host-vs-agent split. The in-sandbox script tags
 #                          every line it emits with SBX_TAG, so a line is agent
 #                          iff it carries the tag. No content heuristics.
 #   normalize_transcript — swap the volatile bits (issue #, nonces, timestamps,
@@ -1280,54 +1280,7 @@ def _pty_lines(text: str) -> list[str]:
     return strip_ansi(text).replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
 
-def get_views(text: str) -> tuple[list[str], list[str], list[str]]:
-    """Split ONE interleaved transcript into (host_lines, sandbox_lines, popup_lines).
 
-    A line belongs to the SANDBOX child iff it STARTS with SBX_TAG, and to the POPUP
-    iff it STARTS with POPUP_TAG. `emit`/`runtagged` (and the popup fold) write the tag
-    at column 0, so real tagged output always leads with it — whereas rein's own
-    startup banner ECHOES the script body (`rein: running: bash -c …`), and those
-    HOST lines contain the literal `SBX| ` *mid-line* (inside the emit/runtagged
-    definitions). Matching on `startswith` (not a substring `find`) keeps that echo
-    on the HOST side; a substring test would mis-file the fragment after the tag as
-    agent output. One pass, so the views can never disagree about a line; the tag is
-    stripped from tagged lines.
-
-    THREE views because a transcript carries two tagged sources beside rein's own host
-    output: the sandbox child (SBX_TAG) and the client-owned tmux popup the human read
-    Form A in (POPUP_TAG). A caller wanting the Form A alone reads `popup`; the routing
-    invariant "no inline Form A on rein's own terminal" is
-    `PROMPT_HINT not in "\\n".join(host)`.
-
-    Tag-split is exact for whole, unwrapped lines. It is NOT the whole artifact:
-    callers still CURATE the views for the golden (dropping git object-count
-    noise, masking pty line-wrap), so "tag-split + curation" — not the split
-    alone — is what a human reviews.
-
-    A tagged line whose CONTENT is blank appears in a transcript as the bare tag
-    with its trailing space stripped (`SBX|`, `POPUP|`) — build_raw_transcript
-    rstrips every line, and a golden must not carry trailing whitespace (an editor
-    stripping it would read as drift). Such a line is still its view's, not the
-    host's, so the split accepts the bare tag too.
-    """
-    host: list[str] = []
-    agent: list[str] = []
-    popup: list[str] = []
-    for ln in _pty_lines(text):
-        if ln.startswith(SBX_TAG) or ln.rstrip() == SBX_TAG.rstrip():
-            agent.append(ln[len(SBX_TAG):].rstrip())
-        elif ln.startswith(POPUP_TAG) or ln.rstrip() == POPUP_TAG.rstrip():
-            popup.append(ln[len(POPUP_TAG):].rstrip())
-        else:
-            host.append(ln.rstrip())
-    return host, agent, popup
-
-
-# The popup box's corners, as tmux paints them (it picks a style depending on
-# terminal/config: square, rounded, or heavy). Used ONLY to locate the box on the
-# RENDERED screen — we no longer strip box art out of a byte stream, because we no
-# longer read a byte stream (#100). A row is the top/bottom border iff it carries
-# the matching left+right corner glyph.
 _BOX_TOP = re.compile(r"[┌╭┏].*[┐╮┓]")
 _BOX_BOTTOM = re.compile(r"[└╰┗].*[┘╯┛]")
 
@@ -1432,7 +1385,7 @@ def popup_block(popup_lines: list[str]) -> list[str]:
 
     rstrips the TAGGED line, not the content: Form A contains a genuinely blank line
     (rein prints one before "To approve"), which must still carry the tag to stay on
-    the popup side of get_views — but must not leave trailing whitespace in the
+    the popup side of the tag split — but must not leave trailing whitespace in the
     checked-in golden, where an editor stripping it would read as drift.
     """
     return [""] + [(POPUP_TAG + ln).rstrip() for ln in popup_lines]

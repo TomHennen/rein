@@ -212,21 +212,19 @@ in-sandbox script runs commands through the `run` helper in
 and then tags every line of its output (piping through `tr '\r' '\n'` so even
 git's progress redraws stay tagged). So the transcript reads like a real terminal
 session — `$ command` then its output then the next `$ command` — and everything
-the agent produced carries `reinharness.SBX_TAG` (`SBX| `). Then
-`reinharness.get_views(text) -> (host, sandbox, popup)` is a single pass — a line
-belongs to a tagged view iff it **starts with** that view's tag (rein's banner echoes
-the script body, so a *substring* test would mis-file those host lines; `startswith` is
-deliberate), and a tagged line whose content is blank arrives as the **bare tag**
-(`SBX|`, `POPUP|` — `build_raw_transcript` rstrips), which the split accepts by exact
-equality. Everything else is rein's own host output. Use `sandbox_preamble()` in a new
-journey's in-sandbox script so it inherits this exact shape.
+the agent produced carries `reinharness.SBX_TAG` (`SBX| `). Use `sandbox_preamble()`
+in a new journey's in-sandbox script so it inherits this exact shape.
 
-`get_views` is available when a journey wants the two sides *separately* (e.g. to
-assert an invariant about only the agent's output). The golden itself does NOT
-split them: `build_raw_transcript` keeps the full interleaved transcript, where
-the `SBX| `-tagged agent lines and rein's untagged host prompt already show the
-two views inline — the faithful "one terminal" artifact. There is **no whitelist**
-and no brand-new-line blind spot: everything is kept, so a new line survives.
+A line belongs to a tagged view iff it **starts with** that view's tag — a
+*substring* test would mis-file rein's banner, which echoes the script body and so
+contains the literal tag mid-line. (A tagged line whose content is blank arrives as
+the **bare tag** — `SBX|`, `POPUP|` — because `build_raw_transcript` rstrips.)
+
+The golden does NOT split the views: `build_raw_transcript` keeps the full
+interleaved transcript, where the `SBX| `-tagged agent lines and rein's untagged
+host prompt already show the two views inline — the faithful "one terminal"
+artifact. There is **no whitelist** and no brand-new-line blind spot: everything is
+kept, so a new line survives.
 
 ## Use the shared journey runner — it is THE interface for EVERY journey (#82)
 
@@ -392,7 +390,7 @@ in `reinharness.py`, so a new journey is mostly wiring:
 
 - `sandbox_preamble()` — the bash `emit`/`run` helpers a journey's in-sandbox
   script prepends; `run <cmd>` echoes `SBX| $ <cmd>` then tags its output.
-- `SBX_TAG`, `get_views` — the exact view split (for per-side assertions).
+- `SBX_TAG`, `POPUP_TAG` — the tags the view split is keyed on (`startswith`).
 - `build_raw_transcript(text)` — the RAW transcript for the golden file (real
   values; strips only ANSI + progress ticks + blank runs).
 - `normalize_for_compare(text)` — the comparison lens (raw → placeholders).

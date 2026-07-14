@@ -415,7 +415,7 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
 - `reinharness.py` — binary build/locate, env loading, the `ReinRun` pexpect
   wrapper (transcript capture, prompt matchers, sentinel parsing), in-sandbox
   script generation, host-side branch verify/delete, isolated-HOME init helpers,
-  and the shared **journey** API (`sandbox_preamble`, `SBX_TAG`, `get_views`,
+  and the shared **journey** API (`sandbox_preamble`, `SBX_TAG`, `POPUP_TAG`,
   `build_raw_transcript`,
   `normalize_for_compare`, `compare_golden`, `create_issue`/`close_issue`,
   `resolve_throwaway_repo`), plus `tmux_pane_session`/`TmuxPaneSession` (run rein

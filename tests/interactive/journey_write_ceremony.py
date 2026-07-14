@@ -35,9 +35,9 @@ is printed). Exit 2 = the ceremony itself broke.
 
 HOW THE TWO VIEWS ARE SPLIT (the #72 fix): the in-sandbox script tags EVERY line
 it emits with `SBX| ` (reinharness.SBX_TAG); git's own output is piped through
-`tr '\r' '\n' | ...tag` so even progress redraws stay tagged. reinharness.get_views
-then splits by the tag alone — no content heuristics. The host prompt is rein's
-own untagged output on the tty.
+`tr '\r' '\n' | ...tag` so even progress redraws stay tagged. A reader (or an
+assertion) splits the views by the tag alone — no content heuristics. The host
+prompt is rein's own untagged output on the tty.
 
 SELF-CONTAINED: creates its own throwaway issue via gh, and in a `finally`
 deletes both branches and closes the issue. Touches only the throwaway
