@@ -10,6 +10,18 @@ then on rein mints a fresh token per operation and asks you to confirm writes.
 For the full design and threat model, see [`docs/design.md`](docs/design.md) and
 [`docs/phase1-design.md`](docs/phase1-design.md).
 
+![A real claude session under rein: the agent works in the sandbox, and its push
+is gated until the human approves the issue in a tmux popup](demo/creds-joke.gif)
+
+*A real, unedited `claude` session under `rein run`.* The agent works inside the
+sandbox holding **no credential**. When it goes to push, writes are **locked**
+until it declares the issue it's working on — which raises the approval prompt
+**on your terminal, not its own**. You type the issue number; only then is a
+short-lived, repo-scoped token minted on the wire. The branch and PR land under
+the **App's identity**, not yours, and the write token is **revoked when the run
+exits**. Nothing here is staged: it is recorded from the live flow, and you can
+re-record it yourself — see [`demo/`](demo/).
+
 > **Status (2026-07-06).** Phase 1 **sandboxed mode is built and is the
 > default**: `rein run` launches the agent inside Anthropic's
 > [`sandbox-runtime`](https://github.com/anthropic-experimental/sandbox-runtime)
