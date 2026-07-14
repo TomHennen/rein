@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import re
 import shutil
@@ -2102,6 +2103,55 @@ def _tmux(socket: str, *args: str, env: dict | None = None) -> subprocess.Comple
 # and would otherwise bake its own version (`bash-5.2$`) into the golden.
 
 
+class AsciicastRecorder:
+    """An asciicast v2 writer — the RECORDING surface for the README demo (#99).
+
+    OPT-IN AND DEFAULT-OFF. A TmuxPaneSession only ever has one if a caller asks for
+    it (`start_recording`); every journey leaves it None and is byte-identical.
+
+    WHAT IT RECORDS, and why it is the ONLY thing worth recording: the bytes read from
+    the ATTACHED CLIENT's pty. That surface carries the pane's content AND the popup
+    composited on top of it — the tmux popup is a client-owned overlay, so `pipe-pane`
+    (pane-only) and `capture-pane` structurally cannot see it. A recording made from
+    either would show rein's write-approval Form A nowhere at all, which is the one
+    frame the demo exists for.
+
+    The harness already reads that pty on EVERY poll iteration (`pump_client` — rule
+    1's drain). This just TIMESTAMPS those reads. No extra reader, no second thread:
+    the drain and the recording are the same read.
+
+    Format (asciicast v2): a JSON header line, then one JSON array per event —
+        [<seconds since start, float>, "o", "<the bytes>"]
+    which `agg` renders straight to a GIF.
+    """
+
+    def __init__(self, path: str, *, width: int, height: int, term: str = "tmux-256color"):
+        self.path = path
+        self.t0 = time.time()
+        self._f = open(path, "w", encoding="utf-8")
+        header = {
+            "version": 2,
+            "width": width,
+            "height": height,
+            "timestamp": int(self.t0),
+            "env": {"TERM": term, "SHELL": os.environ.get("SHELL", "/bin/bash")},
+        }
+        self._f.write(json.dumps(header) + "\n")
+        self._f.flush()
+
+    def write(self, data: str) -> None:
+        """Append one output event. Flushed immediately: a real-agent take runs for
+        minutes, and an interrupted one must still leave a playable cast."""
+        if not data or self._f.closed:
+            return
+        self._f.write(json.dumps([round(time.time() - self.t0, 6), "o", data]) + "\n")
+        self._f.flush()
+
+    def close(self) -> None:
+        if not self._f.closed:
+            self._f.close()
+
+
 @dataclass
 class TmuxPaneSession:
     """A dedicated-socket tmux session running a REAL pane (a bare shell), with a
@@ -2121,6 +2171,9 @@ class TmuxPaneSession:
     screen: RenderedScreen  # the client's pty, run through a terminal (the popup's home)
     forma: list[str] = field(default_factory=list)
     pane_while_popup: str = ""
+    # OPT-IN, DEFAULT-OFF (#99). None => `pump_client` behaves EXACTLY as before, so
+    # every journey is byte-identical; only the demo recorder ever sets it.
+    recorder: AsciicastRecorder | None = None
     _final_raw: str | None = None
 
     # -- the three surfaces --------------------------------------------------
@@ -2162,8 +2215,13 @@ class TmuxPaneSession:
 
     def send_pane_literal(self, text: str) -> None:
         """Type LITERAL text into the pane (`send-keys -l`), no Enter — so a
-        command's own characters are never interpreted as tmux key names."""
-        _tmux(self.socket, "send-keys", "-t", self.session, "-l", text)
+        command's own characters are never interpreted as tmux key names.
+
+        The trailing `--` is LOAD-BEARING: without it tmux parses text that STARTS with
+        a dash as its own options, so typing `rein run -- claude …` a chunk at a time
+        silently loses the `--` separator and the command runs mangled (observed while
+        recording the demo). `--` ends tmux's option parsing; text is text."""
+        _tmux(self.socket, "send-keys", "-t", self.session, "-l", "--", text)
 
     def run_in_pane(self, command: str) -> None:
         """Type `command` into the pane's shell and press Enter — exactly what a
@@ -2180,17 +2238,47 @@ class TmuxPaneSession:
 
     def pump_client(self, seconds: float = 0.15) -> None:
         """Read whatever the client's pty has RIGHT NOW and feed it into
-        `self.screen`. ONE act, TWO jobs: it is rule 1's drain (an unread pty fills
-        and stalls tmux's attach, and with it the popup) AND the render update. Every
-        poll step calls it; nothing else reads the client."""
+        `self.screen`. ONE act, TWO (or three) jobs: it is rule 1's drain (an unread
+        pty fills and stalls tmux's attach, and with it the popup), the render update,
+        AND — only if a caller opted in via `start_recording` — the asciicast tap.
+        Every poll step calls it; nothing else reads the client."""
         deadline = time.time() + seconds
         while True:
             try:
-                self.screen.feed(self.client.read_nonblocking(size=65536, timeout=0.05))
+                data = self.client.read_nonblocking(size=65536, timeout=0.05)
             except (pexpect.TIMEOUT, pexpect.EOF, OSError, ValueError):
                 break
+            self.screen.feed(data)
+            if self.recorder is not None:  # default None: no-op, byte-identical (#99)
+                self.recorder.write(data)
             if time.time() >= deadline:
                 break
+
+    # -- recording (opt-in; #99's README demo) --------------------------------
+
+    def start_recording(self, path: str, *, term: str = "tmux-256color") -> AsciicastRecorder:
+        """Begin writing every subsequent CLIENT read to `path` as asciicast v2.
+
+        The client's pty is the recording surface BECAUSE it is the only one that
+        carries the pane AND the popup overlaid on it (see AsciicastRecorder). t=0 is
+        NOW, so the cast opens on whatever the caller does next — not on the harness's
+        own attach/priming keystrokes.
+        """
+        self.recorder = AsciicastRecorder(path, width=self.width, height=self.height,
+                                          term=term)
+        return self.recorder
+
+    def stop_recording(self) -> None:
+        if self.recorder is not None:
+            self.recorder.close()
+            self.recorder = None
+
+    def hold(self, seconds: float) -> None:
+        """Idle for `seconds` while STILL DRAINING the client (rule 1) — a bare
+        `time.sleep` here would stall tmux's attach and freeze the pane. Used by the
+        demo to leave the approval Form A on screen long enough for a viewer to READ
+        it (a plain sleep would also record nothing)."""
+        self.until(lambda: False, timeout=seconds, poll=0.05)
 
     def until(self, pred, *, timeout: float = 60.0, poll: float = 0.05) -> bool:
         """THE poll primitive: re-evaluate `pred()` every `poll` seconds until it is
@@ -2303,6 +2391,7 @@ class TmuxPaneSession:
         return self.forma
 
     def close(self) -> None:
+        self.stop_recording()  # no-op unless a caller opted in
         # Snapshot the pipe-pane stream BEFORE the server (and the scratch dir it
         # writes into) go away, so the transcript survives teardown.
         if self._final_raw is None:
