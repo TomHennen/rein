@@ -147,9 +147,11 @@ no frame shows it, the take is a re-record, not a re-pace — see above); the di
 push to `agent/<issue>/…` and the PR; and the final `rein: revoked 1 of 1 write token(s)
 on exit`.
 
-**Known, and NOT fixable by re-recording (issue #119 — open; shipping the take as-is is the
-maintainer's call, not a settled decision):** the agent narrates a `.git/config` write error
-("the `.git/config` write errors are sandbox noise — the push itself succeeded").
+**Known, and NOT fixable by re-recording (issue #119, open).** The agent narrates a
+`.git/config` write error ("the `.git/config` write errors are sandbox noise — the push
+itself succeeded"). Tom's call, made explicitly: **ship this take as-is and re-record once
+#119 lands** — the GIF is honest (a real agent hits a real, filed bug and correctly reasons
+that the push still landed), and re-recording is one live run away.
 `git push -u` writes `branch.<x>.remote` + `.merge`
 into the sandbox's read-only `.git/config`. #103 strips `-u` in the **`rein-git` shim** —
 but that shim is installed under `$HOME/.local/state/rein/shim`, and **$HOME is hidden in
