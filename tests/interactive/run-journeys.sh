@@ -18,8 +18,9 @@
 #                                   # the raw fresh transcript) and exits non-zero.
 #   run-journeys.sh --sandbox       # [A] then [B]: also run the live sandbox suites
 #                                   # (REIN_SANDBOX_E2E Go tests + .git hardening +
-#                                   # agent contract). PASS/FAIL per suite; non-zero
-#                                   # exit if ANY suite (or any journey) fails.
+#                                   # agent contract + real-agent sandbox startup).
+#                                   # PASS/FAIL per suite; non-zero exit if ANY suite
+#                                   # (or any journey) fails.
 #   REIN_UPDATE_GOLDEN=1 run-journeys.sh
 #                                   # ADOPT: rewrite each RAW golden from a live run.
 #                                   # `git diff` then shows the new raw golden to commit.
@@ -156,6 +157,28 @@ if [ "$RUN_SANDBOX" -eq 1 ]; then
   else
     sbx_summary+=("SKIP  agent contract read-back (no 'claude' on PATH — real-agent test skipped)")
     echo "=== agent contract read-back: SKIPPED (no 'claude' on PATH) ==="
+    echo
+  fi
+
+  # Interactive: a REAL claude actually STARTS in the sandbox and answers (the
+  # egress/EROFS/MCP-startup floor). SELECTED here, never self-skipped in run.sh's
+  # sweep. Missing 'claude' is a graceful SKIP (external dep + quota); but 'claude'
+  # present with pyte MISSING is a HARD FAIL — a real agent's TUI can only be read
+  # off a pyte render (#100), so its absence in an opted-in env is a misconfig, not
+  # coverage that quietly vanishes.
+  if command -v claude >/dev/null 2>&1; then
+    if python3 -c 'import pyte' >/dev/null 2>&1; then
+      run_suite "real agent starts in sandbox (interactive, real claude: realagent_e2e.py)" "$HERE" \
+        python3 -m unittest -v realagent_e2e
+    else
+      sbx_summary+=("FAIL  real agent in sandbox (claude present but pyte MISSING — apt install python3-pyte)")
+      sbx_fail=1
+      echo "=== real agent in sandbox: FAIL (claude present, pyte missing — apt install python3-pyte) ==="
+      echo
+    fi
+  else
+    sbx_summary+=("SKIP  real agent in sandbox (no 'claude' on PATH — real-agent test skipped)")
+    echo "=== real agent in sandbox: SKIPPED (no 'claude' on PATH) ==="
     echo
   fi
 

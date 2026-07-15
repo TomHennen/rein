@@ -5,7 +5,7 @@ runner, and how to author the next one, read tests/interactive/CLAUDE.md — non
 that lives here.
 
 THE COVERAGE GAP (#101 "gap 2"): every other journey's "agent" is a deterministic
-bash script we wrote, and `test_realagent_e2e` runs a REAL claude but only asks it
+bash script we wrote, and `realagent_e2e.py` runs a REAL claude but only asks it
 `2+2`. So the thing the product is actually ABOUT — a real LLM meeting rein's write
 gate and working the whole ceremony — had never been tested. This journey drives a
 REAL `claude` in the sandbox, gives it a one-line task, and asserts it comes out the

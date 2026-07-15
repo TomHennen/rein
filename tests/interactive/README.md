@@ -79,7 +79,7 @@ a new `golden/*.txt`). See `tests/interactive/CLAUDE.md` for the authoring rules
 | 4 | **The denial path** — human types the wrong number; the declare fails and writes stay locked | **COVERED** | `test_write_approval.py::test_wrong_answer_denies_and_writes_stay_locked` (edge case — a plain test, no golden) |
 | 5 | **Ref cross-check** — after approval, a non-`agent/<n>/<nonce>` ref is still rejected (#35 decision C) | **COVERED** | `test_write_approval.py::nonmatching_ref_rejected_after_approval` + phase 4 of the ceremony golden |
 | 6 | **Scope expansion** — agent (scoped to repo A) declares an issue that lives in repo B, OUTSIDE scope (`rein declare <n> --repo B`); the SCOPE EXPANSION prompt fires with its distinct "this ADDS a repo to the scope ceiling" header, the human approves + answers the persist `[y/N]`, and the widened token lets the agent clone + push to repo B | **COVERED** | `journey_scope_expansion.py` → **`golden/scope_expansion.txt`** (approve → run-only → push-to-B, ONE story) + `test_scope_expansion.py` (the DENY leg + the CROSS-OWNER structural rejection, as plain assertions — no golden) |
-| 7 | **Real agent in the sandbox** — interactive `claude` under `rein run`, reaching `api.anthropic.com` | **COVERED** | `test_realagent_e2e.py` (live since CP4.5 landed egress) |
+| 7 | **Real agent in the sandbox** — interactive `claude` under `rein run`, reaching `api.anthropic.com` | **COVERED** | `realagent_e2e.py` (live since CP4.5 landed egress; selected by `run-journeys.sh --sandbox`, not swept by `run.sh`) |
 | 8 | **tmux-popup grant** — the DEFAULT TUI path (#37): with `$TMUX` set and `REIN_APPROVAL` unset the confirm prompt fires in a `tmux popup -E "rein approval grant"`, NOT inline; the operator answers there | **COVERED** | `journey_tmux_popup_approval.py` → **`golden/tmux_popup_approval.txt`**. Drives a REAL popup in the REAL configuration (`reinharness.tmux_pane_session`, a DEDICATED tmux socket, never the operator's own server): rein runs INSIDE a real tmux pane — typed into the pane's shell, so `$TMUX`/`$TMUX_PANE` are INHERITED from tmux, not synthesized — and the popup OVERLAYS that live pane, rendering on an ATTACHED pexpect client the harness answers through (a popup is a client-owned overlay — `send-keys` can't reach it, and `capture-pane` can't SEE it; keys go to the client's pty). The golden is the pane's own `pipe-pane` byte stream. Newly assertable because it runs for real: while Form A is up it is on the client's pyte render and ABSENT from `capture-pane` of the pane (which still shows the live `$ rein declare <n>` it is blocking on), and the pane repaints once the popup closes. Positive proof of the surface: the golden shows the declare confirmed with the Form A block ABSENT (it rendered in the popup, unlike the write-ceremony golden's inline block), and rein's `helper.log` records `launching tmux popup` + `issue #<n> CONFIRMED via tmux popup`. SKIPs (exit 3) if `tmux` or `pyte` is missing |
 | 9 | **Sandbox filesystem boundary** — from INSIDE (#59/#63/#64): credential stores + `~/.ssh` + `~/.aws` + rein's own app key read as *absent*; `$HOME` is ephemeral (a write succeeds into tmpfs, then never persists on the host); the `.git` host-exec escape is CLOSED (`mv .git`→"Device or resource busy", `.git/hooks` + `.git/config` read-only); ordinary edits still `add`/`commit`; and the injected agent contract is shown *verbatim* | **COVERED** | `journey_sandbox_filesystem.py` → **`golden/sandbox_filesystem.txt`** (a deterministic bash "agent" — reproducible, unlike real claude) + gated `test_git_hardening.py` (the `.git` escape, incl. the `config.worktree` edge) + `test_agent_contract.py` (real-claude contract read-back — LLM phrasing varies, so NOT golden material). **Complementary evidence:** `journey_credential_boundary.py` → **`golden/credential_boundary.txt`** proves the same hide with an INDEPENDENT third-party scanner (`bagel`) run as a differential — finds 4 planted creds `--direct`, 0 sandboxed — a sweep that catches un-enumerated paths the `cat`-checks can't (the #55 unknown-unknown class). Skips if `bagel` (GPL-3.0, external CLI only) is absent |
 | 10 | **Direct mode (`--direct`)** — the SAME #35 ceremony UNSANDBOXED: reads flow, a pre-declaration push is BLOCKED by the credential-helper channel (a non-secret PLACEHOLDER credential + a stderr hint naming `rein declare` — issues #45/#35 — then git's OWN `Authentication failed`, NOT a proxy `remote error: rein:` ERR), `rein declare <n>` prompts on the host terminal, the verified push LANDS. No proxy, so no ref cross-check (that stays a sandbox feature) | **COVERED** | `journey_direct_mode.py` → **`golden/direct_mode.txt`** (the direct twin of the write ceremony; contrast documented in its docstring) |
@@ -111,12 +111,12 @@ journey, no demo yet), **UNDRIVEABLE** (needs a browser — say so and move on).
 - **`pyte`** (`sudo apt install python3-pyte`) — a TEST-ONLY, in-memory terminal
   emulator, needed only by the surfaces that REDRAW: `journey_realagent_write.py`
   (its biggest consumer — a real claude's TUI *and* the popup), the tmux-popup
-  journey, and `test_realagent_e2e`. Everything else runs without it (the import is
-  lazy): a **journey** that needs it SKIPs with **exit 3**, and the one **plain
-  test** that needs it (`test_realagent_e2e`, swept by `run.sh`) is guarded with
-  `unittest.skipUnless(H.pyte_available(), …)` — so `run.sh` stays green on a box
-  without pyte. LGPLv3, test-only — never linked into or shipped with the Go binary
-  (hard-constraint #4).
+  journey, and `realagent_e2e.py`. Nothing in `run.sh`'s default sweep needs it (the
+  import is lazy). A **journey** that needs it SKIPs with **exit 3**; the real-agent
+  tests that need it are **not** swept by `run.sh` at all — they are selected by
+  `run-journeys.sh --sandbox`, where a missing pyte (with `claude` present) is a HARD
+  FAIL, not a silent skip. LGPLv3, test-only — never linked into or shipped with the
+  Go binary (hard-constraint #4).
 - **Host `gh` authed** as the repo owner — used only for host-side branch
   *verification* and *cleanup* (the operator's own token, never the sandbox).
 - **No pytest needed.** The suite uses the stdlib `unittest`. (This VM has no
@@ -193,10 +193,14 @@ The alias tests deliberately DROP `--no-alias` (it would suppress the very
 behavior under test); the isolated `HOME` is what keeps them safe — the rc file
 they write is the tempdir's.
 
-### `test_realagent_e2e.py` — the real-agent loop, LIVE
+### `realagent_e2e.py` — the real-agent loop, LIVE
 
-A real `claude` running interactively inside the sandbox under `rein run`. Was
-skipped while CP4.5 (sandbox egress) was outstanding; CP4.5 landed, so it runs.
+A real `claude` running interactively inside the sandbox under `rein run`. **Not
+swept by `run.sh`** (named off the `test_*.py` pattern on purpose): it needs a real
+`claude` + `pyte` + live egress + quota, so it is SELECTED by `run-journeys.sh
+--sandbox` [B], not self-skipped in the default sweep (a sweep-skip reads as a
+silent pass — the #68 footgun). There, a missing `claude` is a graceful SKIP, but
+`claude` present with `pyte` missing is a HARD FAIL.
 
 ### `journey_write_ceremony.py` — journey #2, with a GOLDEN
 
@@ -434,9 +438,12 @@ linger — safe to delete by hand. The suite currently leaves the throwaway clea
   forensic log delta).
 - `itest_base.py` — `ReinTestCase` (one-time build, env + throwaway repo,
   disposable-branch cleanup) and the unittest/xfail/skip rationale.
-- `test_write_approval.py`, `test_init_interactive.py`, `test_realagent_e2e.py`,
+- `test_write_approval.py`, `test_init_interactive.py`,
   `test_confirm_shows_title.py` (gated on a real issue + a title word; a real
   regression spec for #35's Form A title display — see its docstring).
+- `realagent_e2e.py` — the real-agent sandbox-startup check. NOT a `test_*.py` (so
+  `run.sh` never sweeps it); selected by `run-journeys.sh --sandbox` [B]. See its
+  section above.
 - `test_golden_shape.py` — stack-free lint: every journey has a golden, and
   `normalize_for_compare` is idempotent on it. Runs in the sweep and standalone.
 - `journey_write_ceremony.py` + `golden/write_ceremony.txt` — journey #2 and its

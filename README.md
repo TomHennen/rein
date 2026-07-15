@@ -324,9 +324,9 @@ Three layers, from hermetic to live:
   [`tests/interactive/README.md`](tests/interactive/README.md).
 
   ```bash
-  tests/interactive/run.sh                    # whole suite
+  tests/interactive/run.sh                    # whole suite (deps-light; no real claude)
   tests/interactive/run.sh test_write_approval # one module
-  tests/interactive/run.sh test_realagent_e2e  # the real-agent e2e (runs one claude)
+  tests/interactive/run-journeys.sh --sandbox  # the real-agent e2e (runs one claude) + sandbox invariants
   ```
 
   The interactive suite is **never** run by `go test ./...` (no `.go` files
