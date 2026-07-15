@@ -33,6 +33,14 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 - Key storage: hand-rolled `internal/keystore` file backend (PEMs under ConfigDir with uid + mode `0o077` + O_NOFOLLOW checks). `github.com/99designs/keyring` (MIT) was planned but never adopted — it is NOT in go.mod; `internal/keystore` is the swap point for future backends (hard-constraint #6).
 - Hardware keys (Phase 1+): `github.com/facebookincubator/sks` (Apache 2.0). Not used in Phase 0.
 - CLI: `github.com/spf13/cobra`
+- Terminal emulation in TESTS ONLY: `pyte` (LGPLv3), installed as the system package
+  `python3-pyte` (`sudo apt install python3-pyte`), same as `pexpect`. It renders a pty's
+  bytes into a SCREEN, which is how `tests/interactive/` asserts on anything that REDRAWS
+  (the tmux approval popup, a real `claude` TUI) instead of regex-stripping ANSI out of the
+  raw byte stream (issue #100). **Test-only is load-bearing for hard-constraint #4**: it is
+  a Python dev/test dependency, never linked into or shipped with the Go binary, and Tom
+  approved it explicitly on that basis. It is imported LAZILY in `reinharness.py`, so the
+  line-oriented journeys run without it. Rules: `tests/interactive/CLAUDE.md`.
 
 ## Dev environment
 
@@ -58,6 +66,7 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 - File GitHub issues for deferred items via `gh issue create`. Don't bury followups in commit messages alone — they get lost.
 - **Fix smells now, don't defer.** When you notice a fixable code smell during work — formatting inconsistency, hand-counted spacing, a missing escape-hatch env var, a cleanup the reviewer flagged as a nit — fix it in the same pass. Don't ask "fix or defer?"; don't surface it as a deferred item; don't leave it for someone else. Only surface for decision when the fix changes behavior in a way the human should weigh in on (security, API shape, user-visible UX). Pure source-cleanliness fixes are decisions you should already be making. Bias: prefer fixing slightly more than feels necessary over asking.
 - No emojis in files unless explicitly requested.
+- **Keep comments and docstrings terse.** Comment the *why* only where it isn't obvious from the code; don't narrate the *what*. One tight sentence beats a paragraph. Design rationale and hard-won empirical findings belong in the PLAN/docs, not stapled into source as multi-paragraph docstrings. The heavy-comment style in some existing files is not a convention to imitate — when you touch such a file, trim toward terse rather than matching it.
 - **You can drive the tty yourself — the write path does NOT need a human present.** The pexpect suite in `tests/interactive/` gives `rein` a real pty, so it IS the human stand-in: it answers the Form A prompt exactly as a developer would. An agent can and **should** self-verify the whole write ceremony (declare → confirm → push lands) with nobody at the keyboard — don't park verification for the human. This does not weaken the model: the *sandboxed* agent has no tty at all and still cannot self-approve; what pexpect drives is the host-side prompt. A **manual script** is only for what pexpect genuinely cannot drive: a **real browser** — i.e. the GitHub App *creation* (manifest) flow. Nothing else.
 - **Every behavior-changing PR moves a JOURNEY, and journeys ship a golden transcript — not just green tests.** A journey walks a major user path live and its deliverable is a checked-in, human-reviewable golden transcript (drift = red = re-review). Before a PR that touches a journey, run **`tests/interactive/run-journeys.sh`** and commit the regenerated golden. Full authoring rules — the default-keep golden model, journey-vs-plain-test distinction, the `SBX|` view-split, expect→act→expect, shared helpers, and the `rein init` (not `source ./dev-env`) setup — live in **`tests/interactive/CLAUDE.md`**; the catalogue table is in `tests/interactive/README.md`. Why this matters: green suites hid a skipped install-coverage check (#68, one path untested) and would have hidden the #35 `.git`-remote push break (the fake ignored the repo field) — a live journey catches what a unit test's single path doesn't.
 

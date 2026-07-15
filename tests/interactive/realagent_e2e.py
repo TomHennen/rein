@@ -1,4 +1,12 @@
-"""test_realagent_e2e — a REAL agent (`claude`) running INSIDE the sandbox.
+"""realagent_e2e — a REAL agent (`claude`) running INSIDE the sandbox.
+
+NOT swept by `run.sh` (deliberately named off the `test_*.py` discovery pattern):
+it needs a real `claude`, `pyte`, live `api.anthropic.com` egress, and API quota,
+so it is SELECTED by the runner, not self-skipped in the default sweep. A skip
+inside the sweep reads as a silent pass — the #68 footgun. `run-journeys.sh
+--sandbox` invokes it [B]: SKIP if `claude` is absent (not everyone has it), but
+a HARD FAIL if `claude` is present and `pyte` is not (pyte is a cheap `apt install`
+— its absence in an opted-in real-agent environment is a misconfig, not a skip).
 
 For a long time this was SKIPPED, blocked on CP4.5 (the sandbox allowed only
 GitHub egress, so `claude` could not reach api.anthropic.com). CP4.5 landed the
@@ -34,6 +42,12 @@ from itest_base import ReinTestCase
 
 
 class RealAgentEndToEnd(ReinTestCase):
+    # A TUI REDRAWS, so both helpers below assert on a pyte-RENDERED SCREEN (#100):
+    # `read_until_ready` / `send_and_collect` pump this pty into a RenderedScreen,
+    # which raises PyteMissing without pyte. There is NO skip guard on purpose: this
+    # file is not swept by run.sh, and the runner (run-journeys.sh --sandbox) only
+    # selects it where `claude` is present — so a missing pyte here is a misconfigured
+    # opted-in environment and must HARD-FAIL loudly, not skip. See the module docstring.
     def test_claude_starts_in_sandbox_and_answers(self):
         """`rein run -- claude` starts a real agent in-sandbox (no EROFS/hang) and
         answers 2+2 -> '4'."""

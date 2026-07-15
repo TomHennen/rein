@@ -10,6 +10,13 @@ then on rein mints a fresh token per operation and asks you to confirm writes.
 For the full design and threat model, see [`docs/design.md`](docs/design.md) and
 [`docs/phase1-design.md`](docs/phase1-design.md).
 
+![A real claude session under rein: the agent works in the sandbox, and its push
+is gated until the human approves the issue in a tmux popup](demo/creds-joke.gif)
+
+*A real `claude` session under `rein run`: the sandboxed agent holds no
+credential, and its push stays locked until you approve the issue it declared —
+recorded live, and reproducible ([`demo/`](demo/)).*
+
 > **Status (2026-07-06).** Phase 1 **sandboxed mode is built and is the
 > default**: `rein run` launches the agent inside Anthropic's
 > [`sandbox-runtime`](https://github.com/anthropic-experimental/sandbox-runtime)
@@ -317,9 +324,9 @@ Three layers, from hermetic to live:
   [`tests/interactive/README.md`](tests/interactive/README.md).
 
   ```bash
-  tests/interactive/run.sh                    # whole suite
+  tests/interactive/run.sh                    # whole suite (deps-light; no real claude)
   tests/interactive/run.sh test_write_approval # one module
-  tests/interactive/run.sh test_realagent_e2e  # the real-agent e2e (runs one claude)
+  tests/interactive/run-journeys.sh --sandbox  # the real-agent e2e (runs one claude) + sandbox invariants
   ```
 
   The interactive suite is **never** run by `go test ./...` (no `.go` files

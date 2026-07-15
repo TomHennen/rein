@@ -4,33 +4,48 @@ This is ONE journey. For what a journey IS, the golden-transcript rule, and how 
 author the next one, read tests/interactive/CLAUDE.md — none of that lives here.
 
 Where journey_write_ceremony shows the GIT-push boundary and journey_sandbox_filesystem
-shows the FILESYSTEM boundary, THIS journey shows the gh / REST-API WRITE boundary — the
-thing the sandbox-gh-scopes fix is ABOUT. It is the direct proof of that fix: the exact
-`gh` write it exercises could NOT succeed before the fix and DOES after it.
+shows the FILESYSTEM boundary, THIS journey shows the gh / REST-API + GraphQL WRITE
+boundary — the thing the sandbox-gh-scopes fix is ABOUT. It is the direct proof of that
+fix: the exact `gh` writes it exercises could NOT succeed before the fix and DO after it.
 
-The whole story is the GAP between two attempts at the SAME `gh` write, one terminal:
+It proves TWO separate write paths in one run, both gated the same way but exercising
+different scopes/protocols:
+
+  1. an issue-comment write (`gh api -X POST .../issues/<n>/comments`), which needs
+     `issues: write`; and
+  2. a `gh pr create` (issue #101 "gap 1" — a live demo hit `403 Resource not
+     accessible by integration` on exactly this path and NO test caught it), which
+     needs BOTH `pull_requests: write` AND a GraphQL read `gh pr create` performs
+     first to resolve the repo — a read rein's proxy classifies and gates SEPARATELY
+     from REST. A green PHASE5 is the regression proof that both the scope and the
+     GraphQL gate are correct in-sandbox.
+
+The whole story is the GAP between two attempts at the SAME `gh` comment write, one
+terminal, plus the PR-create leg that rides on the same post-declare token:
 
   * the AGENT's view (in-sandbox: no tty, no token) — a `gh api -X POST .../comments`
     issue-comment write BEFORE any declaration, DENIED by rein's declare gate (a local
     HTTP 403 carrying "rein: no issue declared for this run" — nothing minted, GitHub
     never contacted); then `rein declare <n>`; then the SAME gh write, which now LANDS
-    (HTTP 201, the comment body echoed back); and
+    (HTTP 201, the comment body echoed back); then a commit pushed to
+    `agent/<n>/<nonce>` and a `gh pr create` against it, which must ALSO land; and
   * the HUMAN's view (host tty) — the Form A prompt carrying the issue title/state/HOME
     repo FETCHED from GitHub, then `[approved]`.
 
-Before the fix, the sandbox proxy injected a CONTENTS-ONLY token into every github
+Before the #91 fix, the sandbox proxy injected a CONTENTS-ONLY token into every github
 request — so `git push` landed but every `gh`/REST/GraphQL issue-or-PR write 403'd with
 'Resource not accessible by integration', falsifying the injected contract's promise
 that approving covers ALL writes. The fix wires the sandbox proxy's write tier to the
 implement-role token (contents+issues+pull_requests write), so the post-declare gh
-write lands. THIS journey is the regression proof: a green run means the contract is
-true in-sandbox.
+writes land. THIS journey is the regression proof: a green run means the contract is
+true in-sandbox — comment write AND PR creation both.
 
 DELIVERABLE: a RAW, human-reviewable transcript at golden/gh_write.txt — real repo, real
-issue title, the real rein 403 text, the real 201 echo — so Tom SEES the deny-before /
-lands-after contrast. Determinism does NOT live in the file: a fresh run is compared to
-the golden by normalizing BOTH sides first (reinharness.compare_golden), so a different
-issue number still matches while a genuinely new or changed line trips drift.
+issue title, the real rein 403 text, the real 201 echo, the real pushed branch, the real
+PR URL — so Tom SEES the deny-before / lands-after contrast AND the PR landing.
+Determinism does NOT live in the file: a fresh run is compared to the golden by
+normalizing BOTH sides first (reinharness.compare_golden), so a different issue number /
+branch nonce / PR number still matches while a genuinely new or changed line trips drift.
 
     python3 tests/interactive/journey_gh_write.py          # exit 0 == matches (normalized)
     REIN_UPDATE_GOLDEN=1 python3 tests/interactive/journey_gh_write.py   # write the RAW golden
@@ -39,12 +54,15 @@ issue number still matches while a genuinely new or changed line trips drift.
 
 Exit 0 = the ceremony held AND the normalized transcript matches the golden. Exit 1 =
 drift (RAW fresh transcript dropped to a scratch path; NORMALIZED diff printed). Exit 2 =
-the ceremony itself broke (deny-before failed to deny, or lands-after failed to land).
+the ceremony itself broke (deny-before failed to deny, lands-after failed to land, the
+push failed, or `gh pr create` failed — including a REAL `pull_requests: write` or
+GraphQL-gate 403, which is a product bug, not a test bug: see the module's PHASE5).
 
 SELF-CONTAINED: creates its own throwaway issue, clones the throwaway for the writable
-checkout, and in a `finally` DELETES the posted comment (host-side, verified first) and
-closes the issue. Touches only the throwaway (hard-constraint #1). The repo is resolved
-the rein-init way (reinharness.resolve_throwaway_repo).
+checkout, and in a `finally` DELETES the posted comment (host-side, verified first),
+closes the PR it opened, deletes the pushed branch, and closes the issue. Touches only
+the throwaway (hard-constraint #1). The repo is resolved the rein-init way
+(reinharness.resolve_throwaway_repo).
 """
 
 from __future__ import annotations
@@ -71,13 +89,25 @@ COMMENT_BODY = (
     "Safe to delete."
 )
 
+# The PR title/body the sandboxed `gh pr create` opens (issue #101 "gap 1"). Fixed
+# (not per-run) so the golden shows a stable proof line; each run opens its OWN PR
+# against its OWN fresh branch, so there is no cross-run collision. No apostrophes
+# (this text is embedded into the in-sandbox bash script via Python repr(), which
+# single-quotes it for the shell — an apostrophe would break that quoting).
+PR_TITLE = "rein gh-write journey: PR leg (safe to close)"
+PR_BODY = (
+    "Opened by a SANDBOXED `gh pr create` after declare+approve, to prove "
+    "pull_requests:write AND the GraphQL read gh pr create performs first both "
+    "work in-sandbox (issue #101). Safe to close."
+)
+
 
 # --------------------------------------------------------------------------
 # The in-sandbox agent script — a deterministic bash "agent", every step tagged
 # --------------------------------------------------------------------------
 
 
-def gh_write_script(repo: str, issue: int) -> str:
+def gh_write_script(repo: str, issue: int, branch: str) -> str:
     """A `bash -c` body run as the srt child. It cannot be puppeted line-by-line
     (one sandboxed process), so each STEP emits a tagged `@PHASE..`/`@..._RC`
     sentinel and the test asserts on those IN SEQUENCE. Commands go through `run`
@@ -89,6 +119,18 @@ def gh_write_script(repo: str, issue: int) -> str:
     after-write uses `--jq .body` so the golden shows a STABLE proof line (the
     comment body we control) instead of the volatile created-comment JSON
     (id/urls/timestamps). `cd "$0"` enters the writable checkout mount.
+
+    PHASE4/PHASE5 (issue #101 "gap 1") ride the SAME post-declare token to prove
+    the `gh pr create` path, which the comment write alone does not exercise:
+    PHASE4 commits and pushes `branch` (convention-following: `agent/<n>/<nonce>`,
+    required by the ref cross-check); PHASE5 runs `gh pr create` with explicit
+    `--repo`/`--base`/`--head`/`--title`/`--body` (never relying on gh inferring
+    the current branch — the local checkout's HEAD may not match what was
+    pushed). `gh pr create` performs a GraphQL read before the REST write, and
+    rein's proxy classifies/gates GraphQL separately from REST — so PHASE5 is the
+    regression proof for BOTH `pull_requests: write` and the GraphQL gate. The
+    base branch is resolved from `origin/HEAD` in-sandbox (untagged, like `cd
+    "$0"`) rather than hard-coded, so the script doesn't assume "main".
     """
     api_path = f"/repos/{repo}/issues/{issue}/comments"
     return f"""
@@ -106,6 +148,20 @@ emit "@DECLARE_RC=$?"
 emit "@PHASE3_START  the SAME gh write AFTER declare (expect: HTTP 201, comment lands)"
 run gh api -X POST {api_path} -f body={COMMENT_BODY!r} --jq .body
 emit "@AFTER_RC=$?"
+
+emit "@PHASE4_START  commit + push {branch} (expect: push lands post-declare)"
+run git checkout -b {branch}
+echo "gh-write journey PR probe for issue #{issue}" >> gh-write-pr-probe.txt
+run git add -A
+run git commit -q -m "gh-write journey: PR probe for issue #{issue}"
+run git push origin HEAD:refs/heads/{branch}
+emit "@PUSH_RC=$?"
+
+emit "@PHASE5_START  gh pr create (needs pull_requests:write AND a gated GraphQL read)"
+base_ref=$(git symbolic-ref refs/remotes/origin/HEAD)
+base="${{base_ref##*/}}"
+run gh pr create --repo {repo} --base "$base" --head {branch} --title {PR_TITLE!r} --body {PR_BODY!r}
+emit "@PRCREATE_RC=$?"
 emit "@SCRIPT_DONE"
 """
 
@@ -148,7 +204,7 @@ def _rc(text: str, name: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def drive_journey(env, repo, issue, workdir):
+def drive_journey(env, repo, issue, branch, workdir):
     """Drive the ONE sandboxed `rein run` through the shared runner (#82). The
     sandbox launch is a normal JourneyStep whose argv is the full `rein run --
     bash -c <script> <workdir>`; the Form-A declare prompt is answered inline via
@@ -156,7 +212,7 @@ def drive_journey(env, repo, issue, workdir):
     step's prompts. run_journey captures the COMPLETE session (banner, injected
     contract, every tagged agent line) as `.transcript`, with no hand-slicing."""
     step = H.JourneyStep(
-        argv=["run", "--", "bash", "-c", gh_write_script(repo, issue), workdir],
+        argv=["run", "--", "bash", "-c", gh_write_script(repo, issue, branch), workdir],
         # rein re-echoes the full script right below its banner, so keep the
         # boundary line concise instead of dumping the whole bash body twice.
         label=f"rein run -- bash -c <sandbox gh-write script> {workdir}",
@@ -165,7 +221,7 @@ def drive_journey(env, repo, issue, workdir):
             "REIN_SESSION_FILE": _pinned_session(repo),
             "REIN_SANDBOX_WORKDIR": workdir,
         },
-        timeout=180,
+        timeout=240,
     )
     result = H.run_journey([step], env=env)
     return result, result.steps[0].text
@@ -190,18 +246,25 @@ def main() -> int:
             env,
         )
 
+    # agent/<issue>/<nonce> — the ref cross-check REQUIRES this exact prefix.
+    # H.unique_branch supplies the <nonce> part (a fresh, timestamped nonce per run).
+    branch = f"agent/{issue}/{H.unique_branch('ghwrite')}"
+
     print(f"journey: gh-write ceremony on {repo}, issue #{issue} "
-          f"({'created' if ours else 'supplied'})", flush=True)
+          f"({'created' if ours else 'supplied'}), PR branch {branch}", flush=True)
 
     workdir = None
     posted_comment_ids: list[int] = []
+    posted_pr_numbers: list[int] = []
     try:
         workdir = clone_checkout(repo, env)
-        result, text = drive_journey(env, repo, issue, workdir)
+        result, text = drive_journey(env, repo, issue, branch, workdir)
 
         before_rc = _rc(text, "BEFORE")
         declare_rc = _rc(text, "DECLARE")
         after_rc = _rc(text, "AFTER")
+        push_rc = _rc(text, "PUSH")
+        prcreate_rc = _rc(text, "PRCREATE")
         prompts = text.count(H.PROMPT_BANNER)
 
         # Host-side GROUND TRUTH: did the comment actually post at GitHub? (The
@@ -210,6 +273,14 @@ def main() -> int:
         comments = H.list_issue_comments(repo, issue, env)
         ours_comments = [c for c in comments if c["body"] == COMMENT_BODY]
         posted_comment_ids = [c["id"] for c in ours_comments]
+
+        # Host-side GROUND TRUTH for the PR leg (issue #101 "gap 1"): did the push
+        # actually reach GitHub and did `gh pr create` actually open a PR there?
+        # (The in-sandbox RCs only say the local commands exited 0; this proves
+        # both are real, the same way ours_comments proves the comment write is.)
+        branch_pushed = H.branch_exists(repo, branch, env)
+        prs = H.list_prs_for_branch(repo, branch, env)
+        posted_pr_numbers = [p["number"] for p in prs]
 
         # ---- 1) The ceremony must hold, independent of the golden. ----
         invariants = [
@@ -225,6 +296,13 @@ def main() -> int:
             (len(ours_comments) == 1,
              f"exactly ONE comment must exist at GitHub (found {len(ours_comments)}): "
              "deny-before posted nothing, lands-after posted once"),
+            (push_rc == 0, f"the commit push to {branch} must LAND post-declare"),
+            (branch_pushed, f"the pushed branch {branch} must actually EXIST at GitHub"),
+            (prcreate_rc == 0,
+             "gh pr create must LAND (pull_requests:write AND the GraphQL read it "
+             "performs first must both work in-sandbox — issue #101 gap 1)"),
+            (len(prs) == 1,
+             f"exactly ONE PR must exist at GitHub for {branch} (found {len(prs)})"),
         ]
         broken = [msg for ok, msg in invariants if not ok]
         if not result.reached_eof:
@@ -234,7 +312,9 @@ def main() -> int:
             for m in broken:
                 print(f"  - {m}", flush=True)
             print(f"  before_rc={before_rc} declare_rc={declare_rc} after_rc={after_rc} "
-                  f"prompts={prompts} comments_at_github={len(ours_comments)}", flush=True)
+                  f"push_rc={push_rc} prcreate_rc={prcreate_rc} prompts={prompts} "
+                  f"comments_at_github={len(ours_comments)} branch_pushed={branch_pushed} "
+                  f"prs_at_github={len(prs)}", flush=True)
             print("--- transcript ---", flush=True)
             print(text, flush=True)
             return 2
@@ -249,6 +329,11 @@ def main() -> int:
         print(f"  gh write AFTER declare: rc={after_rc} (LANDED)", flush=True)
         print(f"  GitHub ground truth: {len(ours_comments)} matching comment(s) on issue "
               f"#{issue} (ids={posted_comment_ids})", flush=True)
+        print(f"  push to {branch}: rc={push_rc} (branch exists at GitHub: {branch_pushed})", flush=True)
+        print(f"  gh pr create: rc={prcreate_rc}  (needs pull_requests:write + the GraphQL "
+              f"read gh pr create performs first — issue #101 gap 1)", flush=True)
+        print(f"  GitHub ground truth: {len(prs)} PR(s) for {branch} "
+              f"(numbers={posted_pr_numbers})", flush=True)
 
         if os.getenv("REIN_SHOW_NORMALIZED"):
             print("\n--- normalized (the comparison lens) ---", flush=True)
@@ -273,8 +358,9 @@ def main() -> int:
         return 1
 
     finally:
-        # Delete the comment the sandbox posted (host-side; verified above), then
-        # clean the checkout and close the issue. Hard-constraint #1: throwaway only.
+        # Delete the comment the sandbox posted (host-side; verified above), close
+        # the PR it opened, delete the pushed branch, clean the checkout, and close
+        # the issue. Hard-constraint #1: throwaway only.
         # Belt-and-suspenders: if an exception fired mid-run before host
         # verification recorded any ids, re-list and sweep ANY comment matching
         # our body so nothing leaks on the throwaway (union with the known ids).
@@ -286,11 +372,26 @@ def main() -> int:
             pass
         for cid in to_delete:
             H.delete_issue_comment(repo, cid, env)
+
+        # Same belt-and-suspenders sweep for the PR leg (issue #101 "gap 1"):
+        # re-list PRs for `branch` in case an exception fired before host
+        # verification ran, so an open PR never leaks on the throwaway.
+        prs_to_close = set(posted_pr_numbers)
+        try:
+            prs_to_close |= {p["number"] for p in H.list_prs_for_branch(repo, branch, env)
+                              if p["state"] == "OPEN"}
+        except Exception:
+            pass
+        for pn in prs_to_close:
+            H.close_pr(repo, pn, env)
+        H.delete_branch(repo, branch, env)
+
         if workdir and os.path.isdir(workdir):
             shutil.rmtree(workdir, ignore_errors=True)
         if ours:
             H.close_issue(repo, issue, env, comment="journey complete; closing.")
-        print(f"cleanup: {len(to_delete)} comment(s) deleted; checkout removed"
+        print(f"cleanup: {len(to_delete)} comment(s) deleted; {len(prs_to_close)} PR(s) closed; "
+              f"branch {branch} deleted; checkout removed"
               + ("; issue closed" if ours else ""), flush=True)
 
 
