@@ -47,7 +47,7 @@ only (hard-constraint #1).
 ## How it is recorded (and why that way)
 
 It reuses the harness that already drives this exact scenario live —
-`tests/interactive/journey_realagent_write.py` and `tests/interactive/reinharness.py`.
+`tests/interactive/journeys/realagent_write/journey.py` and `tests/interactive/reinharness.py`.
 The demo is that journey, *recorded*, not a second implementation of it.
 
 **The recording surface is the attached tmux CLIENT's pty.** That is the only surface
