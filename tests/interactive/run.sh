@@ -28,10 +28,15 @@ cd "$REPO_ROOT"
 # Build up front so a compile error fails fast, before pexpect spawns anything.
 go build -o bin/ ./...
 
-# unittest discovery: run from the suite dir so `import reinharness` resolves.
-cd "$HERE"
+# unittest discovery from the REPO ROOT so the `tests.interactive` package resolves
+# (imports are package-absolute; no sys.path hacks). The `test_*.py` pattern collects
+# the flat plain tests only — journeys are journeys/<name>/journey.py, so they are NOT
+# swept here.
+cd "$REPO_ROOT"
 if [ "$#" -gt 0 ]; then
-  # Explicit module/test target(s), e.g. `run.sh test_write_approval`.
-  exec python3 -m unittest -v "$@"
+  # Explicit module/test target(s), e.g. `run.sh test_write_approval` -> the package path.
+  targets=()
+  for t in "$@"; do targets+=("tests.interactive.$t"); done
+  exec python3 -m unittest -v "${targets[@]}"
 fi
-exec python3 -m unittest discover -s "$HERE" -t "$HERE" -p 'test_*.py' -v
+exec python3 -m unittest discover -s tests/interactive -t . -p 'test_*.py' -v

@@ -56,8 +56,8 @@ import unittest
 
 import pexpect
 
-import reinharness as H
-from itest_base import ReinTestCase
+from tests.interactive import reinharness as H
+from tests.interactive.itest_base import ReinTestCase
 
 # Flags that keep an init run inert: no ~/.local/bin symlink, no network mint.
 # NOT included here: --no-alias (see the module docstring) — tests that don't

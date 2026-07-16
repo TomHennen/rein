@@ -4,6 +4,7 @@
 /rein
 /rein-git
 /rein-gh
+/seedghread
 
 # Editor / OS noise
 .vscode/

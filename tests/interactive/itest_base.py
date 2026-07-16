@@ -23,7 +23,7 @@ import os
 import tempfile
 import unittest
 
-import reinharness as H
+from tests.interactive import reinharness as H
 
 # Issue #35: the issue is agent-declared at runtime (`rein declare <n>`) and
 # rein FETCHES it before prompting — so declare-flow tests need a REAL issue
