@@ -482,21 +482,17 @@ The `test_*.py` sweep (`run.sh`) additionally runs `test_golden_shape.py`, the
 stack-free lint that fails if a journey has no golden or if `normalize_for_compare`
 isn't idempotent on it — a cheap gate that needs no srt/GitHub/tty.
 
-## Setup: the `rein init` world, NOT `source ./dev-env`
+## Setup: the `rein init` world
 
-The documented path is the one a fresh machine uses: `rein init` configures the
-App + a dev-session. As of **#126 the harness no longer sources `dev-env` at
-all** — `reinharness.rein_env()` returns the plain environment. A journey that
-MINTS uses the **real App** resolved from `state.json` (run in the operator's real
-home) or, for an isolated-home init-flavored journey, gets the env-path App from
-`reinharness.init_app_env()` (the real rein-init App if configured, else a
-synthetic one for pure `--skip-mint-check` runs). A journey resolves its throwaway
-with `resolve_throwaway_repo` (`REIN_JOURNEY_REPO` → the configured dev-session →
-`REIN_TEST_REPO_A` as a **legacy this-box shortcut**, last); repo B via
-`throwaway_repo_b` (`REIN_JOURNEY_REPO_B` → `REIN_TEST_REPO_B` → derive the `-b`
-sibling of A). A journey must not DEPEND on `REIN_TEST_REPO_A` special-casing
-(#40). The committed `dev-env` is gone (untracked; `dev-env.example` is the
-template) — it pinned a dead App whose `REIN_APP_*` shadowed the real one.
+Run `rein init` once: it configures the App (recorded in `state.json` + the
+managed keystore) and a dev-session. A journey that MINTS uses that App —
+resolved from `state.json` when it runs in your real home, or, for an
+isolated-home init journey, supplied by `reinharness.init_app_env()` (the real
+App if configured, else a synthetic one for `--skip-mint-check` runs). A journey
+resolves its throwaway with `resolve_throwaway_repo` (`REIN_JOURNEY_REPO` → the
+dev-session → `REIN_TEST_REPO_A`) and repo B with `throwaway_repo_b`
+(`REIN_JOURNEY_REPO_B` → `REIN_TEST_REPO_B` → the `-b` sibling of A). Don't
+DEPEND on `REIN_TEST_REPO_A` special-casing (#40).
 
 ```sh
 # once per machine: rein init sets up the App + dev-session (see HANDOFF.md)

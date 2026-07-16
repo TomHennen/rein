@@ -15,12 +15,11 @@ launched — the same terminal a real developer would type into.
 
 WHAT THE HELPERS GIVE YOU
 -------------------------
-- ``rein_env()``        — the REIN_* environment (os.environ as-is; #126: it no
-                          longer sources ./dev-env). Init-flavored journeys that
-                          need the env-path App in a fresh isolated home get it
-                          from ``init_app_env()`` (the real rein-init App, else a
-                          synthetic one) so ``rein init`` never routes into the
-                          25-minute manifest flow.
+- ``rein_env()``        — the REIN_* environment (os.environ as-is). Init-flavored
+                          journeys that need the env-path App in a fresh isolated
+                          home get it from ``init_app_env()`` (the real rein-init
+                          App, else a synthetic one) so ``rein init`` never routes
+                          into the 25-minute manifest flow.
 - ``build_binaries()``  — ``go build -o bin/ ./...`` + ``rein install-shim``.
 - ``unique_branch()``   — a timestamped disposable branch name (throwaway repo).
 - ``ReinRun``           — a pexpect wrapper around ``rein run`` with a captured
@@ -106,7 +105,7 @@ def throwaway_repo_b(env: dict | None = None) -> str:
     expansion / multi-repo). Same owner as repo A — the App installation is
     single-owner, so an expansion target must share the owner.
 
-    #126: no longer reads REIN_TEST_REPO_B from the committed dev-env. Order:
+    Order:
       1. REIN_JOURNEY_REPO_B         — explicit override (mirrors REIN_JOURNEY_REPO).
       2. REIN_TEST_REPO_B            — legacy env, if a dev exported it.
       3. derive from repo A          — the `-a`/`-b` sibling convention the
@@ -135,14 +134,10 @@ def throwaway_repo_b(env: dict | None = None) -> str:
 def rein_env() -> dict:
     """Return the REIN_* environment as the shell provides it (os.environ).
 
-    #126: this NO LONGER sources ./dev-env. The committed dev-env pinned the
-    origin author's now-DEAD App, and its REIN_APP_* OVERRODE the real App that
-    `rein init` provisions (state.json + keystore) — so every minting journey
-    failed at the mint (`keystore: entry not found`). With REIN_APP_* absent,
-    rein resolves the real App from state.json. Init-flavored journeys that run
-    in a FRESH isolated home (no state.json) supply the env-path App explicitly
-    via init_app_env() so `rein init` never routes into the 25-minute manifest
-    flow.
+    Minting journeys resolve the App from state.json (they run in the real home).
+    Init-flavored journeys that run in a FRESH isolated home (no state.json)
+    supply the env-path App via init_app_env() so `rein init` never routes into
+    the 25-minute manifest flow.
     """
     return dict(os.environ)
 
@@ -158,9 +153,9 @@ def _real_config_dir() -> Path:
 def init_app_env() -> dict:
     """REIN_APP_* for an init-flavored journey/test that runs in an isolated home.
 
-    rein_env() no longer injects REIN_APP_* (#126), but a `rein init` in a FRESH
-    isolated home has no state.json, so without REIN_APP_* it would route into the
-    25-minute manifest flow. This supplies the env-path App:
+    A `rein init` in a FRESH isolated home has no state.json, so without
+    REIN_APP_* it would route into the 25-minute manifest flow. This supplies the
+    env-path App:
 
       * the REAL App `rein init` provisioned (state.json primary + keystore PEM)
         when present — so journeys that actually MINT (session show/add-repo,
@@ -209,8 +204,8 @@ def init_app_env() -> dict:
 def throwaway_repo(env: dict | None = None) -> str:
     """The owner/name of the throwaway repo (hard-constraint #1: touch ONLY this).
 
-    #126: resolved the rein-init way (dev-session first), NOT from the dead-App
-    dev-env's REIN_TEST_REPO_A. Thin alias for resolve_throwaway_repo.
+    Resolved the rein-init way (dev-session first). Thin alias for
+    resolve_throwaway_repo.
     """
     return resolve_throwaway_repo(env)
 

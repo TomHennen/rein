@@ -86,8 +86,8 @@ def main() -> int:
 
     # An isolated HOME/XDG confines every write AND points the state dir at a fresh
     # tree, so `live runs: none` is stable and no ambient run leaks into the golden.
-    # init_app_env() supplies the env-path App (#126: rein_env no longer does), so
-    # the install-coverage probe runs against a REAL App without the browser flow.
+    # init_app_env() supplies the env-path App so the install-coverage probe runs
+    # against a REAL App without the browser flow.
     home = H.isolated_home()
     session_path = _a_only_session(repo_a)
     extra = {**H.isolated_home_env(home), **H.init_app_env()}

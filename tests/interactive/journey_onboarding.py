@@ -66,8 +66,8 @@ def main() -> int:
     # One throwaway HOME/XDG world, shared by both commands: `rein init` sets it
     # up, `rein doctor` inspects it. REIN_MACHINE_HOSTNAME pins the pre-filled
     # label so the golden is deterministic. init_app_env() supplies the env-path
-    # App (#126: rein_env no longer does) so init stays off the manifest flow AND
-    # the post-init `rein doctor` mint check runs against a real App.
+    # App so init stays off the manifest flow and the post-init `rein doctor`
+    # mint check runs against a real App.
     extra = {**H.isolated_home_env(home), **H.init_app_env()}
     extra["REIN_MACHINE_HOSTNAME"] = "demo-box"
 
