@@ -16,10 +16,21 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/TomHennen/rein/internal/gitupstream"
 )
+
+// envUpstreamIntentFile names the rendezvous file rein stages for a SANDBOXED
+// run (set only then, only for a bound checkout). Its presence is the single
+// switch for the two sandbox-git behaviors below: strip `git push -u` (its
+// .git/config write faults on the #64 read-only pin) and record the upstream
+// intent for rein to apply host-side after the run. In direct mode it is unset,
+// so `-u` passes through to real git and writes tracking normally.
+const envUpstreamIntentFile = "REIN_UPSTREAM_INTENT_FILE"
 
 // writeSubcommands need a write-capable installation token.
 var writeSubcommands = map[string]bool{
@@ -42,24 +53,26 @@ func main() {
 	args := os.Args[1:]
 	op := classify(args)
 
-	// In the sandbox, .git/config is read-only (#64 host-exec hardening), so a
-	// `git push -u/--set-upstream` — which writes branch.<x>.remote/merge into
-	// .git/config — fails with "could not write config file .git/config: Device
-	// or resource busy". The push itself succeeds, but the agent burns tokens
-	// puzzling over and explaining the error. Silently drop the upstream-setup
-	// flag on push so the push looks NORMAL to the agent. Tracking for a shared
-	// checkout is a separate, host-side concern (#102).
-	if findSubcommand(args) == "push" {
-		args = dropPushUpstreamFlag(args)
-	}
-
-	env := append(os.Environ(), "REIN_GIT_OP="+op)
-
 	realGit, err := findRealGit(os.Args[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rein-git: %v\n", err)
 		os.Exit(127)
 	}
+
+	// SANDBOX ONLY (env set): .git/config is a read-only bind (#64), so a
+	// `git push -u/--set-upstream`'s branch.<x>.remote/merge write faults with
+	// "could not write config file .git/config: Device or resource busy". Record
+	// what -u would have set (for rein to apply on the real checkout post-run,
+	// #102/#119) and strip the flag so the push looks NORMAL. Gated on -u being
+	// present: a plain push writes no tracking in real git, so we synthesize none.
+	// Direct mode leaves the env unset → -u passes through to real git untouched.
+	if intentFile := os.Getenv(envUpstreamIntentFile); intentFile != "" &&
+		findSubcommand(args) == "push" && gitupstream.HasSetUpstream(args) {
+		captureUpstreamIntent(args, intentFile, realGit)
+		args = dropPushUpstreamFlag(args)
+	}
+
+	env := append(os.Environ(), "REIN_GIT_OP="+op)
 
 	// Replace this process with real git. Note: syscall.Exec wants argv[0]
 	// to be the program name; we pass realGit so git sees its real path.
@@ -68,6 +81,29 @@ func main() {
 		fmt.Fprintf(os.Stderr, "rein-git: exec %s: %v\n", realGit, err)
 		os.Exit(127)
 	}
+}
+
+// captureUpstreamIntent appends the upstream tracking `git push -u` would have
+// written to the rendezvous file. Best-effort: any failure (unparseable argv,
+// detached HEAD, unwritable file) is silently skipped — the push still proceeds,
+// the operator just doesn't get the tracking set. Never blocks the push.
+func captureUpstreamIntent(args []string, intentFile, realGit string) {
+	in, ok := gitupstream.ParsePush(args, func() (string, error) {
+		out, err := exec.Command(realGit, "symbolic-ref", "--quiet", "--short", "HEAD").Output()
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(string(out)), nil
+	})
+	if !ok {
+		return
+	}
+	f, err := os.OpenFile(intentFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintln(f, gitupstream.EncodeLine(in))
 }
 
 // dropPushUpstreamFlag removes `-u` / `--set-upstream` from a `git push` argv.
@@ -161,10 +197,12 @@ func optionConsumesNextArg(a string) bool {
 // directory that contains this shim. Without that exclusion we'd recurse
 // forever.
 //
-// shimPath is os.Args[0]; we resolve it to absolute form and skip its
-// containing dir during the PATH scan. An explicit REIN_REAL_GIT env var
-// (if set) overrides everything, useful for tests and for distributions
-// that don't put git on PATH (NixOS, /opt/...).
+// The shim's own dir is taken from os.Executable() (the actual running binary),
+// falling back to shimPath (os.Args[0]). This matters when the shim is invoked
+// as bare `git` off PATH: os.Args[0] is then just "git", which would resolve to
+// the CWD, not the shim dir — so the PATH scan would re-find the shim and add a
+// wasteful self-exec hop. os.Executable() names runTmp/git directly. An explicit
+// REIN_REAL_GIT env var overrides everything (tests; distros without git on PATH).
 func findRealGit(shimPath string) (string, error) {
 	if override := os.Getenv("REIN_REAL_GIT"); override != "" {
 		if _, err := os.Stat(override); err == nil {
@@ -173,9 +211,11 @@ func findRealGit(shimPath string) (string, error) {
 		return "", fmt.Errorf("REIN_REAL_GIT=%q does not exist", override)
 	}
 
-	shimAbs, err := filepath.Abs(shimPath)
-	if err != nil {
-		shimAbs = shimPath
+	shimAbs := shimPath
+	if exe, err := os.Executable(); err == nil {
+		shimAbs = exe
+	} else if abs, err := filepath.Abs(shimPath); err == nil {
+		shimAbs = abs
 	}
 	if resolved, err := filepath.EvalSymlinks(shimAbs); err == nil {
 		shimAbs = resolved

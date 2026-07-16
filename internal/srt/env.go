@@ -21,6 +21,12 @@ const EnvAgentWorktrees = "REIN_REPO_WORKTREES"
 // being committed into repo A.
 const EnvAgentCloneDir = "REIN_EPHEMERAL_CLONE_DIR"
 
+// EnvUpstreamIntentFile is the shim-internal rendezvous the staged rein-git
+// appends `git push -u` tracking intent to, for rein to apply on the operator's
+// real checkout post-run (#102/#119). Set only for a bound checkout. Not a
+// stable agent API; see EnvParams.UpstreamIntentFile.
+const EnvUpstreamIntentFile = "REIN_UPSTREAM_INTENT_FILE"
+
 // EnvDisableClaudeMCP is the rein-side, per-run opt-OUT that restores the old
 // behavior of disabling Claude Code's account/claude.ai remote MCP connectors
 // (see EnvParams.DisableClaudeAIMCP). By DEFAULT rein no longer disables them —
@@ -198,6 +204,14 @@ type EnvParams struct {
 	// can (bwrap binds are fixed at launch), so its tree is ephemeral and the
 	// durable artifact is the push (docs/session-scope-ux-mocks.md §7).
 	EphemeralCloneDir string
+
+	// UpstreamIntentFile, when non-empty, is the rendezvous path the staged
+	// rein-git shim appends `git push -u` tracking intent to — delivered as
+	// REIN_UPSTREAM_INTENT_FILE. Set only for a bound checkout, where .git/config
+	// is read-only (#64) so real git's -u write faults; the shim strips -u and
+	// records the intent here for rein to apply host-side post-run (#102/#119).
+	// Internal rein-git rendezvous, not a stable agent API.
+	UpstreamIntentFile string
 }
 
 // passthroughExact is the allowlist of environment variable NAMES carried from
@@ -313,6 +327,9 @@ func BuildEnv(p EnvParams) []string {
 	}
 	if p.EphemeralCloneDir != "" {
 		out = append(out, EnvAgentCloneDir+"="+p.EphemeralCloneDir)
+	}
+	if p.UpstreamIntentFile != "" {
+		out = append(out, EnvUpstreamIntentFile+"="+p.UpstreamIntentFile)
 	}
 
 	// Agent-visible facts (#63). rein WRITES these INTO the sandbox — see the
