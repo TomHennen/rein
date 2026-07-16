@@ -88,7 +88,7 @@ func TestDecideBridge_Table(t *testing.T) {
 			name:        "row5_managed_externally_env_absent",
 			state:       stateManaged,
 			wantAction:  BridgeManagedExternallyMissingEnv,
-			wantContain: "re-source",
+			wantContain: "export them again",
 		},
 		// Design row 6: state present + env match → quiet steady state.
 		{

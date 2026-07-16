@@ -292,7 +292,7 @@ func checkAppKeyReadable() checkResult {
 		if alt, ok := managedPEMPath(); ok {
 			path = alt
 		} else {
-			return checkResult{"app key", statusFail, "REIN_APP_PRIVATE_KEY_PATH unset (source ./dev-env?)"}
+			return checkResult{"app key", statusFail, "no App private key: REIN_APP_PRIVATE_KEY_PATH unset and no keystore-managed PEM (run `rein init`)"}
 		}
 	}
 	info, err := os.Stat(path)

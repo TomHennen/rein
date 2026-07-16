@@ -20,9 +20,9 @@
 //
 // What it does NOT do at CP1:
 //
-//   - GitHub App manifest flow (CP4-5). Assumes the App already exists
-//     and its credentials live in REIN_* env vars (typically via
-//     ./dev-env in this repo).
+//   - GitHub App manifest flow (CP4-5). Assumes the App already exists,
+//     with credentials either in REIN_APP_* env vars or the managed
+//     keystore recorded by a prior manifest-flow `rein init`.
 //   - Shell-rc alias (CP3).
 //   - Diagnostics (CP2 — `rein doctor`).
 
@@ -151,24 +151,36 @@ func runInit(args []string) error {
 		appCfgPtr = &cfg
 		appKS = ks
 
-	case appsetup.BridgeEnvOverrideMatch, appsetup.BridgeUseState:
+	case appsetup.BridgeEnvOverrideMatch:
 		cfg, ks, err := loadAppConfigForInit()
 		if err != nil {
-			// Post-manifest-flow UX: state.json records audit_done
-			// (or primary_done) but the user hasn't set
-			// REIN_APP_INSTALLATION_ID yet. LoadAppConfig fails with
-			// "missing env var ..." — instead of surfacing that as an
-			// error, print the same install-deep-link hint doctor
-			// uses and exit 0. The user is in a known intermediate
-			// state, not a broken one.
-			if action == appsetup.BridgeUseState && state.Primary != nil && state.Primary.InstallationID == 0 {
-				if hint, ok := appsetup.PostManifestInstallHint(configDir); ok {
-					fmt.Println()
-					fmt.Println(hint)
-					return nil
-				}
-			}
 			return err
+		}
+		appCfgPtr = &cfg
+		appKS = ks
+
+	case appsetup.BridgeUseState:
+		// Manifest-flow steady state: App config lives in state.json + the
+		// managed keystore, NOT env vars. Resolve without REIN_APP_* (mirrors
+		// doctor's checkAppMint). Requiring env here used to hard-fail a
+		// re-run after the App was installed with "missing env var
+		// REIN_APP_CLIENT_ID" — the install-id was cached, so the old
+		// uncached-only hint guard didn't fire.
+		cfg, ks, awaitInstall, err := resolveStateApp()
+		if err != nil {
+			return err
+		}
+		if awaitInstall {
+			// App exists but its installation id isn't cached yet (not
+			// installed on a repo). Known intermediate state, not an error:
+			// print the same install deep-link doctor uses and exit 0.
+			fmt.Println()
+			if hint, ok := appsetup.PostManifestInstallHint(configDir); ok {
+				fmt.Println(hint)
+			} else {
+				fmt.Println("  App not yet installed on a repo; install it, then re-run `rein init`.")
+			}
+			return nil
 		}
 		appCfgPtr = &cfg
 		appKS = ks
@@ -217,13 +229,21 @@ func runInit(args []string) error {
 	if appCfgPtr != nil {
 		appCfg := *appCfgPtr
 		fmt.Printf("  app:        client_id=%s installation_id=%d\n", appCfg.ClientID, appCfg.InstallationID)
-		// PEM path no longer lives in githubapp.Config (the keystore is
-		// the source of truth). Pre-flight via env directly so the user
-		// gets a clear "file missing" error here rather than a deeper
-		// keystore error at first mint.
+		// Pre-flight the PEM so a missing/unreadable key surfaces here rather
+		// than as a deeper keystore error at first mint. The env path points
+		// via REIN_APP_PRIVATE_KEY_PATH; the manifest/state path uses the
+		// keystore-managed PEM under ConfigDir (same fallback doctor uses).
 		pemPath := os.Getenv("REIN_APP_PRIVATE_KEY_PATH")
+		if pemPath == "" {
+			if alt, ok := managedPEMPath(); ok {
+				pemPath = alt
+			}
+		}
+		if pemPath == "" {
+			return errors.New("no App private key: neither REIN_APP_PRIVATE_KEY_PATH nor a keystore-managed PEM (state.json) is available")
+		}
 		if _, err := os.Stat(pemPath); err != nil {
-			return fmt.Errorf("private key %s: %w (REIN_APP_PRIVATE_KEY_PATH points somewhere unreadable)", pemPath, err)
+			return fmt.Errorf("private key %s: %w", pemPath, err)
 		}
 	}
 
@@ -269,6 +289,17 @@ func runInit(args []string) error {
 	case skipMint:
 		fmt.Println("  mint check: skipped (--skip-mint-check)")
 	default:
+		// On the state path ResolveApp leaves RepoNames empty; MintReadOnlyToken
+		// needs at least one. Fill from the session, matching doctor / the helper.
+		if len(appCfgPtr.RepoNames) == 0 {
+			if sess, _, serr := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A")); serr == nil && len(sess.Repos) > 0 {
+				appCfgPtr.RepoNames = sess.BareRepoNames()
+			}
+		}
+		if len(appCfgPtr.RepoNames) == 0 {
+			fmt.Println("  mint check: skipped (no session repo to scope the token; scaffold one with --repo)")
+			break
+		}
 		fmt.Println("  mint check: minting a read-only installation token to verify App credentials")
 		client, err := githubapp.NewClient(*appCfgPtr, appKS, config.AppKeystoreRole)
 		if err != nil {
@@ -598,6 +629,19 @@ func loadAppConfigForInit() (githubapp.Config, keystore.Keystore, error) {
 		return githubapp.Config{}, nil, fmt.Errorf("env validation: %w", err)
 	}
 	return cfg, ks, nil
+}
+
+// resolveStateApp resolves App config for the manifest-flow steady-state
+// (BridgeUseState) path from state.json + the managed keystore — no
+// REIN_APP_* env vars. awaitInstall is true when the App exists but its
+// installation id isn't cached yet (App not installed on a repo); the
+// caller prints the install hint and exits 0 rather than trying to mint.
+func resolveStateApp() (cfg githubapp.Config, ks keystore.Keystore, awaitInstall bool, err error) {
+	cfg, ks, _, err = config.ResolveApp()
+	if err != nil {
+		return githubapp.Config{}, nil, false, err
+	}
+	return cfg, ks, cfg.InstallationID == 0, nil
 }
 
 // pathContainsDir reports whether dir is one of the entries in $PATH.

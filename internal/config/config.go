@@ -64,7 +64,7 @@ func LoadAppConfig() (githubapp.Config, keystore.Keystore, error) {
 	}
 	for _, k := range required {
 		if os.Getenv(k) == "" {
-			return githubapp.Config{}, nil, fmt.Errorf("missing env var %s (did you source ./dev-env?)", k)
+			return githubapp.Config{}, nil, fmt.Errorf("missing env var %s", k)
 		}
 	}
 	installationID, err := strconv.ParseInt(os.Getenv("REIN_APP_INSTALLATION_ID"), 10, 64)
@@ -161,7 +161,7 @@ func ResolveApp() (githubapp.Config, keystore.Keystore, AppSource, error) {
 
 	// 3. Fail closed.
 	return githubapp.Config{}, nil, SourceNone,
-		fmt.Errorf("no App config: set REIN_APP_* (source ./dev-env) or run `rein init`")
+		fmt.Errorf("no App config: run `rein init` (or set the REIN_APP_* env vars for the dev/env path)")
 }
 
 // WarnPartialAppEnv writes a one-line note to w when SOME but not all of the

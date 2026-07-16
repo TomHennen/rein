@@ -483,7 +483,7 @@ func resolveAndCacheInstallID(ctx context.Context, sess session.Session, newProb
 		// operator's asserted id agrees with GitHub — if it doesn't, every mint
 		// this session makes would target the WRONG installation. Fail loud.
 		if resolvedID != knownID {
-			return fmt.Errorf("REIN_APP_INSTALLATION_ID=%d contradicts GitHub: %s resolves to installation %d; fix REIN_APP_INSTALLATION_ID (or your dev-env), then re-run",
+			return fmt.Errorf("REIN_APP_INSTALLATION_ID=%d contradicts GitHub: %s resolves to installation %d; fix REIN_APP_INSTALLATION_ID, then re-run",
 				knownID, resolvedRepo, resolvedID)
 		}
 		return nil

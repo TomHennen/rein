@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/TomHennen/rein/internal/appsetup"
 	"github.com/TomHennen/rein/internal/session"
 )
 
@@ -312,5 +313,81 @@ func TestStdinIsTerminal_NonTTY(t *testing.T) {
 	}
 	if stdinIsTerminal(nil) {
 		t.Errorf("stdinIsTerminal(nil) = true, want false")
+	}
+}
+
+// TestResolveStateApp_NoEnv is the regression guard for the manifest-flow
+// steady-state `rein init` bug: after the App is installed (install-id
+// cached), a re-run with NO REIN_APP_* env vars must resolve App config
+// from state.json + the managed keystore and NOT demand env vars. Before
+// the fix, init's BridgeUseState path called the env-only loader and
+// hard-failed on "missing env var REIN_APP_CLIENT_ID".
+func TestResolveStateApp_NoEnv(t *testing.T) {
+	for _, k := range []string{
+		"REIN_APP_CLIENT_ID", "REIN_APP_PRIVATE_KEY_PATH",
+		"REIN_APP_INSTALLATION_ID", "REIN_TEST_REPO_A",
+	} {
+		t.Setenv(k, "")
+	}
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	configDir := filepath.Join(dir, "rein")
+
+	// Cached install-id: the steady state a re-run hits.
+	if err := appsetup.WriteState(configDir, appsetup.State{
+		Phase: appsetup.PhaseAuditDone,
+		Primary: &appsetup.AppRecord{
+			ClientID:       "Iv23li-state",
+			InstallationID: 12345,
+		},
+	}); err != nil {
+		t.Fatalf("WriteState: %v", err)
+	}
+
+	cfg, ks, awaitInstall, err := resolveStateApp()
+	if err != nil {
+		t.Fatalf("resolveStateApp must succeed with no REIN_APP_* env: %v", err)
+	}
+	if awaitInstall {
+		t.Error("awaitInstall = true, want false (install-id is cached)")
+	}
+	if cfg.ClientID != "Iv23li-state" || cfg.InstallationID != 12345 {
+		t.Errorf("cfg = %+v, want client_id=Iv23li-state installation_id=12345", cfg)
+	}
+	if ks == nil {
+		t.Error("keystore must be non-nil on the state path")
+	}
+}
+
+// TestResolveStateApp_UncachedAwaitsInstall verifies the App-created-but-
+// not-yet-installed state: install-id is 0, so awaitInstall is true and the
+// caller prints the install hint instead of trying to mint.
+func TestResolveStateApp_UncachedAwaitsInstall(t *testing.T) {
+	for _, k := range []string{
+		"REIN_APP_CLIENT_ID", "REIN_APP_PRIVATE_KEY_PATH",
+		"REIN_APP_INSTALLATION_ID", "REIN_TEST_REPO_A",
+	} {
+		t.Setenv(k, "")
+	}
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	configDir := filepath.Join(dir, "rein")
+
+	if err := appsetup.WriteState(configDir, appsetup.State{
+		Phase: appsetup.PhaseAuditDone,
+		Primary: &appsetup.AppRecord{
+			ClientID:       "Iv23li-state",
+			InstallationID: 0, // uncached: App not yet installed on a repo
+		},
+	}); err != nil {
+		t.Fatalf("WriteState: %v", err)
+	}
+
+	_, _, awaitInstall, err := resolveStateApp()
+	if err != nil {
+		t.Fatalf("resolveStateApp must NOT error on uncached install-id: %v", err)
+	}
+	if !awaitInstall {
+		t.Error("awaitInstall = false, want true (install-id uncached)")
 	}
 }
