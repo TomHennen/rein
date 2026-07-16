@@ -117,9 +117,12 @@ def main() -> int:
     # Init legs pin the machine label to a stable "demo-box" so the #82
     # machine-label prompt renders a deterministic default (the raw hostname is
     # machine-variable and un-normalized). Same knob the onboarding journey uses.
-    init_env_detected = dict(H.isolated_home_env(home_detected))
+    # init_app_env() supplies the env-path App (#126: rein_env no longer sources
+    # the dead-App dev-env), so these --skip-mint-check init runs stay on the env
+    # path instead of the 25-minute manifest flow.
+    init_env_detected = {**H.isolated_home_env(home_detected), **H.init_app_env()}
     init_env_detected["REIN_MACHINE_HOSTNAME"] = "demo-box"
-    init_env_bare = dict(H.isolated_home_env(home_bare))
+    init_env_bare = {**H.isolated_home_env(home_bare), **H.init_app_env()}
     init_env_bare["REIN_MACHINE_HOSTNAME"] = "demo-box"
 
     # The run legs blank REIN_TEST_REPO_A so LoadOrFallback has NO fallback and
@@ -132,7 +135,10 @@ def main() -> int:
     # That production special-casing is tracked for removal by #40 — once #40
     # lands and LoadOrFallback no longer consults this env var, this blanking
     # becomes unnecessary and can be dropped.
-    run_env = dict(H.isolated_home_env(home_bare))
+    # init_app_env() gives the run legs the env-path App (#126) so `rein run` does
+    # not additionally warn about missing App config; REIN_TEST_REPO_A is then
+    # re-blanked (init_app_env sets it) to keep forcing the no-session hint.
+    run_env = {**H.isolated_home_env(home_bare), **H.init_app_env()}
     run_env["REIN_TEST_REPO_A"] = ""
 
     # DECLARE STEPS ONLY — argv + cwd + the ordered answers. run_journey captures

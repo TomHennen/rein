@@ -62,7 +62,11 @@ _ready: dict = {}
 def _ensure_ready() -> dict:
     """Build rein + shims once; cache the env. Shared by all test cases."""
     if not _ready:
-        env = H.rein_env()
+        # #126: rein_env() no longer injects REIN_APP_* (it stopped sourcing the
+        # dead-App dev-env). init_app_env() supplies the env-path App (the real
+        # rein-init App, else a synthetic one) so an init run in a fresh isolated
+        # home stays on the env path instead of the 25-minute manifest flow.
+        env = {**H.rein_env(), **H.init_app_env()}
         H.build_binaries(env)
         _ready["env"] = env
         _ready["repo"] = H.throwaway_repo(env)

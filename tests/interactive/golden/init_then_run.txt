@@ -1,0 +1,53 @@
+$ rein init --yes --no-alias --no-symlink  (real mint check, App from state.json, NO env vars)
+rein init: setting up local scaffolding
+  state dir:  /tmp/rein-itest-home-cs4hv10p/.local/state/rein
+  config dir: /tmp/rein-itest-home-cs4hv10p/.config/rein
+  machine:    demo-box (label for this machine's App name)
+  setup:      state.json: audit_done (steady state from manifest flow)
+  app:        client_id=Iv23lihaPgKgifHps75d installation_id=145330081
+  shim:       3 binaries under /tmp/rein-itest-home-cs4hv10p/.local/state/rein/shim
+  symlink:    skipped (--no-symlink)
+  mint check: minting a read-only installation token to verify App credentials
+              ok (token expires 2026-07-16T03:06:05Z)
+  session:    not scaffolded (pass --repo owner/name to scaffold)
+  alias:      not installed (opt-in; enable with `rein init --alias`)
+  install on repo:
+    install the App on the repos you want it to broker tokens for.
+    visit this URL in your browser:
+      https://github.com/apps/rein-primary-56e410c903/installations/new
+
+rein init: done.
+Next:
+  - /tmp/rein-itest-home-cs4hv10p/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
+  - run `rein run -- claude` (or another agent) to launch with rein in effect
+  - (optional) enable the `claude` alias with `rein init --alias`
+  - run `rein doctor` to verify everything is wired up
+
+$ rein run --direct -- git clone https://github.com/TomHennen/agentcreds-validation-a clone
+===============================================================
+rein: WARNING — DIRECT (UNSANDBOXED) MODE
+  The agent runs OUTSIDE the srt sandbox. It shares your user
+  account: it CAN read your ambient credentials (gh login, SSH
+  keys, ~/.netrc, keyrings) and the rein-brokered token is only
+  hidden by process boundaries, not a sandbox. Use this ONLY on a
+  THROWAWAY repo. For real work, drop --direct to run sandboxed.
+===============================================================
+rein: launching wrapped process with:
+  session: sess_init_then_run (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-itest-home-cs4hv10p/session.yaml]
+  PATH-front shim dir: /tmp/rein-itest-home-cs4hv10p/.local/state/rein/shim
+  per-process git config: /tmp/rein-run-1732270398/gitconfig
+  (your real ~/.gitconfig is layered in via include.path)
+
+  Writes are LOCKED until the agent declares its issue:  rein declare <n>
+  then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal
+  (or a tmux popup); approving covers all writes for this run.
+
+rein: running: git clone https://github.com/TomHennen/agentcreds-validation-a clone
+---
+Cloning into 'clone'...
+remote: Enumerating objects: 57, done.
+remote: Counting objects: 100% (3/3), done.
+remote: Compressing objects: 100% (2/2), done.
+remote: Total 57 (delta 2), reused 1 (delta 1), pack-reused 54 (from 1)
+Receiving objects: 100% (57/57), 5.00 KiB | 5.00 MiB/s, done.
+Resolving deltas: 100% (17/17), done.

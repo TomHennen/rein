@@ -79,16 +79,18 @@ def _a_only_session(repo_a: str) -> str:
 
 
 def main() -> int:
-    env = H.rein_env()  # REIN_APP_* present => env path, real install-coverage probe
+    env = H.rein_env()
     repo_a = H.resolve_throwaway_repo(env)   # rein-init way first; #40
-    repo_b = H.throwaway_repo_b(env)         # REIN_TEST_REPO_B (same owner as A)
+    repo_b = H.throwaway_repo_b(env)         # -a/-b sibling of A (same owner)
     H.build_binaries(env)
 
     # An isolated HOME/XDG confines every write AND points the state dir at a fresh
     # tree, so `live runs: none` is stable and no ambient run leaks into the golden.
+    # init_app_env() supplies the env-path App (#126: rein_env no longer does), so
+    # the install-coverage probe runs against a REAL App without the browser flow.
     home = H.isolated_home()
     session_path = _a_only_session(repo_a)
-    extra = dict(H.isolated_home_env(home))
+    extra = {**H.isolated_home_env(home), **H.init_app_env()}
     extra["REIN_SESSION_FILE"] = session_path
 
     print(f"journey: session commands  A={repo_a}  add B={repo_b}  session={session_path}", flush=True)

@@ -1,0 +1,23 @@
+# dev-env.example — OPTIONAL per-developer dev config. Copy to `dev-env` (which is
+# gitignored) and fill in your OWN throwaway values. These are non-secret public
+# GitHub App identifiers, NOT credentials; the private key lives outside the repo.
+#
+#   cp dev-env.example dev-env && $EDITOR dev-env && source ./dev-env
+#
+# YOU USUALLY DON'T NEED THIS. The documented path is the `rein init` world: run
+# `rein init` once and rein resolves your App from state.json + the managed
+# keystore. The interactive journeys (tests/interactive/) use THAT App, not
+# dev-env — see #126, which removed the harness's dependence on this file (its
+# committed values used to shadow the real App and break every minting journey).
+#
+# Source this only if you specifically want the env-var path — e.g. to run the
+# opt-in live Go tests (REIN_LIVE=1) which read config.LoadAppConfig from env.
+
+export REIN_APP_CLIENT_ID=Iv23liXXXXXXXXXXXXXX     # your App's client id
+export REIN_APP_ID=0000000                          # your App's numeric id
+export REIN_APP_INSTALLATION_ID=00000000            # the installation id on your repos
+export REIN_APP_PRIVATE_KEY_PATH=$HOME/.config/rein-credentials/app.pem
+export REIN_TEST_REPO_A=your-org/throwaway-a        # a private throwaway you own
+export REIN_TEST_REPO_B=your-org/throwaway-b        # a same-owner sibling (scope-expansion tests)
+export REIN_GITHUB_USERNAME=your-login
+export REIN_DEV_MODE=1

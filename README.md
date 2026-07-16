@@ -318,9 +318,10 @@ Three layers, from hermetic to live:
 
 - **Interactive (pexpect) suite** — drives the real `rein` binary through a pty
   against a **live throwaway repo + a working App**: the write-approval loop and
-  a real-agent (`claude`) end-to-end run. Prereqs: `source ./dev-env` (sets
-  `REIN_*`, incl. a **throwaway** `REIN_TEST_REPO_A`), the sandbox stack, host
-  `gh` authed, and `python3` + `pexpect`. See
+  a real-agent (`claude`) end-to-end run. Prereqs: a machine set up via
+  `rein init` (the suite resolves your App from `state.json` and its throwaway
+  from the dev-session — no `dev-env`, #126), the sandbox stack, host `gh`
+  authed, and `python3` + `pexpect`. See
   [`tests/interactive/README.md`](tests/interactive/README.md).
 
   ```bash
