@@ -131,6 +131,12 @@ func runInit(args []string) error {
 	// appKS is the keystore the mint check builds NewClient against.
 	var appCfgPtr *githubapp.Config
 	var appKS keystore.Keystore
+	// appFromState is true when the config came from state.json + the managed
+	// keystore (BridgeUseState) rather than REIN_APP_* env. It picks the PEM the
+	// pre-flight validates so a stale REIN_APP_PRIVATE_KEY_PATH (identity vars
+	// unset, PEM path left over from a past env setup) can't false-fail the
+	// state path against a file the mint never reads.
+	appFromState := false
 	// ranManifest is true when the manifest flow executed this run. Its
 	// printPostFlowSummary already prints the per-App install deep-links, so
 	// the install-on-repo step below suppresses itself to avoid a double link
@@ -184,6 +190,7 @@ func runInit(args []string) error {
 		}
 		appCfgPtr = &cfg
 		appKS = ks
+		appFromState = true
 
 	case appsetup.BridgeWriteEnvMarker:
 		cfg, ks, err := loadAppConfigForInit()
@@ -229,15 +236,19 @@ func runInit(args []string) error {
 	if appCfgPtr != nil {
 		appCfg := *appCfgPtr
 		fmt.Printf("  app:        client_id=%s installation_id=%d\n", appCfg.ClientID, appCfg.InstallationID)
-		// Pre-flight the PEM so a missing/unreadable key surfaces here rather
-		// than as a deeper keystore error at first mint. The env path points
-		// via REIN_APP_PRIVATE_KEY_PATH; the manifest/state path uses the
-		// keystore-managed PEM under ConfigDir (same fallback doctor uses).
-		pemPath := os.Getenv("REIN_APP_PRIVATE_KEY_PATH")
-		if pemPath == "" {
+		// Pre-flight the PEM the mint will actually open, so a missing/unreadable
+		// key surfaces here rather than as a deeper keystore error at first mint.
+		// Key off the resolved SOURCE, not env-var presence: the state path uses
+		// the keystore-managed PEM under ConfigDir (a stale REIN_APP_PRIVATE_KEY_PATH
+		// must NOT be validated instead — the mint never reads it); the env path
+		// uses REIN_APP_PRIVATE_KEY_PATH, which LoadAppConfig has already required.
+		var pemPath string
+		if appFromState {
 			if alt, ok := managedPEMPath(); ok {
 				pemPath = alt
 			}
+		} else {
+			pemPath = os.Getenv("REIN_APP_PRIVATE_KEY_PATH")
 		}
 		if pemPath == "" {
 			return errors.New("no App private key: neither REIN_APP_PRIVATE_KEY_PATH nor a keystore-managed PEM (state.json) is available")

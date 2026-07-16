@@ -23,7 +23,7 @@ other init journeys keep them set to stay on the env path). It never sources / r
 isolated config dir. So it neither needs nor is blocked by the `dev-env` cleanup
 (#126).
 
-TWO STEPS, both in the golden, each a real `rein init` under a pty in its OWN
+THREE STEPS, all in the golden, each a real `rein init` under a pty in its OWN
 isolated HOME/XDG world seeded with a manifest-flow `state.json`:
 
   * CACHED: install-id already fetched (the true steady state a re-run hits). init
@@ -32,6 +32,11 @@ isolated HOME/XDG world seeded with a manifest-flow `state.json`:
   * UNCACHED: App registered but not yet installed on a repo (install-id 0). init
     recognizes the known intermediate state, prints the install-deep-link hint, and
     exits 0 (it does NOT try to mint with no id).
+  * STALE PEM: still the state path (identity vars absent), but a leftover
+    REIN_APP_PRIVATE_KEY_PATH points at a now-deleted file (what a past `source
+    ./dev-env` leaves behind). init validates the MANAGED keystore PEM the mint
+    actually reads, NOT the stale env path, so it still exits 0 — regression guard
+    for the source-keyed pre-flight fix.
 
 Both run `--yes --no-alias --no-symlink --skip-mint-check`: --yes keeps it
 non-interactive (no prompt to answer — the point here is config resolution, not the
@@ -125,8 +130,19 @@ def main() -> int:
 
     home_cached = H.isolated_home()
     home_uncached = H.isolated_home()
+    home_stale = H.isolated_home()
     seed_manifest_state(home_cached, installation_id=12345)
     seed_manifest_state(home_uncached, installation_id=0)
+    seed_manifest_state(home_stale, installation_id=12345)
+
+    # The stale-PEM leg: identity vars still absent (so it's the state path), but
+    # REIN_APP_PRIVATE_KEY_PATH is left over pointing at a file that does NOT
+    # exist — the leftover a past `source ./dev-env` leaves behind. init must
+    # validate the MANAGED keystore PEM (what the mint actually reads), not this
+    # stale path; before the source-keyed pre-flight fix it false-failed here.
+    stale_pem_path = "/nonexistent/rein-stale-dev-env-app.pem"
+    stale_env = step_env(home_stale)
+    stale_env["REIN_APP_PRIVATE_KEY_PATH"] = stale_pem_path
 
     init_flags = ["init", "--yes", "--no-alias", "--no-symlink", "--skip-mint-check"]
     result = H.run_journey(
@@ -141,11 +157,16 @@ def main() -> int:
                 extra_env=step_env(home_uncached),
                 label="rein init --yes --no-alias --no-symlink --skip-mint-check  (state.json: audit_done, install-id UNCACHED)",
             ),
+            H.JourneyStep(
+                argv=init_flags,
+                extra_env=stale_env,
+                label="rein init --yes --no-alias --no-symlink --skip-mint-check  (state path + STALE REIN_APP_PRIVATE_KEY_PATH)",
+            ),
         ],
         env=env,
     )
     text = result.transcript
-    cached, uncached = result.steps
+    cached, uncached, stale = result.steps
 
     # Invariants — the regression oracle for behavior, independent of the golden
     # (exit 2). Expected strings are INLINE LITERALS a reviewer reads right here.
@@ -179,6 +200,16 @@ def main() -> int:
             "installation_id=" not in uncached.text,
             "uncached leg: init does NOT print an app config line (it awaits install first)",
         ),
+        # STALE PEM: a leftover REIN_APP_PRIVATE_KEY_PATH must not false-fail the
+        # state path — init validates the managed keystore PEM the mint reads.
+        (
+            stale.exitstatus == 0,
+            f"stale-PEM leg: init must exit 0 despite a stale REIN_APP_PRIVATE_KEY_PATH; got {stale.exitstatus}",
+        ),
+        (
+            "installation_id=12345" in stale.text and stale_pem_path not in stale.text,
+            "stale-PEM leg: init resolves from state and never touches the stale env PEM path",
+        ),
     ]
     broken = [msg for ok, msg in invariants if not ok]
     if broken:
@@ -192,8 +223,9 @@ def main() -> int:
     print()
     print(text, flush=True)  # what actually happened, real output
     print("--- outcomes (asserted) ---", flush=True)
-    print("  cached leg:   resolved App config from state.json (installation_id=12345), NO env vars", flush=True)
-    print("  uncached leg: printed the install hint and exited 0 (App not yet installed)", flush=True)
+    print("  cached leg:    resolved App config from state.json (installation_id=12345), NO env vars", flush=True)
+    print("  uncached leg:  printed the install hint and exited 0 (App not yet installed)", flush=True)
+    print("  stale-PEM leg: ignored a stale REIN_APP_PRIVATE_KEY_PATH, resolved from state, exited 0", flush=True)
 
     if os.getenv("REIN_SHOW_NORMALIZED"):
         print("\n--- normalized (the comparison lens) ---", flush=True)

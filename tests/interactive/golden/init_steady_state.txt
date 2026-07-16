@@ -1,11 +1,11 @@
 $ rein init --yes --no-alias --no-symlink --skip-mint-check  (state.json: audit_done, install-id cached)
 rein init: setting up local scaffolding
-  state dir:  /tmp/rein-itest-home-jw_bc6bf/.local/state/rein
-  config dir: /tmp/rein-itest-home-jw_bc6bf/.config/rein
+  state dir:  /tmp/rein-itest-home-m2wcwj6h/.local/state/rein
+  config dir: /tmp/rein-itest-home-m2wcwj6h/.config/rein
   machine:    demo-box (label for this machine's App name)
   setup:      state.json: audit_done (steady state from manifest flow)
   app:        client_id=Iv23liDEMOclientID installation_id=12345
-  shim:       3 binaries under /tmp/rein-itest-home-jw_bc6bf/.local/state/rein/shim
+  shim:       3 binaries under /tmp/rein-itest-home-m2wcwj6h/.local/state/rein/shim
   symlink:    skipped (--no-symlink)
   mint check: skipped (--skip-mint-check)
   session:    not scaffolded (pass --repo owner/name to scaffold)
@@ -17,16 +17,40 @@ rein init: setting up local scaffolding
 
 rein init: done.
 Next:
-  - /tmp/rein-itest-home-jw_bc6bf/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
+  - /tmp/rein-itest-home-m2wcwj6h/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
   - run `rein run -- claude` (or another agent) to launch with rein in effect
   - (optional) enable the `claude` alias with `rein init --alias`
   - run `rein doctor` to verify everything is wired up
 
 $ rein init --yes --no-alias --no-symlink --skip-mint-check  (state.json: audit_done, install-id UNCACHED)
 rein init: setting up local scaffolding
-  state dir:  /tmp/rein-itest-home-h_p_i0mu/.local/state/rein
-  config dir: /tmp/rein-itest-home-h_p_i0mu/.config/rein
+  state dir:  /tmp/rein-itest-home-mt2gc5q2/.local/state/rein
+  config dir: /tmp/rein-itest-home-mt2gc5q2/.config/rein
   machine:    demo-box (label for this machine's App name)
   setup:      state.json: audit_done (steady state from manifest flow)
 
 App registered (rein-demo-primary) but not yet installed on a repo; visit https://github.com/apps/rein-demo-primary/installations/new, then run `rein run` (it fetches the installation id automatically)
+
+$ rein init --yes --no-alias --no-symlink --skip-mint-check  (state path + STALE REIN_APP_PRIVATE_KEY_PATH)
+rein init: setting up local scaffolding
+  state dir:  /tmp/rein-itest-home-5cd7madv/.local/state/rein
+  config dir: /tmp/rein-itest-home-5cd7madv/.config/rein
+  machine:    demo-box (label for this machine's App name)
+  setup:      state.json: audit_done (steady state from manifest flow)
+  app:        client_id=Iv23liDEMOclientID installation_id=12345
+  shim:       3 binaries under /tmp/rein-itest-home-5cd7madv/.local/state/rein/shim
+  symlink:    skipped (--no-symlink)
+  mint check: skipped (--skip-mint-check)
+  session:    not scaffolded (pass --repo owner/name to scaffold)
+  alias:      not installed (opt-in; enable with `rein init --alias`)
+  install on repo:
+    install the App on the repos you want it to broker tokens for.
+    visit this URL in your browser:
+      https://github.com/apps/rein-demo-primary/installations/new
+
+rein init: done.
+Next:
+  - /tmp/rein-itest-home-5cd7madv/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
+  - run `rein run -- claude` (or another agent) to launch with rein in effect
+  - (optional) enable the `claude` alias with `rein init --alias`
+  - run `rein doctor` to verify everything is wired up
