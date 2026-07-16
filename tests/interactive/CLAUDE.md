@@ -482,16 +482,17 @@ The `test_*.py` sweep (`run.sh`) additionally runs `test_golden_shape.py`, the
 stack-free lint that fails if a journey has no golden or if `normalize_for_compare`
 isn't idempotent on it — a cheap gate that needs no srt/GitHub/tty.
 
-## Setup: the `rein init` world, NOT `source ./dev-env`
+## Setup: the `rein init` world
 
-The documented path is the one a fresh machine uses: `rein init` configures the
-App + a dev-session; a journey resolves its throwaway with
-`resolve_throwaway_repo` (`REIN_JOURNEY_REPO` → the configured dev-session →
-`REIN_TEST_REPO_A` as a **legacy this-box shortcut**, last). A journey must not
-DEPEND on `REIN_TEST_REPO_A` special-casing (#40); it may use a throwaway repo,
-it just shouldn't assume that one env var names it. `source ./dev-env` is the dead-
-App footgun the HANDOFF banner warns about — mention it only as a labeled local
-shortcut.
+Run `rein init` once: it configures the App (recorded in `state.json` + the
+managed keystore) and a dev-session. A journey that MINTS uses that App —
+resolved from `state.json` when it runs in your real home, or, for an
+isolated-home init journey, supplied by `reinharness.init_app_env()` (the real
+App if configured, else a synthetic one for `--skip-mint-check` runs). A journey
+resolves its throwaway with `resolve_throwaway_repo` (`REIN_JOURNEY_REPO` → the
+dev-session → `REIN_TEST_REPO_A`) and repo B with `throwaway_repo_b`
+(`REIN_JOURNEY_REPO_B` → `REIN_TEST_REPO_B` → the `-b` sibling of A). Don't
+DEPEND on `REIN_TEST_REPO_A` special-casing (#40).
 
 ```sh
 # once per machine: rein init sets up the App + dev-session (see HANDOFF.md)
@@ -507,5 +508,5 @@ create` above is only needed for the gated `test_*.py` that take an issue via en
 Hard-constraint #1: a journey touches ONLY its throwaway. It creates its own
 disposable branches (`H.unique_branch`) and issue, and cleans both up in a
 `finally`. Init journeys additionally confine every write to a throwaway
-`HOME`/XDG tempdir and keep `REIN_APP_*` present so init never trips the
-~25-minute manifest/browser flow.
+`HOME`/XDG tempdir and supply the env-path App via `init_app_env()` so init never
+trips the ~25-minute manifest/browser flow.

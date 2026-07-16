@@ -1,19 +1,19 @@
-$ rein run -- bash -c <clone+declare+push A and B> /tmp/rein-itest-vw9dbpft
+$ rein run -- bash -c <clone+declare+push A and B> /tmp/rein-itest-8vcahvm4
 rein: sandbox preflight:
-  [ok]   srt present: /home/admin/.npm-global/bin/srt
+  [ok]   srt present: /home/tom.linux/.npm-global/bin/srt
   [ok]   srt version: 0.0.63 (package.json; note `srt --version` misreports 1.0.0)
   [ok]   seccomp: apply-seccomp present (unix-socket block available)
   [ok]   bwrap userns: unprivileged user namespace works
   [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
-rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-vw9dbpft (git -C /tmp/rein-itest-vw9dbpft rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
+rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-8vcahvm4 (git -C /tmp/rein-itest-8vcahvm4 rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_gh_read_staleness (role=implement, repos=[TomHennen/agentcreds-validation-a TomHennen/agentcreds-validation-b]) [source=file:/tmp/rein-journey-sess-qk_2ro7q/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-4vT76hlSXtCcZ7DJ-rE69Q/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-itest-vw9dbpft
+  session: sess_journey_gh_read_staleness (role=implement, repos=[TomHennen/agentcreds-validation-a TomHennen/agentcreds-validation-b]) [source=file:/tmp/rein-journey-sess-w0pvjaow/session.yaml]
+  proxy socket (out of sandbox): /run/user/501/rein/run-XZYrO402G8q9TvElCnHo9g/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-itest-8vcahvm4
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-3916258727
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-4239531149
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -24,9 +24,9 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-itest-vw9dbpft
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-itest-8vcahvm4
     => work the agent must keep has to be written INTO the working tree.
-    allowed back read-only: /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.claude, /home/admin/.claude.json, /home/admin/.local/bin, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv
+    allowed back read-only: /home/tom.linux/.npm-global/bin, /home/tom.linux/.npm-global/lib/node_modules, /home/tom.linux/.claude, /home/tom.linux/.claude.json, /home/tom.linux/.local/bin, /home/tom.linux/.cargo, /home/tom.linux/.rustup, /home/tom.linux/go, /home/tom.linux/.pyenv
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
       REIN_SANDBOX_ALLOW_READ=/abs/path[:/more] rein run --sandbox -- …
     or (NOT recommended — exposes your whole home dir): REIN_SANDBOX_SHOW_HOME=1
@@ -58,37 +58,37 @@ run git clone https://github.com/TomHennen/agentcreds-validation-b repoB
 emit "@READ_B_RC=$?"
 [ -d repoB/.git ] && emit "@READ_B_OK"
 
-emit "@DECLARE_A_START  rein declare 120 --repo TomHennen/agentcreds-validation-a  (1st issue: plain confirm, in scope)"
-run rein declare 120 --repo TomHennen/agentcreds-validation-a
+emit "@DECLARE_A_START  rein declare 277 --repo TomHennen/agentcreds-validation-a  (1st issue: plain confirm, in scope)"
+run rein declare 277 --repo TomHennen/agentcreds-validation-a
 emit "@DECLARE_A_RC=$?"
 
-emit "@PUSH_A_START  push agent/120/<nonce> -> TomHennen/agentcreds-validation-a (expect: LANDS on A)"
+emit "@PUSH_A_START  push agent/277/<nonce> -> TomHennen/agentcreds-validation-a (expect: LANDS on A)"
 cd repoA
 echo "gh-read staleness journey: real agent work in repo A" >> agent-note.txt
 run git add -A
 run git commit -q -m "gh-read staleness journey: real agent work (repo A)"
-run git push --progress origin HEAD:refs/heads/agent/120/stale-a-20260712-191045-dfad6b
+run git push --progress origin HEAD:refs/heads/agent/277/stale-a-20260716-065821-6971db
 emit "@PUSH_A_RC=$?"
 cd "$0"
 
-emit "@DECLARE_B_START  rein declare 19 --repo TomHennen/agentcreds-validation-b  (2nd issue: the #95 surface — pre-fix this 404s reusing the stale A-only token)"
-run rein declare 19 --repo TomHennen/agentcreds-validation-b
+emit "@DECLARE_B_START  rein declare 32 --repo TomHennen/agentcreds-validation-b  (2nd issue: the #95 surface — pre-fix this 404s reusing the stale A-only token)"
+run rein declare 32 --repo TomHennen/agentcreds-validation-b
 emit "@DECLARE_B_RC=$?"
 
-emit "@PUSH_B_START  push agent/19/<nonce> -> TomHennen/agentcreds-validation-b (expect: LANDS on B)"
+emit "@PUSH_B_START  push agent/32/<nonce> -> TomHennen/agentcreds-validation-b (expect: LANDS on B)"
 cd repoB
 echo "gh-read staleness journey: real agent work in repo B" >> agent-note.txt
 run git add -A
 run git commit -q -m "gh-read staleness journey: real agent work (repo B)"
-run git push --progress origin HEAD:refs/heads/agent/19/stale-b-20260712-191045-7aa1fd
+run git push --progress origin HEAD:refs/heads/agent/32/stale-b-20260716-065821-e85468
 emit "@PUSH_B_RC=$?"
 emit "@SCRIPT_DONE"
- /tmp/rein-itest-vw9dbpft
+ /tmp/rein-itest-8vcahvm4
 ---
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/rein-itest-vw9dbpft
+- Your work persists ONLY in the working tree: /tmp/rein-itest-8vcahvm4
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
@@ -126,69 +126,69 @@ SBX| $ git clone https://github.com/TomHennen/agentcreds-validation-b repoB
 SBX| Cloning into 'repoB'...
 SBX| @READ_B_RC=0
 SBX| @READ_B_OK
-SBX| @DECLARE_A_START  rein declare 120 --repo TomHennen/agentcreds-validation-a  (1st issue: plain confirm, in scope)
-SBX| $ rein declare 120 --repo TomHennen/agentcreds-validation-a
+SBX| @DECLARE_A_START  rein declare 277 --repo TomHennen/agentcreds-validation-a  (1st issue: plain confirm, in scope)
+SBX| $ rein declare 277 --repo TomHennen/agentcreds-validation-a
 
 === rein: agent declares work on an issue ===
-   issue:    #120 "rein journey: gh-read staleness fixture (safe to close)"  [open]
+   issue:    #277 "rein journey: gh-read staleness fixture (safe to close)"  [open]
              in TomHennen/agentcreds-validation-a
    session:  sess_journey_gh_read_staleness (role=implement, repos=[TomHennen/agentcreds-validation-a, TomHennen/agentcreds-validation-b])
    approving covers ALL writes for this run (git push, gh, API).
 
-To approve, type the issue number (120) and press enter.
+To approve, type the issue number (277) and press enter.
 To deny, press Ctrl-C or type anything else.
-> 120
+> 277
   [approved]
-SBX| issue #120 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/120/<nonce>)
+SBX| issue #277 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/277/<nonce>)
 SBX| @DECLARE_A_RC=0
-SBX| @PUSH_A_START  push agent/120/<nonce> -> TomHennen/agentcreds-validation-a (expect: LANDS on A)
+SBX| @PUSH_A_START  push agent/277/<nonce> -> TomHennen/agentcreds-validation-a (expect: LANDS on A)
 SBX| $ git add -A
 SBX| $ git commit -q -m gh-read staleness journey: real agent work (repo A)
-SBX| $ git push --progress origin HEAD:refs/heads/agent/120/stale-a-20260712-191045-dfad6b
+SBX| $ git push --progress origin HEAD:refs/heads/agent/277/stale-a-20260716-065821-6971db
 SBX| Enumerating objects: 4, done.
 SBX| Counting objects: 100% (4/4), done.
-SBX| Delta compression using up to 8 threads
+SBX| Delta compression using up to 4 threads
 SBX| Compressing objects: 100% (3/3), done.
-SBX| Writing objects: 100% (3/3), 386 bytes | 386.00 KiB/s, done.
+SBX| Writing objects: 100% (3/3), 385 bytes | 385.00 KiB/s, done.
 SBX| Total 3 (delta 1), reused 0 (delta 0), pack-reused 0
 SBX| remote:
-SBX| remote: Create a pull request for 'agent/120/stale-a-20260712-191045-dfad6b' on GitHub by visiting:
-SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/120/stale-a-20260712-191045-dfad6b
+SBX| remote: Create a pull request for 'agent/277/stale-a-20260716-065821-6971db' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/277/stale-a-20260716-065821-6971db
 SBX| remote:
 SBX| To https://github.com/TomHennen/agentcreds-validation-a
-SBX|  * [new branch]      HEAD -> agent/120/stale-a-20260712-191045-dfad6b
+SBX|  * [new branch]      HEAD -> agent/277/stale-a-20260716-065821-6971db
 SBX| @PUSH_A_RC=0
-SBX| @DECLARE_B_START  rein declare 19 --repo TomHennen/agentcreds-validation-b  (2nd issue: the #95 surface — pre-fix this 404s reusing the stale A-only token)
-SBX| $ rein declare 19 --repo TomHennen/agentcreds-validation-b
+SBX| @DECLARE_B_START  rein declare 32 --repo TomHennen/agentcreds-validation-b  (2nd issue: the #95 surface — pre-fix this 404s reusing the stale A-only token)
+SBX| $ rein declare 32 --repo TomHennen/agentcreds-validation-b
 
 === rein: agent wants to ALSO work on an issue ===
-   issue:    #19 "rein journey: gh-read staleness fixture (safe to close)"  [open]
+   issue:    #32 "rein journey: gh-read staleness fixture (safe to close)"  [open]
              in TomHennen/agentcreds-validation-b
    session:  sess_journey_gh_read_staleness (role=implement, repos=[TomHennen/agentcreds-validation-a, TomHennen/agentcreds-validation-b])
    approving covers ALL writes for this run (git push, gh, API).
 
-To approve, type the issue number (19) and press enter.
+To approve, type the issue number (32) and press enter.
 To deny, press Ctrl-C or type anything else.
-> 19
+> 32
   [approved]
-SBX| issue #19 in TomHennen/agentcreds-validation-b confirmed — writes are unlocked for this run (push to agent/19/<nonce>)
+SBX| issue #32 in TomHennen/agentcreds-validation-b confirmed — writes are unlocked for this run (push to agent/32/<nonce>)
 SBX| @DECLARE_B_RC=0
-SBX| @PUSH_B_START  push agent/19/<nonce> -> TomHennen/agentcreds-validation-b (expect: LANDS on B)
+SBX| @PUSH_B_START  push agent/32/<nonce> -> TomHennen/agentcreds-validation-b (expect: LANDS on B)
 SBX| $ git add -A
 SBX| $ git commit -q -m gh-read staleness journey: real agent work (repo B)
-SBX| $ git push --progress origin HEAD:refs/heads/agent/19/stale-b-20260712-191045-7aa1fd
+SBX| $ git push --progress origin HEAD:refs/heads/agent/32/stale-b-20260716-065821-e85468
 SBX| Enumerating objects: 4, done.
 SBX| Counting objects: 100% (4/4), done.
-SBX| Delta compression using up to 8 threads
+SBX| Delta compression using up to 4 threads
 SBX| Compressing objects: 100% (3/3), done.
-SBX| Writing objects: 100% (3/3), 413 bytes | 413.00 KiB/s, done.
+SBX| Writing objects: 100% (3/3), 410 bytes | 410.00 KiB/s, done.
 SBX| Total 3 (delta 0), reused 0 (delta 0), pack-reused 0
 SBX| remote:
-SBX| remote: Create a pull request for 'agent/19/stale-b-20260712-191045-7aa1fd' on GitHub by visiting:
-SBX| remote:      https://github.com/TomHennen/agentcreds-validation-b/pull/new/agent/19/stale-b-20260712-191045-7aa1fd
+SBX| remote: Create a pull request for 'agent/32/stale-b-20260716-065821-e85468' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-b/pull/new/agent/32/stale-b-20260716-065821-e85468
 SBX| remote:
 SBX| To https://github.com/TomHennen/agentcreds-validation-b
-SBX|  * [new branch]      HEAD -> agent/19/stale-b-20260712-191045-7aa1fd
+SBX|  * [new branch]      HEAD -> agent/32/stale-b-20260716-065821-e85468
 SBX| @PUSH_B_RC=0
 SBX| @SCRIPT_DONE
 rein: revoked 1 of 1 write token(s) on exit

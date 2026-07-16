@@ -1,19 +1,19 @@
-$ cd /tmp/rein-journey-checkout-39ov174a && rein init --no-alias --no-symlink --skip-mint-check
+$ cd /tmp/rein-journey-checkout-foeyrbr4 && rein init --no-alias --no-symlink --skip-mint-check
 rein init: setting up local scaffolding
-  state dir:  /tmp/rein-itest-home-wlgd0pur/.local/state/rein
-  config dir: /tmp/rein-itest-home-wlgd0pur/.config/rein
+  state dir:  /tmp/rein-itest-home-c9t9869t/.local/state/rein
+  config dir: /tmp/rein-itest-home-c9t9869t/.config/rein
 Name this machine [demo-box]:
   machine:    demo-box (label for this machine's App name)
   setup:      no state.json; REIN_APP_* env vars detected — using env-managed path (marker state.json will be written)
               wrote managed_externally marker (state.json)
-  app:        client_id=Iv23lii9NlJIOVZkkD7G installation_id=134965206
-  shim:       3 binaries under /tmp/rein-itest-home-wlgd0pur/.local/state/rein/shim
+  app:        client_id=Iv23lihaPgKgifHps75d installation_id=145330081
+  shim:       3 binaries under /tmp/rein-itest-home-c9t9869t/.local/state/rein/shim
   symlink:    skipped (--no-symlink)
   mint check: skipped (--skip-mint-check)
   (add more later with `rein session add-repo`, or approve the agent's
    expansion requests as it encounters work)
 Which repo should the agent work on? (default detected from this dir) [TomHennen/agentcreds-validation-a]:
-  session:    scaffolded at /tmp/rein-itest-home-wlgd0pur/.config/rein/dev-session.yaml (repos: [TomHennen/agentcreds-validation-a])
+  session:    scaffolded at /tmp/rein-itest-home-c9t9869t/.config/rein/dev-session.yaml (repos: [TomHennen/agentcreds-validation-a])
               writes are agent-declared (#35): the agent runs `rein declare <n>`,
               you confirm on your terminal, then writes flow for that run. Reads work immediately.
   alias:      not installed (opt-in; enable with `rein init --alias`)
@@ -25,21 +25,21 @@ Which repo should the agent work on? (default detected from this dir) [TomHennen
 
 rein init: done.
 Next:
-  - /tmp/rein-itest-home-wlgd0pur/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
+  - /tmp/rein-itest-home-c9t9869t/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
   - run `rein run -- claude` (or another agent) to launch with rein in effect
   - (optional) enable the `claude` alias with `rein init --alias`
   - run `rein doctor` to verify everything is wired up
 
-$ cd /tmp/rein-journey-nongit-z9n_stqp && rein init --no-alias --no-symlink --skip-mint-check
+$ cd /tmp/rein-journey-nongit-dzuclt6b && rein init --no-alias --no-symlink --skip-mint-check
 rein init: setting up local scaffolding
-  state dir:  /tmp/rein-itest-home-a4d6a076/.local/state/rein
-  config dir: /tmp/rein-itest-home-a4d6a076/.config/rein
+  state dir:  /tmp/rein-itest-home-_xvbmmy3/.local/state/rein
+  config dir: /tmp/rein-itest-home-_xvbmmy3/.config/rein
 Name this machine [demo-box]:
   machine:    demo-box (label for this machine's App name)
   setup:      no state.json; REIN_APP_* env vars detected — using env-managed path (marker state.json will be written)
               wrote managed_externally marker (state.json)
-  app:        client_id=Iv23lii9NlJIOVZkkD7G installation_id=134965206
-  shim:       3 binaries under /tmp/rein-itest-home-a4d6a076/.local/state/rein/shim
+  app:        client_id=Iv23lihaPgKgifHps75d installation_id=145330081
+  shim:       3 binaries under /tmp/rein-itest-home-_xvbmmy3/.local/state/rein/shim
   symlink:    skipped (--no-symlink)
   mint check: skipped (--skip-mint-check)
 Which repo should the agent work on? (owner/name, Enter to skip):
@@ -53,12 +53,12 @@ Which repo should the agent work on? (owner/name, Enter to skip):
 
 rein init: done.
 Next:
-  - /tmp/rein-itest-home-a4d6a076/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
+  - /tmp/rein-itest-home-_xvbmmy3/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
   - run `rein run -- claude` (or another agent) to launch with rein in effect
   - (optional) enable the `claude` alias with `rein init --alias`
   - run `rein doctor` to verify everything is wired up
 
-$ cd /tmp/rein-journey-checkout-39ov174a && rein run --direct -- echo hi
+$ cd /tmp/rein-journey-checkout-foeyrbr4 && rein run --direct -- echo hi
 ===============================================================
 rein: WARNING — DIRECT (UNSANDBOXED) MODE
   The agent runs OUTSIDE the srt sandbox. It shares your user
@@ -67,10 +67,10 @@ rein: WARNING — DIRECT (UNSANDBOXED) MODE
   hidden by process boundaries, not a sandbox. Use this ONLY on a
   THROWAWAY repo. For real work, drop --direct to run sandboxed.
 ===============================================================
-rein run: load session: no session file at /tmp/rein-itest-home-a4d6a076/.config/rein/dev-session.yaml and no usable fallback repo (see README for dev-session.yaml format)
+rein run: load session: no session file at /tmp/rein-itest-home-_xvbmmy3/.config/rein/dev-session.yaml and no usable fallback repo (see README for dev-session.yaml format)
       run `rein init --repo TomHennen/agentcreds-validation-a` to scaffold a session for the repo you are standing in
 
-$ cd /tmp/rein-journey-nongit-z9n_stqp && rein run --direct -- echo hi
+$ cd /tmp/rein-journey-nongit-dzuclt6b && rein run --direct -- echo hi
 ===============================================================
 rein: WARNING — DIRECT (UNSANDBOXED) MODE
   The agent runs OUTSIDE the srt sandbox. It shares your user
@@ -79,5 +79,5 @@ rein: WARNING — DIRECT (UNSANDBOXED) MODE
   hidden by process boundaries, not a sandbox. Use this ONLY on a
   THROWAWAY repo. For real work, drop --direct to run sandboxed.
 ===============================================================
-rein run: load session: no session file at /tmp/rein-itest-home-a4d6a076/.config/rein/dev-session.yaml and no usable fallback repo (see README for dev-session.yaml format)
+rein run: load session: no session file at /tmp/rein-itest-home-_xvbmmy3/.config/rein/dev-session.yaml and no usable fallback repo (see README for dev-session.yaml format)
       run `rein init` to create one

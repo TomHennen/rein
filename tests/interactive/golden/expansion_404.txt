@@ -1,19 +1,19 @@
-$ rein run -- bash -c <declare-uninstalled agent script> /tmp/rein-itest-o8owy4dz
+$ rein run -- bash -c <declare-uninstalled agent script> /tmp/rein-itest-f7vcgini
 rein: sandbox preflight:
-  [ok]   srt present: /home/admin/.npm-global/bin/srt
+  [ok]   srt present: /home/tom.linux/.npm-global/bin/srt
   [ok]   srt version: 0.0.63 (package.json; note `srt --version` misreports 1.0.0)
   [ok]   seccomp: apply-seccomp present (unix-socket block available)
   [ok]   bwrap userns: unprivileged user namespace works
   [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
-rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-o8owy4dz (git -C /tmp/rein-itest-o8owy4dz rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
+rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-f7vcgini (git -C /tmp/rein-itest-f7vcgini rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_expansion_404 (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-404-c4l4ica0/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-UOgJmRm-L49zauzmqGM-pg/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-itest-o8owy4dz
+  session: sess_journey_expansion_404 (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-404-4amie9vh/session.yaml]
+  proxy socket (out of sandbox): /run/user/501/rein/run-_M4LOufqmNQb2mMCHqg2ow/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-itest-f7vcgini
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-3631068625
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-2360789114
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -24,9 +24,9 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-itest-o8owy4dz
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-itest-f7vcgini
     => work the agent must keep has to be written INTO the working tree.
-    allowed back read-only: /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.claude, /home/admin/.claude.json, /home/admin/.local/bin, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv
+    allowed back read-only: /home/tom.linux/.npm-global/bin, /home/tom.linux/.npm-global/lib/node_modules, /home/tom.linux/.claude, /home/tom.linux/.claude.json, /home/tom.linux/.local/bin, /home/tom.linux/.cargo, /home/tom.linux/.rustup, /home/tom.linux/go, /home/tom.linux/.pyenv
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
       REIN_SANDBOX_ALLOW_READ=/abs/path[:/more] rein run --sandbox -- …
     or (NOT recommended — exposes your whole home dir): REIN_SANDBOX_SHOW_HOME=1
@@ -49,12 +49,12 @@ emit "@DECLARE_START  rein declare 1 --repo TomHennen/definitely-not-installed  
 run rein declare 1 --repo TomHennen/definitely-not-installed
 emit "@DECLARE_RC=$?"
 emit "@SCRIPT_DONE"
- /tmp/rein-itest-o8owy4dz
+ /tmp/rein-itest-f7vcgini
 ---
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/rein-itest-o8owy4dz
+- Your work persists ONLY in the working tree: /tmp/rein-itest-f7vcgini
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
@@ -87,17 +87,17 @@ SBX| $ rein declare 1 --repo TomHennen/definitely-not-installed
 
 === rein: NOTICE — App not installed (nothing to approve) ===
    the agent asked for:  TomHennen/definitely-not-installed  (for issue #1)
-   but the GitHub App rein-primary-735a3bbe20 is NOT installed on it,
+   but the GitHub App rein-primary-56e410c903 is NOT installed on it,
    so rein cannot mint any credential for it — there is no approval to give.
-   Install it here:  https://github.com/apps/rein-primary-735a3bbe20/installations/new
+   Install it here:  https://github.com/apps/rein-primary-56e410c903/installations/new
    Then the agent re-runs its declare, and you will be asked to APPROVE the repo.
 
 Press ENTER when the install is done (the agent will retry), or 's' to skip.
 > s
   [acknowledged — the agent must re-run its declare; you will be asked to approve the repo then]
-SBX| rein: cannot request TomHennen/definitely-not-installed — the GitHub App rein-primary-735a3bbe20 is not installed on it.
+SBX| rein: cannot request TomHennen/definitely-not-installed — the GitHub App rein-primary-56e410c903 is not installed on it.
 SBX|       The human must install it first:
-SBX|       https://github.com/apps/rein-primary-735a3bbe20/installations/new
+SBX|       https://github.com/apps/rein-primary-56e410c903/installations/new
 SBX|       Then run this command again.
 SBX| @DECLARE_RC=1
 SBX| @SCRIPT_DONE

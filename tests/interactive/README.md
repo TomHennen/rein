@@ -45,15 +45,17 @@ human script (`scripts/cp5-manifest-manual-test.sh`).
 
 ### The recipe (copy this)
 
-Setup is the **`rein init` world**, not `source ./dev-env` (the dead-App footgun
-HANDOFF warns about). `rein init` configures the App + a dev-session; a journey
-resolves its throwaway with `resolve_throwaway_repo` (`REIN_JOURNEY_REPO` → the
-configured dev-session → `REIN_TEST_REPO_A` only as a **labeled legacy shortcut**,
-so journeys don't depend on `REIN_TEST_REPO_A` special-casing — #40).
+Setup is the **`rein init` world**, not `source ./dev-env`. As of #126 the harness
+NO LONGER sources `dev-env` at all: `reinharness.rein_env()` returns the plain
+environment, journeys resolve the **real App** from `state.json` (what `rein init`
+provisions), and init-flavored journeys get the env-path App from
+`reinharness.init_app_env()`. `rein init` configures the App + a dev-session; a
+journey resolves its throwaway with `resolve_throwaway_repo` (`REIN_JOURNEY_REPO`
+→ the configured dev-session → `REIN_TEST_REPO_A` only as a **labeled legacy
+shortcut**, so journeys don't depend on `REIN_TEST_REPO_A` special-casing — #40).
 
 ```sh
-# once per machine: rein init (see HANDOFF.md); this box's legacy shortcut is
-# `source ./dev-env`, but the documented path is init.
+# once per machine: rein init (see HANDOFF.md). No dev-env needed (#126).
 python3 tests/interactive/journey_write_ceremony.py    # the journey; makes + closes its OWN issue; exit 0 == matches golden
 REIN_UPDATE_GOLDEN=1 python3 tests/interactive/journey_write_ceremony.py   # regenerate the golden intentionally
 
@@ -73,7 +75,7 @@ a new `golden/*.txt`). See `tests/interactive/CLAUDE.md` for the authoring rules
 
 | # | journey | status | where + golden |
 |---|---------|--------|----------------|
-| 1 | **First-time setup** — `rein init`: repo prompt, opt-in `claude` alias, sandbox-health soft-block, shim/symlink | **PARTIAL** | `test_init_interactive.py` (8 live specs). The App-*creation* half is **UNDRIVEABLE** (browser/manifest) → `scripts/cp5-manifest-manual-test.sh`. Machine-label prompt: decided, unbuilt (xfail). No golden yet — a `journey_init.py` is the next one to write |
+| 1 | **First-time setup** — `rein init`: repo prompt, opt-in `claude` alias, sandbox-health soft-block, shim/symlink | **PARTIAL** | `test_init_interactive.py` (8 live specs). The App-*creation* half is **UNDRIVEABLE** (browser/manifest) → `scripts/cp5-manifest-manual-test.sh`. Machine-label prompt: decided, unbuilt (xfail). The *steady-state re-run* leg now has a golden (row 21); a full first-run `journey_init.py` covering the prompts is still the next one to write (**#127**) |
 | 2 | **The write ceremony** — agent declares an issue → human confirms on the terminal → verified push to `agent/<n>/<nonce>` lands | **COVERED** | `journey_write_ceremony.py` → **`golden/write_ceremony.txt`** + `test_write_approval.py::DeclareConfirmPush` + `test_confirm_shows_title.py` (prompt shows the *fetched* title/state/home-repo) |
 | 3 | **The pre-declaration lock** — agent pushes before declaring; the proxy denies with a synthesized `fatal: remote error`, no prompt ever fires | **COVERED** | `test_write_approval.py::PreDeclarationLock` + phase 1 of the ceremony golden |
 | 4 | **The denial path** — human types the wrong number; the declare fails and writes stay locked | **COVERED** | `test_write_approval.py::test_wrong_answer_denies_and_writes_stay_locked` (edge case — a plain test, no golden) |
@@ -92,6 +94,8 @@ a new `golden/*.txt`). See `tests/interactive/CLAUDE.md` for the authoring rules
 | 17 | **Multi-repo: REAL cross-repo work in ONE run** — a session statically scoped to TWO same-owner, App-installed throwaway repos, where ONE `rein run` does real work in BOTH: the launch banner names the full ceiling `repos=[A B]` (the #68 gate cleared BOTH — no separate launch-gate demo needed), the agent CLONES both (reads flow, no declaration), then `declare <issueA> --repo A` → approve → push LANDS on A, and `declare <issueB> --repo B` → the SECOND declare in the run renders the "agent wants to ALSO work on an issue" confirm (an additional-ISSUE confirm within scope — B is already in the ceiling, so session.Contains → NOT the AddRepo SCOPE-EXPANSION prompt an out-of-scope repo would trip, row 6) → approve → push LANDS on B. BOTH branches are then verified host-side as actually landed on GitHub. This proves the brokered run genuinely spans the ceiling and writes across BOTH repos in one run — not merely that a 2-repo session launches | **COVERED** | `journey_multi_repo.py` → **`golden/multi_repo.txt`** (runs SANDBOXED — the default. It ran `--direct` only while #95 blocked the sandboxed SECOND declare; that fix landed, so it is back on sandboxed. This is the multi-repo HAPPY PATH, not the #95 guard — see row 18) |
 | 18 | **#95 regression guard: cross-run gh-read staleness** — the load-bearing sandboxed guard for issue **#95**. A session statically scoped to `[A, B]`, but BEFORE the run a REAL, currently-valid, repo-A-ONLY-scoped gh-read token is SEEDED at the LEGACY untagged cache path in the run's state dir — the leftover a prior single-repo-A run wrote. PRE-FIX the scope-blind broker serves that stale token for the SECOND declare and `declare <issueB> --repo B` 404s ("issue not found in B"); POST-FIX the scope-tagged cache MISSES it, re-mints at `[A,B]`, fetches B's issue, and the push to B LANDS. The guard assertions (declare B rc=0, the second Form A rendered, push-to-B landed) are exactly the surfaces #95 breaks — proven load-bearing: RED on 780a7fb, GREEN on the fix. Unlike row 17 (which passes clean-state with or without the fix), the seed is what makes THIS a regression guard | **COVERED** | `journey_sandbox_gh_read_staleness.py` → **`golden/sandbox_gh_read_staleness.txt`**. Seeds via the test-support `seedghread` mint (same as `cmd/rein/issue95_live_test.go`); NOT a rein subcommand |
 | 19 | **The gh / REST + GraphQL write boundary** — the in-sandbox `gh` twin of row 2's git-push boundary (issue **#91**, and #101 "gap 1"): the SAME `gh api -X POST .../issues/<n>/comments` write is DENIED before the declare (rein's declare gate, a local 403 — GitHub never contacted) and LANDS after declare+approve (HTTP 201, the body echoed back); then, on the same post-declare token, a push to `agent/<n>/<nonce>` and a **`gh pr create`** — which needs BOTH `pull_requests: write` AND the **GraphQL read** `gh pr create` performs first (rein's proxy classifies/gates GraphQL separately from REST). Host-side ground truth confirms the comment, the branch and the PR really exist at GitHub | **COVERED** | `journey_gh_write.py` → **`golden/gh_write.txt`**. The regression proof for the #91 contents-only-token bug (before it, every in-sandbox issue/PR write 403'd "Resource not accessible by integration" while `git push` worked, falsifying the contract's promise that approving covers ALL writes) |
+| 22 | **`rein init` then `rein run` (no `REIN_APP_*`)** — the LIVE companion to row 21 (PR #128 review: "we never see rein run work after init"). Seeds the REAL `rein init` App into an isolated home, clears `REIN_APP_*`, then: (1) `rein init` with a REAL mint check (`mint check: ... ok (token expires <TS>)`) proving the state-resolved App actually mints; (2) `rein run --direct -- git clone <throwaway>` proving the broker mints a git token and a real read lands. The end-to-end proof of what #126 unblocks. SKIPs (exit 3) if no App is configured | **COVERED** | `journey_init_then_run.py` → **`golden/init_then_run.txt`** (live; real mint + broker clone) |
+| 21 | **`rein init` steady state (no `REIN_APP_*`)** — a re-run of `rein init` after the manifest flow completed, with env vars ABSENT: App config must resolve from `state.json` + the managed keystore, not env. Regression guard for the bug where init's `BridgeUseState` branch called the env-ONLY loader and hard-failed on "missing env var REIN_APP_CLIENT_ID (did you source ./dev-env?)" once the install-id was cached. Two legs: **cached** (install-id present → resolves `installation_id` from state, prints the `app:` line, finishes — the leg that used to fail) and **uncached** (install-id 0 → prints the install-deep-link hint and exits 0). Does the OPPOSITE of every other init journey — it CLEARS `REIN_APP_*` — and uses a SYNTHETIC `state.json` in an isolated config dir, so it needs no real App/network and does NOT depend on `dev-env` (#126) | **COVERED** | `journey_init_steady_state.py` → **`golden/init_steady_state.txt`** (offline: `--skip-mint-check`; the mint itself is covered elsewhere — this is about which loader init uses) |
 | 20 | **REAL claude walks the whole write path** — the #101 "gap 2" journey: every other journey's "agent" is a deterministic bash script we wrote, and `test_realagent_e2e` runs a real claude but only asks it `2+2`. Here a **live LLM** gets a one-line task and does the whole thing itself: reads the injected contract, runs `rein declare <n>` **up front** (it does NOT need to discover the gate from a locked push — a design correction to #101, see the journey's docstring), gets approved via the tmux **popup**, writes/commits/pushes `agent/<n>/<its own suffix>` (discovered host-side via `matching-refs` — a real agent names its own branch) and opens a **PR**, whose author is asserted to be the **delegated App bot** (`app/<slug>`, `is_bot=true`), never the developer. It runs in the REAL configuration — rein AND claude INSIDE a real tmux pane (`reinharness.tmux_pane_session`), which matters most here because claude is a full-screen TUI: only then do the agent's TUI and the approval popup actually SHARE ONE TERMINAL. So it also asserts what only that can show: while Form A is up it is on the attached client's pyte render and ABSENT from `capture-pane` of the pane, which still shows claude's TUI live underneath, blocked on its `rein declare` tool call — the popup OVERLAYS, it does not PRINT — and the TUI REPAINTS once the popup closes (`wait_stable`; that assertion has no anchor string) | **COVERED** | `journey_realagent_write.py` → **`golden/realagent_write.txt`** (COMPARED) + **`agent-sessions/realagent_write.txt`** (SHOWN). A live LLM gets its OWN shape — three things, each doing one job — rather than being forced into the deterministic journeys' single composite golden: **(1) invariants in code** (the regression oracle for behavior; a break is exit 2); **(2) a compared golden of rein's OWN output + the popup's Form A and NO agent content**, extracted with one boundary + one regex (`reinharness.split_at_agent_launch`: rein's launch surface verbatim through its `rein: running:` echo — the only compared golden covering the claude-specific `--append-system-prompt` contract-injection line — then column-0 `rein: …` lines). Because no agent content is in it, a COMPLETELY DIFFERENT claude session still compares clean, and every rein-emitted line still trips drift; **(3) the agent's session** — rendered `capture-pane -p -J` milestone frames (TUI live, TUI under the popup, the repaint, the final screen) committed under `agent-sessions/` so a human can READ what the agent did, and NEVER compared (it is not in `golden/`, so nothing diffs it: an LLM's prose is not a regression signal). claude's folder-trust dialog is dismissed as **plumbing** — never asserted, never in the narrative. SKIPs with exit 3 if `claude`, `tmux` or `pyte` is absent. Spends real API tokens: run it deliberately |
 
 Statuses: **COVERED** (a file drives it), **PARTIAL** (some of it), **GAP** (real
@@ -103,8 +107,8 @@ journey, no demo yet), **UNDRIVEABLE** (needs a browser — say so and move on).
   dev-session (the documented path); the repo is resolved by
   `resolve_throwaway_repo` (`REIN_JOURNEY_REPO` → the configured dev-session →
   `REIN_TEST_REPO_A` as a **legacy this-box shortcut**). Hard-constraint #1: the
-  suite touches **only** that one throwaway. `source ./dev-env` still works on
-  this VM but is the dead-App footgun HANDOFF warns about — prefer `rein init`.
+  suite touches **only** that one throwaway. As of #126 the harness does not
+  source `dev-env` — it uses the `rein init` App from `state.json`.
 - **A healthy sandbox stack:** `srt`, `bwrap`, `socat`, `ripgrep`, and working
   unprivileged user namespaces. (`rein doctor` checks these.)
 - **`python3` + `pexpect`** (developed against 4.9.0).
@@ -130,9 +134,9 @@ tests/interactive/run.sh test_write_approval          # one module
 tests/interactive/run.sh test_write_approval.WriteApprovalLoop.test_wrong_answer_denies_and_push_fails_cleanly
 ```
 
-`run.sh` sources `./dev-env`, builds `rein` + shims, and runs `unittest`. It is
-**never** run by `go test ./...` (there are no `.go` files here), so the Go
-suite stays untouched.
+`run.sh` builds `rein` + shims and runs `unittest` (no `dev-env` — #126; the App
+comes from `state.json`). It is **never** run by `go test ./...` (there are no
+`.go` files here), so the Go suite stays untouched.
 
 ## What's covered
 

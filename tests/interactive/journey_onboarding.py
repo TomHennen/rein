@@ -59,14 +59,16 @@ GOLDEN_NAME = "onboarding.txt"
 
 
 def main() -> int:
-    env = H.rein_env()  # REIN_APP_* present => env path, never the browser flow
+    env = H.rein_env()
     H.build_binaries(env)
 
     home = H.isolated_home()
     # One throwaway HOME/XDG world, shared by both commands: `rein init` sets it
     # up, `rein doctor` inspects it. REIN_MACHINE_HOSTNAME pins the pre-filled
-    # label so the golden is deterministic.
-    extra = dict(H.isolated_home_env(home))
+    # label so the golden is deterministic. init_app_env() supplies the env-path
+    # App so init stays off the manifest flow and the post-init `rein doctor`
+    # mint check runs against a real App.
+    extra = {**H.isolated_home_env(home), **H.init_app_env()}
     extra["REIN_MACHINE_HOSTNAME"] = "demo-box"
 
     # DECLARE STEPS ONLY — argv + the ordered answers to each prompt. The runner

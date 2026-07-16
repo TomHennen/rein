@@ -15,9 +15,11 @@ launched — the same terminal a real developer would type into.
 
 WHAT THE HELPERS GIVE YOU
 -------------------------
-- ``rein_env()``        — the REIN_* environment (pre-sourced, or parsed from
-                          ./dev-env). REIN_APP_* MUST stay present so ``rein
-                          init`` never routes into the 25-minute manifest flow.
+- ``rein_env()``        — the REIN_* environment (os.environ as-is). Init-flavored
+                          journeys that need the env-path App in a fresh isolated
+                          home get it from ``init_app_env()`` (the real rein-init
+                          App, else a synthetic one) so ``rein init`` never routes
+                          into the 25-minute manifest flow.
 - ``build_binaries()``  — ``go build -o bin/ ./...`` + ``rein install-shim``.
 - ``unique_branch()``   — a timestamped disposable branch name (throwaway repo).
 - ``ReinRun``           — a pexpect wrapper around ``rein run`` with a captured
@@ -60,7 +62,6 @@ import pexpect
 
 # reinharness.py lives at <repo>/tests/interactive/reinharness.py
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEV_ENV = REPO_ROOT / "dev-env"
 REIN_BIN = REPO_ROOT / "bin" / "rein"
 
 
@@ -101,17 +102,28 @@ PERSIST_QUESTION = "save"  # "Also save <repo> to the session for future runs? [
 
 def throwaway_repo_b(env: dict | None = None) -> str:
     """The owner/name of the SECOND throwaway repo (issue #69 scope
-    expansion). Same owner as REIN_TEST_REPO_A — the App installation is
+    expansion / multi-repo). Same owner as repo A — the App installation is
     single-owner, so an expansion target must share the owner.
 
-    Hard-constraint #1: this is a throwaway too. It is created once via
-    `gh repo create <owner>/agentcreds-validation-b --private` if absent.
+    Order:
+      1. REIN_JOURNEY_REPO_B         — explicit override (mirrors REIN_JOURNEY_REPO).
+      2. REIN_TEST_REPO_B            — legacy env, if a dev exported it.
+      3. derive from repo A          — the `-a`/`-b` sibling convention the
+                                       throwaways follow (…-validation-a -> …-b).
+    Hard-constraint #1: this is a throwaway too.
     """
     env = env or rein_env()
-    repo = env.get("REIN_TEST_REPO_B")
-    if not repo:
-        raise RuntimeError("REIN_TEST_REPO_B unset; source ./dev-env")
-    return repo
+    if env.get("REIN_JOURNEY_REPO_B"):
+        return env["REIN_JOURNEY_REPO_B"]
+    if env.get("REIN_TEST_REPO_B"):
+        return env["REIN_TEST_REPO_B"]
+    a = resolve_throwaway_repo(env)
+    if a.endswith("-a"):
+        return a[:-2] + "-b"
+    raise RuntimeError(
+        "no second throwaway repo: set REIN_JOURNEY_REPO_B (or REIN_TEST_REPO_B), "
+        f"or name repo A with an '-a' suffix so '-b' can be derived (got {a!r})"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -120,46 +132,82 @@ def throwaway_repo_b(env: dict | None = None) -> str:
 
 
 def rein_env() -> dict:
-    """Return os.environ augmented with the REIN_* vars.
+    """Return the REIN_* environment as the shell provides it (os.environ).
 
-    If REIN_APP_ID is already exported (the caller sourced ./dev-env, which is
-    what run.sh does), we use the live environment as-is. Otherwise we source
-    ./dev-env in a subshell and merge the REIN_* vars it exports. Keeping the
-    REIN_APP_* vars PRESENT is load-bearing for the init tests: with them set,
-    `rein init` stays on the env-driven path and never reaches RunManifestFlow
-    (a 25-minute browser/callback flow that would try to create a real App).
+    Minting journeys resolve the App from state.json (they run in the real home).
+    Init-flavored journeys that run in a FRESH isolated home (no state.json)
+    supply the env-path App via init_app_env() so `rein init` never routes into
+    the 25-minute manifest flow.
     """
-    env = dict(os.environ)
-    if env.get("REIN_APP_ID"):
-        return env
-    if not DEV_ENV.exists():
-        raise RuntimeError(
-            f"REIN_APP_ID not set and {DEV_ENV} not found; "
-            "source ./dev-env before running (run.sh does this for you)."
-        )
-    # Capture the REIN_* vars ./dev-env exports, with $HOME etc. expanded.
-    out = subprocess.check_output(
-        ["bash", "-c", f"set -a; source {DEV_ENV!s}; env"],
-        text=True,
+    return dict(os.environ)
+
+
+def _real_config_dir() -> Path:
+    """The operator's real rein config dir (NOT an isolated-home override)."""
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config"
     )
-    for line in out.splitlines():
-        if "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        if k.startswith("REIN_"):
-            env[k] = v
-    if not env.get("REIN_APP_ID"):
-        raise RuntimeError(f"sourcing {DEV_ENV} did not yield REIN_APP_ID")
-    return env
+    return Path(base) / "rein"
+
+
+def init_app_env() -> dict:
+    """REIN_APP_* for an init-flavored journey/test that runs in an isolated home.
+
+    A `rein init` in a FRESH isolated home has no state.json, so without
+    REIN_APP_* it would route into the 25-minute manifest flow. This supplies the
+    env-path App:
+
+      * the REAL App `rein init` provisioned (state.json primary + keystore PEM)
+        when present — so journeys that actually MINT (session show/add-repo,
+        onboarding's coverage probe) exercise a working App; else
+      * well-formed SYNTHETIC values + a temp PEM — enough for a pure
+        --skip-mint-check init run to stay on the env path (it never reads the
+        key), so the init tests run on a box with no configured App too.
+    """
+    try:
+        s = json.loads((_real_config_dir() / "state.json").read_text())
+        primary = s.get("primary") or {}
+        cid = primary.get("client_id")
+        iid = primary.get("installation_id")
+        pem = _real_config_dir() / "primary.pem"
+        if cid and iid and pem.exists():
+            try:
+                repo_a = resolve_throwaway_repo()
+            except RuntimeError:
+                repo_a = "octocat/throwaway"
+            return {
+                "REIN_APP_CLIENT_ID": cid,
+                # REIN_APP_ID is set explicitly (state.json primary.app_id, "" if
+                # absent) so a STALE REIN_APP_ID exported in the operator's shell
+                # can't survive the {**os.environ, **init_app_env()} merge and form
+                # a mismatched partial-env App.
+                "REIN_APP_ID": str(primary.get("app_id") or ""),
+                "REIN_APP_INSTALLATION_ID": str(iid),
+                "REIN_APP_PRIVATE_KEY_PATH": str(pem),
+                "REIN_TEST_REPO_A": repo_a,
+            }
+    except (OSError, ValueError):
+        pass
+    # Synthetic fallback (no configured App): valid-shaped, never minted.
+    pem = Path(tempfile.mkdtemp(prefix="rein-itest-synthpem-")) / "app.pem"
+    pem.write_text("synthetic-not-a-real-key\n")
+    pem.chmod(0o600)
+    return {
+        "REIN_APP_CLIENT_ID": "Iv23liSYNTHETIC0000",
+        "REIN_APP_ID": "9999999",
+        "REIN_APP_INSTALLATION_ID": "424242",
+        "REIN_APP_PRIVATE_KEY_PATH": str(pem),
+        "REIN_TEST_REPO_A": "octocat/throwaway",
+    }
 
 
 def throwaway_repo(env: dict | None = None) -> str:
-    """The owner/name of the throwaway repo (hard-constraint #1: touch ONLY this)."""
-    env = env or rein_env()
-    repo = env.get("REIN_TEST_REPO_A")
-    if not repo:
-        raise RuntimeError("REIN_TEST_REPO_A unset; source ./dev-env")
-    return repo
+    """The owner/name of the throwaway repo (hard-constraint #1: touch ONLY this).
+
+    Resolved the rein-init way (dev-session first). Thin alias for
+    resolve_throwaway_repo.
+    """
+    return resolve_throwaway_repo(env)
 
 
 # --------------------------------------------------------------------------
@@ -1505,7 +1553,7 @@ def normalize_transcript(text: str, subs: list[tuple[str, str]] | None = None) -
 # Extend this list (not a per-journey whitelist) for a genuinely new volatile.
 _NORMALIZE_RULES = [
     # per-operator GitHub App identity that `rein init` echoes on the env path
-    # (client_id + installation_id are whoever ran `source ./dev-env`). Generic,
+    # (client_id + installation_id are whoever provisioned the App). Generic,
     # so the onboarding golden is portable across operators. BEFORE the hash
     # rule (client_id can look hex-ish) and the issue rules (installation_id is
     # bare digits that no issue rule would otherwise touch).
@@ -1757,7 +1805,7 @@ def resolve_throwaway_repo(env: dict | None = None) -> str:
         return env["REIN_TEST_REPO_A"]
     raise RuntimeError(
         "no throwaway repo: set REIN_JOURNEY_REPO, or run `rein init` to scaffold "
-        "a dev-session, or (legacy) source ./dev-env for REIN_TEST_REPO_A"
+        "a dev-session, or (legacy) export REIN_TEST_REPO_A"
     )
 
 

@@ -32,8 +32,9 @@
 # Workflow (see tests/interactive/CLAUDE.md): before a PR that changes a journey,
 # run with REIN_UPDATE_GOLDEN=1 and COMMIT the regenerated raw golden.
 #
-# Setup is the `rein init` world (a fresh machine is already configured). This
-# script sources ./dev-env only as the LEGACY this-box shortcut for the App creds.
+# Setup is the `rein init` world: a machine configured via `rein init` has its App
+# in state.json + the managed keystore. Journeys resolve the real App from there
+# and their throwaway via resolve_throwaway_repo — NO dev-env (#126).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,11 +49,6 @@ for arg in "$@"; do
     *) echo "unknown flag: $arg (accepted: --sandbox, --normalized)" >&2; exit 2 ;;
   esac
 done
-
-# Legacy this-box shortcut for REIN_APP_* (a rein-init machine won't need it; the
-# journeys resolve their throwaway via resolve_throwaway_repo regardless).
-# shellcheck disable=SC1091
-[ -f ./dev-env ] && source ./dev-env
 
 # Build up front so a compile error fails fast before any pexpect spawn.
 go build -o bin/ ./...
