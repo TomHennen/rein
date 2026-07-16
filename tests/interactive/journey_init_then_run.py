@@ -169,6 +169,11 @@ def main() -> int:
          "init must MINT a real token from the state.json App (no --skip-mint-check)"),
         ("missing env var" not in text and "keystore: entry not found" not in text,
          "no env-var demand and no dead-App keystore error (the #126 unblock)"),
+        # NOTE: the clone invariants below prove a broker read only because the
+        # throwaway is PRIVATE — an unauthenticated clone would 404, so a landed
+        # .git means the broker minted + injected a token. The init leg's real
+        # "mint check ... ok (token expires …)" corroborates that independently.
+        # If the throwaway is ever made public these read-legs go vacuous.
         # DIRECT leg
         (direct_step.exitstatus == 0, f"direct rein run clone must exit 0; got {direct_step.exitstatus}"),
         (os.path.isdir(os.path.join(direct_workdir, "clone", ".git")),

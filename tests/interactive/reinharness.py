@@ -182,6 +182,11 @@ def init_app_env() -> dict:
                 repo_a = "octocat/throwaway"
             return {
                 "REIN_APP_CLIENT_ID": cid,
+                # REIN_APP_ID is set explicitly (state.json primary.app_id, "" if
+                # absent) so a STALE REIN_APP_ID exported in the operator's shell
+                # can't survive the {**os.environ, **init_app_env()} merge and form
+                # a mismatched partial-env App.
+                "REIN_APP_ID": str(primary.get("app_id") or ""),
                 "REIN_APP_INSTALLATION_ID": str(iid),
                 "REIN_APP_PRIVATE_KEY_PATH": str(pem),
                 "REIN_TEST_REPO_A": repo_a,
@@ -194,6 +199,7 @@ def init_app_env() -> dict:
     pem.chmod(0o600)
     return {
         "REIN_APP_CLIENT_ID": "Iv23liSYNTHETIC0000",
+        "REIN_APP_ID": "9999999",
         "REIN_APP_INSTALLATION_ID": "424242",
         "REIN_APP_PRIVATE_KEY_PATH": str(pem),
         "REIN_TEST_REPO_A": "octocat/throwaway",
