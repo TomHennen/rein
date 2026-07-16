@@ -22,3 +22,6 @@ __pycache__/
 # copy dev-env.example and fill in your own throwaway App/repo values. The
 # journeys use the `rein init` App from state.json, not dev-env.
 /dev-env
+
+# Stray clones from manual rein-run tests
+/clone
