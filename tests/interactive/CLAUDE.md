@@ -405,8 +405,8 @@ in `reinharness.py`, so a new journey is mostly wiring:
 - `split_at_agent_launch` / `REIN_LINE_RE` — the REAL-agent golden: rein's launch
   surface verbatim, then rein's own lines only. One boundary, one regex; no agent
   content reaches the compared file (see above).
-- `write_agent_session` / `AGENT_SESSION_DIR` — the real agent's session artifact:
-  committed and human-readable, never compared (it is not named `golden.txt`).
+- `write_agent_session` — the real agent's session artifact (written to the journey's
+  own `session.txt`): committed and human-readable, never compared (not `golden.txt`).
 - `drain_children` — the real-agent drain rule (see above).
 - `dismiss_claude_trust_dialog(pane)` — claude's folder-trust dialog, as PLUMBING
   (dismissed, never asserted, never in the narrative).
