@@ -281,15 +281,17 @@ func TestInSandboxSelfGrantStructurallyFails(t *testing.T) {
 	}
 }
 
-// TestCredentialDenyReadHidesClaudeWorkArtifacts is the CP4.5 regression: the
-// wrapped agent's OAuth file (~/.claude/.credentials.json) stays readable so the
-// agent can authenticate, but the developer's cross-project Claude work history
-// (history.jsonl, projects/, sessions/) is hidden so a prompt-injected agent
-// can't read it and exfiltrate via the extra egress the operator opened.
-func TestCredentialDenyReadHidesClaudeWorkArtifacts(t *testing.T) {
+// TestCredentialDenyReadDefaultDeniesClaudeTree pins the #94 default-deny flip:
+// the WHOLE host ~/.claude tree and ~/.claude.json are authoritative denies —
+// not an allowlist-of-denials over a re-allowed dir. The agent no longer touches
+// the host tree at all (it is repointed at a rein-owned overlay via
+// CLAUDE_CONFIG_DIR), so nothing under ~/.claude may be readable in-sandbox: a
+// new subdir a future claude ships can no longer leak (the #55 unknown-unknown).
+func TestCredentialDenyReadDefaultDeniesClaudeTree(t *testing.T) {
 	t.Setenv("HOME", "/home/someone")
 	t.Setenv("XDG_CONFIG_HOME", "/home/someone/.config")
 	t.Setenv("XDG_STATE_HOME", "/home/someone/.local/state")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
 
 	paths, err := credentialDenyReadPaths(t.TempDir())
 	if err != nil {
@@ -299,28 +301,33 @@ func TestCredentialDenyReadHidesClaudeWorkArtifacts(t *testing.T) {
 	for _, p := range paths {
 		set[p] = true
 	}
+	// The whole tree + the sibling file are denied outright. Even the agent's own
+	// OAuth file is denied AT THE HOST PATH now — the sandboxed claude reads it
+	// from the overlay (seeded copy), never here.
 	for _, want := range []string{
-		"/home/someone/.claude/history.jsonl",
-		"/home/someone/.claude/projects",
-		"/home/someone/.claude/sessions",
-		// session-env is hidden AND (as a denyRead dir => writable tmpfs) doubles
-		// as the writable scratch claude's SessionStart machinery mkdir's per run;
-		// without it the in-sandbox mkdir hits EROFS under the read-only root.
-		"/home/someone/.claude/session-env",
-		// #94: same cross-project-artifact class, previously leaked in-sandbox.
-		"/home/someone/.claude/file-history",
-		"/home/someone/.claude/paste-cache",
-		"/home/someone/.claude/jobs",
-		"/home/someone/.claude/tasks",
-		"/home/someone/.claude/downloads",
-		"/home/someone/.claude/backups",
+		"/home/someone/.claude",
+		"/home/someone/.claude.json",
 	} {
 		if !set[want] {
-			t.Errorf("claude work artifact %q missing from deny-read set: %v", want, paths)
+			t.Errorf("host claude path %q missing from deny-read set (must be default-denied): %v", want, paths)
 		}
 	}
-	// A relocated CLAUDE_CONFIG_DIR must ALSO be hidden, and the legacy ~/.claude
-	// default stays hidden too (belt-and-suspenders, mirroring gh/gpg).
+	// No PER-SUBDIR allowlist-of-denials survives: the whole-dir deny replaced it.
+	// A stray sub-entry would signal the old fail-open shape crept back.
+	for _, gone := range []string{
+		"/home/someone/.claude/history.jsonl",
+		"/home/someone/.claude/projects",
+		"/home/someone/.claude/file-history",
+		"/home/someone/.claude/backups",
+	} {
+		if set[gone] {
+			t.Errorf("per-subdir deny %q present — the #94 flip retires the sub-deny list in favor of the whole-dir deny", gone)
+		}
+	}
+
+	// A relocated CLAUDE_CONFIG_DIR in rein's OWN launch env (e.g. rein run from
+	// inside a claude session) is denied too — that host config must not leak
+	// either. This is rein's parent env, NEVER the injected overlay.
 	t.Setenv("CLAUDE_CONFIG_DIR", "/home/someone/dotfiles/claude")
 	paths2, err := credentialDenyReadPaths(t.TempDir())
 	if err != nil {
@@ -331,25 +338,12 @@ func TestCredentialDenyReadHidesClaudeWorkArtifacts(t *testing.T) {
 		set2[p] = true
 	}
 	for _, want := range []string{
-		"/home/someone/dotfiles/claude/projects", // relocated
-		"/home/someone/.claude/projects",         // legacy default still hidden
-		"/home/someone/dotfiles/claude/backups",  // #94 subs duplicated to relocated dir too
-		"/home/someone/.claude/backups",          // legacy default still hidden
+		"/home/someone/dotfiles/claude", // the relocated host dir
+		"/home/someone/.claude",         // the conventional default, still denied
+		"/home/someone/.claude.json",
 	} {
 		if !set2[want] {
-			t.Errorf("claude history path %q missing when CLAUDE_CONFIG_DIR set: %v", want, paths2)
-		}
-	}
-
-	// The agent's OWN credential + settings must NOT be hidden — hiding them would
-	// break the agent's ability to authenticate/run.
-	for _, mustRead := range []string{
-		"/home/someone/.claude/.credentials.json",
-		"/home/someone/.claude/settings.json",
-		"/home/someone/.claude", // the whole dir must not be tmpfs'd
-	} {
-		if set[mustRead] {
-			t.Errorf("path %q must stay readable in-sandbox but is in the deny-read set", mustRead)
+			t.Errorf("host claude path %q missing when CLAUDE_CONFIG_DIR set: %v", want, paths2)
 		}
 	}
 }

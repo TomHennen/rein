@@ -208,6 +208,35 @@ func TestBuildEnvAgentTmpDir(t *testing.T) {
 	}
 }
 
+// TestBuildEnvClaudeConfigDir asserts the #94 repoint: a supplied ClaudeConfigDir
+// is delivered as CLAUDE_CONFIG_DIR (so claude reads seeded creds/settings from
+// and resumes in the rein-owned overlay, never the denied host ~/.claude), and is
+// ABSENT when not supplied (the probe path sets nothing).
+func TestBuildEnvClaudeConfigDir(t *testing.T) {
+	env := BuildEnv(EnvParams{
+		Parent:          []string{"HOME=/home/dev"},
+		CABundlePath:    "/run/ca-bundle.pem",
+		StubGHToken:     "stub-tok",
+		ClaudeConfigDir: "/home/dev/.config/rein-sandbox-home/.claude",
+	})
+	got := map[string]string{}
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		got[k] = v
+	}
+	if got["CLAUDE_CONFIG_DIR"] != "/home/dev/.config/rein-sandbox-home/.claude" {
+		t.Errorf("CLAUDE_CONFIG_DIR = %q, want the overlay path", got["CLAUDE_CONFIG_DIR"])
+	}
+
+	// Absent when not supplied.
+	env2 := BuildEnv(EnvParams{Parent: []string{"HOME=/home/dev"}, CABundlePath: "/x", StubGHToken: "s"})
+	for _, kv := range env2 {
+		if strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR=") {
+			t.Errorf("CLAUDE_CONFIG_DIR present with no ClaudeConfigDir: %q", kv)
+		}
+	}
+}
+
 // TestBuildEnvGitIdentity asserts the four GIT_*_NAME/EMAIL vars and
 // GIT_CONFIG_GLOBAL are set to exactly the resolved identity when supplied — the
 // unit-level guarantee that a sandboxed commit resolves rein's non-impersonating

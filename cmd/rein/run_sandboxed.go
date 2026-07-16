@@ -372,10 +372,24 @@ func runSandboxed(cmdline []string) (int, error) {
 	if err != nil {
 		return 1, fmt.Errorf("resolve agent scratch dir: %w", err)
 	}
-	// Every read-WRITE bind: work tree, agent scratch, AND the #64 mapped local
-	// checkouts. Any allow-back that is an ancestor of one would ro-bind over it
-	// and abort the launch (#63), so the punch-out must see them all.
-	writables := append([]string{workTree, resolvedAgentTmp}, worktreeWrites...)
+	// (7g) Rein-owned persistent CLAUDE_CONFIG_DIR overlay (issue #94). Created +
+	// seeded HOST-SIDE, before the deny is applied; bound read-WRITE below via
+	// ExtraAllowWrite so claude reads its seeded creds and writes/resumes its
+	// session there instead of the now-fully-denied host ~/.claude. It persists
+	// across runs (NOT torn down, unlike agentTmp). Resolve it so the ancestry
+	// punch-out sees the real path.
+	claudeOverlay, err := prepareClaudeOverlay(logger, home)
+	if err != nil {
+		return 1, fmt.Errorf("prepare claude overlay: %w", err)
+	}
+	resolvedClaudeOverlay, err := proxy.ResolveAbs(claudeOverlay)
+	if err != nil {
+		return 1, fmt.Errorf("resolve claude overlay: %w", err)
+	}
+	// Every read-WRITE bind: work tree, agent scratch, the claude overlay, AND the
+	// #64 mapped local checkouts. Any allow-back that is an ancestor of one would
+	// ro-bind over it and abort the launch (#63), so the punch-out must see them all.
+	writables := append([]string{workTree, resolvedAgentTmp, resolvedClaudeOverlay}, worktreeWrites...)
 	homeDeny, allowReadPaths, showHome, err := deriveHomeDenial(
 		os.Getenv(srt.EnvSandboxShowHome), os.Getenv(srt.EnvSandboxAllowRead),
 		home, srtPath, cmdline, writables)
@@ -413,11 +427,11 @@ func runSandboxed(cmdline []string) (int, error) {
 		SocketPath:          socketPath,
 		WorkingTree:         workTree,
 		ExtraAllowedDomains: extraDomains,
-		// The agent's scratch dir + the developer's mapped local checkouts (#64).
-		// Both are re-bound READ-WRITE under the $HOME deny tmpfs when they live
-		// there (srt pushReadDenyDirMounts; verified in the #59/#63 work), and
-		// both become ForbiddenDirs for the socket placement check below.
-		ExtraAllowWrite:    append([]string{agentTmp}, worktreeWrites...),
+		// The agent's scratch dir, the #94 claude overlay, + the developer's mapped
+		// local checkouts (#64). All are re-bound READ-WRITE under the $HOME deny
+		// tmpfs when they live there (srt pushReadDenyDirMounts; verified in the
+		// #59/#63 work), and all become ForbiddenDirs for the socket placement check.
+		ExtraAllowWrite:    append([]string{agentTmp, claudeOverlay}, worktreeWrites...),
 		WritableGitDirs:    writableGitDirs(writableCheckouts),
 		DenyReadCredStores: denyStores,
 		RuntimeDenyRead:    runtimeDeny,
@@ -651,7 +665,10 @@ func runSandboxed(cmdline []string) (int, error) {
 		GitAuthorEmail:      gitID.Email,
 		GitConfigGlobalPath: managedGitConfig,
 		AgentTmpDir:         agentTmp,
-		DisableClaudeAIMCP:  srt.DisableClaudeMCPFromEnv(os.Getenv(srt.EnvDisableClaudeMCP)),
+		// (#94) Repoint claude at the rein-owned overlay: it reads its seeded creds
+		// + settings and writes/resumes its session there, never the denied host tree.
+		ClaudeConfigDir:    claudeOverlay,
+		DisableClaudeAIMCP: srt.DisableClaudeMCPFromEnv(os.Getenv(srt.EnvDisableClaudeMCP)),
 		// (#64) Tell the AGENT where the developer's checkouts are mounted — it
 		// cannot guess where repo B lives — and where to clone a repo that only
 		// enters scope mid-run. The human banner alone cannot reach the agent.
@@ -1075,43 +1092,25 @@ func credentialDenyReadPaths(stateDir string) ([]string, error) {
 	out = append(out, stateDir)
 	out = append(out, filepath.Join(home, ".local", "state", "rein"))
 
-	// The wrapped agent (Claude Code) authenticates from ~/.claude/.credentials.json,
-	// which stays READABLE (the agent needs it — see CP4.5). But ~/.claude ALSO
-	// holds the developer's cross-project work history — hide those artifacts so a
-	// (possibly prompt-injected) sandboxed agent can't read them and exfiltrate via
-	// the extra egress the operator opened. denyRead of a DIR is an empty WRITABLE
-	// tmpfs in-sandbox (so this doubles as claude's ephemeral per-run scratch);
-	// denyRead of a FILE is /dev/null. .credentials.json and settings.json are
-	// deliberately NOT hidden. This is a deliberate, minimal expansion of rein's
-	// remit (hiding the agent's own work artifacts, not just credential stores);
-	// it is safe (added protection) and untested against a live claude here (srt
-	// 1.0.0 in the dev box doesn't emit) — re-verify in the dogfood.
-	// Hide BOTH the env-resolved dir AND the conventional ~/.claude default
-	// (belt-and-suspenders, mirroring the gh/gpg handling above): a dev who set a
-	// non-default CLAUDE_CONFIG_DIR could still have a populated legacy ~/.claude
-	// with stale cross-project history that would otherwise stay readable. denyRead
-	// of a duplicate or absent path is a harmless no-op.
-	claudeDirs := []string{filepath.Join(home, ".claude")}
-	if cd := os.Getenv("CLAUDE_CONFIG_DIR"); cd != "" {
-		claudeDirs = append(claudeDirs, cd)
-	}
-	// session-env is BOTH a dev-history artifact to hide AND a dir claude's
-	// SessionStart machinery writes into per run (mkdir ~/.claude/session-env/<id>).
-	// denyRead of a DIR is a writable, EMPTY tmpfs in-sandbox, so listing it here
-	// hides the host's accumulated session-env entries (same rationale as
-	// projects/sessions) while giving claude a fresh writable scratch dir — without
-	// it, that mkdir hits EROFS under the read-only root bind (surfaced as a
-	// SessionStart hook error when running a real claude in-sandbox).
-	// file-history/paste-cache/jobs/tasks/downloads/backups are the same
-	// history/secret class as projects/sessions; they leaked because they fell
-	// outside this allowlist-of-denials (#94).
-	for _, cdir := range claudeDirs {
-		for _, sub := range []string{
-			"history.jsonl", "projects", "sessions", "session-env", "todos", "shell-snapshots",
-			"file-history", "paste-cache", "jobs", "tasks", "downloads", "backups",
-		} {
-			out = append(out, filepath.Join(cdir, sub))
-		}
+	// Claude Code: DEFAULT-DENY the WHOLE ~/.claude tree and ~/.claude.json (issue
+	// #94). The old allowlist-of-denials allowed ~/.claude back and re-hid a
+	// hardcoded list of history subdirs — fail-OPEN: any new subdir a claude
+	// update shipped leaked until someone noticed (the #55 unknown-unknown). Now
+	// the agent never touches the host tree at all: it is repointed at a rein-owned
+	// overlay via CLAUDE_CONFIG_DIR (sandbox_claude_home.go), so hiding the host
+	// tree wholesale costs nothing and closes the class structurally.
+	//
+	// The wholesale $HOME deny (homeDeny) already hides these, but list them here
+	// too as authoritative denies so they stay hidden even under the
+	// REIN_SANDBOX_SHOW_HOME=1 kill switch (denyStores applies regardless of
+	// homeDeny). A relocated CLAUDE_CONFIG_DIR in rein's OWN launch env is denied
+	// alongside — a dev who runs rein from inside a claude session must not leak
+	// that session's host config either (this is rein's parent env, never the
+	// injected overlay, which is set only in execEnv).
+	out = append(out, filepath.Join(home, ".claude"))
+	out = append(out, filepath.Join(home, ".claude.json"))
+	if cd := os.Getenv("CLAUDE_CONFIG_DIR"); cd != "" && filepath.IsAbs(cd) {
+		out = append(out, cd)
 	}
 	// Explicit App key path override, if set outside the dirs above.
 	if p := os.Getenv("REIN_APP_PRIVATE_KEY_PATH"); p != "" {

@@ -1,0 +1,30 @@
+$ rein run -- claude -p <store the magic word>
+rein: sandbox preflight:
+rein: warning: could not verify installation coverage of TomHennen/agentcreds-validation-a (read private key from keystore[primary]: keystore: entry not found); git operations on it may fail mid-session if the installation does not cover it
+rein: warning: could not verify installation coverage of session repos (read private key from keystore[primary]: keystore: entry not found); proceeding with installation id 134965206
+rein: verifying sandbox config applies (deny-read + seccomp self-test)…
+rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
+rein: launching SANDBOXED (srt) run:
+rein: running: claude -p Remember this exact token for later, I will ask for it: quokka-overlay-persists-1994. Reply with just the word 'ok'.
+$ rein run -- claude -c -p <recall the magic word>
+rein: sandbox preflight:
+rein: warning: could not verify installation coverage of TomHennen/agentcreds-validation-a (read private key from keystore[primary]: keystore: entry not found); git operations on it may fail mid-session if the installation does not cover it
+rein: warning: could not verify installation coverage of session repos (read private key from keystore[primary]: keystore: entry not found); proceeding with installation id 134965206
+rein: verifying sandbox config applies (deny-read + seccomp self-test)…
+rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
+rein: launching SANDBOXED (srt) run:
+rein: running: claude -c -p Earlier in this conversation I gave you an exact token to remember. Reply with ONLY that token, nothing else.
+$ rein run -- bash -c <host-hidden / overlay-used probe> <workdir>
+rein: sandbox preflight:
+rein: warning: could not verify installation coverage of TomHennen/agentcreds-validation-a (read private key from keystore[primary]: keystore: entry not found); git operations on it may fail mid-session if the installation does not cover it
+rein: warning: could not verify installation coverage of session repos (read private key from keystore[primary]: keystore: entry not found); proceeding with installation id 134965206
+rein: verifying sandbox config applies (deny-read + seccomp self-test)…
+rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
+rein: launching SANDBOXED (srt) run:
+rein: running: bash -c
+SBX| @CLAUDE_CONFIG_DIR=/home/tom.linux/.config/rein-sandbox-home/.claude
+SBX| @HOST_CLAUDE_ENTRIES=[]
+SBX| @HOST_HISTORY_JSONL_READABLE=no
+SBX| @HOST_CLAUDE_JSON_READABLE=no
+SBX| @OVERLAY_CREDS_SEEDED=yes
+SBX| @OVERLAY_SETTINGS={"skipDangerousModePermissionPrompt":true}

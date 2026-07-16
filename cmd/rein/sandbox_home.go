@@ -121,28 +121,14 @@ func sandboxAllowReadPaths(home, srtPath string, cmdline []string) []string {
 	// $HOME (nvm, ~/.npm-global) it contributes node's own install prefix.
 	out = append(out, installChainAllowReads(home, "node")...)
 
-	// (2) The wrapped agent's config + credentials. Claude Code authenticates
-	// from ~/.claude/.credentials.json and reads settings from ~/.claude and
-	// ~/.claude.json (CP4.5 stance: the agent needs its OWN auth). The
-	// developer's cross-project work artifacts inside it (history.jsonl,
-	// projects, sessions, …) STAY hidden: credentialDenyReadPaths lists them
-	// explicitly, and srt applies those deeper denies after this shallower
-	// allow-back. CLAUDE_CONFIG_DIR mirrors the env-resolved handling there.
-	claudeDirs := []string{filepath.Join(home, ".claude")}
-	if cd := os.Getenv("CLAUDE_CONFIG_DIR"); cd != "" && filepath.IsAbs(cd) {
-		claudeDirs = append(claudeDirs, cd)
-	}
-	out = append(out, claudeDirs...)
-	// ~/.claude.json: claude's top-level config/state file — onboarding state,
-	// settings, oauthAccount metadata; without it claude re-onboards every run
-	// (writes under the home tmpfs evaporate). TRADEOFF, on record: its
-	// `projects` map also carries per-project prompt-history snippets, the
-	// same work-history class the ~/.claude/projects sub-denies hide, so this
-	// allow-back preserves the pre-#59 status quo (the file was always
-	// readable in-sandbox) rather than the ideal. srt cannot bind a sanitized
-	// copy over the same path (allowRead re-binds the host path verbatim).
-	// Tracked in issue #62; revisit if claude ever splits state from history.
-	out = append(out, filepath.Join(home, ".claude.json"))
+	// (2) The wrapped agent's config + credentials are DELIBERATELY NOT allowed
+	// back (issue #94, default-deny flip). The host's ~/.claude and ~/.claude.json
+	// are fully denied in-sandbox (credentialDenyReadPaths); claude is repointed
+	// at a rein-owned persistent overlay via CLAUDE_CONFIG_DIR (sandbox_claude_home.go,
+	// internal/srt/env.go), which is bound read-WRITE via ExtraAllowWrite and holds
+	// the seeded .credentials.json. So the agent authenticates from the overlay, never
+	// the host tree — no allow-back into ~/.claude is needed, and the developer's
+	// cross-project history can no longer leak by default.
 
 	// (3) Curated read-mostly toolchain trees. Criteria for inclusion:
 	// binaries/caches a build or the agent's subprocesses EXECUTE or READ,
