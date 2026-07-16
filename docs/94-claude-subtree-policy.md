@@ -13,7 +13,7 @@ whatever extra egress the operator opened. But the mechanism is an
 
 - `sandbox_home.go:131-145` allows the WHOLE `~/.claude` (and `~/.claude.json`)
   back, read-only, so the agent can reach its own `.credentials.json`/`settings.json`.
-- `run_sandboxed.go:1106` then re-hides a **hardcoded list** of known sub-dirs
+- the sub-deny list in `credentialDenyReadPaths` then re-hides a **hardcoded list** of known sub-dirs
   (`history.jsonl, projects, sessions, session-env, todos, shell-snapshots`).
 
 Anything Claude Code adds one level down that is NOT on that list stays **visible**
@@ -34,10 +34,10 @@ same secret/history class as the already-hidden dirs:
 | `jobs` | background-job state | artifact | fix |
 | `tasks` | task state | artifact | fix |
 | `downloads` | files the agent downloaded | artifact | fix |
-| `backups` | backed-up file copies | history | fix |
+| `backups` | `.claude.json.backup.*` — stale copies of the file we deliberately allow-back readable (`sandbox_home.go:136-145`, #62) | history | fix |
 
-**Shipped in this PR:** all six appended to the sub-deny list at
-`run_sandboxed.go:1106` (+ pinned in `run_sandboxed_test.go`). Pure hardening — no
+**Shipped in this PR:** all six appended to the sub-deny list in
+`credentialDenyReadPaths` (+ pinned in `run_sandboxed_test.go`). Pure hardening — no
 agent-behavior change (denyRead of a dir = empty writable tmpfs, so any dir Claude
 *writes* still works, ephemerally). This closes the known holes but does NOT fix the
 fail-open shape — that is the end-state below.
@@ -60,7 +60,7 @@ the agent may need to read).
 | `file-history/`, `paste-cache/`, `jobs/`, `tasks/`, `downloads/`, `backups/` | HIST/artifact | deny (**this PR**) |
 | `session-env/` | HIST + RUNTIME-WRITE | deny (already; tmpfs doubles as per-run scratch) |
 | `cache/`, `gh-pr-status-cache.json`, `mcp-needs-auth-cache.json`, `stats-cache.json` | CACHE | deny (cold start ok) |
-| `daemon*`, `daemon.log`, `.last-cleanup`, `.last-update-result.json` | RUNTIME-WRITE | deny (tmpfs) |
+| `daemon/` (holds a mode-0600 `control.key`), `daemon.log`, `.last-cleanup`, `.last-update-result.json` | RUNTIME-WRITE + key | deny under the flip; still readable today (low reachability — fresh /tmp), deferred to it — issue #122 |
 
 Decidability check: under default-deny the **allowlist is tiny and stable** —
 `.credentials.json`, `settings.json`, `.claude.json`, and (maybe) `plugins/`.
@@ -111,8 +111,8 @@ worth building *with* #4; #3 without #4 is a regression.
   needed). The parent `~/.claude` stays under the `$HOME` deny → empty tmpfs by
   default; the narrow allow-backs re-expose exactly the read-needs.
 - **srt layering makes this work:** allow-back is shallow, deeper/exact deny wins;
-  a file allow-back re-binds just that host file. The `run_sandboxed.go:1106`
-  sub-deny list then becomes **redundant** (everything is denied by default) and can
+  a file allow-back re-binds just that host file. The sub-deny list in
+  `credentialDenyReadPaths` then becomes **redundant** (everything is denied by default) and can
   be retired — or kept as belt-and-suspenders.
 - **Fail-closed guards it must satisfy** (`internal/srt/config.go:276-293`):
   `srt.Build` errors if a widening (allow-back/allowWrite) path sits **at or under**
@@ -150,7 +150,7 @@ worth building *with* #4; #3 without #4 is a regression.
 Per hard-constraint #5 (stop-and-ask on security-sensitive decisions):
 
 1. **Flip to default-deny** for the `~/.claude` subtree (retire the
-   allowlist-of-denials at `run_sandboxed.go:1106` in favor of default-deny +
+   allowlist-of-denials in `credentialDenyReadPaths` in favor of default-deny +
    narrow CRED allow-backs at `sandbox_home.go:131-135`). Security-positive but
    changes the sandbox's read surface for a live Claude — needs a real-claude
    journey to prove nothing essential got hidden.

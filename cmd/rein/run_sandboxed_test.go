@@ -333,6 +333,8 @@ func TestCredentialDenyReadHidesClaudeWorkArtifacts(t *testing.T) {
 	for _, want := range []string{
 		"/home/someone/dotfiles/claude/projects", // relocated
 		"/home/someone/.claude/projects",         // legacy default still hidden
+		"/home/someone/dotfiles/claude/backups",  // #94 subs duplicated to relocated dir too
+		"/home/someone/.claude/backups",          // legacy default still hidden
 	} {
 		if !set2[want] {
 			t.Errorf("claude history path %q missing when CLAUDE_CONFIG_DIR set: %v", want, paths2)
