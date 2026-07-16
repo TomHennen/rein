@@ -1110,7 +1110,15 @@ func credentialDenyReadPaths(stateDir string) ([]string, error) {
 	out = append(out, filepath.Join(home, ".claude"))
 	out = append(out, filepath.Join(home, ".claude.json"))
 	if cd := os.Getenv("CLAUDE_CONFIG_DIR"); cd != "" && filepath.IsAbs(cd) {
-		out = append(out, cd)
+		// NESTED-REIN guard: a rein launched INSIDE a rein sandbox inherits its
+		// parent's injected CLAUDE_CONFIG_DIR — which IS our own overlay. Denying it
+		// would both hide the inner agent's own config AND (since the inner run also
+		// allow-WRITES that path) trip srt.Build's widening-under-authoritative-deny
+		// fail-closed check. Skip it when it equals the overlay; otherwise it is a
+		// host config in rein's real launch env and must be hidden.
+		if overlay, oerr := config.SandboxClaudeHomeDir(); oerr != nil || filepath.Clean(cd) != filepath.Clean(overlay) {
+			out = append(out, cd)
+		}
 	}
 	// Explicit App key path override, if set outside the dirs above.
 	if p := os.Getenv("REIN_APP_PRIVATE_KEY_PATH"); p != "" {

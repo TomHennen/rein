@@ -31,12 +31,18 @@ deterministic, so its prose is NEVER golden material.
      word (resume), the probe saw the host tree empty + history unreadable (hiding) +
      the overlay creds seeded (auth). These are the regression oracle; a break is
      exit 2. Nothing about claude's wording is asserted.
-  2. THE COMPARED GOLDEN (golden/claude_resume.txt) — DETERMINISTIC content only:
-     rein's OWN lines (the launch banners for all three runs) + the bash probe's
-     SBX|-tagged output. claude's raw -p/-c stdout is EXCLUDED, so a completely
+  2. THE COMPARED GOLDEN (golden/claude_resume.txt) — DETERMINISTIC content only,
+     built two ways by agent kind (split_at_agent_launch doctrine, CLAUDE.md rule #2):
+     the two REAL-claude steps keep rein's launch surface VERBATIM through its
+     `rein: running:` echo (so the claude-specific `--append-system-prompt` contract
+     line is compared, not silently dropped by a prefix grep) then rein's own lines
+     only; the DETERMINISTIC bash probe keeps its full SBX|-tagged transcript, like
+     journey_sandbox_filesystem. claude's own -p/-c stdout is EXCLUDED, so a completely
      different claude session still compares clean. The magic word is a FIXED phrase
      (not a per-run nonce) precisely so run 1's `rein: running:` echo stays stable in
      the golden; the resume PROOF is the invariant, which reads run 2's live output.
+     The golden is generated against the `rein init` keystore (healthy_app_env), matching
+     every other sandbox journey — so no box-specific install-coverage warning bakes in.
 
 Unlike the real-agent WRITE journey, this one needs NO tmux/pyte: `claude -p`/`-c`
 are headless and line-oriented, so it drives three ordinary `rein run` steps through
@@ -142,14 +148,52 @@ def host_logged_in() -> bool:
         return False
 
 
-# rein's own launch lines (the banner) + the probe's SBX| output. claude's raw -p/-c
-# stdout is NEITHER, so it is excluded — a different claude session still compares clean.
-def compared_golden(transcript: str) -> str:
-    kept = [
-        ln for ln in transcript.split("\n")
-        if ln.startswith("$ ") or H.REIN_LINE_RE.match(ln) or ln.startswith(H.SBX_TAG)
-    ]
-    return "\n".join(kept).strip("\n") + "\n"
+def healthy_app_env(env: dict) -> dict:
+    """Resolve the App from the `rein init` STATE path (state.json + the populated
+    keystore[primary]), the documented journey world (tests/interactive/CLAUDE.md),
+    rather than dev-env's REIN_APP_* env path. On a box whose dev-env points at an
+    App key that is NOT present, the env path resolves but then fails the
+    install-coverage probe with a `keystore[primary]: entry not found` warning —
+    box-specific noise that would bake into the golden. Every OTHER sandbox journey's
+    golden is clean because it runs against the populated keystore; this matches that.
+
+    Only strips the REIN_APP_* override when a state.json actually exists (so a
+    dev-env-only box still resolves via the env path). REIN_TEST_REPO_A and the rest
+    of the env are untouched."""
+    cfg_base = env.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    if not os.path.exists(os.path.join(cfg_base, "rein", "state.json")):
+        return env
+    e = dict(env)
+    for k in ("REIN_APP_ID", "REIN_APP_CLIENT_ID", "REIN_APP_INSTALLATION_ID",
+              "REIN_APP_PRIVATE_KEY_PATH"):
+        e.pop(k, None)
+    return e
+
+
+# THE COMPARED GOLDEN — deterministic content only. Two shapes, one per agent kind
+# (tests/interactive/CLAUDE.md rule #2, and the split_at_agent_launch doctrine):
+#   - the two REAL-claude steps: rein's launch surface VERBATIM through its
+#     `rein: running:` echo, then rein's own lines only (split_at_agent_launch). Keeping
+#     the launch surface whole — not a `rein: `-prefix grep — is load-bearing: rein's
+#     banner body is INDENTED, and the claude-specific `--append-system-prompt` contract
+#     line would silently stop being compared under a prefix filter. claude's own -p/-c
+#     stdout is excluded, so a different claude session still compares clean.
+#   - the DETERMINISTIC bash probe step: its full raw transcript, SBX|-tagged, exactly
+#     like journey_sandbox_filesystem (reproducible, so it belongs in the golden whole).
+def compared_golden(result, store_needle: str, recall_needle: str) -> tuple[str, bool]:
+    def rein_only(label: str, step_text: str, needle: str) -> tuple[list[str], bool]:
+        launch, tail, found = H.split_at_agent_launch(
+            H.build_raw_transcript(step_text), needle)
+        return [f"$ {label}"] + launch + tail, found
+
+    lines0, f0 = rein_only("rein run -- claude -p <store the magic word>",
+                           result.steps[0].text, store_needle)
+    lines1, f1 = rein_only("rein run -- claude -c -p <recall the magic word>",
+                           result.steps[1].text, recall_needle)
+    probe = ["$ rein run -- bash -c <host-hidden / overlay-used probe> <workdir>"]
+    probe += H.build_raw_transcript(result.steps[2].text).split("\n")
+    text = "\n".join(lines0 + lines1 + probe).strip("\n") + "\n"
+    return text, (f0 and f1)
 
 
 def main() -> int:
@@ -177,7 +221,7 @@ def main() -> int:
         step_env = {"REIN_SESSION_FILE": session, "REIN_SANDBOX_WORKDIR": workdir}
 
         result = H.run_journey(
-            [
+            steps=[
                 # (a)+(b) store: a real claude records the magic word in the overlay session.
                 H.JourneyStep(
                     argv=["run", "--", "claude", "-p", store_prompt()],
@@ -198,10 +242,11 @@ def main() -> int:
                     cwd=workdir, extra_env=step_env, timeout=180,
                 ),
             ],
+            env=healthy_app_env(env),  # populated keystore[primary], no coverage warning
             timeout=240,
         )
 
-        raw = compared_golden(result.transcript)
+        raw, launch_found = compared_golden(result, store_prompt(), recall_prompt())
         recall_text = result.steps[1].text if len(result.steps) > 1 else ""
         probe_text = result.steps[2].text if len(result.steps) > 2 else ""
 
@@ -209,6 +254,10 @@ def main() -> int:
         invariants = [
             (result.reached_eof,
              "every rein run must reach EOF (no step hung / timed out)"),
+            (launch_found,
+             "rein's `running:` launch echo must be in BOTH claude steps — it is the "
+             "boundary between rein's launch surface and claude's own output, and "
+             "without it the golden would be silently truncated"),
             (MAGIC_WORD in recall_text,
              f"RESUME: run 2 (`claude -c`, a separate rein run) must recall {MAGIC_WORD!r} "
              f"from run 1 via the persistent overlay — it is not in run 2's prompt, so "

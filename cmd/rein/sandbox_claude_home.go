@@ -55,6 +55,14 @@ func prepareClaudeOverlay(logger *log.Logger, home string) (string, error) {
 	if err := os.MkdirAll(overlay, 0o700); err != nil {
 		return "", fmt.Errorf("create claude overlay %q: %w", overlay, err)
 	}
+	// Harden the whole created chain, not just the leaf: MkdirAll follows symlinks
+	// on PARENTS, so a symlinked ~/.config/rein-sandbox-home could redirect the
+	// seeded token into a non-owned dir while the leaf (which we just created)
+	// still looks fine. Reject a symlinked/foreign-owned parent, then the leaf
+	// strictly (0700), before seeding anything.
+	if _, err := assertRealUserDir(filepath.Dir(overlay)); err != nil {
+		return "", err
+	}
 	if err := assertTightUserDir(overlay); err != nil {
 		return "", err
 	}
@@ -88,23 +96,33 @@ func seedClaudeCredentials(logger *log.Logger, home, overlay string) error {
 	return nil
 }
 
-// assertTightUserDir fails closed if dir is a symlink, is not a directory, is not
-// owned by the current uid, or is group/other-accessible (mode & 0o077 != 0). The
-// overlay holds the OAuth token; a tampered (symlinked/loosened/foreign-owned)
-// overlay must abort the launch rather than seed a token into it.
-func assertTightUserDir(dir string) error {
+// assertRealUserDir fails closed if dir is a symlink, is not a directory, or is not
+// owned by the current uid. Used for the overlay's PARENT (MkdirAll followed
+// symlinks on it) and, with a stricter mode check, for the token-bearing leaf.
+func assertRealUserDir(dir string) (os.FileInfo, error) {
 	fi, err := os.Lstat(dir)
 	if err != nil {
-		return fmt.Errorf("stat claude overlay %q: %w", dir, err)
+		return nil, fmt.Errorf("stat claude overlay path %q: %w", dir, err)
 	}
 	if fi.Mode()&fs.ModeSymlink != 0 {
-		return fmt.Errorf("claude overlay %q is a symlink; refusing to seed a credential into it (fail closed)", dir)
+		return nil, fmt.Errorf("claude overlay path %q is a symlink; refusing to seed a credential through it (fail closed)", dir)
 	}
 	if !fi.IsDir() {
-		return fmt.Errorf("claude overlay %q is not a directory", dir)
+		return nil, fmt.Errorf("claude overlay path %q is not a directory", dir)
 	}
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
-		return fmt.Errorf("claude overlay %q is owned by uid %d, not the current user %d (fail closed)", dir, st.Uid, os.Getuid())
+		return nil, fmt.Errorf("claude overlay path %q is owned by uid %d, not the current user %d (fail closed)", dir, st.Uid, os.Getuid())
+	}
+	return fi, nil
+}
+
+// assertTightUserDir is assertRealUserDir plus a strict mode check: the overlay
+// leaf holds the OAuth token, so it must not be group/other-accessible
+// (mode & 0o077 != 0). A tampered overlay aborts the launch, never seeds into it.
+func assertTightUserDir(dir string) error {
+	fi, err := assertRealUserDir(dir)
+	if err != nil {
+		return err
 	}
 	if fi.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("claude overlay %q has mode %o; want 0700 (holds the OAuth token) (fail closed)", dir, fi.Mode().Perm())
@@ -129,6 +147,11 @@ func readUserFileNoFollow(path string) ([]byte, error) {
 	}
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
 		return nil, fmt.Errorf("%q is owned by uid %d, not the current user %d (fail closed)", path, st.Uid, os.Getuid())
+	}
+	// Reject a group/world-readable source token (keystore bar, HC#6 spirit): a
+	// loose-mode OAuth file is a leak we must not propagate into the overlay.
+	if fi.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("%q has mode %o; a credential file must not be group/other-accessible (fail closed)", path, fi.Mode().Perm())
 	}
 	return io.ReadAll(f)
 }

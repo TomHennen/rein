@@ -346,6 +346,30 @@ func TestCredentialDenyReadDefaultDeniesClaudeTree(t *testing.T) {
 			t.Errorf("host claude path %q missing when CLAUDE_CONFIG_DIR set: %v", want, paths2)
 		}
 	}
+
+	// NESTED-REIN guard: when the rein-env CLAUDE_CONFIG_DIR IS our own overlay (a
+	// rein launched inside a rein sandbox inherits it), it must NOT be denied —
+	// denying it would hide the inner agent's config and trip srt.Build's
+	// widening-under-authoritative-deny check (the inner run also allow-writes it).
+	overlay := "/home/someone/.config/rein-sandbox-home/.claude"
+	t.Setenv("CLAUDE_CONFIG_DIR", overlay)
+	paths3, err := credentialDenyReadPaths(t.TempDir())
+	if err != nil {
+		t.Fatalf("credentialDenyReadPaths: %v", err)
+	}
+	for _, p := range paths3 {
+		if p == overlay {
+			t.Errorf("the rein overlay %q was added to the deny set; a nested rein must not deny its own overlay: %v", overlay, paths3)
+		}
+	}
+	// The host defaults stay denied even in the nested case.
+	set3 := map[string]bool{}
+	for _, p := range paths3 {
+		set3[p] = true
+	}
+	if !set3["/home/someone/.claude"] || !set3["/home/someone/.claude.json"] {
+		t.Errorf("host claude defaults must stay denied in the nested case: %v", paths3)
+	}
 }
 
 // TestCredentialDenyReadHidesOnDiskKeyringStore is the #46 regression: the

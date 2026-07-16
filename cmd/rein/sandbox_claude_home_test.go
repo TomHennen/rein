@@ -144,3 +144,45 @@ func TestPrepareClaudeOverlayFailsClosedOnSymlink(t *testing.T) {
 		t.Error("prepareClaudeOverlay accepted a symlinked overlay dir; it must fail closed")
 	}
 }
+
+// TestPrepareClaudeOverlayFailsClosedOnSymlinkedParent: MkdirAll follows symlinks on
+// PARENTS, so a symlinked ~/.config/rein-sandbox-home could redirect the seeded token
+// into a non-owned dir while the freshly-created leaf still looks fine. The parent
+// check must catch it before any credential is written.
+func TestPrepareClaudeOverlayFailsClosedOnSymlinkedParent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	if err := os.MkdirAll(filepath.Join(home, ".config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// ~/.config/rein-sandbox-home is a symlink to an elsewhere dir we "control".
+	elsewhere := t.TempDir()
+	if err := os.Symlink(elsewhere, filepath.Join(home, ".config", "rein-sandbox-home")); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := prepareClaudeOverlay(discardLogger(), home); err == nil {
+		t.Error("prepareClaudeOverlay accepted a symlinked PARENT dir; it must fail closed")
+	}
+	// And it must not have seeded a credential through the symlink.
+	if _, err := os.Stat(filepath.Join(elsewhere, ".claude", ".credentials.json")); !os.IsNotExist(err) {
+		t.Errorf("a credential was seeded through the symlinked parent (err=%v)", err)
+	}
+}
+
+// TestPrepareClaudeOverlayRejectsLooseHostCreds: a group/world-readable host token is
+// rejected (keystore bar) rather than propagated into the overlay.
+func TestPrepareClaudeOverlayRejectsLooseHostCreds(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	hostClaude := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(hostClaude, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hostClaude, ".credentials.json"), []byte("tok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepareClaudeOverlay(discardLogger(), home); err == nil {
+		t.Error("prepareClaudeOverlay accepted a group/world-readable host credential; it must fail closed")
+	}
+}
