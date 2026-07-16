@@ -320,9 +320,8 @@ Three layers, from hermetic to live:
   against a **live throwaway repo + a working App**: the write-approval loop and
   a real-agent (`claude`) end-to-end run. Prereqs: a machine set up via
   `rein init` (the suite resolves your App from `state.json` and its throwaway
-  from the dev-session — no `dev-env`, #126), the sandbox stack, host `gh`
-  authed, and `python3` + `pexpect`. See
-  [`tests/interactive/README.md`](tests/interactive/README.md).
+  from the dev-session), the sandbox stack, host `gh` authed, and `python3` +
+  `pexpect`. See [`tests/interactive/README.md`](tests/interactive/README.md).
 
   ```bash
   tests/interactive/run.sh                    # whole suite (deps-light; no real claude)
