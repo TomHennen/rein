@@ -1102,8 +1102,17 @@ func credentialDenyReadPaths(stateDir string) ([]string, error) {
 	// projects/sessions) while giving claude a fresh writable scratch dir — without
 	// it, that mkdir hits EROFS under the read-only root bind (surfaced as a
 	// SessionStart hook error when running a real claude in-sandbox).
+	// file-history/paste-cache/jobs/tasks/downloads/backups are the SAME
+	// cross-project-artifact class as projects/sessions (edited-file copies,
+	// mode-0600 pasted blobs, job/task state, downloaded+backed-up files) and
+	// leaked in-sandbox under the ~/.claude allow-back. Hide them too (#94).
+	// This is still an allowlist-of-denials — the coherent default-deny flip is
+	// the #94 design doc, docs/94-claude-subtree-policy.md.
 	for _, cdir := range claudeDirs {
-		for _, sub := range []string{"history.jsonl", "projects", "sessions", "session-env", "todos", "shell-snapshots"} {
+		for _, sub := range []string{
+			"history.jsonl", "projects", "sessions", "session-env", "todos", "shell-snapshots",
+			"file-history", "paste-cache", "jobs", "tasks", "downloads", "backups",
+		} {
 			out = append(out, filepath.Join(cdir, sub))
 		}
 	}

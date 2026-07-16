@@ -307,6 +307,13 @@ func TestCredentialDenyReadHidesClaudeWorkArtifacts(t *testing.T) {
 		// as the writable scratch claude's SessionStart machinery mkdir's per run;
 		// without it the in-sandbox mkdir hits EROFS under the read-only root.
 		"/home/someone/.claude/session-env",
+		// #94: same cross-project-artifact class, previously leaked in-sandbox.
+		"/home/someone/.claude/file-history",
+		"/home/someone/.claude/paste-cache",
+		"/home/someone/.claude/jobs",
+		"/home/someone/.claude/tasks",
+		"/home/someone/.claude/downloads",
+		"/home/someone/.claude/backups",
 	} {
 		if !set[want] {
 			t.Errorf("claude work artifact %q missing from deny-read set: %v", want, paths)
