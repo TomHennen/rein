@@ -7,9 +7,10 @@
 //
 // Everything here runs HOST-SIDE, before the in-sandbox deny is applied. rein
 // seeds ONLY .credentials.json (copied fresh from the host every launch — the
-// OAuth token lives ~6h) and authors its OWN minimal settings.json. It does NOT
-// seed .claude.json (the overlay regenerates it — seeding would leak host
-// project history) and NEVER copies the sandbox's rotated creds back to host.
+// OAuth token lives ~6h). It does NOT author a settings.json (see
+// prepareClaudeOverlay), does NOT seed .claude.json (the overlay regenerates it —
+// seeding would leak host project history), and NEVER copies the sandbox's
+// rotated creds back to host.
 package main
 
 import (
