@@ -665,6 +665,14 @@ func runSandboxed(cmdline []string) (int, error) {
 	if cwdEphemeral {
 		agentBindings = wt.Bindings
 	}
+
+	// Rendezvous file for the git push -u fix (#102/#119). Bound checkouts only:
+	// an ephemeral tree's .git/config is writable, so -u needs no help there.
+	upstreamIntentFile := ""
+	if !cwdEphemeral {
+		upstreamIntentFile = filepath.Join(workTree, ".git", upstreamIntentBasename)
+	}
+
 	execEnv := srt.BuildEnv(srt.EnvParams{
 		Parent:              os.Environ(),
 		CABundlePath:        bundlePath,
@@ -691,7 +699,8 @@ func runSandboxed(cmdline []string) (int, error) {
 		// The staged rein binary (copied into runTmp below, step 12) goes
 		// on the in-sandbox PATH so `rein declare <n>` works exactly as
 		// the deny messages instruct (#35 §3).
-		ExtraPathDir: runTmp,
+		ExtraPathDir:       runTmp,
+		UpstreamIntentFile: upstreamIntentFile,
 	})
 
 	// (12) FAIL-OPEN DEFENSE: prove the config actually applied by launching srt
@@ -713,6 +722,17 @@ func runSandboxed(cmdline []string) (int, error) {
 	reinBin := filepath.Join(runTmp, "rein")
 	if err := copyFile(self, reinBin, 0o700); err != nil {
 		return 1, fmt.Errorf("stage rein probe binary: %w", err)
+	}
+
+	// (12b) Stage the rein-git shim as `git` on the in-sandbox PATH so the agent's
+	// `git push -u` resolves to it (strip -u + record intent, #102/#119). Bound
+	// checkouts only. Fail-open: unshimmed just means the old harmless EBUSY.
+	if upstreamIntentFile != "" {
+		if src, err := locateBinary("rein-git", filepath.Dir(self)); err != nil {
+			logger.Printf("git upstream: rein-git shim not found (%v); -u pushes will show the harmless .git/config EBUSY", err)
+		} else if err := copyFile(src, filepath.Join(runTmp, "git"), 0o700); err != nil {
+			logger.Printf("git upstream: staging rein-git shim failed (%v); continuing unshimmed", err)
+		}
 	}
 	fmt.Fprintln(os.Stderr, "rein: verifying sandbox config applies (deny-read + seccomp self-test)…")
 	if err := srt.VerifyConfigApplied(srt.VerifyParams{
@@ -801,6 +821,12 @@ func runSandboxed(cmdline []string) (int, error) {
 
 	waitErr := cmd.Wait()
 	close(doneCh)
+
+	// Apply any `git push -u` tracking the shim recorded (#102/#119). Best-effort:
+	// the push already landed; tracking is a convenience.
+	if upstreamIntentFile != "" {
+		applyUpstreamIntent(workTree, upstreamIntentFile, logger)
+	}
 
 	if waitErr == nil {
 		return 0, nil
