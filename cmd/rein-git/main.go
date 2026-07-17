@@ -24,12 +24,8 @@ import (
 	"github.com/TomHennen/rein/internal/gitupstream"
 )
 
-// envUpstreamIntentFile names the rendezvous file rein stages for a SANDBOXED
-// run (set only then, only for a bound checkout). Its presence is the single
-// switch for the two sandbox-git behaviors below: strip `git push -u` (its
-// .git/config write faults on the #64 read-only pin) and record the upstream
-// intent for rein to apply host-side after the run. In direct mode it is unset,
-// so `-u` passes through to real git and writes tracking normally.
+// envUpstreamIntentFile is set only for a sandboxed bound checkout. Its presence
+// switches on the strip+capture below; unset (direct mode) passes -u through.
 const envUpstreamIntentFile = "REIN_UPSTREAM_INTENT_FILE"
 
 // writeSubcommands need a write-capable installation token.
@@ -59,13 +55,10 @@ func main() {
 		os.Exit(127)
 	}
 
-	// SANDBOX ONLY (env set): .git/config is a read-only bind (#64), so a
-	// `git push -u/--set-upstream`'s branch.<x>.remote/merge write faults with
-	// "could not write config file .git/config: Device or resource busy". Record
-	// what -u would have set (for rein to apply on the real checkout post-run,
-	// #102/#119) and strip the flag so the push looks NORMAL. Gated on -u being
-	// present: a plain push writes no tracking in real git, so we synthesize none.
-	// Direct mode leaves the env unset → -u passes through to real git untouched.
+	// Sandbox bound checkout only (#64/#102/#119): record what `git push -u` would
+	// set (for rein to apply post-run) and strip the flag, so its .git/config write
+	// doesn't fault on the read-only pin. Gated on -u present so we synthesize
+	// tracking only when real git would; direct mode (env unset) passes -u through.
 	if intentFile := os.Getenv(envUpstreamIntentFile); intentFile != "" &&
 		findSubcommand(args) == "push" && gitupstream.HasSetUpstream(args) {
 		captureUpstreamIntent(args, intentFile, realGit)
@@ -83,10 +76,9 @@ func main() {
 	}
 }
 
-// captureUpstreamIntent appends the upstream tracking `git push -u` would have
-// written to the rendezvous file. Best-effort: any failure (unparseable argv,
-// detached HEAD, unwritable file) is silently skipped — the push still proceeds,
-// the operator just doesn't get the tracking set. Never blocks the push.
+// captureUpstreamIntent appends what `git push -u` would have set to the
+// rendezvous file. Best-effort: any failure is silently skipped, never blocking
+// the push (the operator just doesn't get tracking set).
 func captureUpstreamIntent(args []string, intentFile, realGit string) {
 	in, ok := gitupstream.ParsePush(args, func() (string, error) {
 		out, err := exec.Command(realGit, "symbolic-ref", "--quiet", "--short", "HEAD").Output()
@@ -193,16 +185,11 @@ func optionConsumesNextArg(a string) bool {
 	return optionsThatTakeArg[a]
 }
 
-// findRealGit finds the system git executable, deliberately excluding the
-// directory that contains this shim. Without that exclusion we'd recurse
-// forever.
-//
-// The shim's own dir is taken from os.Executable() (the actual running binary),
-// falling back to shimPath (os.Args[0]). This matters when the shim is invoked
-// as bare `git` off PATH: os.Args[0] is then just "git", which would resolve to
-// the CWD, not the shim dir — so the PATH scan would re-find the shim and add a
-// wasteful self-exec hop. os.Executable() names runTmp/git directly. An explicit
-// REIN_REAL_GIT env var overrides everything (tests; distros without git on PATH).
+// findRealGit finds the system git, excluding this shim's own dir so we don't
+// recurse. The dir comes from os.Executable() (falling back to shimPath): when
+// invoked as bare `git`, os.Args[0] is just "git" and would resolve to the CWD,
+// making the PATH scan re-find the shim and add a wasteful self-exec hop.
+// REIN_REAL_GIT overrides everything (tests; distros without git on PATH).
 func findRealGit(shimPath string) (string, error) {
 	if override := os.Getenv("REIN_REAL_GIT"); override != "" {
 		if _, err := os.Stat(override); err == nil {

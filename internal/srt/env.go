@@ -21,10 +21,8 @@ const EnvAgentWorktrees = "REIN_REPO_WORKTREES"
 // being committed into repo A.
 const EnvAgentCloneDir = "REIN_EPHEMERAL_CLONE_DIR"
 
-// EnvUpstreamIntentFile is the shim-internal rendezvous the staged rein-git
-// appends `git push -u` tracking intent to, for rein to apply on the operator's
-// real checkout post-run (#102/#119). Set only for a bound checkout. Not a
-// stable agent API; see EnvParams.UpstreamIntentFile.
+// EnvUpstreamIntentFile is the shim-internal rendezvous for `git push -u`
+// tracking intent (#102/#119). See EnvParams.UpstreamIntentFile.
 const EnvUpstreamIntentFile = "REIN_UPSTREAM_INTENT_FILE"
 
 // EnvDisableClaudeMCP is the rein-side, per-run opt-OUT that restores the old
@@ -205,12 +203,9 @@ type EnvParams struct {
 	// durable artifact is the push (docs/session-scope-ux-mocks.md §7).
 	EphemeralCloneDir string
 
-	// UpstreamIntentFile, when non-empty, is the rendezvous path the staged
-	// rein-git shim appends `git push -u` tracking intent to — delivered as
-	// REIN_UPSTREAM_INTENT_FILE. Set only for a bound checkout, where .git/config
-	// is read-only (#64) so real git's -u write faults; the shim strips -u and
-	// records the intent here for rein to apply host-side post-run (#102/#119).
-	// Internal rein-git rendezvous, not a stable agent API.
+	// UpstreamIntentFile, when non-empty, is the rendezvous path the rein-git shim
+	// appends `git push -u` tracking intent to (REIN_UPSTREAM_INTENT_FILE, bound
+	// checkouts only; #102/#119). Internal, not a stable agent API.
 	UpstreamIntentFile string
 }
 

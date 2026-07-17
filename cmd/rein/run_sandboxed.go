@@ -644,12 +644,8 @@ func runSandboxed(cmdline []string) (int, error) {
 		agentBindings = wt.Bindings
 	}
 
-	// (#102/#119) For a BOUND checkout, .git/config is read-only (#64), so the
-	// agent's `git push -u` would fault. The staged rein-git shim strips -u and
-	// records what it would have set into this rendezvous file (in the writable
-	// part of .git); rein applies it to the real checkout post-run. Only for
-	// bound checkouts — an ephemeral tree's .git/config is writable (so -u works
-	// there) and its tree is discarded, so tracking is moot.
+	// Rendezvous file for the git push -u fix (#102/#119). Bound checkouts only:
+	// an ephemeral tree's .git/config is writable, so -u needs no help there.
 	upstreamIntentFile := ""
 	if !cwdEphemeral {
 		upstreamIntentFile = filepath.Join(workTree, ".git", upstreamIntentBasename)
@@ -678,9 +674,7 @@ func runSandboxed(cmdline []string) (int, error) {
 		// The staged rein binary (copied into runTmp below, step 12) goes
 		// on the in-sandbox PATH so `rein declare <n>` works exactly as
 		// the deny messages instruct (#35 §3).
-		ExtraPathDir: runTmp,
-		// Where the staged rein-git shim records `git push -u` intent (bound
-		// checkouts only). Empty on the ephemeral path → shim passes -u through.
+		ExtraPathDir:       runTmp,
 		UpstreamIntentFile: upstreamIntentFile,
 	})
 
@@ -705,17 +699,12 @@ func runSandboxed(cmdline []string) (int, error) {
 		return 1, fmt.Errorf("stage rein probe binary: %w", err)
 	}
 
-	// (12b) For a bound checkout, stage the rein-git shim as `git` on the
-	// in-sandbox PATH (runTmp is prepended) so the agent's `git push -u` resolves
-	// to it: it strips the -u whose .git/config write faults on the #64 read-only
-	// pin and records the intent for post-run apply (#102/#119). The shim's other
-	// job (REIN_GIT_OP classification) is inert in-sandbox — gating is the proxy's
-	// — so this only adds the strip/capture. Fail-OPEN: if rein-git can't be
-	// located (unusual layout), log and continue unshimmed; the agent then sees
-	// the old harmless EBUSY rather than a blocked run.
+	// (12b) Stage the rein-git shim as `git` on the in-sandbox PATH so the agent's
+	// `git push -u` resolves to it (strip -u + record intent, #102/#119). Bound
+	// checkouts only. Fail-open: unshimmed just means the old harmless EBUSY.
 	if upstreamIntentFile != "" {
 		if src, err := locateBinary("rein-git", filepath.Dir(self)); err != nil {
-			logger.Printf("git upstream: rein-git shim not found (%v); pushes with -u will show the harmless .git/config EBUSY", err)
+			logger.Printf("git upstream: rein-git shim not found (%v); -u pushes will show the harmless .git/config EBUSY", err)
 		} else if err := copyFile(src, filepath.Join(runTmp, "git"), 0o700); err != nil {
 			logger.Printf("git upstream: staging rein-git shim failed (%v); continuing unshimmed", err)
 		}
@@ -808,10 +797,8 @@ func runSandboxed(cmdline []string) (int, error) {
 	waitErr := cmd.Wait()
 	close(doneCh)
 
-	// (#102/#119) Apply any `git push -u` tracking the shim recorded onto the
-	// operator's real checkout, now that .git/config is writable host-side.
-	// Best-effort and fail-open — the push already landed; tracking is a
-	// convenience, never a reason to fail the run.
+	// Apply any `git push -u` tracking the shim recorded (#102/#119). Best-effort:
+	// the push already landed; tracking is a convenience.
 	if upstreamIntentFile != "" {
 		applyUpstreamIntent(workTree, upstreamIntentFile, logger)
 	}

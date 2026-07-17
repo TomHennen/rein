@@ -1,29 +1,10 @@
-"""push_upstream — a sandboxed `git push -u` reads CLEAN, and rein sets the
-upstream on the operator's real checkout (#102 part 2 / #119).
+"""push_upstream — a sandboxed `git push -u` reads clean, and rein sets the
+upstream on the real checkout (#102 pt2 / #119). See README.md.
 
-The demo that surfaced #102 showed a real agent's `git push -u` printing
-`could not write config file .git/config: Device or resource busy` and having to
-explain it away: -u writes branch.<x>.remote/merge into .git/config, which #64
-pins READ-ONLY in the sandbox. This journey is the reviewable proof that the push
-now reads normal — the golden is the agent's own view of a clean push.
-
-WHY THIS JOURNEY BINDS A HOST-SIDE HARDENED CHECKOUT (and doesn't clone in the
-sandbox like write_ceremony): the bug only exists when .git/config is the #64
-read-only bind. A clone made INSIDE the sandbox's writable mount has a WRITABLE
-.git/config, so -u succeeds there regardless of the fix — a golden built that way
-would be green whether or not the fix works (the exact trap #119 calls out). So
-we clone HOST-side and let rein bind it hardened (spawn_rein_run exports it as
-REIN_SANDBOX_WORKDIR; `cd "$0"` lands the in-sandbox script in it).
-
-PROVE-IT-RAN: git only writes the upstream config on a SUCCESSFUL push, so a clean
-transcript is only meaningful once the push LANDED. The invariants assert the tree
-was a real .git dir, the push rc==0, and the branch reached the remote BEFORE the
-golden's no-fault reading counts. The tracking-set half (host-side, post-run) is
-asserted from rein's helper.log — it is a file log, not terminal output, so it is
-NOT in the golden.
-
-See CLAUDE.md for the golden-transcript rules. Self-contained: creates its own
-throwaway issue + branch and cleans both up. Throwaway repo only (constraint #1).
+Load-bearing: this binds a HOST-side hardened checkout, NOT an in-sandbox clone
+like write_ceremony. The bug only exists when .git/config is the #64 read-only
+bind; an in-sandbox clone's config is writable, so -u succeeds there regardless
+of the fix (the #119 trap). Don't "simplify" it to clone in the sandbox.
 """
 
 from __future__ import annotations
@@ -49,9 +30,8 @@ _EBUSY_MARKERS = (
 
 
 def _clone_hardened(repo: str, env: dict) -> str:
-    """A HOST-side normal checkout (real .git dir -> rein binds it hardened).
-    origin is forced to the plain https URL so the in-sandbox push routes through
-    rein's injecting proxy."""
+    """A HOST-side checkout (real .git -> rein binds it hardened). origin forced to
+    the https URL so the in-sandbox push routes through rein's proxy."""
     d = tempfile.mkdtemp(prefix="rein-push-upstream-")
     subprocess.run(["gh", "repo", "clone", repo, d, "--", "-q"],
                    check=True, env=env, capture_output=True, text=True)
@@ -61,11 +41,9 @@ def _clone_hardened(repo: str, env: dict) -> str:
 
 
 def upstream_script(issue: int, good: str) -> str:
-    """A `bash -c` body run as the srt child in the BOUND checkout ($0). Each step
-    emits a tagged @PHASE.. sentinel so the run reads expect->act->expect; `run`
-    (sandbox_preamble) echoes each command as `SBX| $ …` and tags its output. The
-    push passes --progress so git's real chatter is captured (counts normalized at
-    compare time)."""
+    """The srt child's `bash -c` body in the BOUND checkout ($0). Each step emits a
+    tagged @PHASE.. sentinel (expect->act->expect); `run` echoes `SBX| $ …` + tags
+    output. --progress forces git's chatter (counts normalized at compare)."""
     return f"""
 {H.sandbox_preamble()}
 cd "$0"

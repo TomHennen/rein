@@ -1,16 +1,12 @@
-// Package gitupstream carries the branch-upstream-tracking intent of a
-// sandboxed `git push -u` from the in-sandbox rein-git shim (which STRIPS the
-// -u so real git doesn't fault on the read-only .git/config, #64/#102/#119) to
-// the host-side rein process, which sets the tracking on the operator's real
-// checkout AFTER the run.
+// Package gitupstream carries the `git push -u` tracking intent from the
+// in-sandbox rein-git shim (which strips -u so real git doesn't fault on the
+// read-only .git/config, #64/#102/#119) to host-side rein, which sets it after
+// the run. The shim appends a rendezvous line; rein reads it post-run.
 //
-// The two parties never share memory: rein-git APPENDS a rendezvous line, rein
-// READS it post-run. The rendezvous file lives in the sandbox-writable part of
-// .git, so the agent can also write it — every value that crosses this boundary
-// is therefore UNTRUSTED and must pass Validate before rein acts on it. rein
-// only ever writes branch.<local>.remote/.merge (never a code-exec key), so the
-// worst a forged line can do is set benign tracking on an already-existing local
-// branch to an already-existing remote.
+// The rendezvous file is in the sandbox-writable part of .git, so its contents
+// are UNTRUSTED and must pass Validate. rein only ever writes
+// branch.<local>.remote/.merge (never a code-exec key) for an already-existing
+// branch + remote, so the worst a forged line can do is benign.
 package gitupstream
 
 import (
@@ -118,11 +114,12 @@ func ParsePush(args []string, currentBranch func() (string, error)) (Intent, boo
 	var local, mergeRef string
 	switch {
 	case refspec == "":
-		l, ok := resolveLocal("")
-		if !ok {
-			return Intent{}, false
-		}
-		local, mergeRef = l, "refs/heads/"+l
+		// No refspec: what git pushes and what upstream it sets depend on
+		// push.default AND remote state (often an error when no upstream exists),
+		// so we can't reliably know it. The sandbox always pushes an explicit
+		// agent/<n>/<nonce> ref anyway — decline rather than guess. (Confirmed
+		// against real git in the differential test.)
+		return Intent{}, false
 	case strings.Contains(refspec, ":"):
 		src, dst, _ := strings.Cut(refspec, ":")
 		if dst == "" { // "src:" is not a normal upstream-setting push

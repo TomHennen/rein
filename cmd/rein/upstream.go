@@ -1,13 +1,8 @@
-// Host-side apply of the `git push -u` upstream tracking the in-sandbox rein-git
-// shim recorded (#102/#119): the shim strips -u (its .git/config write faults on
-// the #64 read-only pin) and appends the intended tracking to a rendezvous file;
-// rein sets it here, on the operator's real checkout, after the run.
-//
-// The rendezvous file and its contents are UNTRUSTED — see the internal/gitupstream
-// package doc for the threat model. Two host-side defenses live here: the file is
-// read only if it is a plain regular file (an agent-planted FIFO/symlink is
-// ignored, never opened-and-blocked-on), and tracking is set only on a branch
-// that has NONE yet (so a forged line cannot RETARGET an existing branch like main).
+// Host-side apply of the `git push -u` tracking the rein-git shim recorded
+// (#102/#119). Untrusted input (see internal/gitupstream); the host-side defenses
+// here: read only a plain regular file (a planted FIFO/symlink is ignored, never
+// blocked on), and set tracking only on a branch that has none yet (so a forged
+// line can't retarget an existing branch).
 package main
 
 import (
@@ -56,12 +51,10 @@ func applyUpstreamIntent(workTree, intentFile string, logger *log.Logger) {
 
 	g := &repoGit{dir: workTree}
 
-	// Collapse to last-write-wins per local branch (the agent's final push is what
-	// git would reflect), preserving first-seen order for deterministic logs.
+	// Last-write-wins per branch (the agent's final push), first-seen order for
+	// stable logs. LimitedReader caps bytes; a truncated line just fails Validate.
 	latest := map[string]gitupstream.Intent{}
 	var order []string
-	// LimitedReader caps total bytes; an over-long or boundary-truncated line just
-	// fails the 3-field shape or Validate below — best-effort, sc.Err ignored.
 	sc := bufio.NewScanner(&io.LimitedReader{R: f, N: maxIntentBytes})
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
@@ -127,10 +120,8 @@ func (g *repoGit) hasUpstream(name string) bool {
 	return err == nil && strings.TrimSpace(string(out)) != ""
 }
 
-// setTracking writes ONLY the two tracking keys, via `git config` (not a raw
-// file write) so git validates the key syntax. The key is built from the
-// already-Validated branch name and never varies from branch.<local>.remote /
-// .merge, so no other config key can be reached.
+// setTracking writes ONLY branch.<local>.remote/.merge, via `git config`. The
+// key is built from an already-Validated branch name, so no other key is reachable.
 func (g *repoGit) setTracking(in gitupstream.Intent) error {
 	if _, err := g.run("config", "branch."+in.Local+".remote", in.Remote); err != nil {
 		return err
