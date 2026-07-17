@@ -45,7 +45,7 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 ## Dev environment
 
 - Development happens directly in this Linux VM. There is no devcontainer.
-- Source `./dev-env` at the start of each work session to load the `REIN_*` environment variables.
+- Setup is the `rein init` world: run `rein init` once (see `HANDOFF.md`) and rein resolves your App from `state.json` + the managed keystore — no env vars needed. **Do NOT `source ./dev-env`**: that file is untracked per-developer scaffolding (`dev-env.example` is the template), and the old committed copy pinned a dead App whose `REIN_APP_*` *override* the real one (#126). Only source a dev-env you filled in yourself, and only for the env-var path (e.g. the opt-in live Go tests).
 - The GitHub App private key is at `$REIN_APP_PRIVATE_KEY_PATH` (`~/.config/rein-credentials/app.pem`).
 - Secure Enclave is not available on Linux. Phase 0/1 use the `internal/keystore` file backend. Phase 1's hardware-backed work would require TPM2 (if this VM has one) or shift to a Mac host.
 - srt sandbox is out of scope for Phase 0.

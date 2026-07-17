@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # run-journeys.sh — the MANUAL, on-demand journey runner (no timer, no background
-# token-minting — Tom's ruling). It runs every tests/interactive/journey_*.py
+# token-minting — Tom's ruling). It runs every tests/interactive/journeys/*/journey.py
 # LIVE and each one COMPARES its fresh run to the committed RAW golden by
 # normalizing BOTH sides (PR #78), so a different issue number / nonce / object
 # count still passes but a genuinely new or changed line trips drift.
@@ -32,8 +32,9 @@
 # Workflow (see tests/interactive/CLAUDE.md): before a PR that changes a journey,
 # run with REIN_UPDATE_GOLDEN=1 and COMMIT the regenerated raw golden.
 #
-# Setup is the `rein init` world (a fresh machine is already configured). This
-# script sources ./dev-env only as the LEGACY this-box shortcut for the App creds.
+# Setup is the `rein init` world: a machine configured via `rein init` has its App
+# in state.json + the managed keystore. Journeys resolve the real App from there
+# and their throwaway via resolve_throwaway_repo — NO dev-env (#126).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,11 +50,6 @@ for arg in "$@"; do
   esac
 done
 
-# Legacy this-box shortcut for REIN_APP_* (a rein-init machine won't need it; the
-# journeys resolve their throwaway via resolve_throwaway_repo regardless).
-# shellcheck disable=SC1091
-[ -f ./dev-env ] && source ./dev-env
-
 # Build up front so a compile error fails fast before any pexpect spawn.
 go build -o bin/ ./...
 
@@ -62,10 +58,10 @@ go build -o bin/ ./...
 # ==========================================================================
 echo "########## [A] GOLDEN-DRIFT: journeys vs goldens ##########"
 shopt -s nullglob
-journeys=("$HERE"/journey_*.py)
+journeys=("$HERE"/journeys/*/journey.py)
 shopt -u nullglob
 if [ "${#journeys[@]}" -eq 0 ]; then
-  echo "no journey_*.py under $HERE" >&2
+  echo "no journeys/*/journey.py under $HERE" >&2
   exit 1
 fi
 
@@ -73,7 +69,7 @@ fail=0
 skipped=0
 summary=()
 for j in "${journeys[@]}"; do
-  name="$(basename "$j")"
+  name="$(basename "$(dirname "$j")")"   # the journey dir IS the name
   echo "=== $name (live) ==="
   # The journey itself does the normalize-both compare and sets the exit code:
   #   0 = match (or golden updated)   1 = drift   2 = ceremony/boundary broke
@@ -81,7 +77,8 @@ for j in "${journeys[@]}"; do
   # 3 is its own status ON PURPOSE: a skip that reports PASS is the #68 footgun
   # (a green suite hiding an untested path). A skip is not a failure, but it must
   # never look like coverage.
-  python3 "$j"
+  # Run as a module from the REPO ROOT so the tests.interactive package resolves.
+  ( cd "$REPO_ROOT" && python3 -m "tests.interactive.journeys.$name.journey" )
   rc=$?
   case "$rc" in
     0) summary+=("PASS  $name") ;;
@@ -105,7 +102,7 @@ if [ -n "${REIN_UPDATE_GOLDEN:-}" ]; then
   echo
   echo "REIN_UPDATE_GOLDEN was set: the RAW goldens were rewritten from live runs."
   echo "Review and commit them:"
-  git --no-pager diff --stat -- "$HERE/golden/" || true
+  git --no-pager diff --stat -- "$HERE/journeys/" || true
 fi
 echo
 
@@ -143,17 +140,17 @@ if [ "$RUN_SANDBOX" -eq 1 ]; then
   run_suite "sandbox_home work-tree-under-allow-back E2E (Go: cmd/rein -run E2E)" "$REPO_ROOT" \
     env REIN_SANDBOX_E2E=1 go test ./cmd/rein/ -run E2E -count=1
 
-  # Interactive (run from HERE so `import reinharness`/`import itest_base` resolve):
-  # the .git host-exec escape is CLOSED (live srt, no tty needed).
-  run_suite ".git hardening (interactive: test_git_hardening.py)" "$HERE" \
-    python3 -m unittest -v test_git_hardening
+  # Interactive (run as modules from the REPO ROOT so the tests.interactive package
+  # resolves): the .git host-exec escape is CLOSED (live srt, no tty needed).
+  run_suite ".git hardening (interactive: test_git_hardening.py)" "$REPO_ROOT" \
+    python3 -m unittest -v tests.interactive.test_git_hardening
 
   # Interactive: the injected contract reaches a REAL claude (needs claude on PATH;
   # skip gracefully if absent — LLM phrasing is not golden material, so this is an
   # invariant check, not a transcript compare).
   if command -v claude >/dev/null 2>&1; then
-    run_suite "agent contract read-back (interactive, real claude: test_agent_contract.py)" "$HERE" \
-      python3 -m unittest -v test_agent_contract
+    run_suite "agent contract read-back (interactive, real claude: test_agent_contract.py)" "$REPO_ROOT" \
+      python3 -m unittest -v tests.interactive.test_agent_contract
   else
     sbx_summary+=("SKIP  agent contract read-back (no 'claude' on PATH — real-agent test skipped)")
     echo "=== agent contract read-back: SKIPPED (no 'claude' on PATH) ==="
@@ -168,8 +165,8 @@ if [ "$RUN_SANDBOX" -eq 1 ]; then
   # coverage that quietly vanishes.
   if command -v claude >/dev/null 2>&1; then
     if python3 -c 'import pyte' >/dev/null 2>&1; then
-      run_suite "real agent starts in sandbox (interactive, real claude: realagent_e2e.py)" "$HERE" \
-        python3 -m unittest -v realagent_e2e
+      run_suite "real agent starts in sandbox (interactive, real claude: realagent_e2e.py)" "$REPO_ROOT" \
+        python3 -m unittest -v tests.interactive.realagent_e2e
     else
       sbx_summary+=("FAIL  real agent in sandbox (claude present but pyte MISSING — apt install python3-pyte)")
       sbx_fail=1

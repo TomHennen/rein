@@ -8,9 +8,8 @@ it only reads files + runs pure string transforms. So it runs in the normal
 
 It guards the invariants of the RAW-golden / normalize-on-compare model (PR #78):
 
-  1. Every `journey_*.py` has a committed golden at the conventional path
-     (`journey_<stem>.py` -> `golden/<stem>.txt`), and there are no orphan
-     goldens with no journey.
+  1. Every journey (`journeys/<name>/journey.py`) has a committed golden co-located
+     at `journeys/<name>/golden.txt`, and there are no orphan goldens with no journey.
   2. The comparison transform is WELL-FORMED on each golden: normalizing it is
      IDEMPOTENT (`normalize(normalize(g)) == normalize(g)`). If a rule were not a
      fixpoint — e.g. it rewrote its own output — the comparator would be unstable
@@ -25,39 +24,41 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-import reinharness as H
+from tests.interactive import reinharness as H
 
 HERE = Path(__file__).resolve().parent
-GOLDEN_DIR = HERE / "golden"
+JOURNEYS_DIR = HERE / "journeys"
 
-# journey_<stem>.py  <->  golden/<stem>.txt
-JOURNEYS = sorted(HERE.glob("journey_*.py"))
+# journeys/<name>/journey.py  <->  journeys/<name>/golden.txt (co-located)
+JOURNEYS = sorted(JOURNEYS_DIR.glob("*/journey.py"))
 
 
 def golden_for(journey: Path) -> Path:
-    stem = journey.name[len("journey_"):-len(".py")]
-    return GOLDEN_DIR / f"{stem}.txt"
+    return journey.parent / "golden.txt"
+
+
+def rel(p: Path) -> str:
+    return str(p.relative_to(HERE))
 
 
 class GoldenShape(unittest.TestCase):
     def test_at_least_one_journey_exists(self):
-        self.assertTrue(JOURNEYS, "no journey_*.py found — the catalogue should have at least one")
+        self.assertTrue(JOURNEYS, "no journeys/*/journey.py found — the catalogue should have at least one")
 
     def test_every_journey_has_a_committed_golden(self):
-        missing = [j.name for j in JOURNEYS if not golden_for(j).exists()]
+        missing = [rel(j) for j in JOURNEYS if not golden_for(j).exists()]
         self.assertEqual(
             missing, [],
             f"journeys with no committed golden (run tests/interactive/run-journeys.sh): {missing}",
         )
 
     def test_no_orphan_goldens(self):
-        expected = {golden_for(j).name for j in JOURNEYS}
-        actual = {p.name for p in GOLDEN_DIR.glob("*.txt")} if GOLDEN_DIR.exists() else set()
-        orphans = sorted(actual - expected)
-        self.assertEqual(orphans, [], f"golden files with no matching journey_*.py: {orphans}")
+        goldens = sorted(JOURNEYS_DIR.glob("*/golden.txt")) if JOURNEYS_DIR.exists() else []
+        orphans = [rel(g) for g in goldens if not (g.parent / "journey.py").exists()]
+        self.assertEqual(orphans, [], f"golden.txt with no sibling journey.py: {orphans}")
 
     def test_goldens_are_nonempty(self):
-        empty = [golden_for(j).name for j in JOURNEYS
+        empty = [rel(golden_for(j)) for j in JOURNEYS
                  if golden_for(j).exists() and not golden_for(j).read_text().strip()]
         self.assertEqual(empty, [], f"empty goldens: {empty}")
 
@@ -73,7 +74,7 @@ class GoldenShape(unittest.TestCase):
             once = H.normalize_for_compare(raw)
             twice = H.normalize_for_compare(once)
             if once != twice:
-                unstable.append(g.name)
+                unstable.append(rel(g))
         self.assertEqual(
             unstable, [],
             f"normalize_for_compare is NOT idempotent on: {unstable} — a rule rewrites its own output",

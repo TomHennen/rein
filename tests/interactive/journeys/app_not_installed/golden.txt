@@ -1,0 +1,35 @@
+# leg 1 — MISCONFIG: session names the UNCOVERED repo TomHennen/definitely-not-installed
+$ rein run --direct -- echo REIN_INNER_COMMAND_RAN /tmp/rein-itest-y_9j81w5
+===============================================================
+rein: WARNING — DIRECT (UNSANDBOXED) MODE
+  The agent runs OUTSIDE the srt sandbox. It shares your user
+  account: it CAN read your ambient credentials (gh login, SSH
+  keys, ~/.netrc, keyrings) and the rein-brokered token is only
+  hidden by process boundaries, not a sandbox. Use this ONLY on a
+  THROWAWAY repo. For real work, drop --direct to run sandboxed.
+===============================================================
+rein run: App rein-primary-56e410c903 is not installed on TomHennen/definitely-not-installed; install it (or add the repo to the installation) at https://github.com/apps/rein-primary-56e410c903/installations/new, then re-run
+
+# leg 2 — CONTROL: session names the COVERED throwaway TomHennen/agentcreds-validation-a
+$ rein run --direct -- echo REIN_INNER_COMMAND_RAN /tmp/rein-itest-x05vxykz
+===============================================================
+rein: WARNING — DIRECT (UNSANDBOXED) MODE
+  The agent runs OUTSIDE the srt sandbox. It shares your user
+  account: it CAN read your ambient credentials (gh login, SSH
+  keys, ~/.netrc, keyrings) and the rein-brokered token is only
+  hidden by process boundaries, not a sandbox. Use this ONLY on a
+  THROWAWAY repo. For real work, drop --direct to run sandboxed.
+===============================================================
+rein: launching wrapped process with:
+  session: sess_journey_control (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-up8v2r4z/session.yaml]
+  PATH-front shim dir: /home/tom.linux/.local/state/rein/shim
+  per-process git config: /tmp/rein-run-3341677548/gitconfig
+  (your real ~/.gitconfig is layered in via include.path)
+
+  Writes are LOCKED until the agent declares its issue:  rein declare <n>
+  then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal
+  (or a tmux popup); approving covers all writes for this run.
+
+rein: running: echo REIN_INNER_COMMAND_RAN /tmp/rein-itest-x05vxykz
+---
+REIN_INNER_COMMAND_RAN /tmp/rein-itest-x05vxykz

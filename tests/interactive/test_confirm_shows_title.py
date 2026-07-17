@@ -33,8 +33,8 @@ from __future__ import annotations
 import os
 import unittest
 
-import reinharness as H
-from itest_base import ReinTestCase
+from tests.interactive import reinharness as H
+from tests.interactive.itest_base import ReinTestCase
 
 _ISSUE_ENV = "REIN_ITEST_TITLE_ISSUE"
 _WORD_ENV = "REIN_ITEST_TITLE_WORD"

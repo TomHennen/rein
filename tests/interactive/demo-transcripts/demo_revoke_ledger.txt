@@ -3,7 +3,7 @@
 # A static, human-reviewable capture of two Go demo tests' STRUCTURED reports —
 # NOT a normalize-on-compare golden (a Go test's t.Log output is a report, not a
 # shell terminal; test:line prefixes + timing are normalized out), so it lives in
-# demo-transcripts/ (outside golden/, which is journey RAW goldens only).
+# demo-transcripts/ (outside the journeys' golden.txt files, which are the RAW goldens).
 # Two captures, both live/real:
 
 ## (A) dedupe: the exit-revoke summary reads 'revoked 1 of 1', not '1 of 6'

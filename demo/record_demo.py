@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """record_demo — record the README demo (#99): a real `claude`, sandboxed by rein,
 declares an issue, blocks, is approved at the tmux popup, pushes a PR, and `/exit`s so
-rein revokes the token and says so. It IS journey_realagent_write.py recorded — it
+rein revokes the token and says so. It IS journeys/realagent_write/journey.py recorded — it
 reuses `reinharness` and adds only what a recording needs.
 
-    python3 demo/record_demo.py                 # record + render
-    python3 demo/record_demo.py --no-render     # record only (.cast)
-    python3 demo/record_demo.py --render-only    # re-render an existing .cast (no claude)
-    REIN_DEMO_ISSUE=123 python3 demo/record_demo.py   # reuse an existing issue
+Run as a module from the REPO ROOT so the `tests.interactive` package resolves (no
+sys.path hacks):
+
+    python3 -m demo.record_demo                 # record + render
+    python3 -m demo.record_demo --no-render     # record only (.cast)
+    python3 -m demo.record_demo --render-only   # re-render an existing .cast (no claude)
+    REIN_DEMO_ISSUE=123 python3 -m demo.record_demo   # reuse an existing issue
 
 Non-obvious constraints, each explained where it bites below: the popup is a
 client-owned overlay (so the recording comes from the attached client's pty, not
@@ -32,10 +35,8 @@ import time
 from pathlib import Path
 
 DEMO_DIR = Path(__file__).resolve().parent
-REPO_ROOT = DEMO_DIR.parent
-sys.path.insert(0, str(REPO_ROOT / "tests" / "interactive"))
 
-import reinharness as H  # noqa: E402
+from tests.interactive import reinharness as H
 
 CAST = DEMO_DIR / "creds-joke.cast"
 GIF = DEMO_DIR / "creds-joke.gif"

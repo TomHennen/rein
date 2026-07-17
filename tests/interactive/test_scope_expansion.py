@@ -34,8 +34,8 @@ import unittest
 
 import pexpect
 
-import reinharness as H
-from itest_base import (
+from tests.interactive import reinharness as H
+from tests.interactive.itest_base import (
     DECLARE_ISSUE_B_ENV,
     ReinTestCase,
     declare_issue_b,
