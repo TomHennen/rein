@@ -2,7 +2,7 @@
 // SINGLE repository and writes it as a tokencache.Entry to a caller-named path.
 //
 // It exists ONLY to seed the #95 regression journey's stale-cache fixture
-// (tests/interactive/journey_sandbox_gh_read_staleness.py): that journey needs
+// (tests/interactive/journeys/sandbox_gh_read_staleness/journey.py): that journey needs
 // a genuine, narrowly-scoped (repo-A-only) leftover token planted at the LEGACY
 // untagged cache path a prior single-repo run would have written, so a pre-fix
 // broker serves it to a wider [A,B] run and 404s on repo B — faithfully

@@ -1,7 +1,7 @@
 # REFERENCE TRANSCRIPT — demo_pat_leak.sh (issue #57)
 #
 # A static, human-reviewable capture — NOT a normalize-on-compare golden, so it
-# lives in demo-transcripts/ (outside golden/, which is journey RAW goldens only).
+# lives in demo-transcripts/ (outside the journeys' golden.txt files, which are the RAW goldens).
 # Captured live; /tmp paths normalized to <TMP>. The script echoes each command
 # it runs as `$ <command>` then its output, self-asserts (12 checks), and exits
 # non-zero on any regression. Regenerate:

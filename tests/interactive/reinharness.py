@@ -398,7 +398,7 @@ def pr_author(repo: str, number: int, env: dict | None = None) -> dict:
     OWN authed gh — the GROUND TRUTH for the DELEGATED identity (#101): a PR a
     sandboxed agent opened must be authored by the App's bot
     (`app/<slug>`, is_bot=true), NEVER by the developer. The commit-side twin of
-    this is journey_git_author's `<name> (via rein)` author stamp.
+    this is journeys/git_author/journey.py's `<name> (via rein)` author stamp.
     """
     env = env or rein_env()
     import json as _json
@@ -1256,7 +1256,7 @@ def run_journey(steps, *, env=None, extra_env=None, timeout: int = 60) -> Journe
 #
 # A "journey" drives one major user path end to end and produces a checked-in,
 # human-reviewable GOLDEN transcript. These helpers are what make the NEXT
-# journey mostly declarative; journey_write_ceremony.py is the exemplar that
+# journey mostly declarative; journeys/write_ceremony/journey.py is the exemplar that
 # proved the shape. The four moving parts:
 #
 #   SBX_TAG / POPUP_TAG  — EXACT host-vs-agent split. The in-sandbox script tags
@@ -1265,10 +1265,10 @@ def run_journey(steps, *, env=None, extra_env=None, timeout: int = 60) -> Journe
 #   normalize_transcript — swap the volatile bits (issue #, nonces, timestamps,
 #                          object counts, hashes, tmp paths) for stable
 #                          placeholders so two runs yield an identical golden.
-#   read_golden/compare_golden/update_golden — the golden file itself.
+#   read_golden/compare_golden/update_golden — the golden file itself. Goldens are
+#     CO-LOCATED with their journey: a journey passes its own
+#     `Path(__file__).parent / "golden.txt"`, so these helpers take a Path.
 #   create_issue/close_issue/issue_title      — a throwaway issue to declare.
-
-GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
 
 # The agent tags EVERY line it emits with this. `tr '\r' '\n'` upstream turns
 # git's carriage-return progress redraws into real lines so each one still
@@ -1688,39 +1688,35 @@ def normalize_for_compare(text: str) -> str:
     return normalize_transcript(build_raw_transcript(text))
 
 
-def read_golden(name: str) -> str | None:
-    p = GOLDEN_DIR / name
-    return p.read_text() if p.exists() else None
+def read_golden(path: Path) -> str | None:
+    return path.read_text() if path.exists() else None
 
 
-def update_golden(name: str, raw_text: str) -> Path:
+def update_golden(path: Path, raw_text: str) -> Path:
     """Write the RAW transcript to the golden file (real values, no placeholders)."""
-    GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
-    p = GOLDEN_DIR / name
-    p.write_text(raw_text)
-    return p
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(raw_text)
+    return path
 
 
-# The SESSION ARTIFACT directory — NOT goldens, and deliberately not under golden/.
-# A real LLM's session is committed and human-readable ("it helps me understand if the
-# agent is confused") but it is NEVER COMPARED: its prose, turn count and tool ordering
-# are not a regression signal, and a chronically-red journey trains everyone to ignore
-# drift. Keeping it out of golden/ is what makes that structural rather than a promise:
-# test_golden_shape only globs golden/*.txt, so nothing here is ever diffed, required to
-# be normalize-idempotent, or flagged as an orphan golden. Behavior is asserted in the
+# The SESSION ARTIFACT — NOT a golden. A real LLM's session is committed and
+# human-readable ("it helps me understand if the agent is confused") but it is NEVER
+# COMPARED: its prose, turn count and tool ordering are not a regression signal, and a
+# chronically-red journey trains everyone to ignore drift. It lands as session.txt in the
+# journey dir, NOT golden.txt — the only file test_golden_shape globs
+# (journeys/*/golden.txt), so nothing here is ever diffed, required to be
+# normalize-idempotent, or flagged as an orphan golden. Behavior is asserted in the
 # journey's own invariants (exit 2), not by reading this file.
-AGENT_SESSION_DIR = Path(__file__).resolve().parent / "agent-sessions"
 
 
-def write_agent_session(name: str, text: str) -> Path:
+def write_agent_session(path: Path, text: str) -> Path:
     """Write the SHOWN-not-compared record of a real agent's session (see above)."""
-    AGENT_SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    p = AGENT_SESSION_DIR / name
-    p.write_text(text)
-    return p
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
 
 
-def compare_golden(name: str, fresh_raw: str) -> tuple[bool, str]:
+def compare_golden(path: Path, fresh_raw: str) -> tuple[bool, str]:
     """Compare a fresh RAW run to the committed RAW golden, NORMALIZING BOTH first.
 
     Returns (matches, normalized_unified_diff). The diff is over the NORMALIZED
@@ -1729,7 +1725,7 @@ def compare_golden(name: str, fresh_raw: str) -> tuple[bool, str]:
     """
     import difflib
 
-    golden_raw = read_golden(name) or ""
+    golden_raw = read_golden(path) or ""
     expected = normalize_for_compare(golden_raw)
     actual = normalize_for_compare(fresh_raw)
     if expected == actual:
@@ -1737,7 +1733,7 @@ def compare_golden(name: str, fresh_raw: str) -> tuple[bool, str]:
     diff = difflib.unified_diff(
         expected.splitlines(keepends=True),
         actual.splitlines(keepends=True),
-        fromfile=f"golden/{name} (normalized)",
+        fromfile=f"{path.parent.name}/{path.name} (normalized)",
         tofile="fresh run (normalized)",
     )
     return False, "".join(diff)
@@ -1882,7 +1878,7 @@ def read_log_since(path: Path, offset: int) -> str:
 # surface can't be driven for real, SKIP with exit 3.
 #
 # If tmux (or pyte) is not installed the popup surface cannot be driven at all; a
-# journey must SKIP with exit 3 (see journey_tmux_popup_approval.py), never fake it
+# journey must SKIP with exit 3 (see journeys/tmux_popup_approval/journey.py), never fake it
 # and never exit 0.
 
 

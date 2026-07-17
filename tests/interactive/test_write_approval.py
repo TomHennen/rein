@@ -32,8 +32,8 @@ import unittest
 
 import pexpect
 
-import reinharness as H
-from itest_base import DECLARE_ISSUE_ENV, ReinTestCase, declare_issue
+from tests.interactive import reinharness as H
+from tests.interactive.itest_base import DECLARE_ISSUE_ENV, ReinTestCase, declare_issue
 
 _NEEDS_ISSUE = unittest.skipUnless(
     declare_issue(),

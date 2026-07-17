@@ -37,8 +37,8 @@ from __future__ import annotations
 
 import unittest
 
-import reinharness as H
-from itest_base import ReinTestCase
+from tests.interactive import reinharness as H
+from tests.interactive.itest_base import ReinTestCase
 
 
 class RealAgentEndToEnd(ReinTestCase):

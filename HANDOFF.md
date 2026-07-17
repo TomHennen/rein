@@ -277,7 +277,7 @@ casing (#40).
 ```sh
 # once per machine: rein init (see the env prereqs above); this box's legacy
 # shortcut is `source ./dev-env`, but the documented path is init.
-python3 tests/interactive/journey_write_ceremony.py     # the ceremony journey (creates + closes its own issue)
+python3 -m tests.interactive.journeys.write_ceremony.journey   # the ceremony journey (creates + closes its own issue)
 
 # the gated test_*.py take an issue via env (they don't self-create one):
 gh issue create --repo <throwaway> --title "..." --body "..."   # declare FETCHES a real issue

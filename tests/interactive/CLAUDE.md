@@ -6,7 +6,7 @@ the difference is a rule, not a vibe:
 
 | kind | naming | swept by `run.sh`? | deliverable |
 |------|--------|--------------------|-------------|
-| **journey** | `journey_*.py` | no — run deliberately | a checked-in, human-reviewable **golden transcript** |
+| **journey** | `journeys/*/journey.py` | no — run deliberately | a checked-in, human-reviewable **golden transcript** |
 | **plain test** | `test_*.py` | yes | a pass/fail assertion; no transcript ceremony |
 
 **Journeys = major user paths.** A journey walks a whole path a real person takes
@@ -122,7 +122,7 @@ We learned this the expensive way. A full-screen, non-deterministic TUI does not
 be a line-oriented composite, and every bit of the complexity that used to live here — a
 collapse-with-a-keep-filter, a placeholder line, an anchor pair, `AGENT| ` frames that
 the comparator had to remember to drop — was scar tissue from forcing one into that
-shape. All of it is deleted. `journey_realagent_write.py` is the exemplar of the new one:
+shape. All of it is deleted. `journeys/realagent_write/journey.py` is the exemplar of the new one:
 
 1. **Invariants — plain `assert`-style checks in the journey.** Branch under
    `agent/<issue>/` (DISCOVERED, not assumed — a real agent picks its own suffix),
@@ -150,14 +150,14 @@ shape. All of it is deleted. `journey_realagent_write.py` is the exemplar of the
    - **The proof it works:** run the journey twice. The second run is a COMPLETELY
      DIFFERENT claude session and must still report `[golden OK]`.
 
-3. **The agent's session — `agent-sessions/realagent_write.txt`, COMMITTED, NEVER
+3. **The agent's session — `journeys/realagent_write/session.txt`, COMMITTED, NEVER
    COMPARED.** Rendered milestone frames so a human can read what the agent did — the
    maintainer's ask: *"it helps me understand if the agent is confused."*
    - **Source: `capture-pane -p -J`**, the tmux server's own authoritative render of the
      pane claude runs in — unobscured by the popup (a popup is a client overlay, not part
      of the pane). Not a pexpect screen; not the raw stream.
-   - **It is not in `golden/`, so nothing diffs it.** That is what makes "never compared"
-     structural instead of a promise: `test_golden_shape.py` only globs `golden/*.txt`,
+   - **It is not named `golden.txt`, so nothing diffs it.** That is what makes "never compared"
+     structural instead of a promise: `test_golden_shape.py` only globs `journeys/*/golden.txt`,
      so the session file is never diffed, never required to be normalize-idempotent, and
      never flagged as an orphan golden. An LLM's prose/turn count/tool ordering is not a
      regression signal, and a chronically-red journey trains everyone to ignore drift.
@@ -261,10 +261,10 @@ early onboarding golden silently dropped `rein doctor`: the journey curated its
 own capture. `run_journey` removes that footgun — there's no supported path to
 omit a section.) Volatiles are handled downstream by **normalize-on-compare**
 (add a rule to `_NORMALIZE_RULES`); you **normalize** machine-variable values,
-you do **not** drop output. `journey_onboarding.py` is the exemplar.
+you do **not** drop output. `journeys/onboarding/journey.py` is the exemplar.
 
 An **in-sandbox** journey drives its `rein run` as a step too — no carve-out.
-`journey_sandbox_filesystem.py` is the exemplar (#63's migration): one
+`journeys/sandbox_filesystem/journey.py` is the exemplar (#63's migration): one
 `JourneyStep(argv=["run", "--", "bash", "-c", <script>, <workdir>],
 extra_env={"REIN_SANDBOX_WORKDIR": <workdir>, ...}, timeout=180)`, and
 `run_journey` captures the complete session — banner, injected contract, and every
@@ -344,14 +344,14 @@ set `TERM`/`default-terminal` deliberately (the popup's box-drawing depends on i
 and give the pane's shell a **fixed `PS1` via `--rcfile`** (bash ignores an exported
 `PS1` and would otherwise bake `bash-5.2$` — its own version — into the golden).
 
-`journey_tmux_popup_approval.py` is the exemplar. Because it runs for real it can
+`journeys/tmux_popup_approval/journey.py` is the exemplar. Because it runs for real it can
 assert what the empty-pane cheat could not: while Form A is up it is on
 `client_screen()` and **absent from `pane_text()`**, which at that moment still
 shows the live `SBX| $ rein declare <n>` the popup is blocking on — the popup
 **overlays** a live pane rather than printing into it — and after the popup closes
 the pane repaints and the run carries on, with no Form A residue on the client.
 
-`journey_realagent_write.py` is the same shape with a **REAL agent** in the pane, and
+`journeys/realagent_write/journey.py` is the same shape with a **REAL agent** in the pane, and
 that is where it matters most: claude is a full-screen TUI, so only here do the agent's
 TUI and the popup genuinely share one terminal. It asserts the three things only the
 real configuration can show — Form A is on `client_screen()` and **absent from**
@@ -385,7 +385,7 @@ reads top-to-bottom as expect→act→expect even though the child runs once. Do
 
 ## Shared helpers (keep the next journey declarative)
 
-`journey_write_ceremony.py` is the exemplar. The reusable machinery already lives
+`journeys/write_ceremony/journey.py` is the exemplar. The reusable machinery already lives
 in `reinharness.py`, so a new journey is mostly wiring:
 
 - `sandbox_preamble()` — the bash `emit`/`run` helpers a journey's in-sandbox
@@ -405,8 +405,8 @@ in `reinharness.py`, so a new journey is mostly wiring:
 - `split_at_agent_launch` / `REIN_LINE_RE` — the REAL-agent golden: rein's launch
   surface verbatim, then rein's own lines only. One boundary, one regex; no agent
   content reaches the compared file (see above).
-- `write_agent_session` / `AGENT_SESSION_DIR` — the real agent's session artifact:
-  committed and human-readable, never compared (it is not in `golden/`).
+- `write_agent_session` — the real agent's session artifact (written to the journey's
+  own `session.txt`): committed and human-readable, never compared (not `golden.txt`).
 - `drain_children` — the real-agent drain rule (see above).
 - `dismiss_claude_trust_dialog(pane)` — claude's folder-trust dialog, as PLUMBING
   (dismissed, never asserted, never in the narrative).
@@ -430,7 +430,7 @@ in `reinharness.py`, so a new journey is mostly wiring:
 ## Running & refreshing goldens: `run-journeys.sh`
 
 `tests/interactive/run-journeys.sh` is the **manual, on-demand** runner (no timer,
-no background minting). By default it runs every `journey_*.py` live and each one
+no background minting). By default it runs every `journeys/*/journey.py` live and each one
 COMPARES its fresh run to the committed RAW golden (normalizing both sides), so a
 different issue/nonce/count still passes; it reports PASS / DRIFT / BROKE / SKIP with
 a non-zero exit on drift. `REIN_UPDATE_GOLDEN=1 run-journeys.sh` instead ADOPTS —
@@ -444,7 +444,7 @@ exercised** — the #68 footgun, the exact failure this suite exists to prevent.
 **3 = SKIPPED**: the runner prints `SKIP … this journey did NOT run` plus a summary
 warning, so missing coverage is visible instead of masquerading as coverage. A skip
 is not a failure (it does not fail the run), but it must never look like a pass.
-`journey_credential_boundary.py` is the exemplar (it needs the external `bagel` CLI).
+`journeys/credential_boundary/journey.py` is the exemplar (it needs the external `bagel` CLI).
 
 - Default (compare) mode does NOT rewrite the raw goldens, so a PASS leaves the
   tree clean. DRIFT prints the normalized diff and a scratch path to the raw
@@ -460,7 +460,7 @@ keep matching while a regression quietly opened a hole (the transcript would onl
 change if the *observable output* changed). So the runner has a **second,
 clearly-separated section**, opt-in via `run-journeys.sh --sandbox`:
 
-- **[A] GOLDEN-DRIFT** — every `journey_*.py` vs its golden (the default section).
+- **[A] GOLDEN-DRIFT** — every `journeys/*/journey.py` vs its golden (the default section).
 - **[B] SANDBOX-HOLDS** — the live sandbox invariants, run only with `--sandbox`.
   It is the on-demand **"prove the sandbox still holds"** entry point and runs four
   suites, PASS/FAIL each, non-zero exit if any (or any journey) fails:
@@ -497,7 +497,7 @@ DEPEND on `REIN_TEST_REPO_A` special-casing (#40).
 ```sh
 # once per machine: rein init sets up the App + dev-session (see HANDOFF.md)
 gh issue create --repo <throwaway> --title "..." --body "..."   # declare FETCHES a real issue
-python3 tests/interactive/journey_write_ceremony.py             # exit 0 == matches golden
+python3 -m tests.interactive.journeys.write_ceremony.journey             # exit 0 == matches golden
 ```
 
 (The write journeys create their own throwaway issue, so the manual `gh issue
