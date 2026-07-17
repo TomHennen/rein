@@ -161,6 +161,53 @@ func sandboxAllowReadPaths(home, srtPath string, cmdline []string) []string {
 	return dedupePaths(out)
 }
 
+// agentUnderClaudeDenyError detects the `claude migrate-installer` layout, where the
+// agent binary resolves UNDER ~/.claude (e.g. ~/.claude/local/claude, with a launcher
+// symlinked from ~/.local/bin). Since #94 default-denies ~/.claude in-sandbox, that
+// install tree is hidden and the auto-derived install-chain allow-back would sit under
+// the authoritative ~/.claude deny — srt.Build then aborts with a cryptic
+// widening-under-deny error whose only workaround is the insecure SHOW_HOME kill switch.
+// Detect it early and return a CLEAR, actionable error instead. home must be the
+// symlink-resolved home dir; returns nil when the layout is fine or undetectable (a
+// launch that would fail for another reason still fails on its own).
+//
+// Only meaningful while the home deny is active — the caller gates on that (under
+// SHOW_HOME, ~/.claude is visible and the layout launches fine).
+func agentUnderClaudeDenyError(home string, cmdline []string) error {
+	if home == "" || len(cmdline) == 0 {
+		return nil
+	}
+	claudeDir, err := proxy.ResolveAbs(filepath.Join(home, ".claude"))
+	if err != nil {
+		return nil
+	}
+	found, err := exec.LookPath(cmdline[0])
+	if err != nil {
+		return nil
+	}
+	// Check the launcher AND its symlink target: the native launcher can live at
+	// ~/.local/bin/claude (outside ~/.claude) yet point INTO ~/.claude/local.
+	candidates := []string{found}
+	if t, terr := filepath.EvalSymlinks(found); terr == nil {
+		candidates = append(candidates, t)
+	}
+	for _, c := range candidates {
+		r, rerr := proxy.ResolveAbs(c)
+		if rerr != nil {
+			continue
+		}
+		if pathAtOrUnder(r, claudeDir) {
+			return fmt.Errorf("the %q binary resolves under ~/.claude (%s) — the `claude migrate-installer` layout. "+
+				"rein hides ~/.claude in-sandbox (issue #94 default-deny), so that install tree is invisible and the "+
+				"sandbox cannot launch it. Reinstall claude with the NATIVE installer so it lives under ~/.local "+
+				"(e.g. `curl -fsSL https://claude.ai/install.sh | bash`), then re-run. "+
+				"(Proper support for the ~/.claude/local layout is tracked in issue #132.)",
+				cmdline[0], r)
+		}
+	}
+	return nil
+}
+
 // installChainAllowReads resolves command via PATH and returns the allow-back
 // prefixes needed to execute it in-sandbox, filtered to paths under home
 // (paths outside $HOME are unaffected by the home deny). Two entries at most:

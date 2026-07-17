@@ -4,8 +4,10 @@
 subdir a claude update shipped leaked until noticed) to **default-deny**: the host
 `~/.claude` / `~/.claude.json` are fully denied in-sandbox, and claude is repointed at
 a rein-owned **persistent** overlay via `CLAUDE_CONFIG_DIR`. rein seeds only
-`.credentials.json` (fresh, host-side, every launch) and authors its own settings; the
-overlay is bound read-WRITE and **persists across runs**.
+`.credentials.json` (fresh, host-side, every launch) and authors **no** settings.json —
+claude keeps its own permission prompts (defense-in-depth on top of the boundary; rein
+does not launch `--dangerously-skip-permissions`). The overlay is bound read-WRITE and
+**persists across runs**.
 
 A live `claude` (headless `-p`/`-c`, so **no tmux/pyte**) proves three claims:
 

@@ -403,6 +403,14 @@ func runSandboxed(cmdline []string) (int, error) {
 				srt.EnvSandboxAllowRead, srt.EnvSandboxShowHome)
 		}
 	}
+	// #94/#132: fail fast with a clear error when the agent lives under ~/.claude (the
+	// migrate-installer layout) — under the default-deny that tree is hidden, so
+	// srt.Build would otherwise abort cryptically. Only while the home deny is active.
+	if homeDeny != "" {
+		if err := agentUnderClaudeDenyError(homeDeny, cmdline); err != nil {
+			return 1, err
+		}
+	}
 
 	// (8) Build + validate the srt config (typed struct; no hand-rolled JSON).
 	// baseParams is shared by BOTH the VerifyConfigApplied probe and the real

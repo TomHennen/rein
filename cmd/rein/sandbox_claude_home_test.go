@@ -11,8 +11,9 @@ import (
 func discardLogger() *log.Logger { return log.New(io.Discard, "", 0) }
 
 // TestPrepareClaudeOverlaySeeds asserts the #94 overlay: created 0700, host
-// ~/.claude/.credentials.json copied in 0600, and rein's own minimal settings.json
-// authored (NOT the host's). ~/.claude.json is deliberately NOT seeded.
+// ~/.claude/.credentials.json copied in 0600. ~/.claude.json is deliberately NOT
+// seeded, and rein authors NO settings.json (it must not weaken claude's own
+// permission posture — the host's is likewise never copied).
 func TestPrepareClaudeOverlaySeeds(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
@@ -25,7 +26,7 @@ func TestPrepareClaudeOverlaySeeds(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(hostClaude, ".credentials.json"), []byte(`{"token":"host-oauth"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// A host settings.json that must NOT be copied verbatim.
+	// A host settings.json that must NOT be copied.
 	if err := os.WriteFile(filepath.Join(hostClaude, "settings.json"), []byte(`{"theme":"host-only"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -59,13 +60,10 @@ func TestPrepareClaudeOverlaySeeds(t *testing.T) {
 		t.Errorf("seeded creds mode = %o, want 0600", cfi.Mode().Perm())
 	}
 
-	// settings.json is rein's own minimal one, NOT the host's.
-	sBytes, err := os.ReadFile(filepath.Join(overlay, "settings.json"))
-	if err != nil {
-		t.Fatalf("read overlay settings: %v", err)
-	}
-	if string(sBytes) != sandboxClaudeSettings {
-		t.Errorf("overlay settings = %q, want rein's minimal settings %q", sBytes, sandboxClaudeSettings)
+	// rein authors NO settings.json (it reads nothing from claude's settings and must
+	// not weaken claude's permission posture); the host's is not copied either.
+	if _, err := os.Stat(filepath.Join(overlay, "settings.json")); !os.IsNotExist(err) {
+		t.Errorf("rein must NOT author/copy settings.json into the overlay (err=%v)", err)
 	}
 
 	// .claude.json is NOT seeded (regenerated in-sandbox; seeding would leak host history).
@@ -75,8 +73,8 @@ func TestPrepareClaudeOverlaySeeds(t *testing.T) {
 }
 
 // TestPrepareClaudeOverlayNoHostCreds: absent host creds is NOT an error (rein
-// guards GitHub creds, not claude auth) — the overlay is still created + settings
-// authored, and no credentials file is seeded.
+// guards GitHub creds, not claude auth) — the overlay is still created and no
+// credentials file is seeded (and rein authors no settings.json either).
 func TestPrepareClaudeOverlayNoHostCreds(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
@@ -89,8 +87,11 @@ func TestPrepareClaudeOverlayNoHostCreds(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(overlay, ".credentials.json")); !os.IsNotExist(err) {
 		t.Errorf("no host creds => overlay must have no seeded creds; err=%v", err)
 	}
-	if _, err := os.Stat(filepath.Join(overlay, "settings.json")); err != nil {
-		t.Errorf("settings.json must still be authored: %v", err)
+	if _, err := os.Stat(filepath.Join(overlay, "settings.json")); !os.IsNotExist(err) {
+		t.Errorf("rein must NOT author a settings.json; err=%v", err)
+	}
+	if _, err := os.Stat(overlay); err != nil {
+		t.Errorf("overlay dir must still be created: %v", err)
 	}
 }
 

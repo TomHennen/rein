@@ -57,7 +57,7 @@ emit "@HOST_CLAUDE_ENTRIES=[$(ls -A ~/.claude 2>/dev/null | sort | tr '\\n' ' ')
 emit "@HOST_HISTORY_JSONL_READABLE=$(test -r ~/.claude/history.jsonl && echo YES-LEAK || echo no)"
 emit "@HOST_CLAUDE_JSON_READABLE=$(test -s ~/.claude.json && echo YES-LEAK || echo no)"
 emit "@OVERLAY_CREDS_SEEDED=$(test -s "$CLAUDE_CONFIG_DIR/.credentials.json" && echo yes || echo no)"
-emit "@OVERLAY_SETTINGS=$(tr -d '\\n ' < "$CLAUDE_CONFIG_DIR/settings.json")"
+emit "@OVERLAY_FORCES_SKIPDANGEROUS=$(grep -rqs skipDangerousModePermissionPrompt "$CLAUDE_CONFIG_DIR" && echo YES-BYPASS || echo no)"
 """
 
 
@@ -80,6 +80,16 @@ def clone_checkout(repo: str, env: dict) -> str:
         check=True, env=env, capture_output=True, text=True,
     )
     return d
+
+
+def overlay_dir(env: dict) -> str:
+    """rein's persistent CLAUDE_CONFIG_DIR overlay parent (the sibling of ConfigDir,
+    config.SandboxClaudeHomeDir's parent). Cleaned at journey start so the run is
+    deterministic and isolated from prior box state (e.g. a stale settings.json from an
+    older rein). The resume proof still holds: run 1 creates the session run 2 resumes,
+    both WITHIN this journey."""
+    base = env.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "rein-sandbox-home")
 
 
 def host_logged_in() -> bool:
@@ -136,6 +146,10 @@ def main() -> int:
 
     print(f"journey: REAL-claude overlay resume on {repo} (#94 default-deny + persistent "
           f"CLAUDE_CONFIG_DIR overlay)", flush=True)
+
+    # Start from a clean overlay so the run is deterministic and isolated from prior
+    # box state (resume is still proven WITHIN this journey: run 1 → run 2).
+    shutil.rmtree(overlay_dir(env), ignore_errors=True)
 
     workdir = None
     try:
@@ -195,8 +209,10 @@ def main() -> int:
             ("@OVERLAY_CREDS_SEEDED=yes" in probe_text,
              "AUTH: rein must have seeded .credentials.json into the overlay "
              "(CLAUDE_CONFIG_DIR) so claude authenticates"),
-            ("skipDangerousModePermissionPrompt" in probe_text,
-             "the overlay must carry rein's own minimal settings.json"),
+            ("@OVERLAY_FORCES_SKIPDANGEROUS=no" in probe_text,
+             "POSTURE: rein must NOT author a permission-bypassing settings.json — "
+             "claude keeps its own permission prompts in-sandbox (defense-in-depth on "
+             "top of the boundary; rein does not launch --dangerously-skip-permissions)"),
         ]
         broken = [msg for ok, msg in invariants if not ok]
         if broken:

@@ -8,11 +8,11 @@ rein: sandbox preflight:
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_claude_resume (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-r2aa4pau/session.yaml]
-  proxy socket (out of sandbox): /run/user/501/rein/run-dyO1mA5pbtnIPMcREzzeLg/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-claude-resume-wm1649ty  [TomHennen/agentcreds-validation-a]
+  session: sess_journey_claude_resume (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-ntkcrdal/session.yaml]
+  proxy socket (out of sandbox): /run/user/501/rein/run-FBQe1lhjqoAmDEJamZA-Mw/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-claude-resume-u5r83z_k  [TomHennen/agentcreds-validation-a]
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-3237731130
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-8364813
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -23,7 +23,7 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-claude-resume-wm1649ty
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-claude-resume-u5r83z_k
     => work the agent must keep has to be written INTO the working tree.
     allowed back read-only: /home/tom.linux/.local/bin, /home/tom.linux/.local/share/claude/versions, /home/tom.linux/.npm-global/bin, /home/tom.linux/.npm-global/lib/node_modules, /home/tom.linux/.cargo, /home/tom.linux/.rustup, /home/tom.linux/go, /home/tom.linux/.pyenv
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
@@ -46,11 +46,11 @@ rein: sandbox preflight:
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_claude_resume (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-r2aa4pau/session.yaml]
-  proxy socket (out of sandbox): /run/user/501/rein/run-_D-uBxGGaA80z92T5ZgbmA/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-claude-resume-wm1649ty  [TomHennen/agentcreds-validation-a]
+  session: sess_journey_claude_resume (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-ntkcrdal/session.yaml]
+  proxy socket (out of sandbox): /run/user/501/rein/run-ivwATF7Sf5bsL6GynyiDqA/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-claude-resume-u5r83z_k  [TomHennen/agentcreds-validation-a]
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-1010045890
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-2642613924
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -61,7 +61,7 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-claude-resume-wm1649ty
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-claude-resume-u5r83z_k
     => work the agent must keep has to be written INTO the working tree.
     allowed back read-only: /home/tom.linux/.local/bin, /home/tom.linux/.local/share/claude/versions, /home/tom.linux/.npm-global/bin, /home/tom.linux/.npm-global/lib/node_modules, /home/tom.linux/.cargo, /home/tom.linux/.rustup, /home/tom.linux/go, /home/tom.linux/.pyenv
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
@@ -84,11 +84,11 @@ rein: sandbox preflight:
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_claude_resume (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-r2aa4pau/session.yaml]
-  proxy socket (out of sandbox): /run/user/501/rein/run-De7fIF8HMPqFgkhOZnHmYw/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-claude-resume-wm1649ty  [TomHennen/agentcreds-validation-a]
+  session: sess_journey_claude_resume (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-ntkcrdal/session.yaml]
+  proxy socket (out of sandbox): /run/user/501/rein/run-ExHfb5Flgg0kshbcQWf4pg/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-claude-resume-u5r83z_k  [TomHennen/agentcreds-validation-a]
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-2804054210
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-1374966417
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -99,7 +99,7 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-claude-resume-wm1649ty
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-claude-resume-u5r83z_k
     => work the agent must keep has to be written INTO the working tree.
     allowed back read-only: /home/tom.linux/.npm-global/bin, /home/tom.linux/.npm-global/lib/node_modules, /home/tom.linux/.local/bin, /home/tom.linux/.cargo, /home/tom.linux/.rustup, /home/tom.linux/go, /home/tom.linux/.pyenv
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
@@ -124,13 +124,13 @@ emit "@HOST_CLAUDE_ENTRIES=[$(ls -A ~/.claude 2>/dev/null | sort | tr '\n' ' ')]
 emit "@HOST_HISTORY_JSONL_READABLE=$(test -r ~/.claude/history.jsonl && echo YES-LEAK || echo no)"
 emit "@HOST_CLAUDE_JSON_READABLE=$(test -s ~/.claude.json && echo YES-LEAK || echo no)"
 emit "@OVERLAY_CREDS_SEEDED=$(test -s "$CLAUDE_CONFIG_DIR/.credentials.json" && echo yes || echo no)"
-emit "@OVERLAY_SETTINGS=$(tr -d '\n ' < "$CLAUDE_CONFIG_DIR/settings.json")"
- /tmp/rein-claude-resume-wm1649ty
+emit "@OVERLAY_FORCES_SKIPDANGEROUS=$(grep -rqs skipDangerousModePermissionPrompt "$CLAUDE_CONFIG_DIR" && echo YES-BYPASS || echo no)"
+ /tmp/rein-claude-resume-u5r83z_k
 ---
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/rein-claude-resume-wm1649ty
+- Your work persists ONLY in the working tree: /tmp/rein-claude-resume-u5r83z_k
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
@@ -163,4 +163,4 @@ SBX| @HOST_CLAUDE_ENTRIES=[]
 SBX| @HOST_HISTORY_JSONL_READABLE=no
 SBX| @HOST_CLAUDE_JSON_READABLE=no
 SBX| @OVERLAY_CREDS_SEEDED=yes
-SBX| @OVERLAY_SETTINGS={"skipDangerousModePermissionPrompt":true}
+SBX| @OVERLAY_FORCES_SKIPDANGEROUS=no

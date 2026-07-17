@@ -24,25 +24,18 @@ import (
 	"github.com/TomHennen/rein/internal/config"
 )
 
-// sandboxClaudeSettings is the rein-authored minimal settings.json placed in the
-// overlay. rein reads NOTHING from claude's settings today (the only settings.json
-// in the Go tree is srt's OWN), so this stays deliberately minimal — host
-// user-settings are NOT copied (spike: repointing CLAUDE_CONFIG_DIR does not merge
-// them anyway). The one setting is the sandbox's explicit permission posture:
-// skipDangerousModePermissionPrompt suppresses the startup confirmation that
-// rein's --dangerously-skip-permissions launch would otherwise trigger and that
-// would hang a headless/autonomous run. The sandbox IS the security boundary, so
-// claude's own permission prompt is redundant here.
-const sandboxClaudeSettings = `{
-  "skipDangerousModePermissionPrompt": true
-}
-`
-
 // prepareClaudeOverlay creates/refreshes the rein-owned CLAUDE_CONFIG_DIR overlay
 // and returns its absolute path. On EVERY launch it (1) creates the overlay 0700
 // (it holds the OAuth token), fail-closed if the path is a symlink or not
 // user-owned; (2) seeds .credentials.json fresh from the host so the sandboxed
-// claude authenticates; (3) authors rein's own minimal settings.json.
+// claude authenticates.
+//
+// rein does NOT author a settings.json: it reads nothing from claude's settings,
+// and claude runs on its own defaults when the file is absent. Deliberately so —
+// rein must NOT weaken claude's own permission posture (real users run claude
+// INTERACTIVELY in the sandbox and keep its normal permission prompts as
+// defense-in-depth on top of the sandbox boundary; rein does not launch with
+// --dangerously-skip-permissions).
 //
 // Absent host creds is NOT an error: rein guards GitHub credentials, not claude
 // auth. The run proceeds with an unauthenticated overlay (claude reports "Not
@@ -68,9 +61,6 @@ func prepareClaudeOverlay(logger *log.Logger, home string) (string, error) {
 	}
 	if err := seedClaudeCredentials(logger, home, overlay); err != nil {
 		return "", err
-	}
-	if err := writeOverlayFile(filepath.Join(overlay, "settings.json"), []byte(sandboxClaudeSettings)); err != nil {
-		return "", fmt.Errorf("author claude overlay settings.json: %w", err)
 	}
 	return overlay, nil
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -48,6 +49,76 @@ func TestSandboxAllowReadPathsCuratedSet(t *testing.T) {
 		if set[denied] {
 			t.Errorf("allow-back %q present; it must stay denied/minimal: %v", denied, got)
 		}
+	}
+}
+
+// TestAgentUnderClaudeDenyError pins the #94/#132 fast-fail: an agent binary that
+// resolves UNDER ~/.claude (the `claude migrate-installer` layout) is detected and
+// rejected with a clear, actionable error rather than a cryptic srt.Build abort; a
+// native-installer layout under ~/.local, and an unresolvable/empty command, pass.
+func TestAgentUnderClaudeDenyError(t *testing.T) {
+	home := t.TempDir()
+	home, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// migrate-installer layout: ~/.claude/local/claude, launcher on PATH under ~/.local/bin.
+	claudeLocal := filepath.Join(home, ".claude", "local")
+	if err := os.MkdirAll(claudeLocal, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realBin := filepath.Join(claudeLocal, "claude")
+	if err := os.WriteFile(realBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realBin, filepath.Join(binDir, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+"/usr/bin:/bin")
+
+	err = agentUnderClaudeDenyError(home, []string{"claude"})
+	if err == nil {
+		t.Fatal("agent under ~/.claude must be rejected with a clear error")
+	}
+	for _, want := range []string{"migrate-installer", "~/.claude", "#132"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error must mention %q; got: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "SHOW_HOME") {
+		t.Errorf("error must NOT point at the insecure SHOW_HOME kill switch; got: %v", err)
+	}
+
+	// Native layout: ~/.local/share/claude/... under ~/.local — NOT under ~/.claude.
+	nativeDir := filepath.Join(home, ".local", "share", "claude")
+	if err := os.MkdirAll(nativeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nativeBin := filepath.Join(nativeDir, "claude")
+	if err := os.WriteFile(nativeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(binDir, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(nativeBin, filepath.Join(binDir, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	if err := agentUnderClaudeDenyError(home, []string{"claude"}); err != nil {
+		t.Errorf("native-installer layout (~/.local) must be accepted; got: %v", err)
+	}
+
+	// Empty / unresolvable commands contribute no error.
+	if err := agentUnderClaudeDenyError(home, nil); err != nil {
+		t.Errorf("empty cmdline must not error: %v", err)
+	}
+	if err := agentUnderClaudeDenyError(home, []string{"no-such-cmd-xyz"}); err != nil {
+		t.Errorf("unresolvable command must not error: %v", err)
 	}
 }
 

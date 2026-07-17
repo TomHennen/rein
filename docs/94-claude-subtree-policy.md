@@ -96,14 +96,14 @@ the fully-denied host `~/.claude`.
   The read and write both refuse to follow a symlink (`O_NOFOLLOW`) and require user
   ownership — the keystore's security bar, matched even though this is not a PEM. The
   sandbox's rotated creds are **never** copied back to the host.
-- **Author a rein-controlled minimal `settings.json`** — NOT a copy of the host's.
-  rein reads nothing from claude's settings today, so the overlay's is deliberately
-  minimal: `{"skipDangerousModePermissionPrompt": true}`. That one setting is the
-  sandbox's explicit permission posture — it suppresses the startup confirmation that
-  rein's `--dangerously-skip-permissions` launch would otherwise trigger and that
-  would hang a headless/autonomous run. The sandbox IS the security boundary, so
-  claude's own permission prompt is redundant here. (Host user-settings are NOT
-  merged when repointed anyway.)
+- **Author NO `settings.json`.** rein reads nothing from claude's settings, and claude
+  runs on its own defaults when the file is absent — so rein authors none (and never
+  copies the host's). Deliberately: rein must NOT weaken claude's own permission
+  posture. Real users run claude **interactively** in the sandbox and keep its normal
+  permission prompts as **defense-in-depth** on top of the sandbox boundary; rein does
+  **not** launch with `--dangerously-skip-permissions`. A test that needs a tool to run
+  non-interactively opts in by passing that flag in its own `rein run -- claude …`
+  invocation, never via the shipped overlay.
 - **Do NOT seed `.claude.json`** — the overlay regenerates it; seeding would leak
   host project history.
 - **Absent host creds is NOT an error.** rein guards GitHub credentials, not claude
@@ -118,10 +118,23 @@ sees the host's real creds or cross-project history, so what it writes into the
 overlay is its own work, not the developer's. This is why persisting is safe here
 without a redaction pass.
 
+### Agent install layout (the `claude migrate-installer` case)
+
+`claude migrate-installer` relocates the claude binary to `~/.claude/local/`. Under
+the default-deny that tree is hidden, so the auto-derived install-chain allow-back
+would sit under the authoritative `~/.claude` deny and `srt.Build` would abort
+cryptically (recoverable only via the insecure `REIN_SANDBOX_SHOW_HOME=1`). rein
+instead **detects this early and fails fast** with a clear, actionable error
+(reinstall via the native installer so claude lives under `~/.local`) —
+`agentUnderClaudeDenyError` (`cmd/rein/sandbox_home.go`). Proper support (narrowly
+carving the agent's own install subtree — code, not data — back out of the deny) is
+deferred to **#132**.
+
 ## Proven live (real claude 2.1.204)
 
-`tests/interactive/journey_claude_resume.py` drives a REAL claude and proves all
-three properties, with a checked-in golden (`golden/claude_resume.txt`):
+`tests/interactive/journeys/claude_resume/journey.py` drives a REAL claude and proves
+all three properties, with a checked-in golden
+(`tests/interactive/journeys/claude_resume/golden.txt`):
 
 - **(a) authenticated in-sandbox** — `claude -p` answers (creds seeded into the
   overlay; host `~/.claude` denied);
@@ -133,6 +146,10 @@ three properties, with a checked-in golden (`golden/claude_resume.txt`):
 
 ## Deferred follow-ups
 
+- **#132 — agent install layout.** Proper support for the `claude migrate-installer`
+  layout (`~/.claude/local`): narrowly carve the agent's own install subtree — code,
+  not data — back out of the `~/.claude` deny, so it runs in-sandbox without
+  re-exposing history/creds. #121 ships the detect-and-fail-fast stop-gap only.
 - **#125 — caches.** Give `~/.cache` / `~/.npm` the same rein-owned persistent
   overlay treatment (perf: today they are a cold, empty tmpfs every run). Regenerable
   → low blast-radius. Scope: perf, not security.
