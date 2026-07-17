@@ -1,0 +1,166 @@
+$ rein run -- claude -p <store the magic word>
+rein: sandbox preflight:
+  [ok]   srt present: /home/tom.linux/.npm-global/bin/srt
+  [ok]   srt version: 0.0.63 (package.json; note `srt --version` misreports 1.0.0)
+  [ok]   seccomp: apply-seccomp present (unix-socket block available)
+  [ok]   bwrap userns: unprivileged user namespace works
+  [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
+rein: verifying sandbox config applies (deny-read + seccomp self-test)…
+rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
+rein: launching SANDBOXED (srt) run:
+  session: sess_journey_claude_resume (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-r2aa4pau/session.yaml]
+  proxy socket (out of sandbox): /run/user/501/rein/run-dyO1mA5pbtnIPMcREzzeLg/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-claude-resume-wm1649ty  [TomHennen/agentcreds-validation-a]
+  a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-3237731130
+    (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
+     never inside the working tree, where a nested clone can be committed into it).
+    map it under `worktrees:` to use your own checkout on the NEXT run.
+  the agent sees NO real token; git/gh are injected at the proxy.
+  credential stores, ~/.ssh, on-disk keyrings, and keyring/agent sockets are hidden.
+  $HOME is HIDDEN in-sandbox. Three different behaviors — know which one you get:
+    READS of a hidden path FAIL LOUDLY: ENOENT, or an empty listing for a dir.
+    WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
+      DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
+    WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-claude-resume-wm1649ty
+    => work the agent must keep has to be written INTO the working tree.
+    allowed back read-only: /home/tom.linux/.local/bin, /home/tom.linux/.local/share/claude/versions, /home/tom.linux/.npm-global/bin, /home/tom.linux/.npm-global/lib/node_modules, /home/tom.linux/.cargo, /home/tom.linux/.rustup, /home/tom.linux/go, /home/tom.linux/.pyenv
+    if a tool breaks on a hidden $HOME path, allow it back narrowly:
+      REIN_SANDBOX_ALLOW_READ=/abs/path[:/more] rein run --sandbox -- …
+    or (NOT recommended — exposes your whole home dir): REIN_SANDBOX_SHOW_HOME=1
+  extra egress ALLOWED (direct TLS, NOT injected, no rein token): api.anthropic.com
+  writes are LOCKED until the agent declares its issue:  rein declare <n>
+  then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.
+  to run claude WITHOUT rein for one command: `\claude` (bash/zsh) or `command claude` (fish)
+  agent contract injected via --append-system-prompt (claude): $HOME is ephemeral, no creds, declare-then-push.
+rein: running: claude -p Remember this exact token for later, I will ask for it: quokka-overlay-persists-1994. Reply with just the word 'ok'.
+---
+$ rein run -- claude -c -p <recall the magic word>
+rein: sandbox preflight:
+  [ok]   srt present: /home/tom.linux/.npm-global/bin/srt
+  [ok]   srt version: 0.0.63 (package.json; note `srt --version` misreports 1.0.0)
+  [ok]   seccomp: apply-seccomp present (unix-socket block available)
+  [ok]   bwrap userns: unprivileged user namespace works
+  [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
+rein: verifying sandbox config applies (deny-read + seccomp self-test)…
+rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
+rein: launching SANDBOXED (srt) run:
+  session: sess_journey_claude_resume (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-r2aa4pau/session.yaml]
+  proxy socket (out of sandbox): /run/user/501/rein/run-_D-uBxGGaA80z92T5ZgbmA/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-claude-resume-wm1649ty  [TomHennen/agentcreds-validation-a]
+  a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-1010045890
+    (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
+     never inside the working tree, where a nested clone can be committed into it).
+    map it under `worktrees:` to use your own checkout on the NEXT run.
+  the agent sees NO real token; git/gh are injected at the proxy.
+  credential stores, ~/.ssh, on-disk keyrings, and keyring/agent sockets are hidden.
+  $HOME is HIDDEN in-sandbox. Three different behaviors — know which one you get:
+    READS of a hidden path FAIL LOUDLY: ENOENT, or an empty listing for a dir.
+    WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
+      DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
+    WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-claude-resume-wm1649ty
+    => work the agent must keep has to be written INTO the working tree.
+    allowed back read-only: /home/tom.linux/.local/bin, /home/tom.linux/.local/share/claude/versions, /home/tom.linux/.npm-global/bin, /home/tom.linux/.npm-global/lib/node_modules, /home/tom.linux/.cargo, /home/tom.linux/.rustup, /home/tom.linux/go, /home/tom.linux/.pyenv
+    if a tool breaks on a hidden $HOME path, allow it back narrowly:
+      REIN_SANDBOX_ALLOW_READ=/abs/path[:/more] rein run --sandbox -- …
+    or (NOT recommended — exposes your whole home dir): REIN_SANDBOX_SHOW_HOME=1
+  extra egress ALLOWED (direct TLS, NOT injected, no rein token): api.anthropic.com
+  writes are LOCKED until the agent declares its issue:  rein declare <n>
+  then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.
+  to run claude WITHOUT rein for one command: `\claude` (bash/zsh) or `command claude` (fish)
+  agent contract injected via --append-system-prompt (claude): $HOME is ephemeral, no creds, declare-then-push.
+rein: running: claude -c -p Earlier in this conversation I gave you an exact token to remember. Reply with ONLY that token, nothing else.
+---
+$ rein run -- bash -c <host-hidden / overlay-used probe> <workdir>
+rein: sandbox preflight:
+  [ok]   srt present: /home/tom.linux/.npm-global/bin/srt
+  [ok]   srt version: 0.0.63 (package.json; note `srt --version` misreports 1.0.0)
+  [ok]   seccomp: apply-seccomp present (unix-socket block available)
+  [ok]   bwrap userns: unprivileged user namespace works
+  [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
+rein: verifying sandbox config applies (deny-read + seccomp self-test)…
+rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
+rein: launching SANDBOXED (srt) run:
+  session: sess_journey_claude_resume (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-r2aa4pau/session.yaml]
+  proxy socket (out of sandbox): /run/user/501/rein/run-De7fIF8HMPqFgkhOZnHmYw/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-claude-resume-wm1649ty  [TomHennen/agentcreds-validation-a]
+  a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-2804054210
+    (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
+     never inside the working tree, where a nested clone can be committed into it).
+    map it under `worktrees:` to use your own checkout on the NEXT run.
+  the agent sees NO real token; git/gh are injected at the proxy.
+  credential stores, ~/.ssh, on-disk keyrings, and keyring/agent sockets are hidden.
+  $HOME is HIDDEN in-sandbox. Three different behaviors — know which one you get:
+    READS of a hidden path FAIL LOUDLY: ENOENT, or an empty listing for a dir.
+    WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
+      DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
+    WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-claude-resume-wm1649ty
+    => work the agent must keep has to be written INTO the working tree.
+    allowed back read-only: /home/tom.linux/.npm-global/bin, /home/tom.linux/.npm-global/lib/node_modules, /home/tom.linux/.local/bin, /home/tom.linux/.cargo, /home/tom.linux/.rustup, /home/tom.linux/go, /home/tom.linux/.pyenv
+    if a tool breaks on a hidden $HOME path, allow it back narrowly:
+      REIN_SANDBOX_ALLOW_READ=/abs/path[:/more] rein run --sandbox -- …
+    or (NOT recommended — exposes your whole home dir): REIN_SANDBOX_SHOW_HOME=1
+  extra egress ALLOWED (direct TLS, NOT injected, no rein token): api.anthropic.com
+  writes are LOCKED until the agent declares its issue:  rein declare <n>
+  then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.
+  to run bash WITHOUT rein for one command: `\bash` (bash/zsh) or `command bash` (fish)
+  agent contract PRINTED to the agent's output (this agent has no system-prompt channel, so it may or
+    may not reach the model's context; the REIN_IN_SANDBOX_* env vars carry the same facts machine-readably).
+rein: running: bash -c
+set +e
+emit() { printf '%s%s\n' 'SBX| ' "$*"; }
+run() {
+  printf '%s$ %s\n' 'SBX| ' "$*"
+  "$@" 2>&1 | tr '\r' '\n' | while IFS= read -r l; do printf '%s%s\n' 'SBX| ' "$l"; done
+  return ${PIPESTATUS[0]}
+}
+emit "@CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR"
+emit "@HOST_CLAUDE_ENTRIES=[$(ls -A ~/.claude 2>/dev/null | sort | tr '\n' ' ')]"
+emit "@HOST_HISTORY_JSONL_READABLE=$(test -r ~/.claude/history.jsonl && echo YES-LEAK || echo no)"
+emit "@HOST_CLAUDE_JSON_READABLE=$(test -s ~/.claude.json && echo YES-LEAK || echo no)"
+emit "@OVERLAY_CREDS_SEEDED=$(test -s "$CLAUDE_CONFIG_DIR/.credentials.json" && echo yes || echo no)"
+emit "@OVERLAY_SETTINGS=$(tr -d '\n ' < "$CLAUDE_CONFIG_DIR/settings.json")"
+ /tmp/rein-claude-resume-wm1649ty
+---
+rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
+
+FILES
+- Your work persists ONLY in the working tree: /tmp/rein-claude-resume-wm1649ty
+  Write anything that must outlive this run THERE. Nothing else survives.
+- $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
+  DISCARDED when the run ends. You will get no error. Do not keep work there.
+- Most of $HOME reads as empty/missing; a few paths are re-exposed READ-ONLY, where
+  writes fail with "Read-only file system". Caches work but start cold each run.
+
+CREDENTIALS
+- There are NO credentials in this environment. Tokens, keys, and credential stores
+  are hidden on purpose. Do not go looking for them, and do not ask the user for one.
+- git and gh still work anyway: a proxy OUTSIDE the sandbox injects a short-lived
+  GitHub token you never see. Just use them normally.
+
+GITHUB WRITES
+- Writes to GitHub (push, PRs, comments, any API mutation) are LOCKED until you
+  declare the issue this work is for:
+      rein declare <n>
+  That asks the human to approve, on their terminal. Reads work without it.
+- Once confirmed, push ONLY to a branch named:
+      agent/<n>/<nonce>
+  where <n> is the declared issue number and <nonce> is a short name you choose
+  (letters/digits, then letters/digits/./_/-). Any other ref is rejected.
+- One issue per push.
+
+NETWORK
+- Egress is restricted to GitHub plus: api.anthropic.com
+- Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.
+
+SBX| @CLAUDE_CONFIG_DIR=/home/tom.linux/.config/rein-sandbox-home/.claude
+SBX| @HOST_CLAUDE_ENTRIES=[]
+SBX| @HOST_HISTORY_JSONL_READABLE=no
+SBX| @HOST_CLAUDE_JSON_READABLE=no
+SBX| @OVERLAY_CREDS_SEEDED=yes
+SBX| @OVERLAY_SETTINGS={"skipDangerousModePermissionPrompt":true}

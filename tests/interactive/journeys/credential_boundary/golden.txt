@@ -1,0 +1,163 @@
+$ rein run --direct -- bash -c <credential-scan>
+===============================================================
+rein: WARNING — DIRECT (UNSANDBOXED) MODE
+  The agent runs OUTSIDE the srt sandbox. It shares your user
+  account: it CAN read your ambient credentials (gh login, SSH
+  keys, ~/.netrc, keyrings) and the rein-brokered token is only
+  hidden by process boundaries, not a sandbox. Use this ONLY on a
+  THROWAWAY repo. For real work, drop --direct to run sandboxed.
+===============================================================
+rein: launching wrapped process with:
+  session: sess_journey_credboundary (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-6etr7kk5/session.yaml]
+  PATH-front shim dir: /home/tom.linux/.local/state/rein/shim
+  per-process git config: /tmp/rein-run-3106395079/gitconfig
+  (your real ~/.gitconfig is layered in via include.path)
+
+  Writes are LOCKED until the agent declares its issue:  rein declare <n>
+  then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal
+  (or a tmux popup); approving covers all writes for this run.
+
+rein: running: bash -c
+set +e
+emit() { printf '%s%s\n' 'SBX| ' "$*"; }
+run() {
+  printf '%s$ %s\n' 'SBX| ' "$*"
+  "$@" 2>&1 | tr '\r' '\n' | while IFS= read -r l; do printf '%s%s\n' 'SBX| ' "$l"; done
+  return ${PIPESTATUS[0]}
+}
+FX="$HOME/rein-bagel-fixture"
+OUT="$HOME/.rein-bagel-scan.json"
+emit '$ bagel scan --base-dirs ~/rein-bagel-fixture --format json  (secrets, summarized)'
+/home/tom.linux/go/bin/bagel scan --base-dirs "$FX" --format json --no-cache --disable-version-check   > "$OUT" 2>/dev/null
+if jq -e 'has("findings")' "$OUT" >/dev/null 2>&1; then RAN=yes; else RAN=no; fi
+COUNT=$(jq '[.findings[]|select(.type=="secret" and ((.path|tostring)|contains("rein-bagel-fixture")))]|length' "$OUT" 2>/dev/null)
+# Do NOT default a failed/empty count to 0 — that would let a jq failure
+# (e.g. findings:null, which still passes has("findings")) read as "0 secrets
+# found = boundary held" and PASS BY ACCIDENT. A non-numeric count => ERR, which
+# main() cannot parse and so fails the run instead of silently passing.
+case "$COUNT" in ''|*[!0-9]*) COUNT=ERR;; esac
+IDS=$(jq -r '[.findings[]|select(.type=="secret" and ((.path|tostring)|contains("rein-bagel-fixture")))]|map(.id)|sort|unique|join(",")' "$OUT" 2>/dev/null)
+emit "@BAGEL_RAN=$RAN"
+emit "@SECRET_COUNT=$COUNT"
+emit "@SECRET_IDS=$IDS"
+# Show WHAT bagel found under the fixture (severity/id/relative-path), so the
+# golden lets a reviewer SEE the actual findings — 4 named creds in the CONTROL
+# leg, none in the SANDBOXED leg — not just a bare count.
+jq -r '[.findings[]|select(.type=="secret" and ((.path|tostring)|contains("rein-bagel-fixture")))]|sort_by(.path,.id)|.[]|"\(.severity) \(.id) \(.path|tostring|sub(".*rein-bagel-fixture/";""))"' "$OUT" 2>/dev/null | while IFS= read -r f; do emit "@FINDING $f"; done
+emit "@SCAN_DONE"
+
+---
+SBX| $ bagel scan --base-dirs ~/rein-bagel-fixture --format json  (secrets, summarized)
+SBX| @BAGEL_RAN=yes
+SBX| @SECRET_COUNT=4
+SBX| @SECRET_IDS=cloud-credential-aws-access-key-id,cloud-credential-aws-secret-access-key,docker-registry-inline-auth,ssh-private-key-openssh
+SBX| @FINDING critical cloud-credential-aws-access-key-id .aws/credentials
+SBX| @FINDING critical cloud-credential-aws-secret-access-key .aws/credentials
+SBX| @FINDING critical docker-registry-inline-auth .docker/config.json
+SBX| @FINDING critical ssh-private-key-openssh .ssh/id_rsa
+SBX| @SCAN_DONE
+
+$ rein run -- bash -c <credential-scan>
+rein: sandbox preflight:
+  [ok]   srt present: /home/tom.linux/.npm-global/bin/srt
+  [ok]   srt version: 0.0.63 (package.json; note `srt --version` misreports 1.0.0)
+  [ok]   seccomp: apply-seccomp present (unix-socket block available)
+  [ok]   bwrap userns: unprivileged user namespace works
+  [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
+rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-credbound-cwd-fxrtnfdz (git -C /tmp/rein-credbound-cwd-fxrtnfdz rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
+rein: verifying sandbox config applies (deny-read + seccomp self-test)…
+rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
+rein: launching SANDBOXED (srt) run:
+  session: sess_journey_credboundary (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-6etr7kk5/session.yaml]
+  proxy socket (out of sandbox): /run/user/501/rein/run-qKd9agUfZHSHIK80FumL_g/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-credbound-cwd-fxrtnfdz
+  a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-1132548678
+    (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
+     never inside the working tree, where a nested clone can be committed into it).
+    map it under `worktrees:` to use your own checkout on the NEXT run.
+  the agent sees NO real token; git/gh are injected at the proxy.
+  credential stores, ~/.ssh, on-disk keyrings, and keyring/agent sockets are hidden.
+  $HOME is HIDDEN in-sandbox. Three different behaviors — know which one you get:
+    READS of a hidden path FAIL LOUDLY: ENOENT, or an empty listing for a dir.
+    WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
+      DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
+    WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-credbound-cwd-fxrtnfdz
+    => work the agent must keep has to be written INTO the working tree.
+    allowed back read-only: /home/tom.linux/.npm-global/bin, /home/tom.linux/.npm-global/lib/node_modules, /home/tom.linux/.claude, /home/tom.linux/.claude.json, /home/tom.linux/.local/bin, /home/tom.linux/.cargo, /home/tom.linux/.rustup, /home/tom.linux/go, /home/tom.linux/.pyenv
+    if a tool breaks on a hidden $HOME path, allow it back narrowly:
+      REIN_SANDBOX_ALLOW_READ=/abs/path[:/more] rein run --sandbox -- …
+    or (NOT recommended — exposes your whole home dir): REIN_SANDBOX_SHOW_HOME=1
+  extra egress ALLOWED (direct TLS, NOT injected, no rein token): api.anthropic.com
+  writes are LOCKED until the agent declares its issue:  rein declare <n>
+  then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.
+  to run bash WITHOUT rein for one command: `\bash` (bash/zsh) or `command bash` (fish)
+  agent contract PRINTED to the agent's output (this agent has no system-prompt channel, so it may or
+    may not reach the model's context; the REIN_IN_SANDBOX_* env vars carry the same facts machine-readably).
+rein: running: bash -c
+set +e
+emit() { printf '%s%s\n' 'SBX| ' "$*"; }
+run() {
+  printf '%s$ %s\n' 'SBX| ' "$*"
+  "$@" 2>&1 | tr '\r' '\n' | while IFS= read -r l; do printf '%s%s\n' 'SBX| ' "$l"; done
+  return ${PIPESTATUS[0]}
+}
+FX="$HOME/rein-bagel-fixture"
+OUT="$HOME/.rein-bagel-scan.json"
+emit '$ bagel scan --base-dirs ~/rein-bagel-fixture --format json  (secrets, summarized)'
+/home/tom.linux/go/bin/bagel scan --base-dirs "$FX" --format json --no-cache --disable-version-check   > "$OUT" 2>/dev/null
+if jq -e 'has("findings")' "$OUT" >/dev/null 2>&1; then RAN=yes; else RAN=no; fi
+COUNT=$(jq '[.findings[]|select(.type=="secret" and ((.path|tostring)|contains("rein-bagel-fixture")))]|length' "$OUT" 2>/dev/null)
+# Do NOT default a failed/empty count to 0 — that would let a jq failure
+# (e.g. findings:null, which still passes has("findings")) read as "0 secrets
+# found = boundary held" and PASS BY ACCIDENT. A non-numeric count => ERR, which
+# main() cannot parse and so fails the run instead of silently passing.
+case "$COUNT" in ''|*[!0-9]*) COUNT=ERR;; esac
+IDS=$(jq -r '[.findings[]|select(.type=="secret" and ((.path|tostring)|contains("rein-bagel-fixture")))]|map(.id)|sort|unique|join(",")' "$OUT" 2>/dev/null)
+emit "@BAGEL_RAN=$RAN"
+emit "@SECRET_COUNT=$COUNT"
+emit "@SECRET_IDS=$IDS"
+# Show WHAT bagel found under the fixture (severity/id/relative-path), so the
+# golden lets a reviewer SEE the actual findings — 4 named creds in the CONTROL
+# leg, none in the SANDBOXED leg — not just a bare count.
+jq -r '[.findings[]|select(.type=="secret" and ((.path|tostring)|contains("rein-bagel-fixture")))]|sort_by(.path,.id)|.[]|"\(.severity) \(.id) \(.path|tostring|sub(".*rein-bagel-fixture/";""))"' "$OUT" 2>/dev/null | while IFS= read -r f; do emit "@FINDING $f"; done
+emit "@SCAN_DONE"
+
+---
+rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
+
+FILES
+- Your work persists ONLY in the working tree: /tmp/rein-credbound-cwd-fxrtnfdz
+  Write anything that must outlive this run THERE. Nothing else survives.
+- $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
+  DISCARDED when the run ends. You will get no error. Do not keep work there.
+- Most of $HOME reads as empty/missing; a few paths are re-exposed READ-ONLY, where
+  writes fail with "Read-only file system". Caches work but start cold each run.
+
+CREDENTIALS
+- There are NO credentials in this environment. Tokens, keys, and credential stores
+  are hidden on purpose. Do not go looking for them, and do not ask the user for one.
+- git and gh still work anyway: a proxy OUTSIDE the sandbox injects a short-lived
+  GitHub token you never see. Just use them normally.
+
+GITHUB WRITES
+- Writes to GitHub (push, PRs, comments, any API mutation) are LOCKED until you
+  declare the issue this work is for:
+      rein declare <n>
+  That asks the human to approve, on their terminal. Reads work without it.
+- Once confirmed, push ONLY to a branch named:
+      agent/<n>/<nonce>
+  where <n> is the declared issue number and <nonce> is a short name you choose
+  (letters/digits, then letters/digits/./_/-). Any other ref is rejected.
+- One issue per push.
+
+NETWORK
+- Egress is restricted to GitHub plus: api.anthropic.com
+- Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.
+
+SBX| $ bagel scan --base-dirs ~/rein-bagel-fixture --format json  (secrets, summarized)
+SBX| @BAGEL_RAN=yes
+SBX| @SECRET_COUNT=0
+SBX| @SECRET_IDS=
+SBX| @SCAN_DONE

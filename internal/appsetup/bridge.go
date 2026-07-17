@@ -111,7 +111,7 @@ func DecideBridge(state State, stateErr error, envPresent bool, envClientID stri
 	// state present.
 	if state.Phase == PhaseManagedExternally {
 		if !envPresent {
-			return BridgeManagedExternallyMissingEnv, "state.json says env-managed but REIN_APP_* are not set; re-source ./dev-env OR run `rein init --force` to switch to the manifest-flow path"
+			return BridgeManagedExternallyMissingEnv, "state.json says env-managed but REIN_APP_* are not set; export them again OR run `rein init --force` to switch to the manifest-flow path"
 		}
 		// env present + managed_externally marker → match or mismatch.
 		return classifyEnvMatch(state, envClientID, envInstallationID)

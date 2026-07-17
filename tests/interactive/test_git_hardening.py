@@ -28,8 +28,8 @@ import subprocess
 import tempfile
 import unittest
 
-import reinharness as H
-from itest_base import ReinTestCase
+from tests.interactive import reinharness as H
+from tests.interactive.itest_base import ReinTestCase
 
 
 def _clone_plain(repo: str, env: dict) -> str:

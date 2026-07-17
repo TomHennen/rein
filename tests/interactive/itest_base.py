@@ -23,7 +23,7 @@ import os
 import tempfile
 import unittest
 
-import reinharness as H
+from tests.interactive import reinharness as H
 
 # Issue #35: the issue is agent-declared at runtime (`rein declare <n>`) and
 # rein FETCHES it before prompting — so declare-flow tests need a REAL issue
@@ -62,7 +62,7 @@ _ready: dict = {}
 def _ensure_ready() -> dict:
     """Build rein + shims once; cache the env. Shared by all test cases."""
     if not _ready:
-        env = H.rein_env()
+        env = {**H.rein_env(), **H.init_app_env()}
         H.build_binaries(env)
         _ready["env"] = env
         _ready["repo"] = H.throwaway_repo(env)

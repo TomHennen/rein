@@ -3,7 +3,7 @@
 # A static, human-reviewable capture of a Go demo test's STRUCTURED before/after
 # report — NOT a normalize-on-compare golden (a Go test's t.Log output is a
 # report, not a shell terminal; test:line prefixes are normalized out), so it
-# lives in demo-transcripts/ (outside golden/, which is journey RAW goldens only).
+# lives in demo-transcripts/ (outside the journeys' golden.txt files, which are the RAW goldens).
 # Captured from: go test ./cmd/rein -run TestDemo_TMG8PanicRecovery -v
 # Shows the REAL exit codes (subprocess): a panic in the helper must not become
 # empty-stdout/exit-2 (git's PAT fall-through); the guard serves the placeholder + exit 0.

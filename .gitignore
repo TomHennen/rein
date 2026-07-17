@@ -4,6 +4,7 @@
 /rein
 /rein-git
 /rein-gh
+/seedghread
 
 # Editor / OS noise
 .vscode/
@@ -17,3 +18,11 @@
 # Python
 __pycache__/
 *.pyc
+
+# Local dev App identifiers (#126): dev-env is per-developer and untracked;
+# copy dev-env.example and fill in your own throwaway App/repo values. The
+# journeys use the `rein init` App from state.json, not dev-env.
+/dev-env
+
+# Stray clones from manual rein-run tests
+/clone
