@@ -1152,10 +1152,9 @@ func credentialDenyReadPaths(stateDir string) ([]string, error) {
 		// detector uses; it handles non-existent leaves.
 		resolvedCD, cderr := proxy.ResolveAbs(cd)
 		if cderr != nil {
-			// Fail closed: a resolution error must NEVER leave the host path visible.
-			// Deny the cleaned absolute form (hide-by-default); if even Abs fails, the
-			// relative-clean path lands in denyStores and srt.Build refuses the launch
-			// (still closed), never a silent skip.
+			// Defensive: ResolveAbs never errors today, but if that ever changes,
+			// still deny an absolute form rather than silently skip. The real
+			// backstop remains the unconditional ~/.claude denies above + homeDeny.
 			if abs, aerr := filepath.Abs(cd); aerr == nil {
 				resolvedCD = filepath.Clean(abs)
 			} else {
