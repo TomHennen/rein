@@ -3,14 +3,17 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-// TestSandboxAllowReadPathsCuratedSet asserts the #59 curated allow-back set:
-// the agent config (~/.claude, ~/.claude.json, CLAUDE_CONFIG_DIR) and the
-// justified read-mostly toolchain trees are allowed back — and NOTHING broad
-// like ~/.local or ~/.config sneaks in (each entry must stay individually
-// justified; ~/.local/share holds keyrings, browser profiles, …).
+// TestSandboxAllowReadPathsCuratedSet asserts the curated allow-back set: the
+// justified read-mostly toolchain trees are allowed back — and NOTHING broad like
+// ~/.local or ~/.config sneaks in (each entry must stay individually justified).
+//
+// #94: the claude config is DELIBERATELY NOT in this set any more. Host ~/.claude
+// / ~/.claude.json / a rein-env CLAUDE_CONFIG_DIR are default-denied; claude reads
+// its config from a rein-owned overlay via CLAUDE_CONFIG_DIR, not an allow-back.
 func TestSandboxAllowReadPathsCuratedSet(t *testing.T) {
 	home := "/home/someone"
 	t.Setenv("CLAUDE_CONFIG_DIR", "/home/someone/dotfiles/claude")
@@ -22,9 +25,6 @@ func TestSandboxAllowReadPathsCuratedSet(t *testing.T) {
 		set[p] = true
 	}
 	for _, want := range []string{
-		"/home/someone/.claude",
-		"/home/someone/dotfiles/claude", // CLAUDE_CONFIG_DIR, env-resolved
-		"/home/someone/.claude.json",
 		"/home/someone/.local/bin",
 		"/home/someone/.cargo",
 		"/home/someone/.rustup",
@@ -35,15 +35,90 @@ func TestSandboxAllowReadPathsCuratedSet(t *testing.T) {
 			t.Errorf("curated allow-back %q missing; got %v", want, got)
 		}
 	}
-	for _, tooBroad := range []string{
+	// The claude config must NOT be allowed back (default-deny, #94), nor may any
+	// broad tree sneak in.
+	for _, denied := range []string{
+		"/home/someone/.claude",
+		"/home/someone/.claude.json",
+		"/home/someone/dotfiles/claude", // rein-env CLAUDE_CONFIG_DIR, no longer allowed back
 		"/home/someone",
 		"/home/someone/.local",
 		"/home/someone/.local/share",
 		"/home/someone/.config",
 	} {
-		if set[tooBroad] {
-			t.Errorf("over-broad allow-back %q present; the set must stay minimal: %v", tooBroad, got)
+		if set[denied] {
+			t.Errorf("allow-back %q present; it must stay denied/minimal: %v", denied, got)
 		}
+	}
+}
+
+// TestAgentUnderClaudeDenyError pins the #94/#132 fast-fail: an agent binary that
+// resolves UNDER ~/.claude (the `claude migrate-installer` layout) is detected and
+// rejected with a clear, actionable error rather than a cryptic srt.Build abort; a
+// native-installer layout under ~/.local, and an unresolvable/empty command, pass.
+func TestAgentUnderClaudeDenyError(t *testing.T) {
+	home := t.TempDir()
+	home, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// migrate-installer layout: ~/.claude/local/claude, launcher on PATH under ~/.local/bin.
+	claudeLocal := filepath.Join(home, ".claude", "local")
+	if err := os.MkdirAll(claudeLocal, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realBin := filepath.Join(claudeLocal, "claude")
+	if err := os.WriteFile(realBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realBin, filepath.Join(binDir, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+"/usr/bin:/bin")
+
+	err = agentUnderClaudeDenyError(home, []string{"claude"})
+	if err == nil {
+		t.Fatal("agent under ~/.claude must be rejected with a clear error")
+	}
+	for _, want := range []string{"migrate-installer", "~/.claude", "#132"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error must mention %q; got: %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "SHOW_HOME") {
+		t.Errorf("error must NOT point at the insecure SHOW_HOME kill switch; got: %v", err)
+	}
+
+	// Native layout: ~/.local/share/claude/... under ~/.local — NOT under ~/.claude.
+	nativeDir := filepath.Join(home, ".local", "share", "claude")
+	if err := os.MkdirAll(nativeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nativeBin := filepath.Join(nativeDir, "claude")
+	if err := os.WriteFile(nativeBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(binDir, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(nativeBin, filepath.Join(binDir, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	if err := agentUnderClaudeDenyError(home, []string{"claude"}); err != nil {
+		t.Errorf("native-installer layout (~/.local) must be accepted; got: %v", err)
+	}
+
+	// Empty / unresolvable commands contribute no error.
+	if err := agentUnderClaudeDenyError(home, nil); err != nil {
+		t.Errorf("empty cmdline must not error: %v", err)
+	}
+	if err := agentUnderClaudeDenyError(home, []string{"no-such-cmd-xyz"}); err != nil {
+		t.Errorf("unresolvable command must not error: %v", err)
 	}
 }
 
@@ -167,8 +242,11 @@ func TestDeriveHomeDenial(t *testing.T) {
 	for _, p := range allowReads {
 		set[p] = true
 	}
-	if !set[filepath.Join(home, ".claude")] {
-		t.Errorf("default-on: allow-backs missing ~/.claude; got %v", allowReads)
+	// #94: ~/.claude is NOT allowed back (default-deny); claude uses the overlay.
+	// The install-chain / toolchain allow-backs remain (e.g. the derived agent's
+	// own install prefix), so the set is non-empty but excludes the host claude tree.
+	if set[filepath.Join(home, ".claude")] {
+		t.Errorf("default-on: ~/.claude allowed back; the #94 flip default-denies it; got %v", allowReads)
 	}
 
 	// (2) Kill switch: NO home deny, NO allow-backs, showHome reported so the

@@ -226,3 +226,27 @@ func ConfigDir() (string, error) {
 	}
 	return filepath.Join(base, "rein"), nil
 }
+
+// SandboxClaudeHomeDir is the rein-owned, PERSISTENT CLAUDE_CONFIG_DIR overlay
+// for sandboxed claude runs: $XDG_CONFIG_HOME/rein-sandbox-home/.claude
+// (default ~/.config/rein-sandbox-home/.claude). Issue #94.
+//
+// Deliberately a SIBLING of ConfigDir, NOT nested under it: ConfigDir holds the
+// proxy CA key and is denied WHOLESALE in-sandbox (credentialDenyReadPaths), so
+// an overlay under it would (a) collide with that authoritative deny — srt.Build
+// fails closed on a widening path at/under a deny — and (b) need to be
+// agent-READABLE, contradicting the deny. Persistent (not tmpfs) so claude
+// sessions resume across runs; a single SHARED dir (rein sessions span multiple
+// repos, so there is no clean repo key — mirrors host claude's one ~/.claude).
+// Does NOT create the directory (the caller creates it 0700 and seeds it).
+func SandboxClaudeHomeDir() (string, error) {
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("locate home dir: %w", err)
+		}
+		base = filepath.Join(home, ".config")
+	}
+	return filepath.Join(base, "rein-sandbox-home", ".claude"), nil
+}

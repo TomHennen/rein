@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/TomHennen/rein/internal/approvals"
+	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/githubapp"
+	"github.com/TomHennen/rein/internal/proxy"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/srt"
 	"github.com/TomHennen/rein/internal/worktree"
@@ -281,15 +283,17 @@ func TestInSandboxSelfGrantStructurallyFails(t *testing.T) {
 	}
 }
 
-// TestCredentialDenyReadHidesClaudeWorkArtifacts is the CP4.5 regression: the
-// wrapped agent's OAuth file (~/.claude/.credentials.json) stays readable so the
-// agent can authenticate, but the developer's cross-project Claude work history
-// (history.jsonl, projects/, sessions/) is hidden so a prompt-injected agent
-// can't read it and exfiltrate via the extra egress the operator opened.
-func TestCredentialDenyReadHidesClaudeWorkArtifacts(t *testing.T) {
+// TestCredentialDenyReadDefaultDeniesClaudeTree pins the #94 default-deny flip:
+// the WHOLE host ~/.claude tree and ~/.claude.json are authoritative denies —
+// not an allowlist-of-denials over a re-allowed dir. The agent no longer touches
+// the host tree at all (it is repointed at a rein-owned overlay via
+// CLAUDE_CONFIG_DIR), so nothing under ~/.claude may be readable in-sandbox: a
+// new subdir a future claude ships can no longer leak (the #55 unknown-unknown).
+func TestCredentialDenyReadDefaultDeniesClaudeTree(t *testing.T) {
 	t.Setenv("HOME", "/home/someone")
 	t.Setenv("XDG_CONFIG_HOME", "/home/someone/.config")
 	t.Setenv("XDG_STATE_HOME", "/home/someone/.local/state")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
 
 	paths, err := credentialDenyReadPaths(t.TempDir())
 	if err != nil {
@@ -299,21 +303,33 @@ func TestCredentialDenyReadHidesClaudeWorkArtifacts(t *testing.T) {
 	for _, p := range paths {
 		set[p] = true
 	}
+	// The whole tree + the sibling file are denied outright. Even the agent's own
+	// OAuth file is denied AT THE HOST PATH now — the sandboxed claude reads it
+	// from the overlay (seeded copy), never here.
 	for _, want := range []string{
-		"/home/someone/.claude/history.jsonl",
-		"/home/someone/.claude/projects",
-		"/home/someone/.claude/sessions",
-		// session-env is hidden AND (as a denyRead dir => writable tmpfs) doubles
-		// as the writable scratch claude's SessionStart machinery mkdir's per run;
-		// without it the in-sandbox mkdir hits EROFS under the read-only root.
-		"/home/someone/.claude/session-env",
+		"/home/someone/.claude",
+		"/home/someone/.claude.json",
 	} {
 		if !set[want] {
-			t.Errorf("claude work artifact %q missing from deny-read set: %v", want, paths)
+			t.Errorf("host claude path %q missing from deny-read set (must be default-denied): %v", want, paths)
 		}
 	}
-	// A relocated CLAUDE_CONFIG_DIR must ALSO be hidden, and the legacy ~/.claude
-	// default stays hidden too (belt-and-suspenders, mirroring gh/gpg).
+	// No PER-SUBDIR allowlist-of-denials survives: the whole-dir deny replaced it.
+	// A stray sub-entry would signal the old fail-open shape crept back.
+	for _, gone := range []string{
+		"/home/someone/.claude/history.jsonl",
+		"/home/someone/.claude/projects",
+		"/home/someone/.claude/file-history",
+		"/home/someone/.claude/backups",
+	} {
+		if set[gone] {
+			t.Errorf("per-subdir deny %q present — the #94 flip retires the sub-deny list in favor of the whole-dir deny", gone)
+		}
+	}
+
+	// A relocated CLAUDE_CONFIG_DIR in rein's OWN launch env (e.g. rein run from
+	// inside a claude session) is denied too — that host config must not leak
+	// either. This is rein's parent env, NEVER the injected overlay.
 	t.Setenv("CLAUDE_CONFIG_DIR", "/home/someone/dotfiles/claude")
 	paths2, err := credentialDenyReadPaths(t.TempDir())
 	if err != nil {
@@ -323,25 +339,133 @@ func TestCredentialDenyReadHidesClaudeWorkArtifacts(t *testing.T) {
 	for _, p := range paths2 {
 		set2[p] = true
 	}
+	// The relocated dir is denied in SYMLINK-RESOLVED form (compute the expected the
+	// same way the code does, so the assertion is robust to a symlinked ancestor).
+	wantReloc, err := proxy.ResolveAbs("/home/someone/dotfiles/claude")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, want := range []string{
-		"/home/someone/dotfiles/claude/projects", // relocated
-		"/home/someone/.claude/projects",         // legacy default still hidden
+		wantReloc,               // the relocated host dir (resolved)
+		"/home/someone/.claude", // the conventional default, still denied (unresolved)
+		"/home/someone/.claude.json",
 	} {
 		if !set2[want] {
-			t.Errorf("claude history path %q missing when CLAUDE_CONFIG_DIR set: %v", want, paths2)
+			t.Errorf("host claude path %q missing when CLAUDE_CONFIG_DIR set: %v", want, paths2)
 		}
 	}
 
-	// The agent's OWN credential + settings must NOT be hidden — hiding them would
-	// break the agent's ability to authenticate/run.
-	for _, mustRead := range []string{
-		"/home/someone/.claude/.credentials.json",
-		"/home/someone/.claude/settings.json",
-		"/home/someone/.claude", // the whole dir must not be tmpfs'd
-	} {
-		if set[mustRead] {
-			t.Errorf("path %q must stay readable in-sandbox but is in the deny-read set", mustRead)
+	// NESTED-REIN guard: when the rein-env CLAUDE_CONFIG_DIR IS our own overlay (a
+	// rein launched inside a rein sandbox inherits it), it must NOT be denied —
+	// denying it would hide the inner agent's config and trip srt.Build's
+	// widening-under-authoritative-deny check (the inner run also allow-writes it).
+	overlay := "/home/someone/.config/rein-sandbox-home/.claude"
+	t.Setenv("CLAUDE_CONFIG_DIR", overlay)
+	paths3, err := credentialDenyReadPaths(t.TempDir())
+	if err != nil {
+		t.Fatalf("credentialDenyReadPaths: %v", err)
+	}
+	for _, p := range paths3 {
+		if p == overlay {
+			t.Errorf("the rein overlay %q was added to the deny set; a nested rein must not deny its own overlay: %v", overlay, paths3)
 		}
+	}
+	// The host defaults stay denied even in the nested case.
+	set3 := map[string]bool{}
+	for _, p := range paths3 {
+		set3[p] = true
+	}
+	if !set3["/home/someone/.claude"] || !set3["/home/someone/.claude.json"] {
+		t.Errorf("host claude defaults must stay denied in the nested case: %v", paths3)
+	}
+}
+
+// TestCredentialDenyReadClaudeConfigDirResolution pins the #94 review fixes for a
+// host CLAUDE_CONFIG_DIR in rein's OWN launch env, against a REAL filesystem (so
+// symlink resolution is exercised, not just lexical cleaning):
+//   - B1: a RELATIVE value must resolve to an absolute path and LAND in the deny set
+//     (the old filepath.IsAbs gate wrongly skipped it → a `export CLAUDE_CONFIG_DIR=./evil`
+//     host dir could stay readable in-sandbox);
+//   - B2: a SYMLINK to the overlay must be recognized as the overlay via symlink-resolved
+//     comparison and NOT denied (a lexical Clean would deny it and trip srt.Build's
+//     widening-under-authoritative-deny abort, breaking nested rein);
+//   - an absolute non-overlay value is denied; a non-existent value is STILL denied
+//     (fail-closed: a resolution failure must never leave a host path visible).
+func TestCredentialDenyReadClaudeConfigDirResolution(t *testing.T) {
+	home := t.TempDir()
+	home, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	overlay, err := config.SandboxClaudeHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(overlay, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resolvedOverlay, err := proxy.ResolveAbs(overlay)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	denySet := func() map[string]bool {
+		paths, derr := credentialDenyReadPaths(t.TempDir())
+		if derr != nil {
+			t.Fatalf("credentialDenyReadPaths: %v", derr)
+		}
+		m := map[string]bool{}
+		for _, p := range paths {
+			m[p] = true
+		}
+		return m
+	}
+
+	// (B1) RELATIVE value → resolves to an absolute path and is denied.
+	t.Setenv("CLAUDE_CONFIG_DIR", "evil-host-config-xyz")
+	wantRel, err := proxy.ResolveAbs("evil-host-config-xyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !denySet()[wantRel] {
+		t.Errorf("relative CLAUDE_CONFIG_DIR must resolve to %q and be denied (the IsAbs gate must be gone)", wantRel)
+	}
+
+	// Absolute NON-overlay value → denied.
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "not-the-overlay"))
+	if !denySet()[filepath.Join(home, "not-the-overlay")] {
+		t.Errorf("an absolute non-overlay CLAUDE_CONFIG_DIR must be denied")
+	}
+
+	// (B2) A SYMLINK to the overlay → recognized as the overlay, NOT denied.
+	link := filepath.Join(home, "cd-symlink")
+	if err := os.Symlink(overlay, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", link)
+	s := denySet()
+	if s[link] || s[resolvedOverlay] {
+		t.Errorf("a CLAUDE_CONFIG_DIR symlinked to the overlay must NOT be denied (recognized via symlink-resolved compare)")
+	}
+	// Host defaults stay denied regardless of the guard.
+	if !s[filepath.Join(home, ".claude")] || !s[filepath.Join(home, ".claude.json")] {
+		t.Errorf("host claude defaults must stay denied")
+	}
+
+	// A NON-EXISTENT value → STILL denied (fail-closed). ResolveAbs falls back to the
+	// deepest existing ancestor, so the cleaned absolute form lands in the deny set;
+	// the guard never silently skips it.
+	weird := filepath.Join(home, "no", "such", "nested", "config")
+	t.Setenv("CLAUDE_CONFIG_DIR", weird)
+	wantWeird, err := proxy.ResolveAbs(weird)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !denySet()[wantWeird] {
+		t.Errorf("a non-existent CLAUDE_CONFIG_DIR must still be denied (fail-closed): want %q", wantWeird)
 	}
 }
 

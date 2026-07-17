@@ -1,0 +1,13 @@
+This is the REAL claude's session — SHOWN, NOT COMPARED.
+
+Regenerated on every REIN_UPDATE_GOLDEN=1 adopt; never diffed (a live LLM's exact
+wording is not a regression signal — the resume PROOF is an INVARIANT in journey.py,
+a break is exit 2). It exists so a human can SEE claude's actual replies, which the
+compared golden.txt excludes on purpose (a live model would flake a byte-diff).
+
+--- run 1: `claude -p <store the magic word>` — claude's reply ---
+ok
+
+--- run 2: `claude -c -p <recall the magic word>` — claude's reply (the RESUMED token, recalled from run 1's overlay session) ---
+quokka-overlay-persists-1994
+

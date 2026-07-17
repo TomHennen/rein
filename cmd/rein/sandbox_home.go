@@ -121,28 +121,14 @@ func sandboxAllowReadPaths(home, srtPath string, cmdline []string) []string {
 	// $HOME (nvm, ~/.npm-global) it contributes node's own install prefix.
 	out = append(out, installChainAllowReads(home, "node")...)
 
-	// (2) The wrapped agent's config + credentials. Claude Code authenticates
-	// from ~/.claude/.credentials.json and reads settings from ~/.claude and
-	// ~/.claude.json (CP4.5 stance: the agent needs its OWN auth). The
-	// developer's cross-project work artifacts inside it (history.jsonl,
-	// projects, sessions, …) STAY hidden: credentialDenyReadPaths lists them
-	// explicitly, and srt applies those deeper denies after this shallower
-	// allow-back. CLAUDE_CONFIG_DIR mirrors the env-resolved handling there.
-	claudeDirs := []string{filepath.Join(home, ".claude")}
-	if cd := os.Getenv("CLAUDE_CONFIG_DIR"); cd != "" && filepath.IsAbs(cd) {
-		claudeDirs = append(claudeDirs, cd)
-	}
-	out = append(out, claudeDirs...)
-	// ~/.claude.json: claude's top-level config/state file — onboarding state,
-	// settings, oauthAccount metadata; without it claude re-onboards every run
-	// (writes under the home tmpfs evaporate). TRADEOFF, on record: its
-	// `projects` map also carries per-project prompt-history snippets, the
-	// same work-history class the ~/.claude/projects sub-denies hide, so this
-	// allow-back preserves the pre-#59 status quo (the file was always
-	// readable in-sandbox) rather than the ideal. srt cannot bind a sanitized
-	// copy over the same path (allowRead re-binds the host path verbatim).
-	// Tracked in issue #62; revisit if claude ever splits state from history.
-	out = append(out, filepath.Join(home, ".claude.json"))
+	// (2) The wrapped agent's config + credentials are DELIBERATELY NOT allowed
+	// back (issue #94, default-deny flip). The host's ~/.claude and ~/.claude.json
+	// are fully denied in-sandbox (credentialDenyReadPaths); claude is repointed
+	// at a rein-owned persistent overlay via CLAUDE_CONFIG_DIR (sandbox_claude_home.go,
+	// internal/srt/env.go), which is bound read-WRITE via ExtraAllowWrite and holds
+	// the seeded .credentials.json. So the agent authenticates from the overlay, never
+	// the host tree — no allow-back into ~/.claude is needed, and the developer's
+	// cross-project history can no longer leak by default.
 
 	// (3) Curated read-mostly toolchain trees. Criteria for inclusion:
 	// binaries/caches a build or the agent's subprocesses EXECUTE or READ,
@@ -173,6 +159,53 @@ func sandboxAllowReadPaths(home, srtPath string, cmdline []string) []string {
 	)
 
 	return dedupePaths(out)
+}
+
+// agentUnderClaudeDenyError detects the `claude migrate-installer` layout, where the
+// agent binary resolves UNDER ~/.claude (e.g. ~/.claude/local/claude, with a launcher
+// symlinked from ~/.local/bin). Since #94 default-denies ~/.claude in-sandbox, that
+// install tree is hidden and the auto-derived install-chain allow-back would sit under
+// the authoritative ~/.claude deny — srt.Build then aborts with a cryptic
+// widening-under-deny error whose only workaround is the insecure SHOW_HOME kill switch.
+// Detect it early and return a CLEAR, actionable error instead. home must be the
+// symlink-resolved home dir; returns nil when the layout is fine or undetectable (a
+// launch that would fail for another reason still fails on its own).
+//
+// Only meaningful while the home deny is active — the caller gates on that (under
+// SHOW_HOME, ~/.claude is visible and the layout launches fine).
+func agentUnderClaudeDenyError(home string, cmdline []string) error {
+	if home == "" || len(cmdline) == 0 {
+		return nil
+	}
+	claudeDir, err := proxy.ResolveAbs(filepath.Join(home, ".claude"))
+	if err != nil {
+		return nil
+	}
+	found, err := exec.LookPath(cmdline[0])
+	if err != nil {
+		return nil
+	}
+	// Check the launcher AND its symlink target: the native launcher can live at
+	// ~/.local/bin/claude (outside ~/.claude) yet point INTO ~/.claude/local.
+	candidates := []string{found}
+	if t, terr := filepath.EvalSymlinks(found); terr == nil {
+		candidates = append(candidates, t)
+	}
+	for _, c := range candidates {
+		r, rerr := proxy.ResolveAbs(c)
+		if rerr != nil {
+			continue
+		}
+		if pathAtOrUnder(r, claudeDir) {
+			return fmt.Errorf("the %q binary resolves under ~/.claude (%s) — the `claude migrate-installer` layout. "+
+				"rein hides ~/.claude in-sandbox (issue #94 default-deny), so that install tree is invisible and the "+
+				"sandbox cannot launch it. Reinstall claude with the NATIVE installer so it lives under ~/.local "+
+				"(e.g. `curl -fsSL https://claude.ai/install.sh | bash`), then re-run. "+
+				"(Proper support for the ~/.claude/local layout is tracked in issue #132.)",
+				cmdline[0], r)
+		}
+	}
+	return nil
 }
 
 // installChainAllowReads resolves command via PATH and returns the allow-back

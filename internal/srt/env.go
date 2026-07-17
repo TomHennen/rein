@@ -188,6 +188,17 @@ type EnvParams struct {
 	// never binds writable, so the child hits EROFS on its first temp write.
 	AgentTmpDir string
 
+	// ClaudeConfigDir, when non-empty, is delivered as CLAUDE_CONFIG_DIR — the
+	// rein-owned PERSISTENT overlay claude reads/writes instead of the host's
+	// ~/.claude (issue #94). Creds are read EXCLUSIVELY from
+	// $CLAUDE_CONFIG_DIR/.credentials.json (spike ground truth: no fixed ~/.claude
+	// fallback), so repointing here — with rein having seeded that file host-side
+	// and bound the dir read-write via ExtraAllowWrite — is what lets the sandboxed
+	// claude authenticate and resume while the host tree stays fully denied.
+	// claude-specific but benign to other agents (an env var they ignore); fixed,
+	// non-secret path.
+	ClaudeConfigDir string
+
 	// RepoWorktrees, when non-empty, is the JSON array of local checkouts bound
 	// into this sandbox (worktree.AgentEnvValue). It is delivered as
 	// REIN_REPO_WORKTREES — the AGENT-visible answer to "where does repo B
@@ -313,6 +324,12 @@ func BuildEnv(p EnvParams) []string {
 	// Set only when provided (the probe path passes it empty and does no temp work).
 	if p.AgentTmpDir != "" {
 		out = append(out, "CLAUDE_CODE_TMPDIR="+p.AgentTmpDir)
+	}
+	// Rein-owned persistent CLAUDE_CONFIG_DIR overlay (#94). Set only when provided
+	// (the probe path passes it empty). claude reads creds/settings from and writes
+	// its session into this dir instead of the fully-denied host ~/.claude.
+	if p.ClaudeConfigDir != "" {
+		out = append(out, "CLAUDE_CONFIG_DIR="+p.ClaudeConfigDir)
 	}
 	// Where the developer's real checkouts are mounted, and where to clone a
 	// repo that only enters scope mid-run (issue #64). Both are non-secret
