@@ -34,6 +34,12 @@ A real LLM's prose is never golden material. So:
    `SBX|`-tagged transcript, like `sandbox_filesystem`. claude's own `-p`/`-c` stdout is
    excluded, so a completely different claude session still compares clean. The magic
    word is a FIXED phrase so run 1's `rein: running:` echo stays stable.
+3. **The session** (`session.txt`) — **SHOWN, never compared** (the `realagent_write`
+   convention: it lands as `session.txt`, not `golden.txt`, so nothing diffs it).
+   It captures claude's **actual replies** — run 1's `ok` and run 2's recalled token
+   `quokka-overlay-persists-1994` — the visible resume evidence a reviewer wants to
+   read, which `golden.txt` deliberately excludes because a live model's exact wording
+   would flake a byte-diff. Regenerated alongside `golden.txt` under `REIN_UPDATE_GOLDEN=1`.
 
 **Golden contract.** Exit **0** = the three claims held AND the normalized transcript
 matches; **1** = drift; **2** = a claim broke; **3** = SKIPPED (`claude` absent, or no

@@ -1143,15 +1143,42 @@ func credentialDenyReadPaths(stateDir string) ([]string, error) {
 	// injected overlay, which is set only in execEnv).
 	out = append(out, filepath.Join(home, ".claude"))
 	out = append(out, filepath.Join(home, ".claude.json"))
-	if cd := os.Getenv("CLAUDE_CONFIG_DIR"); cd != "" && filepath.IsAbs(cd) {
+	if cd := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); cd != "" {
+		// RESOLVE cd to an absolute, symlink-resolved path and deny THAT. A RELATIVE
+		// value counts too: a malicious repo's dev script could `export
+		// CLAUDE_CONFIG_DIR=./evil` before `rein run`, and the host dir it points at
+		// must be hidden — an earlier filepath.IsAbs() gate wrongly skipped those.
+		// proxy.ResolveAbs (against rein's launch cwd) is the same resolver the F1
+		// detector uses; it handles non-existent leaves.
+		resolvedCD, cderr := proxy.ResolveAbs(cd)
+		if cderr != nil {
+			// Fail closed: a resolution error must NEVER leave the host path visible.
+			// Deny the cleaned absolute form (hide-by-default); if even Abs fails, the
+			// relative-clean path lands in denyStores and srt.Build refuses the launch
+			// (still closed), never a silent skip.
+			if abs, aerr := filepath.Abs(cd); aerr == nil {
+				resolvedCD = filepath.Clean(abs)
+			} else {
+				resolvedCD = filepath.Clean(cd)
+			}
+		}
 		// NESTED-REIN guard: a rein launched INSIDE a rein sandbox inherits its
 		// parent's injected CLAUDE_CONFIG_DIR — which IS our own overlay. Denying it
 		// would both hide the inner agent's own config AND (since the inner run also
 		// allow-WRITES that path) trip srt.Build's widening-under-authoritative-deny
-		// fail-closed check. Skip it when it equals the overlay; otherwise it is a
-		// host config in rein's real launch env and must be hidden.
-		if overlay, oerr := config.SandboxClaudeHomeDir(); oerr != nil || filepath.Clean(cd) != filepath.Clean(overlay) {
-			out = append(out, cd)
+		// fail-closed check. Compare SYMLINK-RESOLVED paths (not a lexical Clean) so
+		// the overlay is recognized regardless of symlink/relative form; deny the
+		// resolved cd only when it is NOT the overlay.
+		resolvedOverlay := ""
+		if overlay, oerr := config.SandboxClaudeHomeDir(); oerr == nil {
+			if r, rerr := proxy.ResolveAbs(overlay); rerr == nil {
+				resolvedOverlay = r
+			} else {
+				resolvedOverlay = filepath.Clean(overlay)
+			}
+		}
+		if resolvedOverlay == "" || resolvedCD != resolvedOverlay {
+			out = append(out, resolvedCD)
 		}
 	}
 	// Explicit App key path override, if set outside the dirs above.

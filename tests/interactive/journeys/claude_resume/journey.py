@@ -11,11 +11,18 @@ is compared, not dropped by a prefix grep); the resume PROOF is an INVARIANT tha
 run 2's live output; and the deterministic bash probe's SBX| output is golden whole
 (like journeys/sandbox_filesystem). The magic word is a FIXED phrase so run 1's
 `rein: running:` echo stays stable in the golden.
+
+TWO artifacts (the realagent_write pattern): golden.txt is COMPARED (rein's surface
+only — claude's stdout excluded, so a live model can't flake a byte-diff); session.txt
+is SHOWN, never compared — it captures claude's ACTUAL replies (run 1's 'ok', run 2's
+recalled token), the VISIBLE resume evidence a reviewer wants to read. Both are
+regenerated under REIN_UPDATE_GOLDEN=1.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -24,7 +31,8 @@ import tempfile
 from pathlib import Path
 from tests.interactive import reinharness as H
 
-GOLDEN = Path(__file__).parent / "golden.txt"
+GOLDEN = Path(__file__).parent / "golden.txt"       # COMPARED (rein's surface only)
+SESSION = Path(__file__).parent / "session.txt"     # SHOWN, never compared (claude's replies)
 
 # A FIXED, distinctive phrase (not a per-run nonce): run 2 can only produce it by
 # RESUMING run 1's session, and being fixed keeps run 1's `rein: running:` echo stable
@@ -126,6 +134,56 @@ def compared_golden(result, store_needle: str, recall_needle: str) -> tuple[str,
     probe += H.build_raw_transcript(result.steps[2].text).split("\n")
     text = "\n".join(lines0 + lines1 + probe).strip("\n") + "\n"
     return text, (f0 and f1)
+
+
+# Terminal reset/mode sequences claude emits on exit that strip_ansi leaves behind
+# (charset ESC(B, kitty-keyboard ESC[<u, private ESC[>4m, cursor save/restore ESC7/ESC8,
+# stray C0 controls). Scrubbed so session.txt is clean prose for a human reviewer.
+_TERM_JUNK = re.compile(
+    r"\x1b\[[0-9;<>?=]*[ -/]*[@-~]"  # CSI (incl. private > < ? =)
+    r"|\x1b[ -/]*[0-~]"             # other ESC sequences (ESC(B, ESC7, ESC8, …)
+    r"|[\x00-\x08\x0b-\x1f\x7f]"     # stray C0 controls (TAB/newline kept)
+)
+
+
+# claude's OWN reply for a -p/-c step: everything AFTER rein's `rein: running:` echo,
+# minus rein's own trailing lines and terminal-reset junk. For session.txt only (SHOWN,
+# never compared), so a loose extract is fine — the point is a human SEES claude's actual
+# words, which the compared golden deliberately excludes (a live model would flake a diff).
+def agent_reply(step_text: str, needle: str) -> str:
+    lines = H.build_raw_transcript(step_text).split("\n")
+    i = next((n for n, ln in enumerate(lines) if needle in ln), None)
+    tail = lines[i + 1:] if i is not None else lines
+    out = []
+    for ln in tail:
+        if H.REIN_LINE_RE.match(ln) or ln.strip() == "---":
+            continue
+        clean = _TERM_JUNK.sub("", ln).strip()
+        if clean:
+            out.append(clean)
+    return "\n".join(out).strip() or "(no reply captured)"
+
+
+def agent_session_text(result) -> str:
+    """The SHOWN-not-compared record of claude's replies (the realagent_write pattern):
+    run 1's reply ('ok') and run 2's reply — the RESUMED token — the VISIBLE resume
+    evidence golden.txt keeps out on purpose."""
+    return "\n".join([
+        "This is the REAL claude's session — SHOWN, NOT COMPARED.",
+        "",
+        "Regenerated on every REIN_UPDATE_GOLDEN=1 adopt; never diffed (a live LLM's exact",
+        "wording is not a regression signal — the resume PROOF is an INVARIANT in journey.py,",
+        "a break is exit 2). It exists so a human can SEE claude's actual replies, which the",
+        "compared golden.txt excludes on purpose (a live model would flake a byte-diff).",
+        "",
+        "--- run 1: `claude -p <store the magic word>` — claude's reply ---",
+        agent_reply(result.steps[0].text, store_prompt()),
+        "",
+        "--- run 2: `claude -c -p <recall the magic word>` — claude's reply (the RESUMED "
+        "token, recalled from run 1's overlay session) ---",
+        agent_reply(result.steps[1].text, recall_prompt()),
+        "",
+    ]) + "\n"
 
 
 def main() -> int:
@@ -241,16 +299,22 @@ def main() -> int:
             print("\n--- normalized (the comparison lens) ---", flush=True)
             print(H.normalize_for_compare(raw), flush=True)
 
+        session = agent_session_text(result)
+
         if os.getenv("REIN_UPDATE_GOLDEN"):
             p = H.update_golden(GOLDEN, raw)
+            s = H.write_agent_session(SESSION, session)
             print(f"[golden UPDATED] {p} (raw; COMPARED — rein's lines + the probe's "
                   f"SBX| output, no claude content)", flush=True)
+            print(f"[session UPDATED] {s} (SHOWN, never compared — claude's actual "
+                  f"replies incl. the recalled token)", flush=True)
             return 0
 
         ok, diff = H.compare_golden(GOLDEN, raw)
         if ok:
             print(f"[golden OK] fresh run matches {GOLDEN} (normalized) — a "
                   f"DIFFERENT claude session still compares clean", flush=True)
+            print(f"  claude's replies (SHOWN, not compared): {SESSION}", flush=True)
             return 0
         scratch = os.path.join(tempfile.gettempdir(), "claude_resume.fresh.txt")
         with open(scratch, "w") as f:
