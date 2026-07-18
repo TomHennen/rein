@@ -108,8 +108,10 @@ the shared pieces into a neutral package first (§5), not by copying.
 
 nono's own install script downloads a release from
 `https://github.com/nolabs-ai/nono/releases/download/<version>/<asset>`, fetches
-`SHA256SUMS.txt`, and checks the SHA-256 — **checksum only, no signature**. (nono's CI
-is moving toward signing, but the releases carry no signature material yet.)
+`SHA256SUMS.txt`, and checks the SHA-256. nono 0.68.0 **also** publishes sigstore-backed
+GitHub build-provenance attestations (verified: `gh attestation verify` passes on the real
+tarball, fails on a tampered byte) — so independent "who built these bytes" material *does*
+exist. See the decision below on why the installer still uses digest-only for now.
 
 **rein's trust floor is a SHA-256 digest pinned in rein's own source.** Fetching
 `SHA256SUMS.txt` over the same connection as the binary is not independent trust — one
@@ -159,9 +161,20 @@ Failures: unsupported OS/arch → error naming the supported set; no pin for
 (never fall through to trusting `SHA256SUMS.txt`); digest mismatch → error with both
 hashes and the temp file deleted. Download is atomic (temp file in `DestDir` + rename).
 
-**Signature upgrade path (documented, not built):** when nono publishes sigstore bundles
-or GitHub attestations, add a signature check *before* the digest check; keep the
-vendored digest as belt-and-suspenders. Track as a follow-up issue.
+**Decision (locked): digest-only for the first cutover; attestation verify is the
+upgrade path (#142).** nono *does* publish provenance attestations, but the installer
+ships with vendored-digest pinning only. Rationale: for a *pinned* version, a vendored
+in-source digest is already the strongest trust root available — a fully compromised
+release (forged attestations included) still can't pass rein's pin without editing rein's
+own SLSA-covered source. Adding attestation verification means pulling in a large
+`sigstore-go`-class dependency, which is a supply-chain decision worth making deliberately,
+not bundled into P0.
+
+**Tradeoff we're taking:** digest-only gives no *independent* install-time provenance —
+at a version bump, whoever regenerates the pin must verify the new bytes out of band
+(and `gh attestation verify` is exactly the right tool for that manual step). Adding
+`sigstore-go` (issue #142) would move that check into the installer at the cost of the
+dependency. We judged the pinned-digest root strong enough to ship first and upgrade later.
 
 #### 2.1.1 rein-managed path (closes the binary-shadowing gap)
 
@@ -430,7 +443,7 @@ downstream by rein and never enters the sandbox).
   credential, `http.proxyAuthMethod=basic`). Hop 2 is nono → rein (a plain CONNECT tunnel,
   **no auth** — §3a). These are separate; the P1 exit gate (§7) exercises both end to end.
 
-### 3d. UDP policy — DECISION FOR TOM (recommend fail-closed if possible)
+### 3d. UDP policy — DECIDED: accept the residual, document it
 
 **State:** direct TCP egress is strong (seccomp refuses it, same as srt). **UDP egress is
 open by default — all of it** (DNS, QUIC, arbitrary): tested inside `nono run`, `sendto`
@@ -447,19 +460,22 @@ doesn't touch UDP either. So under the proxy mode rein requires, **UDP stays ope
 general exfil channel that srt's empty namespace blocked. Unlike the loopback question
 (which nono's mediation closes), there's no nono config that fixes this.
 
-**Decision for Tom (a genuine accept/block choice, not a config task):**
-- **Accept the residual.** rein's threat model weights credential theft over data exfil,
-  and the credential boundary is intact: the agent can't get a token (proven) and can't
-  exfil over TCP (blocked). What it *can* do is send out data it already sees (the working
-  tree) over UDP. For rein's core purpose — the agent never holds a credential — this
-  holds. UDP exfil is a data-confidentiality regression from srt, documented.
-- **Block on it / mitigate later.** A host-side firewall (nftables) blocking UDP egress
-  from the sandboxed process — but scoping it to just the agent is hard under nono (same
-  uid, no network namespace; would need a cgroup nono exposes). Non-trivial, maybe needs
-  nono support. Not for the first cutover.
+**Decision (locked): accept the residual, document it.** rein's threat model weights
+credential theft over data exfil, and the credential boundary is intact: the agent can't
+get a token (proven) and can't exfil over TCP (blocked). What it *can* do is send out data
+it already sees (the working tree) over UDP. For rein's core purpose — the agent never
+holds a credential — this holds. UDP exfil is a data-confidentiality regression from srt,
+and we ship it documented rather than block the pivot on it.
 
-**P3 cutover gate:** this decision must be made explicitly (accept + document, or block),
-not slipped through.
+**Tradeoff we're taking:** a prompt-injected agent can exfiltrate the working tree over
+UDP (it could already read that tree; it just gains an out-of-band send path srt denied).
+The credential the whole product exists to protect never leaks. The prober REPORTS UDP as
+open (loud warning, not a launch failure) so it's never silent.
+
+**Mitigation deferred (not blocking the cutover):** a host-side firewall (nftables)
+blocking UDP egress from the sandboxed process — but scoping it to just the agent is hard
+under nono (same uid, no network namespace; would need a cgroup nono exposes). Non-trivial,
+maybe needs nono support. Tracked as future work, not first cutover.
 
 ### 3e. The prober (fail-closed launch gate + CI harness)
 
