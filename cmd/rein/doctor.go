@@ -37,6 +37,7 @@ import (
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
+	"github.com/TomHennen/rein/internal/nono"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/srt"
 	"github.com/TomHennen/rein/internal/tokencache"
@@ -84,6 +85,10 @@ func runDoctor(args []string) error {
 	// surfaced here read-only. A [fail] here means sandboxed mode will refuse to
 	// launch — doctor is where the operator learns why before they hit it.
 	checks = append(checks, sandboxDoctorChecks()...)
+	// nono preflight: same rows `rein run --nono` hard-gates on (design pivot §2.3).
+	// Shown alongside srt during the pivot — srt stays the default until P3, so
+	// doctor surfaces both backends rather than selecting one.
+	checks = append(checks, nonoDoctorChecks()...)
 
 	results := runDoctorChecks(checks)
 	printDoctorTable(results)
@@ -500,6 +505,43 @@ func srtStatusToDoctor(s srt.Status) checkStatus {
 		return statusWarn
 	default:
 		return statusFail
+	}
+}
+
+// nonoDoctorChecks runs the nono sandbox preflight and maps each result into a
+// doctor checkResult, mirroring sandboxDoctorChecks. Same lazy sync.Once shape:
+// nono.Preflight (which shells out to nono for the validate rows) runs when the
+// FIRST nono check executes in runDoctor's loop, not at slice-build time, and
+// the single result is shared across the per-row closures. Keep the row NAMES in
+// sync with nono.Preflight's stable output set (a missing name renders as a fail
+// row rather than silently vanishing). srt.Status is a sandboxutil alias, so
+// srtStatusToDoctor maps nono's Status too.
+func nonoDoctorChecks() []func() checkResult {
+	var (
+		once   sync.Once
+		byName map[string]nono.Check
+	)
+	load := func() {
+		once.Do(func() {
+			byName = map[string]nono.Check{}
+			for _, c := range nono.Preflight(nono.DefaultEnv()) {
+				byName[c.Name] = c
+			}
+		})
+	}
+	mk := func(name string) func() checkResult {
+		return func() checkResult {
+			load()
+			c, ok := byName[name]
+			if !ok {
+				return checkResult{name, statusFail, "preflight did not report this check"}
+			}
+			return checkResult{c.Name, srtStatusToDoctor(c.Status), c.Message}
+		}
+	}
+	return []func() checkResult{
+		mk("nono present"), mk("nono profile validate"), mk("rein CA"),
+		mk("loopback proxy port"), mk("nono af_unix_mediation"),
 	}
 }
 

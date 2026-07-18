@@ -36,6 +36,10 @@ import (
 // restarted daemon reuses the SAME certificate — see LoadOrCreateCA.
 const caEntryName = "proxy-ca"
 
+// CAEntryName exports caEntryName so doctor/preflight can locate the CA file
+// (stat-only, via keystore.PathOf) without duplicating the layout constant.
+const CAEntryName = caEntryName
+
 // caValidity is how long a freshly-minted CA is valid. ~2 years (design §5.4).
 const caValidity = 2 * 365 * 24 * time.Hour
 
