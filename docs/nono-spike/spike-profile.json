@@ -1,0 +1,15 @@
+{
+  "meta": { "name": "spike" },
+  "network": {
+    "block": false,
+    "credentials": ["gitspike"],
+    "custom_credentials": {
+      "gitspike": {
+        "upstream": "https://gitspike.test:8443",
+        "credential_key": "env://SPIKE_TOKEN",
+        "inject_header": "Authorization",
+        "credential_format": "Basic {}"
+      }
+    }
+  }
+}
