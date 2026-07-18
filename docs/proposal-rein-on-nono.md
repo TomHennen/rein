@@ -52,6 +52,7 @@ so rein keeps a relay for that, and nothing else.
 | Egress control | **nono** ← rein | rein writes a tightened `allow_domain` profile |
 | GitHub App onboarding | **rein** | manifest flow (existing) |
 | Install/orchestration | **rein** | verified nono fetch + profile gen + CLI drive |
+| Containment **assurance** | **rein** | sandbox prober: fail-closed launch gate + CI differential harness (trust-but-verify the substrate) |
 
 Integration boundary = **nono CLI + JSON profile + the `cmd://` subprocess
 contract** (the same clean subprocess boundary rein already uses for srt — no
@@ -106,6 +107,37 @@ flags as a contract to re-verify on bump (existing srt policy).
    ReverseProxy` (stdlib streaming/chunked/Expect) with a thin rein inject +
    receive-pack-tap layer.
 
+## Assurance over a substrate we don't own: the sandbox prober
+
+Ceding containment to nono — pre-1.0, fast-moving, not ours — means rein no longer
+controls the sandbox. The sandbox prober (`docs/containment-probe-harness.md`,
+written substrate-agnostic for exactly this moment) is how rein keeps assurance,
+and under the pivot it is **more central than it was under srt, not optional**.
+Two layers:
+
+1. **Launch-time gate (fail-closed, every `rein run`).** The nono analog of the
+   `VerifyConfigApplied` we're deleting with `internal/srt`: before exposing the
+   agent, rein confirms nono actually applied the expected denials — a sentinel
+   read-back (a known file in the deny set must read empty in-sandbox) plus a probe
+   that the App key + cred stores are unreadable. If nono didn't confine as
+   configured — version drift, a profile bug, a Landlock-unavailable kernel — rein
+   **fails closed and refuses to launch**. We keep the *concept* of the launch gate
+   even as the srt implementation goes; with a third-party substrate it matters
+   more, not less.
+2. **CI / golden differential prober (dev + CI + on every nono bump).** Adopt
+   `controlplaneio/sandbox-probe` (Apache-2.0, Go, same host-vs-sandbox-diff
+   design): run inside `nono run` vs on the host, diff, and classify each
+   surviving-reachable observation against rein's config-derived oracle — expected
+   denials (`app.pem`, gh, ssh, history, keyring/agent sockets) and expected-open
+   (the tightened egress allowlist). Golden-committed; drift = red = re-review.
+   This is the check that caught, this session, that nono's stock profile leaves
+   egress wide open — exactly the kind of substrate surprise rein must not ship.
+
+The prober is also the **acceptance gate for the P3 cutover**: srt's containment
+tests are only safe to delete once the prober proves nono enforces the equivalent
+denials on the target platform(s). And it stays test-only / dev-invoked (like
+`pyte`), so its license never touches the shipped binary.
+
 ## How we'd TEST
 
 The **golden-transcript journey model stays** (`tests/interactive/`): every
@@ -123,11 +155,10 @@ goldens.
 **DROP / DEMOTE (srt-specific containment — now nono's job):**
 `sandbox_filesystem` (srt deny-read of cred stores) and the srt-only unit tests
 (`VerifyConfigApplied`, seccomp AF_UNIX, /dev/tty self-grant) go away **with**
-`internal/srt`. They're **replaced by one containment check** — the
-`sandbox-probe` harness (`docs/containment-probe-harness.md`) run inside
-`nono run` vs host, diffed against rein's expected denials (app.pem, gh, ssh,
-history) — verified once + kept as a regression guard, not re-derived per srt
-release. `sandbox_gh_read_staleness` likely stays (broker cache behavior).
+`internal/srt` — replaced by the **sandbox prober** (its own section above): the
+fail-closed launch gate + the differential CI harness verify nono's containment
+once and guard it against drift, instead of rein re-deriving it per release.
+`sandbox_gh_read_staleness` likely stays (broker cache behavior).
 
 **NEW:**
 - `nono_install` — `rein init` fetches + **verifies** (sig + digest) a pinned
@@ -171,13 +202,17 @@ custom security-critical component we keep).
 
 - **P0 — Install+profile:** verified nono fetch + opinionated profile gen in
   `rein init`; `doctor` nono health. Journey: `nono_install`.
-- **P1 — `cmd://` authority:** `rein credential-capture`; wire the broker core +
-  approval through it. Journey: `cmd_capture_approval`.
+- **P1 — `cmd://` authority + prober:** `rein credential-capture` (broker core +
+  approval through it) **and** the sandbox prober — the fail-closed launch-time
+  gate plus the `sandbox-probe` differential CI harness. Journeys:
+  `cmd_capture_approval`, containment diff. The prober lands here because this is
+  the first phase rein actually launches nono, and it's the assurance we need
+  before trusting the substrate.
 - **P2 — Relay reposition + de-risk:** move git-push relay behind nono, rebuild on
   stdlib transport, add fuzzers + review. Journey: `git_push_via_relay`.
 - **P3 — Cut over sandboxed mode:** `rein run` launches nono (not srt); delete
-  `internal/srt` + srt journeys; containment via the probe. Regenerate kept
-  goldens.
+  `internal/srt` + srt journeys. **Gated on the prober** proving nono enforces the
+  equivalent denials on the target platform(s). Regenerate kept goldens.
 - **P4 — Dogfood** on a throwaway, then wrangle (the existing CP6 gate).
 
 ## The decision
