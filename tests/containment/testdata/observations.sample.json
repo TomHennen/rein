@@ -1,0 +1,21 @@
+{
+  "_comment": "Sample NORMALIZED observations (issue #136B). This is the schema tests/containment/cmd/classify consumes; the harness maps sandbox-probe's native report into this shape (that mapping is the current stub — see README). Kind is stamped from the section, so entries omit it. Used by oracle CLI demos and could seed a synthetic-fixture test; it is NOT a real probe result.",
+  "network": [
+    { "target": "api.github.com", "reachable": true, "tokenInjected": true },
+    { "target": "github.com", "reachable": true, "tokenInjected": true },
+    { "target": "codeload.github.com", "reachable": true, "tokenInjected": false },
+    { "target": "api.anthropic.com", "reachable": true, "tokenInjected": false },
+    { "target": "evil.example.com", "reachable": false, "tokenInjected": false }
+  ],
+  "files": [
+    { "target": "/home/dev/.config/gh/hosts.yml", "reachable": false },
+    { "target": "/home/dev/.config/rein-credentials/app.pem", "reachable": false },
+    { "target": "/home/dev/.ssh/id_ed25519", "reachable": false },
+    { "target": "/home/dev/.bash_history", "reachable": false }
+  ],
+  "env": [
+    { "target": "ANTHROPIC_API_KEY", "reachable": false },
+    { "target": "GH_TOKEN", "reachable": false },
+    { "target": "SSH_AUTH_SOCK", "reachable": false }
+  ]
+}
