@@ -168,3 +168,104 @@ registries, `gh` logged in (or a rein App key), and cargo/nono.
   local HTTPS upstream, `env://` credential, Basic inject).
 - `local-repro.sh` — end-to-end local reproduction of the chunked-hang result
   (EC P-256 CA, `SSL_CERT_FILE`, small/chunked/Content-Length push matrix).
+
+## Real-box results (2026-07-18, Tom's dev VM: aarch64, Landlock, real nono 0.68.0)
+
+Three things the container couldn't test are now done on real hardware.
+
+### Real github.com push (not just a local server)
+Injected the PAT as `Basic` via a nono `custom_credentials` route intercepting
+`github.com`, pushed to the throwaway `TomHennen/agentcreds-validation-a`:
+- **small push → LANDED on real github.com** (injection brokers a real push).
+- **20 MiB push → FAILED** — `send-pack: unexpected disconnect ... remote hung
+  up`. Against real GitHub the chunked upload disconnects (rather than hanging
+  forever), but same outcome: it does not land. Confirms the finding on the real
+  injection path.
+
+### Containment — the positive that justifies adopting nono
+Probe inside `nono run --profile nolabs-ai/claude` (readability only, no content):
+every credential read is **blocked by Landlock** — `~/.config/gh/hosts.yml`,
+`~/.ssh/id_ed25519`, **`~/.config/rein-credentials/app.pem` (the real App key)**,
+`~/.bash_history` all fail with "Permission denied" on open (`deny_credentials`
+works). Write to `/etc` denied. **Caveat:** nono's stock Claude profile leaves
+**egress wide open** (`example.com` → 200) — no allowlist — so a prompt-injected
+agent could exfiltrate anywhere. rein would ship a tightened profile.
+
+### The `cmd://` seam — rein's integration point works, host-side, zero nono changes
+A rein-shaped `cmd://` capture helper, triggered by a request through nono:
+```
+ctx: HOST=github.com PATH=/TomHennen/agentcreds-validation-a/info/refs?service=git-upload-pack METHOD=GET SESSION=ea2cc96221ca29b4
+host-side proof (read app.pem which sandbox CANNOT)? YES-HOST-SIDE
+approval channel /dev/tty? present
+```
+So nono invokes rein's helper **host-side** (it can read the App key the
+sandboxed agent cannot), hands it **per-request context including the repo path**,
+method, and session id, gives it **`/dev/tty`** for a human approval prompt the
+agent can't reach, and injects whatever token it returns. Config: top-level
+`credential_capture: { mint: { command: [...] } }` + a `custom_credentials` entry
+with `credential_key: "cmd://mint"` and a required `env_var`. This is rein's
+issuance + per-repo-scope + human-approval trifecta dropping into nono natively.
+
+## Source confirmation + repo-scoping (from nono's own code, commit 23d93fc)
+
+- The 413 is **verbatim + intentional**: `reverse.rs:37` `const MAX_REQUEST_BODY:
+  usize = 16 * 1024 * 1024;` → `:1539` sends `413` when `content_length >
+  MAX_REQUEST_BODY`. A deliberate DoS guard (issue #554 lists "enforce upload
+  size limits"), **not a tracked bug**. So fix-option (a) "wait for upstream" is
+  weak — it's by design.
+- **Chunked request bodies are never decoded** (no `Content-Length` → empty body
+  returned); chunked decode exists only for responses. **No `Expect:
+  100-continue`** handling anywhere. All three request handlers funnel through
+  one buffering `read_request_body` — no streaming request path.
+- **Not filed.** No issue/PR/discussion raises git push. Nearest analog: **#1433**
+  (OPEN) — intercept path hangs on Codex websocket upgrades (same "intercept
+  assumes buffered request→response, hangs on streaming" weakness).
+- **Repo-scoping requires interception (mutually exclusive with large push).**
+  nono can scope git by repo via path-glob credential routes
+  (`route.rs:1624`, `/org/**` matched against `/org/repo.git/git-receive-pack`)
+  or `endpoint_rules` — but only on the **intercepted** path, which routes through
+  the same 16 MiB/chunked-incapable body reader. Plain host-allowlist tunnels
+  CONNECT **without** interception (proxy blind → no repo distinction, no
+  injection). So:
+
+  | nono config for github | Repo-scoped? | Large `git push`? |
+  |---|---|---|
+  | path-glob route / endpoint_rules (intercept) | **yes** | **no** (413/hang) |
+  | plain host allowlist (tunnel) | no | **yes** (but no injection — git uses own creds) |
+
+  `git clone`/`fetch` survive either way: the `upload-pack` **request** is small;
+  the packfile arrives in the **response**, which nono streams uncapped. Only the
+  **push request body** trips the cap.
+
+## Design: how rein fits into nono WITHOUT changing nono
+
+Division of labor, all via nono's existing config surface (zero nono source
+changes):
+
+- **nono owns:** the Landlock sandbox (proven: `deny_credentials` hides the App
+  key + host creds from the agent), the `cmd://` hook, L7 repo-scoping for the
+  REST path, and egress enforcement.
+- **rein owns (its differentiators), plugged into nono's seams:**
+  - **`cmd://` credential authority** — mints per-issue, per-repo, short-lived App
+    installation tokens host-side (it can reach the App key), returns them for
+    nono to inject. Native fit.
+  - **host-side approval** — the same helper prompts on `/dev/tty` (agent has
+    none) before minting a write token. Native fit.
+  - **a tightened nono profile** — restricts `allow_domain` (restoring rein's
+    strict-egress property the stock profile lacks). Config only.
+- **The one hard seam — `git push`.** Because repo-scoped injection and large push
+  are mutually exclusive in nono, rein routes per-path, still without changing
+  nono:
+  - REST/`gh`/api.github.com writes + `git clone`/`fetch` → through nono's
+    intercept + rein's `cmd://` injection (works today).
+  - **large `git push`** → point the sandboxed git's `http.proxy` at **rein's own
+    relay** (a localhost port allow-listed via the profile's `open_port`, with
+    direct github git egress denied so git can't bypass it). rein's relay does the
+    chunked/streaming inject it already implements (CP1). nono still sandboxes
+    everything; the relay is the one rein component nono cannot replace.
+
+Net: rein sheds srt + its own sandbox composition + CA/TLS for the REST path, and
+keeps only its git-push relay — a large simplification — while nono provides
+containment and rein keeps issuance + per-issue scope + approval. This is the
+"rein becomes the credential authority for nono" split, achievable with zero nono
+changes and one config-wired rein relay for the push path.
