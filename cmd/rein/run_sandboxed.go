@@ -35,19 +35,15 @@ import (
 
 	"github.com/TomHennen/rein/internal/approvals"
 	"github.com/TomHennen/rein/internal/appsetup"
-	"github.com/TomHennen/rein/internal/brokercore"
 	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/declare"
-	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/issuemeta"
 	"github.com/TomHennen/rein/internal/keystore"
 	"github.com/TomHennen/rein/internal/proxy"
 	"github.com/TomHennen/rein/internal/runbroker"
-	"github.com/TomHennen/rein/internal/runscope"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/srt"
-	"github.com/TomHennen/rein/internal/tokencache"
 	"github.com/TomHennen/rein/internal/ui/grant"
 	"github.com/TomHennen/rein/internal/worktree"
 )
@@ -470,144 +466,24 @@ func runSandboxed(cmdline []string) (int, error) {
 		}
 	}
 
-	// (9) Start the in-process broker/proxy. runbroker.Listen placement-checks
-	// the socket against the bind-mounts (working tree) and fails closed if it
-	// would land inside one.
-	// The run's EFFECTIVE scope ceiling (issue #69): the session's standing
-	// repos UNION the repos the human approves as expansions during this
-	// run. Every scope-sensitive surface below reads through it — the scope
-	// check, BOTH mints (a token is minted AT a scope), and the token caches
-	// (via ScopeKey). A launch-time snapshot of sess.Repos in any one of
-	// them would make an approved expansion silently fail to arrive.
-	rscope := runscope.New(sess, stateDir, runID)
-	// scopedAppCfg re-scopes the App config to the ceiling AS OF THIS MINT.
-	// appCfg.RepoNames was set at launch from the standing repos; a mint
-	// after an approved expansion must cover the wider set.
-	scopedAppCfg := func() githubapp.Config {
-		c := appCfg
-		c.RepoNames = rscope.BareNames()
-		return c
-	}
-	mintRead := brokercore.MintFunc(func(ctx context.Context) (string, time.Time, error) {
-		c, err := githubapp.NewClient(scopedAppCfg(), ks, config.AppKeystoreRole)
-		if err != nil {
-			return "", time.Time{}, err
-		}
-		// In sandboxed mode ALL of the agent's github.com/api.github.com
-		// traffic — git AND gh/REST/GraphQL — flows through this one
-		// injecting proxy, so this read token is what backs `gh issue view`,
-		// `gh pr view`, and issue/PR REST reads too. The plain
-		// MintReadOnlyToken (contents+metadata only) lacks issues:read /
-		// pull_requests:read, so those reads 403'd in-sandbox. Use the
-		// gh-shaped read tier (contents+issues+pull_requests+metadata, all
-		// READ) — matching direct mode's gh read path and design §4.2.2.
-		// TIER SPLIT PRESERVED: this token carries NO write permission.
-		return sandboxReadMint(c, ctx)
-	})
-	// ghReadToken supplies the issues:read-capable read token the declare
-	// fetch and the TM-G6 transfer re-check use (the MintGhReadOnlyToken
-	// shape — the plain read mint lacks issues:read). Cached on disk via
-	// ghsession so repeated declares/re-checks don't burn mints.
-	ghReadToken := func(ctx context.Context) (string, error) {
-		c, err := githubapp.NewClient(scopedAppCfg(), ks, config.AppKeystoreRole)
-		if err != nil {
-			return "", err
-		}
-		// Scope-tag the cache by the run's EFFECTIVE ceiling (issue #95): a
-		// still-fresh gh-read token minted by an earlier, NARROWER run (e.g. a
-		// single-repo-A run within the ~1h TTL) must not be served to this run
-		// — it would be scoped to A and 404 on repo B's issue fetch. Same
-		// ceiling => same file => caching behaves as before.
-		tok, _, err := ghsession.EnsureFresh(ghsession.ReadCachePathForScope(stateDir, rscope.Key()), c.MintGhReadOnlyToken, c.RevokeToken, 5*time.Minute, mintTimeout, logger)
-		return tok, err
-	}
-	mintWrite := brokercore.MintFunc(func(ctx context.Context) (string, time.Time, error) {
-		// TM-G6 re-check on EVERY write-token mint (#35 §6): a confirmed
-		// issue whose canonical URL now 3xx's was transferred — its
-		// confirmation is invalidated; an emptied set fails the mint
-		// (placeholder ⇒ local deny; the agent is told to re-declare).
-		if err := declare.InvalidateTransferred(ctx, stateDir, runID, sess, ghReadToken, logger, os.Stderr); err != nil {
-			return "", time.Time{}, err
-		}
-		c, err := githubapp.NewClient(scopedAppCfg(), ks, config.AppKeystoreRole)
-		if err != nil {
-			return "", time.Time{}, err
-		}
-		// In sandboxed mode this write token backs the agent's `git push`
-		// AND its `gh pr create` / `gh issue comment` / issue-or-PR REST +
-		// GraphQL writes (everything post-declare flows through this one
-		// injecting proxy). The plain MintWriteToken (contents+metadata only)
-		// let the push land but 403'd every gh/API issue-or-PR write —
-		// falsifying the injected contract's promise that approving covers
-		// ALL writes. Use the implement-role write tier
-		// (contents+issues+pull_requests WRITE, metadata read) so the
-		// contract is true, matching direct mode's gh write path and design
-		// §4.2.2. The scope CEILING (scopedAppCfg().RepoNames) still confines
-		// it to the run's repos, and the declare gate still gates it (nothing
-		// mints until declare+approve).
-		//
-		// KNOWN RESIDUAL (#86, #6): pull_requests:write also confers PR
-		// review/approve/merge, so a session holding this token could approve
-		// or merge its own PR. Accepted for now; #86 tracks blocking
-		// self-merge (design §4.2.8's "agent-delegated commits don't count as
-		// a second signer"), #6 tracks the broader role-permission hardening.
-		return sandboxWriteMint(c, ctx)
-	})
-
-	approve := buildSandboxApprove(sess, stateDir, runID, logger)
-	host, err := runbroker.Start(runbroker.Config{
-		SessionID:     sess.ID,
-		SocketPath:    socketPath,
-		ForbiddenDirs: append([]string{workTree}, baseParams.ExtraAllowWrite...),
-		MintRead:      mintRead,
-		MintWrite:     mintWrite,
-		InScope:       rscope.Contains,
-		ScopeKey:      rscope.Key,
-		Approve:       approve,
-		Declaration: buildDeclarationHooks(declareEnv{
-			sess:        sess,
-			sessionFile: session.SourceFilePath(sessSource),
-			stateDir:    stateDir,
-			runID:       runID,
-			approve:     approve,
-			ghReadToken: ghReadToken,
-			appCfg:      appCfg,
-			scopedCfg:   scopedAppCfg,
-			ks:          ks,
-			logger:      logger,
-		}),
-		RecordWrite: func(token string, expiresAt time.Time) {
-			if err := approvals.AppendWriteToken(stateDir, runID, tokencache.Entry{Token: token, ExpiresAt: expiresAt}); err != nil {
-				logger.Printf("write-token ledger append failed (best-effort): %v", err)
-			}
-		},
-		CAKeystore: caKeystore,
-		Audit:      auditW,
-		Logger:     logger,
-		// Proactive session expiry (design §5.3): bound how long a granted
-		// approval + cached write token can stay live if the agent idles or runs
-		// forever. On expiry we revoke the run's write tokens and stop the proxy
-		// (the agent's next GitHub request then fails closed) but DO NOT kill the
-		// agent — it keeps running credential-less with a loud message. The
-		// double revoke (here + the deferred exit-time revoke) is harmless:
-		// revoke is idempotent/best-effort.
-		IdleTimeout: runbroker.DefaultIdleTimeout,
-		HardTTL:     runbroker.DefaultHardTTL,
-		OnExpire: func(reason string) {
-			logger.Printf("session expired (%s): revoking write tokens and stopping the proxy", reason)
-			revokeRunWriteTokens(stateDir, runID, productionRevoke(sess), time.Now())
-			// Clear the ledger now that its tokens are revoked, so the deferred
-			// exit-time revokeRunWriteTokens reads an empty ledger and is a clean
-			// no-op — otherwise it would re-revoke already-dead tokens and print a
-			// spurious "exit-revoke of a write token failed" per token (F1). The
-			// deferred ClearRun still runs at exit (idempotent). A write approved
-			// in the brief window before the proxy stops re-appends to the ledger
-			// and is caught by that deferred exit-time revoke.
-			if err := approvals.ClearRun(stateDir, runID); err != nil {
-				logger.Printf("expiry: clear write-token ledger failed (best-effort): %v", err)
-			}
-			printExpiryBanner(os.Stderr, reason)
-		},
+	// (9) Start the in-process broker/proxy via the shared spine (run_broker.go).
+	// runbroker.Listen placement-checks the socket against the bind-mounts
+	// (working tree) and fails closed if it would land inside one. The scope
+	// ceiling (#69), read/write tier split, #35 declare gate, write-approval
+	// hook, and expiry+revoke all live in startRunBroker so srt and nono share
+	// one implementation. srt uses only the unix front (loopbackFront:false).
+	host, err := startRunBroker(runBrokerParams{
+		sess:          sess,
+		sessSource:    sessSource,
+		appCfg:        appCfg,
+		ks:            ks,
+		caKeystore:    caKeystore,
+		stateDir:      stateDir,
+		runID:         runID,
+		socketPath:    socketPath,
+		forbiddenDirs: append([]string{workTree}, baseParams.ExtraAllowWrite...),
+		auditW:        auditW,
+		logger:        logger,
 	})
 	if err != nil {
 		return 1, fmt.Errorf("start broker/proxy: %w", err)
