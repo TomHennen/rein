@@ -61,6 +61,33 @@ rig is sound and nono is the differentiator.
   out of the box, essentially **every real `git push` > 1 MiB hangs through
   nono's injecting proxy.** Only sub-1 MiB (Content-Length) pushes work.
 
+## Real-box confirmation (2026-07-18, aarch64 + Landlock, real nono 0.68.0)
+
+Re-ran on Tom's dev VM (aarch64, `CONFIG_SECURITY_LANDLOCK=y`, nono installed
+from `nono.sh/install.sh`, still against a local `git-http-backend`). Result is
+the same AND sharper — it exposes a second limit the container masked:
+
+| Push through nono (intercept + inject) | Framing | Container | Real box |
+|---|---|---|---|
+| small (KB) | Content-Length | lands ✓ inj | **lands ✓ inj** |
+| 20 MiB | chunked | HANGS | **HANGS** (silent) |
+| 20 MiB | Content-Length | lands | **HTTP 413** (Request Entity Too Large) |
+
+So real nono has **two** failure modes, not one: chunked request bodies **hang**,
+*and* Content-Length bodies **> 16 MiB get a hard 413** (`MAX_REQUEST_BODY`). The
+only pushes that survive the injecting proxy are **Content-Length AND < 16 MiB**.
+Because git chunks every push > `http.postBuffer` (1 MiB default), a working push
+requires forcing `http.postBuffer` high enough to send Content-Length *and*
+staying under 16 MiB. **Any push ≥ 16 MiB is impossible through the injecting
+path.** The 413/hang occur in nono's request handling before bytes reach the
+upstream, so this is **upstream-agnostic** — real github.com will behave the same.
+This kills the "container artifact" doubt: the finding holds on real hardware,
+real kernel, real nono. Injection itself works throughout (verified `Basic
+x-access-token` on the receive-pack POST).
+
+**Consequence for option (d):** the `postBuffer` stopgap is bounded to pushes
+**< 16 MiB**; it cannot carry a larger push at all.
+
 ## Correction / retraction (intellectual honesty)
 
 An earlier turn claimed "nono routes git push through `gh`." **Retracted — the
