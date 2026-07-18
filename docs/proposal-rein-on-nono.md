@@ -16,9 +16,9 @@ sandbox someone else maintains.
 
 ## Why now
 
-`srt` is dropping the hook rein uses to inject credentials (its docs mark it "not
-yet supported... future release"). If that hook goes, rein needs a new one anyway,
-and nono provides one. Caveat: nono is pre-1.0 and also moves fast — this trades
+`srt` is moving away from the hook rein uses to inject credentials (its newer
+config marks custom-proxy support "not yet supported... future release"). If that
+hook goes, rein needs a new one anyway, and nono provides one. Caveat: nono is pre-1.0 and also moves fast — this trades
 one moving dependency for another, not stable for unstable.
 
 ## Who does what
@@ -41,8 +41,10 @@ linking.
 now hides the credentials from the agent (tested — it does).
 
 **Keep:** the broker, the keystore (the App key stays on the laptop), and the
-proxy — but smaller. The proxy stays because it does the injection, which nono
-can't do for a real `git push`.
+proxy — but smaller. The proxy stays for two reasons: nono can't inject into a
+real `git push`, and even where nono *could* inject (small requests), it never
+reads the request body — so rein's approval and per-issue checks would be skipped.
+rein has to see the traffic to enforce its rules.
 
 **Add:**
 - A verified installer: `rein init` downloads a pinned, signature-checked nono
@@ -57,17 +59,18 @@ Works:
 - A **20 MiB `git push`** goes the whole way: agent → nono → rein (inject +
   stream) → GitHub. This was the main risk, and it passed.
 - nono hides the App key, gh token, and ssh keys from the agent.
-- The agent **can't open a direct TCP connection out** — nono blocks it in the
-  kernel.
+- The agent **can't open a direct TCP connection out** — nono blocks it at the
+  syscall level (its supervisor checks every connection).
 - rein can route **only** GitHub to itself and send CDN hosts straight out, so no
   token leaks onto a CDN URL.
 
 Open / not done:
 - **UDP is open by default** — all UDP, not just DNS — so an agent could exfiltrate
-  over UDP. nono *can* filter UDP but its default doesn't; we need the stricter
-  setting or an explicit decision to accept it. (srt blocks this; nono's default
-  doesn't. rein's threat model has cared more about credential theft than exfil —
-  worth revisiting.)
+  over UDP. nono's code routes UDP sends to its supervisor too, so it can *likely*
+  be filtered, but we haven't found or verified the stricter setting — we'd locate
+  it or make an explicit decision to accept the risk. (srt blocks this; nono's
+  default doesn't. rein's threat model has cared more about credential theft than
+  exfil — worth revisiting.)
 - **CA trust** is proven for git; not yet for other tools (they need an env var).
 - **A password on rein's proxy** (so only nono can use it) is supported by nono
   but not yet wired up.
@@ -77,9 +80,9 @@ Open / not done:
 
 No. Checked the options: none fit a forward proxy that streams and injects, and
 one is GPL. Infisical's agent-vault (the same use case) also hand-rolled on the Go
-standard library. rein's proxy core is ~40 lines of standard library; the value is
-rein's own rules (which host gets which token, reading the push). Keep it and fuzz
-it (#136).
+standard library. The spike's stand-in proxy was ~40 lines of standard library, so
+the core rein needs is small; the value is rein's own rules (which host gets which
+token, reading the push). Keep it and fuzz it (#136).
 
 ## How we'd build it
 
