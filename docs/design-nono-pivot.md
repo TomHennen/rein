@@ -521,18 +521,26 @@ deny-overlap is not enforceable; deny '/tmp/tmux-1000' overlaps allowed parent '
 restriction (`ipc_mode:shared_memory_only`) only blocks **abstract** sockets, not
 filesystem sockets like tmux's. So there is **no simple socket-deny**.
 
-**Real mitigation options (P1 design problem — the hardest part of the pivot):**
-(a) **Drop the tmux-popup approval under nono; use only the `/dev/tty` path** (proven
-blocked to the agent) — but the tmux popup existed as the fallback when rein has no
-usable tty (#13/#14), so this narrows the approval UX. (b) **Restructure the fs policy
-so `/tmp` is not broadly allowed** (allow only specific scratch subdirs, so the tmux
-dir is unreachable and no deny-overlap arises) — a departure from nono's default that
-may break tools expecting `/tmp`. (c) Move rein's approval IPC to a path structurally
-outside any agent-allowed tree. **This is the crux of whether the pivot preserves
-rein's core non-replayability guarantee (#32) — it must be resolved in P1 with a
-working, prober-asserted isolation, or it is a go/no-go blocker.** The prober MUST
-assert: `$TMUX` scrubbed, tmux socket connect blocked, `send-keys` blocked, `/dev/tty`
-unopenable — and fail closed if any succeeds.
+**RESOLVED (2026-07-18) — `af_unix_mediation: "pathname"` closes it AND preserves the
+tmux-popup UX; NOT a blocker.** The Landlock fs-deny does not block socket `connect()`
+(only read) — but nono ships an opt-in `LinuxConfig.af_unix_mediation` field, **default
+`off`** (why the hole was open). Set to **`"pathname"`** it deny-by-default mediates
+pathname AF_UNIX connect/bind, requiring explicit `filesystem.unix_socket*` allowlist
+grants. **Tested:** with `linux.af_unix_mediation: "pathname"` (no socket allowlist), the
+agent's `connect()` to the tmux socket → **Permission denied**, `send-keys` blocked,
+while the agent still runs (scratch writes fine); `/dev/tty` already blocked. Crucially
+this constrains **only the sandboxed agent** — rein drives the approval popup
+**host-side, outside the sandbox**, unaffected, so the **interactive tmux approval UX is
+preserved** (the user's constraint).
+
+**P1 work (a config + allowlist-tuning item, not a redesign):** set
+`af_unix_mediation: "pathname"` in rein's profile; scrub `$TMUX` (defense-in-depth — the
+mediation is the real control); determine the *minimal* pathname unix sockets a real
+agent (claude/node/gh — DNS resolver, etc.) legitimately needs and grant ONLY those via
+`filesystem.unix_socket*`, **never the tmux/approval socket**; verify the agent still
+runs. The prober MUST assert (fail closed otherwise): tmux socket connect **denied**,
+`send-keys` denied, `/dev/tty` unopenable, `$TMUX` absent. This preserves rein's #32
+non-replayability guarantee under nono.
 
 1. **Launch gate = nono analog of `VerifyConfigApplied`.** A tiny, dep-free,
    in-binary check that runs on every `rein run --nono` BEFORE the agent, and fails
@@ -739,11 +747,13 @@ Each phase **stops-and-surfaces** at its gate per the current PLAN's discipline;
 
 ## 8. Risks carried from findings
 
-- **Approval-channel isolation (TOP risk — §3e crux):** nono has no namespaces, so the
-  agent shares the session/tty. If it can open `/dev/tty` or drive the tmux socket
-  (`send-keys`) it self-approves its own declared push — defeating rein's core guarantee
-  while journeys stay green. Never measured. P1 confirm + prober assertion + `$TMUX`/tmux
-  socket in the deny/scrub spec. Ranks above F3 and UDP.
+- **Approval-channel isolation (was TOP risk — §3e crux) — CONFIRMED then RESOLVED
+  (2026-07-18).** Confirmed a real hole: the sandboxed agent connected to the tmux socket
+  and drove `send-keys` to self-approve (fs-deny does NOT block socket `connect()`;
+  `/dev/tty` was already blocked). RESOLVED by `linux.af_unix_mediation: "pathname"`
+  (default `off`) — tested to block the agent's tmux connect while rein (host-side) keeps
+  the popup. Downgraded from blocker to a P1 config + unix-socket-allowlist-tuning item
+  (§3e). Still needs the prober assertion + the minimal-allowlist determination.
 - **UDP exfil** (§3d): open by default, mediable-but-strict-setting-unlocated. Explicit
   Tom decision (deny-all vs deny-except-DNS); a regression from srt's empty-netns until
   closed. Must be resolved at the P3 gate, not slip through.
