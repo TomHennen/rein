@@ -381,21 +381,25 @@ gate: wire the external-proxy into `nono run` (sandbox mode).
 
 Worked through the second review's four design requirements empirically + in source.
 
-**(3d) Egress — REFUTED that nono is weaker; it is airtight, and documented.**
-Probe inside `nono run` (`block:false`, only `github.com` allowlisted): every
-direct socket connect to a non-allowlisted host — `1.1.1.1:443`, `:80`,
-`8.8.8.8:53`, `169.254.169.254` (metadata) — is **blocked with `PermissionError`**
-at the syscall level (DNS resolves, but connect is denied); on the host all are
-reachable. Mechanism (nono docs, `cli/internals/wsl2.mdx`): *"the credential
-proxy's network lockdown is enforced via **seccomp user notification — the
-supervisor validates every `connect`/`bind` call**."* Landlock alone is port-scoped
-(`capability.rs:927`), but nono layers seccomp-notify connect-validation for
-**host-scoped** enforcement. It is intentional and **fail-closed**: nono *refuses*
-proxy-only mode on WSL2 (where seccomp-notify is unavailable) rather than allow
-bypass; the degraded `insecure_proxy` mode is explicitly "child not prevented from
-bypassing the proxy." So egress is **parity with srt's netns** (both kernel-
-enforced airtight, different mechanism). **Caveat: WSL2 → rein must fail closed
-(match nono).** The review's biggest structural concern does not hold.
+**(3d) Egress — strong on direct TCP, but DNS is an open exfil channel (NOT full
+parity with srt).** Probe inside `nono run` (`block:false`, only `github.com`
+allowlisted): every direct TCP `connect` to a non-allowlisted host — `1.1.1.1:443`,
+`:80`, `8.8.8.8:53` (TCP), `169.254.169.254` (metadata) — is **blocked with
+`PermissionError`** at the syscall level; on the host all are reachable. Mechanism
+(nono docs, `cli/internals/wsl2.mdx`): *"the credential proxy's network lockdown is
+enforced via **seccomp user notification — the supervisor validates every
+`connect`/`bind` call**."* Landlock alone is port-scoped (`capability.rs:927`);
+nono layers seccomp-notify connect-validation for host-scoped enforcement.
+Intentional + fail-closed (nono *refuses* proxy-only mode on WSL2 rather than allow
+bypass). **BUT the seccomp filter mediates `connect`/`bind`, not UDP `sendto`:**
+tested — a **direct UDP DNS query to `8.8.8.8:53` is REACHABLE** inside the
+sandbox, and arbitrary-name resolution via the system resolver leaves the sandbox.
+So **DNS is a live (low-bandwidth) exfil channel in nono**, which srt's empty netns
+plausibly blocks (no resolver reachable) — nono is **weaker on this one channel.**
+So: direct-TCP egress = parity-with-srt (strong); DNS/UDP = a real residual gap to
+mitigate (check whether a nono UDP-egress/`block:true` setting closes it) or
+document against the threat model. **Caveats: WSL2 → rein fails closed; DNS
+channel open by default.**
 
 **(3c) Host-routing boundary (srt gap #6) — CONFIRMED addressable.** With
 `upstream_bypass:["example.com"]` + `upstream_proxy:<rein>`, inside `nono run`:

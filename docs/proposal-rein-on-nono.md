@@ -97,8 +97,10 @@ The second review confirmed (b) fixes (c)'s problems but flagged real new items.
    `http.sslCAInfo`), the same model nono uses for its own intercept CA. It **fails
    closed** (unsetting the CA var → TLS failure, not a bypass). Mitigation:
    `GIT_CONFIG_GLOBAL=/dev/null` pinning + accept the env model (there is no fs-bind
-   option under Landlock). Confirmed VALIDATED (empirically: the composed push
-   trusted rein's CA via `http.sslCAInfo`).
+   option under Landlock). Status: validated for the **git `http.sslCAInfo` path**
+   (the composed push trusted rein's CA that way); **general env-CA trust for
+   arbitrary tools** (`NODE_EXTRA_CA_CERTS` et al. — the #94-style territory) is
+   **untested** and stays a P1 item.
 3. **Host-routing table (carry srt gap #6 forward) — VALIDATED.** Tested:
    `upstream_bypass` routes bypassed hosts direct while github goes to rein
    (github → rein's MITM; `example.com` in `upstream_bypass` → direct, never touched
@@ -106,14 +108,18 @@ The second review confirmed (b) fixes (c)'s problems but flagged real new items.
    the `upstream_proxy` path and the CDN hosts (codeload/objects/raw) in
    `upstream_bypass` → direct, never reaching rein (no token on a pre-signed asset
    URL). rein's per-host-class inject stays the second line.
-4. **Egress — VALIDATED airtight (was the biggest concern; now refuted).** Tested:
-   inside `nono run`, direct socket connects to non-allowlisted hosts (`1.1.1.1:443`,
-   metadata, etc.) are **blocked with `PermissionError`** — nono enforces egress
-   **host-scoped via seccomp user-notification** (validates every `connect`/`bind`),
-   compensating for Landlock's port-only scope. Documented + fail-closed (nono
-   *refuses* proxy-only mode on WSL2 rather than allow bypass). **Parity with srt's
-   netns.** Remaining action: on WSL2 rein must fail closed (match nono); keep the
-   direct-connect-bypass probe as a prober regression check.
+4. **Egress — direct-TCP blocked (strong), but DNS is an open exfil channel (a
+   real residual, NOT full parity with srt).** Tested: direct TCP `connect` to
+   non-allowlisted hosts is **blocked with `PermissionError`** — nono enforces egress
+   host-scoped via seccomp user-notification (validates every `connect`/`bind`),
+   compensating for Landlock's port-only scope; documented + fail-closed (refuses
+   proxy-only mode on WSL2). **BUT** the seccomp filter mediates `connect`/`bind`,
+   not UDP `sendto`: a direct UDP DNS query to `8.8.8.8:53` is **reachable**, so
+   **DNS is a live low-bandwidth exfil channel** that srt's netns blocks — nono is
+   weaker here. Required: check whether a nono UDP-egress / `block:true` setting
+   closes DNS; if not, document it as a residual (rein's current srt threat model
+   assumes no direct egress at all). Keep TCP-bypass **and** a DNS-exfil probe in the
+   prober. WSL2 → rein fails closed.
 
 ## What we TEAR OUT
 
@@ -243,11 +249,12 @@ lands through the full `nono run` → nono-tunnel → rein-inject → github sta
 the pivot is no longer gated on an unknown, only on *engineering* the four design
 requirements (listener auth, CA-via-fs, host-routing, egress probe) and honest
 risks that are now **much smaller** after the design-requirement validation:
-egress is airtight (seccomp-notify, parity with srt — the biggest concern refuted),
-host-routing is exact (`upstream_bypass`), the listener capability is closeable
-(per-session proxy-auth), and the TCB root is smaller under (b) (nono sees only
-github ciphertext). The remaining genuine unknowns are **macOS (Seatbelt) parity**
-(untested) and **nono pre-1.0 maturity/churn**. Recommendation: **land the carve-out
+direct-TCP egress is blocked (seccomp-notify — the biggest concern largely holds up,
+with one caveat), host-routing is exact (`upstream_bypass`), the listener capability
+is closeable (per-session proxy-auth, source-confirmed), and the TCB root is smaller
+under (b) (nono sees only github ciphertext). The remaining genuine unknowns/gaps:
+**the DNS exfil channel** (nono allows UDP DNS; srt's netns blocks it — mitigate or
+document), **macOS (Seatbelt) parity** (untested), and **nono pre-1.0 maturity**. Recommendation: **land the carve-out
 (#136) now, unconditionally**; then run P0/P1 (behind a flag, srt default), with
 **macOS parity** and the **listener per-session proxy-auth** as the hard gates
 before P3 cutover. Build-vs-adopt on a pre-1.0 dependency remains Tom's call — and
