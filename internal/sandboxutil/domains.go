@@ -6,25 +6,11 @@ import (
 	"strings"
 )
 
-// DefaultExtraAllowedDomains is the built-in egress allowlist (beyond the GitHub
-// inject + CDN hosts) so `rein run -- <agent>` reaches the wrapped agent's OWN
-// API out of the box. These hosts are egress-allowed but NEVER injected: they go
-// into srt allowedDomains only, never mitmProxy.domains, so a non-GitHub host
-// gets a direct end-to-end TLS tunnel to itself (srt dialDirect), validated
-// against the system roots already in the CA bundle, with NO rein token on it.
-// The GitHub credential-hiding CP1-4 built is therefore unaffected — extra hosts
-// carry no injected credential.
-//
-// Currently: Claude Code's API endpoint. Determined EMPIRICALLY (CP4.5): a
-// headless `claude -p` — even with `*.anthropic.com` allowed — contacts ONLY
-// api.anthropic.com (two connections, no other host attempted). Telemetry
-// (statsig), error reporting (sentry), and the MCP endpoints (claude.ai) are
-// best-effort and NOT required for the agent to run, so they are deliberately
-// EXCLUDED to keep the default egress/exfil surface minimal. Claude
-// authenticates from ~/.claude/.credentials.json (a file readable in-sandbox),
-// not via egress to an auth host, so no extra domain is needed for auth.
-// Additions (npm, PyPI, other agents) are opt-in per session via allow_domains
-// or machine-wide via REIN_ALLOW_DOMAINS.
+// DefaultExtraAllowedDomains: built-in egress allowlist so the wrapped agent
+// reaches its own API out of the box. Egress-allowed but NEVER injected (no rein
+// token). Just api.anthropic.com — a headless `claude -p` contacts only that host
+// (CP4.5); telemetry/MCP are excluded to keep the exfil surface minimal. More
+// hosts are opt-in via allow_domains or REIN_ALLOW_DOMAINS.
 var DefaultExtraAllowedDomains = []string{"api.anthropic.com"}
 
 // EnvAllowDomains is the machine-wide extra-egress override: a comma-separated
@@ -36,23 +22,11 @@ const EnvAllowDomains = "REIN_ALLOW_DOMAINS"
 // Kept small so a broad allowlist is always called out loudly.
 const largeExtraSetThreshold = 8
 
-// ResolveExtraAllowedDomains merges the extra egress allowlist from all sources —
-// the built-in DefaultExtraAllowedDomains, the REIN_ALLOW_DOMAINS env value
-// (comma-separated), and the per-session allow_domains — into one lowercased,
-// deduped list. Precedence is moot: an allowlist is a UNION, and no source can
-// REMOVE a host (the default agent endpoint is always present so the wrapped
-// agent works out of the box).
-//
-// It also returns human-facing WARNINGS about the egress data-exfiltration
-// surface (CP4.5 security requirement): the sandboxed agent can send data to ANY
-// allowed host, so widening egress is the operator's explicit choice and must be
-// surfaced loudly. Each wildcard (`*.suffix`) and a large custom set produce a
-// warning; the caller prints them as a stderr banner.
-//
-// An error is returned for a MALFORMED extra domain (empty after trim, or one
-// carrying a scheme/path/space/port, or a wildcard not of the exact `*.suffix`
-// form). Fail closed rather than silently allow a bogus entry that srt would
-// reject or (worse) mis-match into a broader allow than intended.
+// ResolveExtraAllowedDomains unions the extra egress allowlist from all sources
+// (DefaultExtraAllowedDomains + REIN_ALLOW_DOMAINS + per-session allow_domains)
+// into one lowercased, deduped list. It returns warnings about the exfil surface
+// (each wildcard, and a large custom set) for the caller to print, and fails
+// closed on a malformed domain (scheme/path/space/port, or a non-`*.suffix` wildcard).
 func ResolveExtraAllowedDomains(sessionDomains []string, envValue string) (domains, warnings []string, err error) {
 	custom := append(splitAndTrim(envValue), sessionDomains...)
 

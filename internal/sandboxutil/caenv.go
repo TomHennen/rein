@@ -1,10 +1,8 @@
 package sandboxutil
 
-// CAEnvVars are the four CA-trust variables every sandboxed launch points at
-// its per-run CA bundle (system roots + rein's MITM CA) so tooling trusts the
-// injecting proxy's leaf certificate on the inject path while still trusting
-// real certs on any passthrough/CDN path. All four point at the same bundle
-// file.
+// CAEnvVars are the four CA-trust variables every sandboxed launch points at its
+// per-run CA bundle (system roots + rein's MITM CA), so tooling trusts the proxy's
+// leaf on the inject path and real certs on passthrough. All point at one bundle.
 var CAEnvVars = []string{
 	"SSL_CERT_FILE",       // openssl / git (OpenSSL build) / python
 	"GIT_SSL_CAINFO",      // git explicitly
