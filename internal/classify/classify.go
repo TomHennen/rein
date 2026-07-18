@@ -141,18 +141,28 @@ var mutationOrSubscription = regexp.MustCompile(`\b(mutation|subscription)\b`)
 // stripGraphQL removes string/block-string literals and # comments so the
 // keyword scan can't be fooled by a query string that merely CONTAINS the word
 // "mutation" inside a literal or comment.
+//
+// Every prefix test is a fixed-width rune-index check, never string(runes[i:]):
+// the latter reallocates the whole remaining slice at each position, making the
+// scan O(n^2) on the NORMAL path (the block-string case was tested at every
+// character). Since the body can be up to 1 MiB (proxy.go maxGraphQL) and comes
+// from a possibly-injected agent, that was a CPU-DoS; the rune-index form is
+// linear and byte-for-byte equivalent (issue #136A).
 func stripGraphQL(q string) string {
 	var b strings.Builder
 	runes := []rune(q)
+	tripleQuote := func(i int) bool {
+		return i+2 < len(runes) && runes[i] == '"' && runes[i+1] == '"' && runes[i+2] == '"'
+	}
 	for i := 0; i < len(runes); {
 		switch {
 		case runes[i] == '#': // comment to end of line
 			for i < len(runes) && runes[i] != '\n' {
 				i++
 			}
-		case strings.HasPrefix(string(runes[i:]), `"""`): // block string
+		case tripleQuote(i): // block string
 			i += 3
-			for i < len(runes) && !strings.HasPrefix(string(runes[i:]), `"""`) {
+			for i < len(runes) && !tripleQuote(i) {
 				i++
 			}
 			i += 3
