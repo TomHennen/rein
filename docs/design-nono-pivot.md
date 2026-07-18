@@ -456,11 +456,12 @@ proxy-auth to nono's external-proxy path.
   `allow_domain` as an inject host. The spike never tested whether a **direct
   `connect(github.com:443)` that bypasses the proxy** (e.g. agent clears `http.proxy` in
   the writable `.git/config`) is blocked. If `allow_domain` grants direct egress, the
-  agent reaches github OUTSIDE rein's MITM. Impact is bounded — no credential
-  (`deny_credentials`), so *anonymous* github access, not token theft — but it's a
-  mediation-boundary hole and a regression vs srt's no-direct-egress. **P1 confirm +
-  prober assertion:** a direct (non-proxy) connect to an `allow_domain` inject host must
-  be blocked. Do not ship §3b/§1's "no unmediated path" as settled.
+  agent reaches github OUTSIDE rein's MITM. **VERIFIED (2026-07-18): NO hole.** A direct
+  `connect(github.com:443)` inside `nono run` (github in `allow_domain`) is **BLOCKED**
+  (`PermissionError`) — `allow_domain` grants *proxy-mediated* egress, not direct; seccomp
+  blocks the direct connect. So the agent's only path to github is through rein. Keep the
+  prober assertion as a **regression guard**, but §3b/§1's "no unmediated path" now holds
+  empirically.
 - **Two auth hops, do not conflate.** The spike exercised git→nono with `--no-auth`; the
   *authenticated* git→nono credential value (nono's own external-proxy password, if nono
   requires one) needs a P1 end-to-end confirm, distinct from nono→rein
@@ -508,10 +509,30 @@ obviously stops it from (a) opening `/dev/tty` on the shared controlling termina
 (`tmux send-keys`) — self-approving its own declared push **through the legit tunnel,
 no secret-forging needed**, silently defeating the one guarantee rein exists to provide
 while journeys stay green (they drive approval host-side). The tmux socket + `$TMUX`
-appear in NO deny list in this design. **Fix (P1, named confirm-item + spec):** scrub
-`$TMUX` and deny the tmux server socket in the profile; and the prober MUST empirically
-assert the agent cannot reach the approval channel (tty open, tmux socket connect,
-`send-keys` injection all blocked).
+appear in NO deny list in this design. **EMPIRICALLY CONFIRMED (2026-07-18) — this is a real hole, and the obvious fix does
+NOT work.** Inside `nono run` (default-ish profile), the agent: got `$TMUX` **passed
+through** (leaks `/tmp/tmux-<uid>/default`); could NOT `ls` the tmux dir; **but
+successfully `connect()`ed to the tmux AF_UNIX socket and `send-keys`'d a command that
+executed** (self-approval proven). `/dev/tty` was **blocked** (good — a *tty*-based
+approval is safe from the agent). The naive mitigation **fails**: adding
+`/tmp/tmux-<uid>` to `filesystem.deny` makes nono **refuse to launch** — *"Landlock
+deny-overlap is not enforceable; deny '/tmp/tmux-1000' overlaps allowed parent '/tmp'
+(group:system_write_linux)."* Landlock has **no deny-under-allow**, and nono's IPC
+restriction (`ipc_mode:shared_memory_only`) only blocks **abstract** sockets, not
+filesystem sockets like tmux's. So there is **no simple socket-deny**.
+
+**Real mitigation options (P1 design problem — the hardest part of the pivot):**
+(a) **Drop the tmux-popup approval under nono; use only the `/dev/tty` path** (proven
+blocked to the agent) — but the tmux popup existed as the fallback when rein has no
+usable tty (#13/#14), so this narrows the approval UX. (b) **Restructure the fs policy
+so `/tmp` is not broadly allowed** (allow only specific scratch subdirs, so the tmux
+dir is unreachable and no deny-overlap arises) — a departure from nono's default that
+may break tools expecting `/tmp`. (c) Move rein's approval IPC to a path structurally
+outside any agent-allowed tree. **This is the crux of whether the pivot preserves
+rein's core non-replayability guarantee (#32) — it must be resolved in P1 with a
+working, prober-asserted isolation, or it is a go/no-go blocker.** The prober MUST
+assert: `$TMUX` scrubbed, tmux socket connect blocked, `send-keys` blocked, `/dev/tty`
+unopenable — and fail closed if any succeeds.
 
 1. **Launch gate = nono analog of `VerifyConfigApplied`.** A tiny, dep-free,
    in-binary check that runs on every `rein run --nono` BEFORE the agent, and fails
