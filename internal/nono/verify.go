@@ -68,10 +68,12 @@ type VerifyParams struct {
 	Timeout time.Duration
 }
 
-// VerifyContainment is the function rein's run path calls to gate a launch on
-// containment. It returns the classified Verdict and a non-nil error when the
-// launch must be refused (a leak, a failed positive control, or the probe could
-// not run). When nono is absent it returns ErrNonoUnavailable so CI can skip.
+// VerifyContainment is the launch-gate seam rein's `run --nono` path will call
+// to gate a launch on containment (P1e wiring; not yet invoked from cmd/rein —
+// the prober lands first per design §3e). It returns the classified Verdict and
+// a non-nil error when the launch must be refused (a leak, a failed positive
+// control, or the probe could not run). When nono is absent it returns
+// ErrNonoUnavailable so CI can skip.
 func VerifyContainment(vp VerifyParams) (Verdict, error) {
 	if vp.ReinBin == "" {
 		return Verdict{}, fmt.Errorf("nono verify: ReinBin is required")
@@ -182,7 +184,12 @@ func VerifyContainment(vp VerifyParams) (Verdict, error) {
 		obs.Creds[i].Existed = credExist[obs.Creds[i].Path]
 	}
 
-	verdict := Classify(obs, vp.Policy)
+	// The gate guarantees the planted loopback listener is live and that direct
+	// TCP is seccomp-denied pre-network, so an Unknown on those controls is an
+	// errno drift that must fail closed, not pass.
+	pol := vp.Policy
+	pol.RequireControls = true
+	verdict := Classify(obs, pol)
 	if verdict.ShouldFailClosed() {
 		return verdict, fmt.Errorf("nono verify: CONTAINMENT FAILURE — refusing to launch:\n%s", verdict.String())
 	}
@@ -191,28 +198,30 @@ func VerifyContainment(vp VerifyParams) (Verdict, error) {
 
 // launchProbe runs the probe through nono under session isolation and returns
 // nono's stderr and any run error.
+//
+// Session isolation is done with SysProcAttr{Setsid:true} on nono ITSELF, not an
+// external `setsid` wrapper: that makes nono a new session (no controlling tty,
+// detached from the caller's — and the user's tmux — session) AND makes
+// cmd.Process.Pid the session/group leader, so a timeout kill(-pid) reaches
+// nono's whole supervised tree. A `setsid -w` wrapper would put nono in a pgid
+// != cmd.Process.Pid, so the group kill would miss it (nono orphaned to init).
+// cmd.Run waits for nono to exit, so there is no race with the child (a BARE
+// `setsid` returns immediately and races it).
 func launchProbe(nonoBin, reinBin, profPath, work, outPath, cfgPath string, timeout time.Duration) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	nonoArgs := []string{
+	cmd := exec.CommandContext(ctx, nonoBin,
 		"run", "-p", profPath,
 		"--allow", work, // config + observations output
 		"--read-file", reinBin, // the probe binary must be readable to exec
 		"--", reinBin, "__nono-probe", outPath, cfgPath,
-	}
-
-	// Prefer `setsid -w` for session isolation + waiting; fall back to a direct
-	// nono invocation if setsid is unavailable (our context has no tty anyway).
-	var cmd *exec.Cmd
-	if sid, err := exec.LookPath("setsid"); err == nil {
-		cmd = exec.CommandContext(ctx, sid, append([]string{"-w", nonoBin}, nonoArgs...)...)
-	} else {
-		cmd = exec.CommandContext(ctx, nonoBin, nonoArgs...)
-	}
-	// New process group so a timeout kill reaches the whole tree (setsid already
-	// makes a new session; this is belt-and-suspenders for the fallback path).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	// On timeout, kill the whole session group (nono + its supervised children),
+	// not just the direct child. cmd.Process.Pid is the session leader, so -pid
+	// targets the group.
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	// Never inherit HTTP(S)_PROXY etc. from the parent — nono sets the sandbox's
 	// own; a stray parent value must not leak in. Start from a minimal env.
 	cmd.Env = minimalEnv()
@@ -223,8 +232,9 @@ func launchProbe(nonoBin, reinBin, profPath, work, outPath, cfgPath string, time
 
 	err := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
+		// Belt-and-suspenders: ensure the group is gone even if Cancel raced.
 		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // kill the group
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}
 		return stderr.Bytes(), fmt.Errorf("probe timed out after %s (sandbox may be wedged)", timeout)
 	}

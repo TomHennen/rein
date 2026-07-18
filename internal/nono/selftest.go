@@ -61,6 +61,12 @@ const (
 	ChanUDPEgress Channel = "udp_egress"
 )
 
+// Deferred (issue #146): the approval-channel isolation assertions the design
+// (§3e) calls the crux — tmux socket connect denied, `send-keys` denied,
+// /dev/tty unopenable, $TMUX absent. Out of this P1 prober's 5-channel contract;
+// `send-keys` in particular is a session-disruption hazard needing an isolated
+// tmux fixture, not the user's real server.
+
 // Status is the per-channel verdict.
 type Status string
 
@@ -85,6 +91,16 @@ type Policy struct {
 	// FailOnUDP promotes an open UDP channel from a warning to a leak. Default
 	// false: UDP-open is the documented residual.
 	FailOnUDP bool
+
+	// RequireControls fails the gate closed when a control channel that has NO
+	// legitimate "couldn't determine" excuse comes back Unknown — the arbitrary-
+	// loopback crux (target is a guaranteed-live host listener) and direct-TCP
+	// egress (seccomp denies the connect pre-network, so even offline it is a
+	// clean EPERM). An Unknown there means an errno drift the gate must not pass
+	// silently. The host-side gate (VerifyContainment) sets this; synthetic unit
+	// tests leave it off. Does NOT touch github-via-proxy or UDP, which can be
+	// legitimately Unknown (no DNS / not attempted).
+	RequireControls bool
 }
 
 // ConnResult is one connect/send attempt's raw outcome, measured in-sandbox.
@@ -189,13 +205,13 @@ func Classify(obs Observations, policy Policy) Verdict {
 		classifyCreds(obs.Creds),
 		classifyNegative(ChanDirectTCP, obs.DirectExternal,
 			"non-allowlisted external host reachable directly (seccomp egress block failed)",
-			"direct external connect denied"),
+			"direct external connect denied", policy.RequireControls),
 		classifyNegative(ChanArbitraryLoopback, obs.PlantedLoop,
 			"arbitrary loopback listener REACHED — rein's no-proxy-auth assumption is BROKEN",
-			"arbitrary loopback connect denied (rein's listener is safe without proxy-auth)"),
+			"arbitrary loopback connect denied (rein's listener is safe without proxy-auth)", policy.RequireControls),
 		classifyNegative(ChanGitHubViaProxy, obs.GitHubDirect,
 			"github reachable directly, bypassing the proxy (token-injection boundary lost)",
-			"direct github connect denied — github egress must route through the proxy"),
+			"direct github connect denied — github egress must route through the proxy", false),
 		classifyProxyControl(obs.NonoProxy),
 		classifyUDP(obs.UDPExternal, policy),
 	)
@@ -226,18 +242,25 @@ func classifyCreds(creds []CredObs) ChannelVerdict {
 	}
 }
 
-// classifyNegative classifies a channel that must be BLOCKED.
-func classifyNegative(ch Channel, r ConnResult, leakDetail, okDetail string) ChannelVerdict {
+// classifyNegative classifies a channel that must be BLOCKED. If strictUnknown
+// is set, an ambiguous non-denial (the channel has no legitimate Unknown) fails
+// the gate closed instead of passing as Unknown.
+func classifyNegative(ch Channel, r ConnResult, leakDetail, okDetail string, strictUnknown bool) ChannelVerdict {
+	unknown := func(detail string) ChannelVerdict {
+		if strictUnknown {
+			return ChannelVerdict{ch, StatusFail, detail + " — no legitimate Unknown for this control; failing closed"}
+		}
+		return ChannelVerdict{ch, StatusUnknown, detail}
+	}
 	switch {
 	case !r.Attempted:
-		return ChannelVerdict{ch, StatusUnknown, "not attempted (no target)"}
+		return unknown("not attempted (no target)")
 	case r.Succeeded:
 		return ChannelVerdict{ch, StatusLeak, leakDetail + " [" + r.Target + "]"}
 	case r.Denied:
 		return ChannelVerdict{ch, StatusOK, okDetail + " [" + r.Target + "]"}
 	default:
-		return ChannelVerdict{ch, StatusUnknown,
-			fmt.Sprintf("connect to %s failed but not with a denial errno (%s); cannot conclude containment", r.Target, r.Err)}
+		return unknown(fmt.Sprintf("connect to %s failed but not with a denial errno (%s); cannot conclude containment", r.Target, r.Err))
 	}
 }
 

@@ -96,6 +96,45 @@ func TestClassify_RefusedIsUnknownNotOK(t *testing.T) {
 	}
 }
 
+// Under RequireControls (what the gate sets), an ambiguous non-denial on the
+// crux (arbitrary loopback) or direct-TCP fails closed instead of passing as
+// Unknown — those controls have no legitimate "couldn't determine".
+func TestClassify_RequireControls_UnknownFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(o *Observations)
+		ch   Channel
+	}{
+		{"loopback", func(o *Observations) { o.PlantedLoop = refused("127.0.0.1:47999") }, ChanArbitraryLoopback},
+		{"direct", func(o *Observations) { o.DirectExternal = refused("1.1.1.1:443") }, ChanDirectTCP},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			obs := contained()
+			tc.set(&obs)
+			v := Classify(obs, Policy{RequireControls: true})
+			if got := chanStatus(v, tc.ch); got != StatusFail {
+				t.Errorf("%s under RequireControls: got %s, want fail", tc.ch, got)
+			}
+			if !v.ShouldFailClosed() {
+				t.Errorf("strict-control Unknown must fail the gate closed")
+			}
+		})
+	}
+}
+
+// github-via-proxy Unknown is legitimate (no DNS) even under RequireControls.
+func TestClassify_RequireControls_GitHubUnknownStillPasses(t *testing.T) {
+	obs := contained()
+	obs.GitHubDirect = ConnResult{} // unresolved / not attempted
+	v := Classify(obs, Policy{RequireControls: true})
+	if got := chanStatus(v, ChanGitHubViaProxy); got != StatusUnknown {
+		t.Errorf("github unknown under RequireControls: got %s, want unknown", got)
+	}
+	if v.ShouldFailClosed() {
+		t.Errorf("a legitimately-unknown github channel must not fail closed")
+	}
+}
+
 func TestClassify_DirectEgressReached_IsLeak(t *testing.T) {
 	obs := contained()
 	obs.DirectExternal = reached("1.1.1.1:443")
