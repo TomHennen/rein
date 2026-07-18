@@ -42,6 +42,7 @@ import (
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
+	"github.com/TomHennen/rein/internal/nono"
 	"github.com/TomHennen/rein/internal/runscope"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/srt"
@@ -204,6 +205,12 @@ func main() {
 		// prove the deny-read + seccomp protections took effect. Exits with a
 		// srt.Probe* code the parent interprets. Not user-facing.
 		os.Exit(srt.RunProbe(os.Args[2:]))
+	case "__nono-probe":
+		// Hidden subcommand: runs INSIDE `nono run` during
+		// nono.VerifyContainment. It measures the containment channels and
+		// writes an Observations JSON the host-side gate classifies. Not
+		// user-facing.
+		os.Exit(nono.RunContainmentProbe(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage()
 	default:
