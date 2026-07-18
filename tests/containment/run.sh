@@ -41,26 +41,28 @@ echo "run.sh: sandbox-probe=$SANDBOX_PROBE rein=$REIN_BIN"
 host_report="$out_dir/host-report.json"
 echo "run.sh: [1/6] host baseline -> $host_report"
 "$SANDBOX_PROBE" report --format json > "$host_report" || die "sandbox-probe host run failed"
-# NOTE: 'report --format json' is a PLACEHOLDER invocation. Confirm sandbox-probe's
-# real subcommand/flags once fetched and update here + below.
+# TODO(#141): 'report --format json' is a PLACEHOLDER invocation. Confirm
+# sandbox-probe's real subcommand/flags once fetched and update here + below.
 
 # --- 2. In-sandbox run through the real launch path ---------------------------
 sandbox_report="$out_dir/sandbox-report.json"
 echo "run.sh: [2/6] in-sandbox run -> $sandbox_report"
-# TODO(#136B): wire the REAL launch. It must go through `rein run` so the probe
-# inherits the exact scrubbed env, seccomp, and binds the agent gets — NOT a
+# TODO(#141): wire the REAL launch. It must go through `rein run --sandbox` so the
+# probe inherits the exact scrubbed env, seccomp, and binds the agent gets — NOT a
 # bespoke launcher (which would measure a different sandbox). Sketch:
-#     "$REIN_BIN" run --workdir "$PWD" -- "$SANDBOX_PROBE" report --format json > "$sandbox_report"
-# It also needs rein to expose the EMITTED settings.json for this run (step 5).
+#     "$REIN_BIN" run --sandbox -- "$SANDBOX_PROBE" report --format json > "$sandbox_report"
+# It also needs rein to expose the EMITTED settings.json for this run (step 5):
+# today it is written to an ephemeral MkdirTemp dir removed on exit
+# (cmd/rein/run_sandboxed.go), so rein must grow a persist/dump hook first.
 # Until both are confirmed against the current rein CLI, fail rather than fake.
-die "TODO(#136B): in-sandbox launch + settings.json capture not yet wired. See comments above and README 'What is stubbed'."
+die "TODO(#141): in-sandbox launch + settings.json capture not yet wired. See comments above and README 'What is stubbed'."
 
 # --- 3. Diff ------------------------------------------------------------------
 # echo "run.sh: [3/6] diff host vs sandbox"
 # diff <(jq -S . "$host_report") <(jq -S . "$sandbox_report") > "$out_dir/diff.txt" || true
 
 # --- 4. Normalize into the oracle schema --------------------------------------
-# TODO(#136B): map sandbox-probe's native JSON into tests/containment's normalized
+# TODO(#141): map sandbox-probe's native JSON into tests/containment's normalized
 # schema (network/files/env arrays; see README). This mapping is the one piece we
 # cannot write until we see sandbox-probe's actual output shape. Emit:
 #     normalized="$out_dir/observations.json"

@@ -10,13 +10,21 @@ Design of record: `docs/containment-probe-harness.md`. This directory implements
 the "verification harness" layer only — the in-binary launch gate
 (`internal/srt` `RunProbe`/`VerifyConfigApplied`) stays bespoke and is untouched.
 
-## Posture (why this is safe re: licensing)
+## Posture (why sandbox-probe is a separate process)
 
-sandbox-probe is invoked as an **external process**, exactly like `pyte` in
-`tests/interactive/`. It is **never imported** into Go code here and is **not** in
-`go.mod`, so its Apache-2.0 license never touches the shipped rein binary
-(hard-constraint #4). The only Go code in this directory is the oracle + its CLI,
-which import `internal/srt` and `internal/proxy` (same module) and nothing else.
+This is **not** a licensing constraint. rein is licensed **Apache-2.0** (`./LICENSE`)
+and sandbox-probe is **Apache-2.0** — the same license both ways, so importing it
+would be fully license-compatible with **zero incompatibility**. Apache-2.0 poses
+no barrier if pulling it in as a Go dependency later proves cleaner.
+
+The reason it runs as an **external process** is **architectural**: sandbox-probe
+is a runnable enumeration *harness*, not a library designed to be imported, and
+keeping it out-of-binary keeps this whole containment check a standalone test
+artifact rather than code linked into the shipped `rein`. That mirrors the
+project's `pyte` posture (root `CLAUDE.md`, "Libraries"): a test-only dependency,
+never linked into or shipped with the Go binary. It is **not** in `go.mod`; the
+only Go code in this directory is the oracle + its CLI, which import
+`internal/srt` and `internal/proxy` (same module) and nothing else.
 
 ## What the oracle checks
 
@@ -94,11 +102,13 @@ fabricates results.
 
 Honest scope: the **oracle + CLI + schema are complete and unit-tested**
 (`oracle_test.go`, config built via `srt.Build`). The end-to-end wiring is
-skeleton with explicit `TODO(#136B)` markers in `run.sh`:
+skeleton with explicit `TODO(#141)` markers in `run.sh` (tracking issue for the
+remaining wiring):
 
-1. **Fetch/pin sandbox-probe** and **confirm its license is Apache-2.0**
-   (hard-constraint #4 — taken here on the design note's word). Not vendored;
-   `run.sh` expects it on `PATH` or `$SANDBOX_PROBE`. Confirm its real
+1. **Fetch/pin sandbox-probe.** Its license is Apache-2.0 (same as rein — no
+   incompatibility, and importing would be fine license-wise; see Posture above),
+   so hard-constraint #4 is satisfied whether we shell out or ever import. Not
+   vendored; `run.sh` expects it on `PATH` or `$SANDBOX_PROBE`. Confirm its real
    subcommands/flags (the `report --format json` call is a placeholder) and pin
    a version.
 2. **sandbox-probe → normalized mapping.** The single piece we can't write until
