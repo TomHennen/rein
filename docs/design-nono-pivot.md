@@ -257,7 +257,7 @@ neutral package first** (§5) rather than importing srt from `internal/nono`.
 | `nono version` | binary version == `PinnedVersion` | yes |
 | `nono digest` | `VerifyInstalled` (on-disk SHA-256 == pin) | yes |
 | `nono landlock` | `nono setup --check-only` reports Landlock supported | yes |
-| `nono seccomp` | supervisor connect/UDP mediation available | yes |
+| `nono seccomp` | supervisor connect/UDP mediation available (probe or `setup`) | yes |
 | `CA trust env` | rein CA PEM readable + non-empty | yes |
 
 `nono setup --check-only` is nono's own health probe. The launch path
@@ -270,8 +270,9 @@ to a weaker mode.
 
 New file **`cmd/rein/run_nono.go`** (`func runNono(cmdline []string) (int, error)`), the
 nono counterpart of `run_sandboxed.go`. `rein run` reaches it behind **`--nono`**; srt
-stays the default until P3. It reuses the broker/mint/scope machinery unchanged — only
-the *front* of the proxy and the *sandbox launch* differ.
+stays the default until P3. It reuses the broker/mint/scope machinery unchanged
+(`runbroker`, `runscope`, `brokercore`, declare hooks) — only the *front* of the proxy
+and the *sandbox launch* differ.
 
 ### 3a. Re-front the proxy: unix socket → loopback TCP (no password needed)
 
@@ -341,8 +342,8 @@ break the default `rein run` on the branch and defeat "rollback = revert one PR.
   Remove the srt fields at P3.
 
 `declare.rein.internal` (§3, below) rides the same listener: nono CONNECTs to it by
-hostname, rein terminates with its CA and answers locally, token-free. It must be in
-`allow_domain` and must NOT be in `upstream_bypass` (that would send it direct →
+hostname, rein terminates with its CA and answers locally (`classLocalDeclare`),
+token-free. It must be in `allow_domain` and must NOT be in `upstream_bypass` (that would send it direct →
 unresolvable).
 
 - **Confirm-item (untested):** that nono tunnels an *unresolvable* virtual host by its
@@ -434,7 +435,8 @@ downstream by rein and never enters the sandbox).
 **State:** direct TCP egress is strong (seccomp refuses it, same as srt). **UDP egress is
 open by default — all of it** (DNS, QUIC, arbitrary): tested inside `nono run`, `sendto`
 to `8.8.8.8:53`, `8.8.8.8:12345`, and `1.1.1.1:443` all succeed. srt's empty network
-namespace blocked this. nono *can* route UDP sends through its supervisor, but the default
+namespace blocked this. nono *can* route UDP sends through its supervisor
+(`sandbox/linux.rs:2064` routes `sendto`/`sendmsg`/`sendmmsg` to it), but the default
 allows them and the strict setting couldn't be found.
 
 **Investigated (2026-07-18) — no clean fix under nono; a real residual, Tom's call.**
@@ -477,8 +479,8 @@ the socket path); it could not `ls` the tmux dir; but it **did `connect()` to th
 socket and `send-keys` a command that ran** — self-approval proven. `/dev/tty` was blocked
 (good — a tty-based approval is safe). The naive fix fails: adding `/tmp/tmux-<uid>` to
 `filesystem.deny` makes nono **refuse to launch**, because Landlock has no "deny under an
-allowed parent," and nono's shared-memory IPC restriction only blocks *abstract* sockets,
-not filesystem sockets like tmux's.
+allowed parent," and nono's shared-memory IPC restriction (`ipc_mode: shared_memory_only`)
+only blocks *abstract* sockets, not filesystem sockets like tmux's.
 
 **Resolved (2026-07-18) — `linux.af_unix_mediation: "pathname"` closes it and keeps the
 tmux popup UX.** nono ships an opt-in `af_unix_mediation` field, default `off` (which is
@@ -498,7 +500,8 @@ real agent (claude/node/gh — DNS resolver, etc.) genuinely needs and grant onl
 **Cost tested (empty allowlist): low** — DNS, `getent`, git, curl-through-the-proxy, node,
 and gh all still worked; nono blocked 6 non-essential unix-socket ops and nothing
 essential broke. So the allowlist can **start empty** and grow only if a specific tool
-needs a specific socket (P1 must verify the *real* `claude` agent runs clean). The prober
+needs a specific socket (P1 must verify the *real* `claude` agent runs clean — a bare
+`node -e` emitted only a benign warning). The prober
 must assert (fail closed otherwise): tmux socket connect **denied**, `send-keys` denied,
 `/dev/tty` unopenable, `$TMUX` absent. This preserves rein's non-replayability guarantee
 (#32) under nono.
@@ -516,7 +519,13 @@ must assert (fail closed otherwise): tmux socket connect **denied**, `send-keys`
      that lets rein's listener run without a password — §3a);
    - **arbitrary UDP blocked** (guards §3d; only once a UDP policy is set);
    - **approval channel unreachable:** `/dev/tty` unopenable, tmux socket unconnectable,
-     `send-keys` blocked (the crux above).
+     `send-keys` blocked (the crux above);
+   - **positive control — the legit path works:** an authorized request through nono's
+     tunnel to rein reaches the listener and is served (the spike's control was
+     curl-through-nono's-proxy → 200). Without this, a mis-provisioned `upstream_proxy`
+     port or a dead listener would still pass all the negative checks while the whole
+     stack silently fails closed — the positive control surfaces that as a config error in
+     the gate instead.
 
    Lives in `internal/nono/selftest.go` (mirrors `srt/selftest.go`). Keep it bespoke and
    tiny; do not swap an external toolkit into this slot.
@@ -715,8 +724,9 @@ decisions.
   per-run `CLAUDE_CONFIG_DIR` + `~/.claude` deny, or the agent can't run / #94 regresses.
 - **macOS / Seatbelt:** entirely untested. nono uses a different sandbox on macOS. This
   doc is **Linux-scoped**; a macOS cutover is a separate open gate needing its own spike
-  (containment parity, CA-env behavior) *before* flipping the default there. Don't assume
-  Linux results transfer.
+  (containment parity, CA-env behavior, and re-verifying the loopback-mediation property
+  the passwordless listener depends on — it's proven only via Linux seccomp so far)
+  *before* flipping the default there. Don't assume Linux results transfer.
 - **nono is pre-1.0 and moves fast** (0.68.0; profile fields shift — `deny_domain`,
   `platform_overrides` landed in 0.68.0). Mitigations: `PinnedVersion` + vendored digest +
   re-running the prober's golden report on every bump. We trade one moving dependency (srt)
