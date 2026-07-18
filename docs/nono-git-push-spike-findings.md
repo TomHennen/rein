@@ -1,8 +1,9 @@
 # nono git-push spike — findings + real-box runbook
 
-**Status:** IN PROGRESS. Local transport measurement DONE (2026-07-18) in an
-ephemeral container; real-box validation (real github.com, nono's suggested
-profiles, Landlock containment, approval flow) STAGED below, not yet run.
+**Status:** IN PROGRESS. Local transport measurement DONE; real-box validation
+DONE (real github.com, containment, cmd:// seam — see below). **Two independent
+reviews (2026-07-18) then found the proposal built on the wrong architecture —
+see "Post-spike reviews" at the end before acting on any of this.**
 
 **Why this spike exists.** We are evaluating whether `rein` should stop being
 its own sandbox+proxy and instead become the **per-issue, human-approved GitHub
@@ -269,3 +270,52 @@ keeps only its git-push relay — a large simplification — while nono provides
 containment and rein keeps issuance + per-issue scope + approval. This is the
 "rein becomes the credential authority for nono" split, achievable with zero nono
 changes and one config-wired rein relay for the push path.
+
+## Post-spike reviews (2026-07-18) — the proposal built on the wrong architecture
+
+Two independent reviews (a full-context advisor + a fresh adversarial fable
+reviewer of the committed docs) converged: `docs/proposal-rein-on-nono.md` argues
+for the **weakest** of three architectures. Recorded so no one acts on the
+proposal as written.
+
+- **(c) nono injects via `cmd://`** — what the proposal wrote, and what this spike
+  measured. The fable review shows it is a **downgrade of rein's mediation, not a
+  relocation**: `cmd://` sees only `{host, path, method, session}` — never the
+  request BODY. So (i) GraphQL read-vs-write tier classification is impossible
+  (`POST /graphql`); (ii) ref-level push policy dies; and (iii) — using this
+  spike's own data (small pushes LAND through nono's inject) — **small pushes
+  bypass rein's declare gate while still getting a minted token.** A policy bypass
+  for exactly the pushes an exfiltrating agent would craft.
+- **(b) nono sandbox only; rein's existing proxy stays the injection layer**
+  (chain the agent's github egress through rein's proxy via nono's
+  `--upstream-proxy`) — the advisor's point. rein sees full bodies → mediation
+  preserved AND the git-push cap dissolves (it was an artifact of using nono's
+  inject). **Source-plausible** (`external.rs` is an opaque bidirectional CONNECT
+  tunnel — no buffer, per-domain, routing is nono-config not agent-settable, which
+  closes the (c) bypass). **But empirically UNCONFIRMED:** every attempt to wire
+  nono `--upstream-proxy` → an external MITM (profile field + CLI flag, loopback +
+  non-loopback, ± enterprise network-profile) **aborted git's CONNECT with the
+  MITM never receiving a connection.** Cause not cracked (a required
+  network-profile/route config, or an unidentified restriction). Integration is
+  fiddlier than a "one-hour test": CWD handling, `~/.gitconfig` EACCES-is-fatal
+  (rein's #94 `GIT_CONFIG_GLOBAL=/dev/null` fix needed), and this un-routed
+  upstream-proxy all required fighting.
+- **(a) don't pivot** — fix srt's install pain + fuzz the relay + adopt the probe:
+  the three real wins, zero new dependency, zero discarded code.
+
+Other review findings the proposal must absorb: the real forcing function is
+**srt drifting away from the `mitmProxy.socketPath` hook** (foreground it, not
+install friction); nono becomes a **new TCB trust root** (it TLS-terminates all
+agent traffic incl. minted tokens) and "stronger sandbox" was asserted, never
+measured; **large non-push uploads** (LFS, release assets) also hit the cap;
+TM-G8/hard-constraint-#2 denial semantics for `credential-capture` are
+unspecified; and the proposal's `httputil.ReverseProxy` rewrite **contradicts
+CLAUDE.md's hand-rolled-proxy rationale** — retracted (keep + fuzz the CP1 relay).
+
+**Consensus next steps:** land the carve-out (fuzz relay + adopt sandbox-probe on
+main) NOW, unconditionally; treat the pivot as an open question gated on a real
+follow-up spike — (1) crack the (b) `--upstream-proxy` routing, and (2) evaluate a
+forward-proxy library (`google/martian` the lead candidate — viable *because* (b)
+turns rein into a standard forward proxy, dissolving CLAUDE.md's goproxy
+rejection) against rein's injection invariants + the receive-pack declare tap. Do
+NOT green-light the five-phase plan on this spike.

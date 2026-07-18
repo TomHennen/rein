@@ -1,8 +1,18 @@
 # Project proposal: rein as the credential authority for nono
 
-**Status:** DRAFT for Tom's review. Synthesizes the 2026-07-18 nono spike
-(`docs/nono-git-push-spike-findings.md`) and the broker-landscape research.
-This proposes re-basing rein's **sandboxed mode** onto `nono` (Landlock) as the
+**Status:** DRAFT — **SUPERSEDED IN PART by two reviews; do NOT green-light as
+written.** See `docs/nono-git-push-spike-findings.md` §"Post-spike reviews". In
+short: this doc argues architecture **(c)** (nono injects via `cmd://`), which the
+reviews show is a *downgrade* of rein's mediation (the `cmd://` seam never sees
+request bodies → GraphQL tier-classification and the small-push declare gate both
+break). The better candidate is architecture **(b)** (nono = sandbox only; rein's
+existing proxy stays the injection layer) — source-plausible but **empirically
+unconfirmed** (the `--upstream-proxy` wiring did not route in the spike). Land the
+carve-out (fuzz + prober) now; gate the pivot on a real follow-up spike. The
+tear-out/keep/new/test sections below are written for (c) and must be re-pointed
+at (b) if the follow-up spike confirms it.
+
+Original intent: re-base rein's **sandboxed mode** onto `nono` (Landlock) as the
 sandbox substrate, with rein reduced to the credential authority + git-push
 relay + opinionated installer. Direct mode (Shape B) is out of scope.
 
