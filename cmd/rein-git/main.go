@@ -21,12 +21,13 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/TomHennen/rein/internal/agentenv"
 	"github.com/TomHennen/rein/internal/gitupstream"
 )
 
 // envUpstreamIntentFile is set only for a sandboxed bound checkout. Its presence
 // switches on the strip+capture below; unset (direct mode) passes -u through.
-const envUpstreamIntentFile = "REIN_UPSTREAM_INTENT_FILE"
+const envUpstreamIntentFile = agentenv.EnvUpstreamIntentFile
 
 // writeSubcommands need a write-capable installation token.
 var writeSubcommands = map[string]bool{
