@@ -79,15 +79,21 @@ real github.com):
 New package **`internal/nono`**. Files: `installer.go`, `profile.go`, `doctor.go`
 (health checks; the cobra wiring stays in `cmd/rein/doctor.go`).
 
-**P0.0 — schema dump FIRST (gates the profile struct).** Before writing `profile.go`,
-dump nono 0.68.0's *real* profile/config schema from nono source (the profile struct)
-and emit one working, composed `nono run` profile (both auth hops + declare host +
-`deny_credentials` + env) that actually launches. Every field name in §2.2
-(`allow_domain`, `upstream_bypass`, `external_proxy{…}`, `deny_credentials`, `env`) is
-currently inferred from the spike, not from a dumped schema — and the spike drove auth
-via the `--upstream-proxy` CLI flag, never a composed profile with the `auth` object set
-(§8). The struct shape in §2.2 is provisional until this lands. **Do not code the
-generator against guessed field names.**
+**P0.0 — schema dump: DONE (2026-07-18). See `docs/design-nono-profile-schema.md`
+(the AUTHORITATIVE field reference) + `docs/nono-profile-sample.json` (a launch-verified
+profile).** The §2.2 struct below is CORRECTED there — key deltas the generator MUST use:
+the profile is **nested** (`network.*`, `filesystem.*`, `linux.*`, `environment.*`,
+`groups.include`), NOT the flat struct in §2.2; **`upstream_proxy` is a bare `host:port`
+string, not a URL**; **`deny_credentials` is a policy GROUP** (`groups.include:
+["deny_credentials"]`), not a `[]string`; env goes in **`environment.set_vars`**; the CA
+is granted via **`filesystem.read_file`** (fs is default-deny, so `filesystem.deny` is a
+Linux no-op — grant nothing extra); **`external_proxy.auth` is UNIMPLEMENTED in 0.68.0**
+(§3a correction — and not needed); and **nono OWNS `HTTP(S)_PROXY`/`NO_PROXY`** (points
+them at its own proxy with `NONO_PROXY_TOKEN`), so the agent→nono hop is nono's and CDN
+bypass MUST use `upstream_bypass`, not the agent's `NO_PROXY` (§3c correction). The
+schema dump also OMITS the `filesystem.unix_socket*` grant fields the profile actually
+accepts — the generator must not trust the dump as complete. Code the generator against
+`docs/design-nono-profile-schema.md`, not the §2.2 struct.
 
 **"Standalone" caveat.** P0 is *mostly* self-contained, but `doctor.go` needs the
 `Check`/`Status` types that today live in `internal/srt/preflight.go`. Reusing them
@@ -267,7 +273,25 @@ the nono analog of `run_sandboxed.go`. `rein run` dispatches to it behind
 machinery unchanged (`runbroker`, `runscope`, `brokercore`, declare hooks) — only the
 *front* of the proxy and the *sandbox launch* differ.
 
-### 3a. Re-front internal/proxy: unix socket → loopback TCP + proxy-auth (defense-in-depth)
+### 3a. Re-front internal/proxy: unix socket → loopback TCP
+
+> **CORRECTION (2026-07-18, P0.0 + loopback spike) — proxy-auth is OUT; nono's loopback
+> isolation replaces it, and it's stronger.** Two verified findings supersede the
+> proxy-auth design below: (1) **nono's `external_proxy.auth` is UNIMPLEMENTED in
+> 0.68.0** (schema rejects the auth object; source hardcodes `auth: None`; handlers
+> error "not yet implemented") — so a per-session proxy-auth secret **cannot be built**.
+> (2) **But it isn't needed:** tested — a nono-sandboxed agent's raw `connect()` to an
+> **arbitrary loopback port is DENIED** (`EPERM`) while curl-through-nono's-proxy works
+> (200). nono permits the agent only its OWN proxy on loopback; **the agent cannot reach
+> rein's listener directly.** So the socket→TCP capability regression is **closed
+> structurally by nono's loopback mediation**, not by proxy-auth. Net: drop the
+> `ProxyAuthSecret`/407 requirement below (nono can't send the secret anyway); rein's
+> loopback listener needs no auth because nono is the only thing that can reach it. The
+> prober MUST still assert the arbitrary-loopback-port block (it's now the control). All
+> the "full mediation on every accepted connection" reasoning still holds as defense in
+> depth. See `docs/design-nono-profile-schema.md` for the schema evidence.
+
+**Original (proxy-auth) design — superseded by the correction above, kept for context:**
 
 Closes the socket→TCP capability regression — but proxy-auth is **defense-in-depth,
 NOT the security boundary.** The primary gate is declare + tier-classifier +
