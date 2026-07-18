@@ -268,9 +268,10 @@ func download(httpGet func(string) (*http.Response, error), url string) ([]byte,
 }
 
 // extractNonoBinary reads the gzip'd tarball and returns the bytes of the single
-// `nono` file at the archive root. Guards path-traversal (rejects absolute or
-// ".." members) and refuses symlinks/hardlinks/dirs-as-the-binary. A missing or
-// duplicate `nono` member is an error.
+// regular file whose basename is `nono` (the real 0.68.0 tarball places it at the
+// archive root). Guards path-traversal (rejects absolute or ".." members) and
+// refuses symlinks/hardlinks/dirs-as-the-binary. A missing or duplicate `nono`
+// member is an error.
 func extractNonoBinary(tarball []byte) ([]byte, error) {
 	gz, err := gzip.NewReader(bytes.NewReader(tarball))
 	if err != nil {
