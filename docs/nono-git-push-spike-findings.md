@@ -376,3 +376,52 @@ response, the pkt-line declare tap) is custom regardless. Right investment:
 security-critical code — by deleting `internal/srt` (~2000 LOC) and keeping a
 small, fuzzed, stdlib forward-proxy that nono chains to as an external proxy. Next
 gate: wire the external-proxy into `nono run` (sandbox mode).
+
+## Design-requirement validation (2026-07-18, fourth pass) — re-review items resolved
+
+Worked through the second review's four design requirements empirically + in source.
+
+**(3d) Egress — REFUTED that nono is weaker; it is airtight, and documented.**
+Probe inside `nono run` (`block:false`, only `github.com` allowlisted): every
+direct socket connect to a non-allowlisted host — `1.1.1.1:443`, `:80`,
+`8.8.8.8:53`, `169.254.169.254` (metadata) — is **blocked with `PermissionError`**
+at the syscall level (DNS resolves, but connect is denied); on the host all are
+reachable. Mechanism (nono docs, `cli/internals/wsl2.mdx`): *"the credential
+proxy's network lockdown is enforced via **seccomp user notification — the
+supervisor validates every `connect`/`bind` call**."* Landlock alone is port-scoped
+(`capability.rs:927`), but nono layers seccomp-notify connect-validation for
+**host-scoped** enforcement. It is intentional and **fail-closed**: nono *refuses*
+proxy-only mode on WSL2 (where seccomp-notify is unavailable) rather than allow
+bypass; the degraded `insecure_proxy` mode is explicitly "child not prevented from
+bypassing the proxy." So egress is **parity with srt's netns** (both kernel-
+enforced airtight, different mechanism). **Caveat: WSL2 → rein must fail closed
+(match nono).** The review's biggest structural concern does not hold.
+
+**(3c) Host-routing boundary (srt gap #6) — CONFIRMED addressable.** With
+`upstream_bypass:["example.com"]` + `upstream_proxy:<rein>`, inside `nono run`:
+`github.com` routed to rein's MITM (`MITM-GOT-CONNECT: github.com:443`) while
+`example.com` went **direct** (200, MITM never saw it). So rein routes ONLY the
+exact inject hosts (api/github/uploads) to itself; CDN hosts (codeload/objects/raw)
+go in `upstream_bypass` → direct tunnel, never reaching rein → **no token on a
+pre-signed asset URL.** rein's per-host-class inject stays the second line.
+
+**(3a) Listener proxy-auth — solvable (source-confirmed).** nono sends upstream
+`Proxy-Authorization` to the external proxy (`external.rs:51`) and
+`ExternalProxyAuth` (keyring-backed, basic) exists — so rein's loopback-TCP
+listener can **require a per-session secret**, closing the "any local process
+reaches rein's proxy" regression. (Empirical keyring plumbing not exercised; the
+send path is in source.)
+
+**(3b) CA trust — a genuine nono-model difference, fails closed.** nono uses
+Landlock (NO mount namespaces), so the review's suggested "bind rein's CA read-only
+over the system trust path" is **not available** — you can't mount-substitute a
+file. CA trust under nono is therefore **env-var / config based** (`SSL_CERT_FILE`
+/ `GIT_SSL_CAINFO` / `NODE_EXTRA_CA_CERTS`, or git's `http.sslCAInfo`), the same
+model nono uses for its own intercept CA (`intercept_ca_env_vars`). It **fails
+closed** (agent unsetting the CA var → TLS failure, not a bypass). Mitigation is
+`GIT_CONFIG_GLOBAL=/dev/null` pinning + accepting the env model, not an fs bind.
+
+**Net:** the composed stack works; egress is airtight; host-routing is exact;
+listener capability is closeable with proxy-auth; CA trust is env-based-fail-closed.
+Remaining real unknowns: **macOS (Seatbelt) parity** (untested) and **nono pre-1.0
+maturity**. On Linux, architecture (b) is validated end-to-end.

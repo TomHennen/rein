@@ -78,7 +78,9 @@ requirements fell out, both cheap and profile-carried:
 
 ## Design requirements surfaced by the re-review (must be in P1)
 
-The second review confirmed (b) fixes (c)'s problems but flagged real new items:
+The second review confirmed (b) fixes (c)'s problems but flagged real new items.
+**All four were then validated** (empirically / in source — findings
+§"Design-requirement validation"); status noted per item:
 
 1. **Listener capability (the socket→TCP regression).** Today the token-injection
    capability is a placement-checked unix socket (`internal/proxy/placement.go`,
@@ -88,21 +90,30 @@ The second review confirmed (b) fixes (c)'s problems but flagged real new items:
    rein's listener, carried in the generated profile's `external_proxy.auth`
    (verified: nono supports upstream `Proxy-Authorization`), plus per-session token
    binding. This must replace `placement.go`'s guarantees explicitly.
-2. **CA trust via nono fs policy, not env.** Bind rein's CA bundle **read-only over
-   the system trust paths** via nono's filesystem policy + pinned
-   `GIT_CONFIG_GLOBAL=/dev/null` — not agent-mutable `SSL_CERT_FILE`/`GIT_SSL_CAINFO`
-   env (TM-G8: agents "fix" TLS errors by rewriting config).
-3. **Host-routing table (carry srt gap #6 forward).** Specify exactly which hosts
-   tunnel to rein vs go direct: **only the exact inject hosts** (api/github/uploads)
-   route to rein — never a wildcard, or a CDN host (codeload/objects/raw) pulls the
-   token onto a pre-signed asset URL. rein's per-host-class inject is the second
-   line. This routing table is the token-leak boundary; name it.
-4. **Egress is plausibly WEAKER on nono — test the hypothesis, don't assume.**
-   Landlock network control is TCP-port-scoped, not host-scoped; a host allowlist
-   without a netns lives only in a proxy the agent's traffic voluntarily traverses.
-   srt/bwrap can hand an empty netns with only the proxy socket — airtight. The
-   channel diff (below) must include a **direct-connect-bypass probe** and be framed
-   as "prove nono's egress isn't weaker," not neutral curiosity.
+2. **CA trust is env-based + fail-closed (a nono-model difference).** nono uses
+   Landlock with NO mount namespaces, so the review's "bind rein's CA read-only over
+   the system trust path" is **not available** — you can't mount-substitute a file.
+   CA trust is therefore env/config-based (`SSL_CERT_FILE`/`GIT_SSL_CAINFO`/git
+   `http.sslCAInfo`), the same model nono uses for its own intercept CA. It **fails
+   closed** (unsetting the CA var → TLS failure, not a bypass). Mitigation:
+   `GIT_CONFIG_GLOBAL=/dev/null` pinning + accept the env model (there is no fs-bind
+   option under Landlock). Confirmed VALIDATED (empirically: the composed push
+   trusted rein's CA via `http.sslCAInfo`).
+3. **Host-routing table (carry srt gap #6 forward) — VALIDATED.** Tested:
+   `upstream_bypass` routes bypassed hosts direct while github goes to rein
+   (github → rein's MITM; `example.com` in `upstream_bypass` → direct, never touched
+   rein). So the profile puts **only the exact inject hosts** (api/github/uploads) on
+   the `upstream_proxy` path and the CDN hosts (codeload/objects/raw) in
+   `upstream_bypass` → direct, never reaching rein (no token on a pre-signed asset
+   URL). rein's per-host-class inject stays the second line.
+4. **Egress — VALIDATED airtight (was the biggest concern; now refuted).** Tested:
+   inside `nono run`, direct socket connects to non-allowlisted hosts (`1.1.1.1:443`,
+   metadata, etc.) are **blocked with `PermissionError`** — nono enforces egress
+   **host-scoped via seccomp user-notification** (validates every `connect`/`bind`),
+   compensating for Landlock's port-only scope. Documented + fail-closed (nono
+   *refuses* proxy-only mode on WSL2 rather than allow bypass). **Parity with srt's
+   netns.** Remaining action: on WSL2 rein must fail closed (match nono); keep the
+   direct-connect-bypass probe as a prober regression check.
 
 ## What we TEAR OUT
 
@@ -231,9 +242,13 @@ surface. **The load-bearing integration is proven** — a 20 MiB chunked `git pu
 lands through the full `nono run` → nono-tunnel → rein-inject → github stack — so
 the pivot is no longer gated on an unknown, only on *engineering* the four design
 requirements (listener auth, CA-via-fs, host-routing, egress probe) and honest
-risks (new TCB root — smaller under (b) since nono sees only github ciphertext;
-pre-1.0 churn; **unmeasured-and-plausibly-weaker egress**; macOS parity).
-Recommendation: **land the carve-out (#136) now, unconditionally**; then run P0/P1
-(behind a flag, srt default), with the **srt-vs-nono egress channel diff** and the
-listener-capability design as hard gates before P3 cutover. Build-vs-adopt on a
-pre-1.0 dependency remains Tom's call — but the empirics now support it.
+risks that are now **much smaller** after the design-requirement validation:
+egress is airtight (seccomp-notify, parity with srt — the biggest concern refuted),
+host-routing is exact (`upstream_bypass`), the listener capability is closeable
+(per-session proxy-auth), and the TCB root is smaller under (b) (nono sees only
+github ciphertext). The remaining genuine unknowns are **macOS (Seatbelt) parity**
+(untested) and **nono pre-1.0 maturity/churn**. Recommendation: **land the carve-out
+(#136) now, unconditionally**; then run P0/P1 (behind a flag, srt default), with
+**macOS parity** and the **listener per-session proxy-auth** as the hard gates
+before P3 cutover. Build-vs-adopt on a pre-1.0 dependency remains Tom's call — and
+the Linux empirics now support it strongly.
