@@ -169,20 +169,8 @@ func TestBuildEnvDisableClaudeMCP(t *testing.T) {
 	}
 }
 
-// TestDisableClaudeMCPFromEnv covers the truthy parser: only explicit truthy
-// values opt out; everything else (unset/empty/"0"/garbage) keeps MCP enabled.
-func TestDisableClaudeMCPFromEnv(t *testing.T) {
-	for _, v := range []string{"1", "true", "TRUE", "yes", "on", " On "} {
-		if !DisableClaudeMCPFromEnv(v) {
-			t.Errorf("DisableClaudeMCPFromEnv(%q) = false, want true", v)
-		}
-	}
-	for _, v := range []string{"", "0", "false", "no", "off", "nope", "2"} {
-		if DisableClaudeMCPFromEnv(v) {
-			t.Errorf("DisableClaudeMCPFromEnv(%q) = true, want false", v)
-		}
-	}
-}
+// TestDisableClaudeMCPFromEnv moved to internal/agentenv/env_test.go with the
+// function it tests (docs/design-nono-pivot.md §5/§7).
 
 // TestBuildEnvAgentTmpDir asserts that a supplied AgentTmpDir is delivered as
 // CLAUDE_CODE_TMPDIR (srt's sanctioned lever for the child's TMPDIR) and that

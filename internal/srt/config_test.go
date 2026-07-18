@@ -8,6 +8,18 @@ import (
 	"testing"
 )
 
+// contains was formerly shared with domains_test.go, which moved to
+// internal/sandboxutil (docs/design-nono-pivot.md §5/§7); kept here as the one
+// remaining srt test that needs it.
+func contains(hay []string, needle string) bool {
+	for _, h := range hay {
+		if h == needle {
+			return true
+		}
+	}
+	return false
+}
+
 func TestBuildGoldenShape(t *testing.T) {
 	cfg, err := Build(Params{
 		SocketPath:  "/run/user/1000/rein/run-x/proxy.sock",

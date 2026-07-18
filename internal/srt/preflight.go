@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"github.com/TomHennen/rein/internal/sandboxutil"
 )
 
 // PinnedVersion is the srt package version CP3 is verified against. The schema
@@ -22,28 +24,22 @@ import (
 // PackageVersion reads package.json instead.
 const PinnedVersion = "0.0.63"
 
-// Status is a preflight verdict, matching doctor's three-value framing.
-type Status int
+// Status and Check moved to internal/sandboxutil (substrate-neutral: doctor's
+// future nono rows need the same types without importing srt — see
+// docs/design-nono-pivot.md §5/§7 "Standalone" caveat). Aliased here, not
+// copied, so existing srt callers (doctor.go, run_sandboxed.go) are unaffected.
+type Status = sandboxutil.Status
 
 const (
-	StatusOK Status = iota
-	StatusWarn
-	StatusFail
+	StatusOK   = sandboxutil.StatusOK
+	StatusWarn = sandboxutil.StatusWarn
+	StatusFail = sandboxutil.StatusFail
 )
 
 // Check is one preflight result: a stable name, a verdict, and a message that
-// on failure names the exact fix (the loud-degrade requirement).
-type Check struct {
-	Name    string
-	Status  Status
-	Message string
-}
-
-// Hard reports whether this check is a hard gate for launching a sandboxed run.
-// A StatusFail on a hard check must fail the launch closed; StatusWarn never
-// blocks. srt/bwrap/seccomp are hard; clock skew and version-mismatch severity
-// depend on the check's own verdict.
-func (c Check) Hard() bool { return c.Status == StatusFail }
+// on failure names the exact fix (the loud-degrade requirement). Hard()
+// (StatusFail == hard gate) is defined on sandboxutil.Check.
+type Check = sandboxutil.Check
 
 // Env injects the environment-touching operations so the pass/fail decisions
 // are unit-testable with stubbed inputs. Production builds it with DefaultEnv.
@@ -90,8 +86,8 @@ func Preflight(env Env) []Check {
 	// absent, since there's nothing to inspect.
 	if srtPath == "" {
 		checks = append(checks,
-			Check{"srt version", StatusFail, "skipped: srt binary not found"},
-			Check{"seccomp", StatusFail, "skipped: srt binary not found"},
+			Check{Name: "srt version", Status: StatusFail, Message: "skipped: srt binary not found"},
+			Check{Name: "seccomp", Status: StatusFail, Message: "skipped: srt binary not found"},
 		)
 	} else {
 		checks = append(checks, checkSrtVersion(env, srtPath), checkSeccomp(env, srtPath))
@@ -103,55 +99,54 @@ func Preflight(env Env) []Check {
 func checkSrtPresent(env Env) (string, Check) {
 	p, err := env.LookPath("srt")
 	if err != nil {
-		return "", Check{"srt present", StatusFail,
-			"srt not on PATH; install the pinned sandbox runtime: npm i -g @anthropic-ai/sandbox-runtime@" + PinnedVersion}
+		return "", Check{Name: "srt present", Status: StatusFail, Message: "srt not on PATH; install the pinned sandbox runtime: npm i -g @anthropic-ai/sandbox-runtime@" + PinnedVersion}
 	}
-	return p, Check{"srt present", StatusOK, p}
+	return p, Check{Name: "srt present", Status: StatusOK, Message: p}
 }
 
 func checkSrtVersion(env Env, srtPath string) Check {
 	v, err := env.PackageVersion(srtPath)
 	if err != nil {
-		return Check{"srt version", StatusFail,
-			fmt.Sprintf("cannot read srt package version (%v); reinstall: npm i -g @anthropic-ai/sandbox-runtime@%s", err, PinnedVersion)}
+		return Check{Name: "srt version", Status: StatusFail,
+			Message: fmt.Sprintf("cannot read srt package version (%v); reinstall: npm i -g @anthropic-ai/sandbox-runtime@%s", err, PinnedVersion)}
 	}
 	if v != PinnedVersion {
-		return Check{"srt version", StatusFail,
-			fmt.Sprintf("srt package version is %s, pinned is %s; the config shape/fail-open behavior is only verified for %s. Reinstall: npm i -g @anthropic-ai/sandbox-runtime@%s",
+		return Check{Name: "srt version", Status: StatusFail,
+			Message: fmt.Sprintf("srt package version is %s, pinned is %s; the config shape/fail-open behavior is only verified for %s. Reinstall: npm i -g @anthropic-ai/sandbox-runtime@%s",
 				v, PinnedVersion, PinnedVersion, PinnedVersion)}
 	}
-	return Check{"srt version", StatusOK, v + " (package.json; note `srt --version` misreports 1.0.0)"}
+	return Check{Name: "srt version", Status: StatusOK, Message: v + " (package.json; note `srt --version` misreports 1.0.0)"}
 }
 
 func checkSeccomp(env Env, srtPath string) Check {
 	ok, err := env.SeccompPresent(srtPath)
 	if err != nil {
-		return Check{"seccomp", StatusFail,
-			fmt.Sprintf("cannot verify srt's vendored seccomp filter (%v). Without it srt runs WITHOUT the unix-socket block — the agent could reach keyring/ssh-agent sockets. Refusing to launch.", err)}
+		return Check{Name: "seccomp", Status: StatusFail,
+			Message: fmt.Sprintf("cannot verify srt's vendored seccomp filter (%v). Without it srt runs WITHOUT the unix-socket block — the agent could reach keyring/ssh-agent sockets. Refusing to launch.", err)}
 	}
 	if !ok {
-		return Check{"seccomp", StatusFail,
-			fmt.Sprintf("srt's vendored apply-seccomp for %s is missing. srt would WARN and run WITHOUT the unix-socket block (keyring/ssh-agent reachable). Reinstall srt; never launch a sandbox without seccomp.", seccompArch())}
+		return Check{Name: "seccomp", Status: StatusFail,
+			Message: fmt.Sprintf("srt's vendored apply-seccomp for %s is missing. srt would WARN and run WITHOUT the unix-socket block (keyring/ssh-agent reachable). Reinstall srt; never launch a sandbox without seccomp.", seccompArch())}
 	}
-	return Check{"seccomp", StatusOK, "apply-seccomp present (unix-socket block available)"}
+	return Check{Name: "seccomp", Status: StatusOK, Message: "apply-seccomp present (unix-socket block available)"}
 }
 
 func checkBwrapUserns(env Env) Check {
 	if err := env.BwrapUserns(); err != nil {
-		return Check{"bwrap userns", StatusFail,
-			fmt.Sprintf("bwrap could not create a user namespace (%v). On Ubuntu 23.10+ the AppArmor restriction blocks unprivileged userns; fix with:\n"+
+		return Check{Name: "bwrap userns", Status: StatusFail,
+			Message: fmt.Sprintf("bwrap could not create a user namespace (%v). On Ubuntu 23.10+ the AppArmor restriction blocks unprivileged userns; fix with:\n"+
 				"    sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n"+
 				"  (persist in /etc/sysctl.d/), or install a bwrap AppArmor profile. srt cannot sandbox without this.", err)}
 	}
-	return Check{"bwrap userns", StatusOK, "unprivileged user namespace works"}
+	return Check{Name: "bwrap userns", Status: StatusOK, Message: "unprivileged user namespace works"}
 }
 
 func checkSystemCA(env Env) Check {
 	path, err := env.SystemCA()
 	if err != nil {
-		return Check{"system CA bundle", StatusFail, err.Error()}
+		return Check{Name: "system CA bundle", Status: StatusFail, Message: err.Error()}
 	}
-	return Check{"system CA bundle", StatusOK, path}
+	return Check{Name: "system CA bundle", Status: StatusOK, Message: path}
 }
 
 // Clock skew (#22) is NOT a dedicated srt-preflight check: rein's App-JWT mint
