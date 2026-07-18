@@ -477,25 +477,30 @@ netns blocks this. nono *can* mediate UDP — `sandbox/linux.rs:2064` routes
 `sendto`/`sendmsg`/`sendmmsg` to the supervisor — but the default policy allows them
 and the **strict setting is unlocated**.
 
-**P1 task:** locate/verify the nono profile field that restricts UDP (candidates:
-a `deny`-UDP policy, an egress `block:true` + per-proto allow, or a network-lockdown
-mode). Search nono source/docs; test inside `nono run` that DNS-to-resolver still
-works while arbitrary UDP is blocked.
+**INVESTIGATED (2026-07-18) — no clean fix under nono; a real residual, TOM DECISION.**
+There is **no granular UDP-egress control** in nono: the schema has only
+`network.block` (all-or-nothing), and `block:true` is **incompatible with proxy mode**
+(*"--block-net and --allow-domain are contradictory: domain filtering requires proxy
+mode"*), so it can't be combined with rein's proxy. Landlock doesn't touch UDP (docs:
+"DNS resolution (UDP) is not blocked by Landlock, only TCP"). So under the proxy mode
+rein requires, **UDP stays open — all UDP** (DNS/QUIC/arbitrary), a general exfil channel
+srt's empty netns blocked. Unlike the unix-socket hole (cleanly fixed by
+`af_unix_mediation`), this has no nono-config fix.
 
-**Two options for Tom (present both — do not bake acceptance of the weaker one):**
-- **(A) deny-all UDP.** Under this architecture the agent needs NO DNS at all — every
-  egress is CONNECT-by-hostname to a loopback proxy that resolves host-side. So deny-all
-  is simpler, stricter, closest to srt's empty-netns parity, and eliminates the
-  DNS-tunnel exfil channel entirely.
-- **(B) deny-UDP except DNS to the configured resolver.** Retains a DNS-tunnel exfil
-  channel; only needed if some in-sandbox tool genuinely requires local DNS.
+**Decision for Tom (this is a genuine accept/block choice, not a config task):**
+- **Accept the residual.** rein's threat model weights credential-theft over
+  data-exfil, and the credential boundary is intact: the agent can't obtain a token
+  (proven — `deny_credentials` + downstream injection) and can't exfil over **TCP**
+  (blocked). What it CAN do is exfil *data it already sees* (the working tree) over UDP.
+  For rein's core purpose (agent never holds a credential) this holds; UDP is a
+  data-confidentiality regression vs srt, documented.
+- **Block on it / future mitigation.** A host-side firewall (nftables) blocking UDP
+  egress from the sandboxed process — but scoping to the agent is hard under nono (same
+  uid, no netns; would need a cgroup nono exposes to target). Non-trivial, possibly needs
+  nono support. Not for the initial cutover.
 
-If the strict setting is found → set it fail-closed (lean (A) unless a tool breaks). If
-NOT findable before cutover → explicit **accept/reject** decision for Tom in the P1
-stop-and-surface AND a **P3 cutover gate** (§5): rein's threat model has historically
-weighted credential theft over exfil, but a general UDP exfil channel is a real
-regression from srt. Do not silently accept, and do not let cutover slip through with UDP
-unresolved.
+**P3 cutover gate:** this decision must be explicitly made (accept + document, or block),
+not slipped through.
 
 ### 3e. The prober (fail-closed launch gate + CI harness)
 
