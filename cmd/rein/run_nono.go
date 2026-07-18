@@ -18,6 +18,16 @@
 // machinery (nono is default-deny fs + the deny_credentials group), and the
 // VerifyConfigApplied self-test (the nono launch-gate prober is a separate wave,
 // §3e — until it lands, the launch TRUSTS the profile applies; see the handoff).
+// The non-impersonating git identity IS ported — as GIT_CONFIG_* in the profile
+// (not srt's GIT_CONFIG_GLOBAL file), since nono owns env injection.
+//
+// DEFERRED write-journey enablers (a full declare→approve→push journey is the
+// next wave; these are needed for it, tracked as follow-up issues):
+//   - in-sandbox `rein declare <n>`: needs the rein binary reachable+executable
+//     under nono (srt staged a copy + PATH; nono owns PATH — unverified path).
+//   - CLAUDE_CONFIG_DIR / #94 overlay: `rein run --nono -- claude` needs a
+//     rein-owned CLAUDE_CONFIG_DIR (host ~/.claude is hidden by default-deny);
+//     requires an ExtraEnv channel in the profile generator.
 package main
 
 import (
@@ -36,6 +46,7 @@ import (
 
 	"github.com/TomHennen/rein/internal/approvals"
 	"github.com/TomHennen/rein/internal/config"
+	"github.com/TomHennen/rein/internal/gitidentity"
 	"github.com/TomHennen/rein/internal/keystore"
 	"github.com/TomHennen/rein/internal/nono"
 	"github.com/TomHennen/rein/internal/proxy"
@@ -46,21 +57,37 @@ import (
 )
 
 // buildNonoParams assembles the per-run inputs to nono.Build from the resolved
-// loopback port, CA-bundle path, and extra egress domains. Pure (no I/O) so a
-// unit test can pin that the loopback port flows into upstream_proxy and the CA
-// path is carried, without a live launch. The security host lists (inject / CDN
-// / declare) are NOT passed here — nono.Build reads them straight from
-// internal/proxy so the profile and the proxy can never drift.
-func buildNonoParams(loopbackPort int, caBundlePath string, extraDomains []string) nono.Params {
+// loopback port, CA-bundle path, extra egress domains, and the non-impersonating
+// git identity (as extra GIT_CONFIG_* entries). Pure (no I/O) so a unit test can
+// pin that the loopback port flows into upstream_proxy, the CA path is carried,
+// and the git identity is injected — without a live launch. The security host
+// lists (inject / CDN / declare) are NOT passed here — nono.Build reads them
+// straight from internal/proxy so the profile and the proxy can never drift.
+func buildNonoParams(loopbackPort int, caBundlePath string, extraDomains []string, extraGitConfig []nono.GitConfig) nono.Params {
 	return nono.Params{
-		ListenAddr:   "127.0.0.1:" + strconv.Itoa(loopbackPort),
-		CACertPath:   caBundlePath,
-		ExtraDomains: extraDomains,
+		ListenAddr:     "127.0.0.1:" + strconv.Itoa(loopbackPort),
+		CACertPath:     caBundlePath,
+		ExtraDomains:   extraDomains,
+		ExtraGitConfig: extraGitConfig,
 		// UnixSockets left EMPTY: never grant the tmux/approval socket (the
 		// af_unix_mediation crux, §3e). A real agent that needs a specific
 		// pathname socket gets it added deliberately, never by default.
 		Name:        "rein-sandbox",
 		Description: "rein credential-broker sandbox profile (rein run --nono).",
+	}
+}
+
+// nonoGitIdentityConfig renders the non-impersonating git identity as GIT_CONFIG_*
+// entries (user.name / user.email). Under nono's default-deny fs the developer's
+// ~/.gitconfig is hidden, so WITHOUT this the agent's `git commit` fails
+// ("unable to auto-detect email"); WITH it the agent commits as rein's bot, never
+// the developer. This is the nono equivalent of srt's GIT_CONFIG_GLOBAL file —
+// GIT_CONFIG_* is the highest-precedence git config, overriding any repo-local
+// user.* the developer set, which is the desired non-impersonation.
+func nonoGitIdentityConfig(id gitidentity.Identity) []nono.GitConfig {
+	return []nono.GitConfig{
+		{Key: "user.name", Value: id.Name},
+		{Key: "user.email", Value: id.Email},
 	}
 }
 
@@ -278,9 +305,24 @@ func runNono(cmdline []string) (int, error) {
 		return 1, fmt.Errorf("write CA bundle: %w", err)
 	}
 
+	// (10b) NON-IMPERSONATING git identity (CP4). Resolve the bot author/committer
+	// OUTSIDE the sandbox (network + host `git config` at launch) and inject it as
+	// GIT_CONFIG_* via the profile. Fail-open: gitidentity.Resolve never errors —
+	// every fallback is a valid, non-impersonating identity.
+	cachePath, err := gitIdentityCachePath()
+	if err != nil {
+		return 1, err
+	}
+	owner := ""
+	if len(sess.Repos) > 0 {
+		owner = ownerFromRepo(sess.Repos[0])
+	}
+	gitID := resolveGitIdentity(appCfg.ClientID, ks, owner, "", cachePath, logger)
+	logger.Printf("git identity: author/committer = %q <%s>", gitID.Name, gitID.Email)
+
 	// (11) Generate + write the nono profile. Build enforces the six security
 	// invariants and fails CLOSED rather than emit a permissive profile.
-	profile, err := nono.Build(buildNonoParams(loopbackPort, bundlePath, extraDomains))
+	profile, err := nono.Build(buildNonoParams(loopbackPort, bundlePath, extraDomains, nonoGitIdentityConfig(gitID)))
 	if err != nil {
 		return 1, fmt.Errorf("build nono profile: %w", err)
 	}
@@ -303,11 +345,13 @@ func runNono(cmdline []string) (int, error) {
 	nonoArgv = append(nonoArgv, cmdline...)
 
 	// (13) Scrubbed exec environment. nono OWNS HTTP(S)_PROXY/NO_PROXY and the
-	// profile's set_vars carries the CA + git-proxy config — rein must not set
-	// those. Scrub ambient GitHub tokens as defense-in-depth (the agent uses only
-	// rein-brokered, downstream-injected credentials).
+	// profile's set_vars carries the CA + git config — rein must not set those.
+	// Scrub ambient GitHub tokens (the agent uses only rein-brokered,
+	// downstream-injected credentials) AND $TMUX/$TMUX_PANE (design §3e:
+	// defense-in-depth — af_unix_mediation already blocks the approval socket, but
+	// don't leak its path into the sandbox in the first place).
 	execEnv := os.Environ()
-	for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"} {
+	for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "TMUX", "TMUX_PANE"} {
 		execEnv = unsetEnv(execEnv, name)
 	}
 

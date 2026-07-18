@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/TomHennen/rein/internal/gitidentity"
 	"github.com/TomHennen/rein/internal/nono"
 	"github.com/TomHennen/rein/internal/sandboxutil"
 )
@@ -16,7 +17,8 @@ import (
 func TestBuildNonoParams_LoopbackPortFlowsToProxy(t *testing.T) {
 	const port = 47821
 	caPath := "/run/rein/ca-bundle.pem"
-	p := buildNonoParams(port, caPath, []string{"api.anthropic.com"})
+	gitCfg := nonoGitIdentityConfig(gitidentity.Identity{Name: "rein bot", Email: "bot@users.noreply.github.com"})
+	p := buildNonoParams(port, caPath, []string{"api.anthropic.com"}, gitCfg)
 
 	if p.ListenAddr != "127.0.0.1:47821" {
 		t.Fatalf("ListenAddr = %q, want 127.0.0.1:47821", p.ListenAddr)
@@ -43,15 +45,38 @@ func TestBuildNonoParams_LoopbackPortFlowsToProxy(t *testing.T) {
 			t.Errorf("set_vars[%q] = %q, want the CA bundle path %q", k, got, caPath)
 		}
 	}
+	// The non-impersonating git identity must land in the GIT_CONFIG_* env: without
+	// user.email the agent's `git commit` fails under nono's default-deny fs.
+	sv := prof.Environment.SetVars
+	if !hasGitConfigPair(sv, "user.email", "bot@users.noreply.github.com") {
+		t.Errorf("git user.email not injected into GIT_CONFIG_*: %v", sv)
+	}
+	if !hasGitConfigPair(sv, "user.name", "rein bot") {
+		t.Errorf("git user.name not injected into GIT_CONFIG_*: %v", sv)
+	}
 	// Build's Validate already enforces deny_credentials + af_unix_mediation +
 	// inject/CDN routing; a passing Build means those invariants held.
+}
+
+// hasGitConfigPair reports whether set_vars carries a GIT_CONFIG_KEY_n=key with
+// the matching GIT_CONFIG_VALUE_n=value (the git multi-var env encoding).
+func hasGitConfigPair(sv map[string]string, key, value string) bool {
+	for k, v := range sv {
+		if strings.HasPrefix(k, "GIT_CONFIG_KEY_") && v == key {
+			idx := strings.TrimPrefix(k, "GIT_CONFIG_KEY_")
+			if sv["GIT_CONFIG_VALUE_"+idx] == value {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // TestBuildNonoParams_EmptyPortIsInvalid: a zero loopback port (front never
 // bound) must NOT silently produce a usable profile — Build fails closed. runNono
 // guards this before Build, but assert the shape here too.
 func TestBuildNonoParams_EmptyPortStillFormsAddr(t *testing.T) {
-	p := buildNonoParams(0, "/tmp/ca.pem", nil)
+	p := buildNonoParams(0, "/tmp/ca.pem", nil, nil)
 	if p.ListenAddr != "127.0.0.1:0" {
 		t.Fatalf("ListenAddr = %q, want 127.0.0.1:0", p.ListenAddr)
 	}
