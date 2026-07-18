@@ -14,17 +14,26 @@
 //     grants for the writable working tree.
 //
 // NOT ported from the srt path (nono's model differs): bwrap/seccomp preflight
-// (nono uses Landlock), the bind-mount deny-read/home-hiding/git-hardening
-// machinery (nono is default-deny fs + the deny_credentials group), and the
-// VerifyConfigApplied self-test (the nono launch-gate prober is a separate wave,
-// §3e — until it lands, the launch TRUSTS the profile applies; see the handoff).
-// The non-impersonating git identity IS ported — as GIT_CONFIG_* in the profile
+// (nono uses Landlock) and the bind-mount deny-read/home-hiding/git-hardening
+// machinery (nono is default-deny fs + the deny_credentials group). The
+// non-impersonating git identity IS ported — as GIT_CONFIG_* in the profile
 // (not srt's GIT_CONFIG_GLOBAL file), since nono owns env injection.
 //
+// TODO (post-merge integration): this launch does NOT yet run the nono
+// containment prober before the agent. When this branch merges with current
+// nono-pivot-design (which now carries internal/nono.VerifyContainment +
+// RunContainmentProbe + the `__nono-probe` subcommand — the §3e launch gate,
+// the nono counterpart of srt's VerifyConfigApplied), wire VerifyContainment in
+// as the fail-closed pre-launch gate here. Until then the launch trusts the
+// profile applies (digest-verified binary + Build's invariant checks only).
+//
 // DEFERRED write-journey enablers (a full declare→approve→push journey is the
-// next wave; these are needed for it, tracked as follow-up issues):
-//   - in-sandbox `rein declare <n>`: needs the rein binary reachable+executable
-//     under nono (srt staged a copy + PATH; nono owns PATH — unverified path).
+// next wave; these are needed for it):
+//   - in-sandbox `rein declare <n>`: the declare-host TUNNEL is verified (nono
+//     tunnels the unresolvable declare.rein.internal by CONNECT hostname, no
+//     DNS; rein terminates TLS + answers locally), but the agent invoking the
+//     `rein` BINARY in-sandbox needs it reachable+executable under nono (srt
+//     staged a copy + PATH; nono owns PATH — that path is unverified).
 //   - CLAUDE_CONFIG_DIR / #94 overlay: `rein run --nono -- claude` needs a
 //     rein-owned CLAUDE_CONFIG_DIR (host ~/.claude is hidden by default-deny);
 //     requires an ExtraEnv channel in the profile generator.
