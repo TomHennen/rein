@@ -228,8 +228,10 @@ func (p *Proxy) Serve(ctx context.Context, ln net.Listener) error {
 	}
 }
 
-// handleConn consumes any srt CONNECT preamble, terminates TLS (leaf keyed on
-// SNI), then serves HTTP/1.1 requests. SNI is the single identity source
+// handleConn consumes any CONNECT preamble (both fronts use it: srt's
+// unix-socket tunnel and nono's loopback-TCP upstream_proxy), terminates TLS
+// (leaf keyed on SNI), then serves HTTP/1.1 requests. SNI is the single
+// identity source
 // (design §4.1): the upstream connection AND the injection host class both
 // derive from it, and each request's Host header is validated against it.
 func (p *Proxy) handleConn(conn net.Conn) {
@@ -244,10 +246,12 @@ func (p *Proxy) handleConn(conn net.Conn) {
 
 	br := bufio.NewReader(conn)
 
-	// srt forwards the matched-domain CONNECT as an opaque tunnel: it writes
-	// `CONNECT host:443` + headers, expects a 200, then pipes the raw client
+	// Both fronts forward the matched-domain CONNECT as an opaque tunnel: they
+	// write `CONNECT host:443` + headers, expect a 200, then pipe the raw client
 	// TLS. Consume the preamble if present; a direct TLS client (no CONNECT) is
-	// also supported. The CONNECT host is NOT trusted for identity — SNI is.
+	// also supported. The CONNECT host is NOT trusted for identity — SNI is. Any
+	// Proxy-Authorization in the preamble is drained and ignored (no proxy-auth:
+	// the loopback front's safety is nono's loopback mediation, not a secret).
 	if peek, _ := br.Peek(8); string(peek) == "CONNECT " {
 		if _, err := br.ReadString('\n'); err != nil {
 			return

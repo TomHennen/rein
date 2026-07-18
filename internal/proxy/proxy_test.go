@@ -80,6 +80,7 @@ type harness struct {
 	t          *testing.T
 	ca         *CA
 	socket     string
+	tcpAddr    string // loopback TCP front address (set when opts.loopback)
 	caPool     *x509.CertPool
 	gh         *fakeGitHub
 	readCalls  int32
@@ -98,6 +99,7 @@ type harnessOpts struct {
 	handshakeTimeout time.Duration     // if set, overrides the inbound handshake deadline
 	idleTimeout      time.Duration     // if set, overrides the inbound idle deadline
 	decl             *DeclarationHooks // if set, the #35 declaration gate
+	loopback         bool              // if set, also serve the same proxy on a loopback-TCP front
 }
 
 // syncBuffer is a goroutine-safe bytes.Buffer for capturing the audit log,
@@ -235,6 +237,18 @@ func newHarness(t *testing.T, opts harnessOpts) *harness {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go p.Serve(ctx, ln)
+
+	// Dual-front: the SAME proxy also served on a loopback-TCP HTTP-CONNECT
+	// front (the nono pivot). Both fronts share the core, so the injection/relay
+	// invariants are re-exercised through the TCP listener.
+	if opts.loopback {
+		lbLn, port, lerr := ListenLoopback(0)
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		h.tcpAddr = fmt.Sprintf("127.0.0.1:%d", port)
+		go p.Serve(ctx, lbLn)
+	}
 	return h
 }
 

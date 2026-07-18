@@ -46,6 +46,20 @@ type Config struct {
 	SocketPath    string
 	ForbiddenDirs []string
 
+	// LoopbackFront, when true, ALSO binds a 127.0.0.1 TCP HTTP-CONNECT front
+	// (the nono pivot): nono chains the sandboxed agent's GitHub traffic to it
+	// as its upstream_proxy. Both fronts share the same Proxy — identical
+	// TLS-termination, per-host-class injection, and relay — so this is purely
+	// additive: the srt unix socket is still created and served unchanged
+	// (dual-front during the transition; srt is removed at cutover). The chosen
+	// port is read via Host.LoopbackPort() and handed to nono's profile
+	// generator. Safety rests on nono's loopback mediation (no proxy-auth).
+	LoopbackFront bool
+	// LoopbackPort is the requested loopback port. 0 (the default) lets the OS
+	// choose a free port; the actual bound port is exposed via
+	// Host.LoopbackPort(). Ignored unless LoopbackFront is set.
+	LoopbackPort int
+
 	// MintRead / MintWrite mint installation tokens at the session's scope.
 	MintRead  brokercore.MintFunc
 	MintWrite brokercore.MintFunc
@@ -132,10 +146,18 @@ type Config struct {
 type Host struct {
 	socketPath string
 	ca         *proxy.CA
-	ln         net.Listener
-	cancel     context.CancelFunc
-	done       chan struct{}
-	closeOnce  sync.Once
+	// lns are every front's listener (the srt unix socket, plus the loopback
+	// TCP front when enabled). Close closes them all; cancel already makes each
+	// Serve close its own listener via its ctx-watcher, so this is belt-and-
+	// suspenders for the "closed ln without cancel" contract corner.
+	lns          []net.Listener
+	loopbackPort int
+	cancel       context.CancelFunc
+	// done is closed once EVERY front's Serve goroutine has returned (serveWG
+	// drains). Generalizes cleanly to N fronts.
+	done      chan struct{}
+	serveWG   sync.WaitGroup
+	closeOnce sync.Once
 
 	// monitorDone is closed when the expiry monitor goroutine has returned (or
 	// immediately if none was started). Close joins it so no expiry callback
@@ -243,14 +265,38 @@ func Start(cfg Config) (*Host, error) {
 	if err != nil {
 		return nil, err
 	}
+	h.lns = append(h.lns, ln)
+
+	// Optional loopback-TCP HTTP-CONNECT front (nono pivot). Additive: the srt
+	// unix socket above is created and served regardless. On any setup error we
+	// close the already-bound unix listener so nothing is left half-started.
+	if cfg.LoopbackFront {
+		lbLn, port, lerr := proxy.ListenLoopback(cfg.LoopbackPort)
+		if lerr != nil {
+			ln.Close()
+			return nil, lerr
+		}
+		h.lns = append(h.lns, lbLn)
+		h.loopbackPort = port
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	h.ca = ca
-	h.ln = ln
 	h.cancel = cancel
+	// One Serve goroutine per front, all against the SAME Proxy (per-conn
+	// goroutines; the CA leaf cache is mutex-guarded). done closes once every
+	// front's Serve has returned.
+	h.serveWG.Add(len(h.lns))
+	for _, l := range h.lns {
+		l := l
+		go func() {
+			defer h.serveWG.Done()
+			_ = p.Serve(ctx, l)
+		}()
+	}
 	go func() {
-		defer close(h.done)
-		_ = p.Serve(ctx, ln)
+		h.serveWG.Wait()
+		close(h.done)
 	}()
 
 	// Expiry monitor: only when a bound is configured. It shares ctx with Serve,
@@ -280,6 +326,10 @@ func (h *Host) markMonitorDone() {
 // SocketPath is the per-run proxy socket the sandbox connects to.
 func (h *Host) SocketPath() string { return h.socketPath }
 
+// LoopbackPort is the 127.0.0.1 TCP port of the loopback HTTP-CONNECT front
+// (nono's upstream_proxy target), or 0 when LoopbackFront was not enabled.
+func (h *Host) LoopbackPort() int { return h.loopbackPort }
+
 // CACertPEM is the CA certificate (no private key) for the sandbox trust
 // bundle (CP3: SSL_CERT_FILE = system roots + this).
 func (h *Host) CACertPEM() []byte { return h.ca.CertPEM() }
@@ -292,7 +342,9 @@ func (h *Host) CACertPEM() []byte { return h.ca.CertPEM() }
 func (h *Host) Close() error {
 	h.closeOnce.Do(func() {
 		h.cancel()
-		h.ln.Close()
+		for _, l := range h.lns {
+			l.Close()
+		}
 		<-h.done
 		<-h.monitorDone
 	})
