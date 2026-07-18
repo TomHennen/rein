@@ -215,6 +215,41 @@ custom security-critical component we keep).
   equivalent denials on the target platform(s). Regenerate kept goldens.
 - **P4 — Dogfood** on a throwaway, then wrangle (the existing CP6 gate).
 
+## How we'd develop this
+
+**Isolate the pivot from main until it fully replaces srt.** Per Tom's direction,
+this does *not* trickle onto main. Develop on a long-lived integration branch
+(`nono`, off main); main keeps shipping srt-based rein unchanged until the pivot
+is complete and cut over in one reviewed step.
+
+- **Branch model.** `nono` is the pivot trunk. Each phase (P0–P4) is a normal
+  reviewed PR **targeting `nono`**, not main — so we keep per-phase review, green
+  CI, and journey goldens *within* the pivot, without ever leaving main in a
+  half-pivoted state. The flag that keeps srt default (proposal §"The decision")
+  lives on the branch; main never sees it.
+- **Keep `nono` synced with main — the one real risk of a long-lived branch is
+  drift.** Merge main → `nono` continuously (at least per merged main PR / weekly),
+  so the eventual cutover is a small reconciliation, not a big-bang. rein's
+  worktree workflow (`.claude/worktrees`) gives the branch its own workspace.
+- **The branch stays runnable throughout.** srt remains the default *on the branch*
+  until P3; nono is behind the flag. Every phase leaves `go test ./... -race`, vet,
+  gofmt, and the journey goldens green — so the branch is always dogfoodable (you
+  can run the composed nono stack on the branch long before it's near main).
+- **Carve-out: substrate-agnostic hardening goes to main NOW, independently.** Two
+  pieces are wins regardless of the pivot and should not wait on `nono`: (a)
+  **fuzzing the existing relay/parsers** (`ParseReceivePackCommands`, the
+  classifier) — it hardens *today's shipping* code; (b) **adopting `sandbox-probe`
+  as a CI check against the current srt setup** (the harness is substrate-agnostic,
+  written for exactly this). Landing these on main shrinks the `nono` branch and
+  de-risks the relay before it's ever repositioned.
+- **The cutover (P3) is one atomic, reviewed PR** merging `nono` → main: flips the
+  default srt→nono, deletes `internal/srt` + srt journeys, **gated on P4 dogfood +
+  the prober's acceptance** (equivalent denials proven on the target platform(s)).
+  Because srt lived until this PR, **rollback = revert it.**
+- **Discipline per phase** (unchanged from the CP model): advisor before each
+  phase's substantive work; a reviewer subagent (code + security) after each
+  phase's implementation; stop-and-surface at every phase gate.
+
 ## The decision
 
 Adopting nono is a **forward-looking simplification**: rein sheds ~2000+ LOC of
