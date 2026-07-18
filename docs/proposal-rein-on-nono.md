@@ -1,277 +1,206 @@
-# Project proposal: rein as the credential authority for nono
+# Project proposal: rein on nono (architecture B — nono sandboxes, rein's proxy injects)
 
-**Status:** DRAFT — **must be re-pointed from architecture (c) to (b).** This doc
-was written for **(c)** (nono injects via `cmd://`), which two reviews showed is a
-*downgrade* of rein's mediation (the `cmd://` seam never sees request bodies →
-GraphQL tier-classification and the small-push declare gate break). The follow-up
-spike (see `docs/nono-git-push-spike-findings.md` §"Follow-up spike … architecture
-(b) CONFIRMED") **empirically confirmed the better architecture (b)** — nono =
-sandbox + opaque external-proxy tunnel; **rein's existing (small, stdlib) proxy
-stays the injection layer**, sees full bodies (mediation preserved), and streams a
-20 MiB chunked `git push` (the cap dissolves). The library question resolved too:
-**keep the hand-rolled stdlib proxy + fuzz it** (issue #136), no proxy library
-fits. Re-point the tear-out/keep/new/test sections below at (b): rein keeps a
-minimized+fuzzed forward-proxy (NOT `cmd://` injection, NOT a proxy lib) that nono
-chains to as its external proxy. **One open gate remains:** the spike proved (b)
-via `nono proxy` standalone; wiring the external-proxy into `nono run` (sandbox
-mode) did not route and must be solved before committing.
-
-Original intent: re-base rein's **sandboxed mode** onto `nono` (Landlock) as the
-sandbox substrate, with rein reduced to the credential authority + git-push
-relay + opinionated installer. Direct mode (Shape B) is out of scope.
+**Status:** DRAFT for Tom's review (rewritten around architecture **(b)** after
+the spike + two reviews; supersedes the earlier `cmd://` draft). Basis:
+`docs/nono-git-push-spike-findings.md`. Scope: rein's **sandboxed mode** only;
+direct mode (Shape B) untouched.
 
 ## TL;DR
 
-Stop owning the sandbox. rein becomes: (1) an **opinionated, verified installer**
-that sets up nono + the GitHub App + an opinionated profile; (2) the
-**credential authority** — mint per-issue, human-approved, short-lived App tokens
-via nono's `cmd://` hook; (3) a **minimized, fuzzed git-push relay** for the one
-path nono structurally cannot broker. nono provides containment (Landlock),
-credential injection for the REST path, and egress control.
+Re-base rein's sandbox onto **nono** (Landlock), but keep rein's **own proxy as
+the injection layer**. nono runs the sandbox and, for github, acts only as an
+**opaque external-proxy tunnel** — it CONNECT-tunnels the agent's github traffic
+to rein's proxy without terminating or buffering it. rein's proxy (the existing,
+hardened, streaming CP1 relay — **minimized and fuzzed, not rewritten, not
+replaced by a library**) TLS-terminates, injects the scoped token, taps the
+receive-pack for the declare gate, and streams upstream. rein keeps its broker
+(mint / per-issue scope / approval / declare) and adds a verified installer +
+opinionated profile generator. rein **deletes `internal/srt`** (~2000 LOC of
+sandbox composition).
 
-**Why:** the spike proved nono's Landlock genuinely protects the App key + host
-creds from the agent (the reason to adopt it), its `cmd://` hook is a clean
-host-side seam for rein's minting + approval, and its install/containment story
-is far simpler than srt+bwrap+AppArmor. The **only** thing nono can't do is carry
-a real `git push` (16 MiB `413` + chunked hang, both intentional in its source) —
-so rein keeps a relay for that, and nothing else.
+This is the version that actually **minimizes rein's security-critical code**:
+one small stdlib forward-proxy + the broker, on top of a sandbox rein no longer
+maintains.
 
-## Why now — what the spike established (evidence, not vibes)
+## Why (b), not the earlier (c)
 
-- **Containment works:** inside `nono run`, Landlock `deny_credentials` blocks the
-  agent from reading `~/.config/rein-credentials/app.pem`, the gh token, ssh keys,
-  and history (proven). This is what rein's whole `internal/srt` composition
-  (deny-read, seccomp, env allowlist, /dev/tty probe) was built to achieve.
-- **The `cmd://` seam fits rein exactly:** nono invokes rein's helper **host-side**
-  with per-request `{host, repo-path, method, session}`, where it can reach the App
-  key + `/dev/tty` (both denied to the agent) — mint + approval, zero nono changes.
-- **git push is the one hard wall:** nono's proxy caps request bodies at 16 MiB
-  (`reverse.rs:37`, a deliberate DoS guard, issue #554) and never decodes chunked
-  request bodies — git chunks every push > 1 MiB, so brokered pushes hang/413. Not
-  a bug they'll fix. rein already streams pushes correctly (CP1 relay), so it keeps
-  that one component.
-- **Install is simpler on nono:** srt needs bwrap + an AppArmor userns profile +
-  the Ubuntu 24.04 gate (a documented onboarding blocker). nono is a single
-  Landlock binary. rein wrapping a *verified* nono install is a net UX + security
-  win over both srt's setup and nono's own `curl | sh`.
+The earlier draft had nono inject via its `cmd://` hook. Two reviews killed it:
+`cmd://` never sees request bodies, so GraphQL read/write tiering and the
+small-push declare gate both break, and nono's injecting proxy caps bodies at
+16 MiB and can't stream chunked pushes. **(b) avoids all of that** by keeping
+injection in rein's proxy, which sees full plaintext and streams. Proven in the
+spike: a **20 MiB chunked `git push` streamed through `nono proxy --upstream-proxy
+<rein>` → rein → real github and landed** (`git-receive-pack cl=-1` at rein). The
+cap was an artifact of *nono* injecting; when rein injects, it's gone — for git
+push **and** LFS / release-asset / large-REST uploads alike.
 
-## Architecture: division of labor
+## The forcing function (state it honestly)
+
+Install friction alone does not justify a core-substrate swap. The real driver:
+**srt is drifting away from the `mitmProxy.socketPath` hook rein depends on** —
+srt's newer config format lists custom-proxy support as "not yet supported…
+future release" (spike findings). If srt breaks rein's injection hook, rein needs
+a new front-end regardless; nono's opaque external-proxy tunnel is a candidate
+replacement for exactly that hook. (Caveat: nono is *also* pre-1.0 and churny —
+this is choosing between two moving dependencies, not stable→unstable.)
+
+## Architecture (b): division of labor
 
 | Concern | Owner | Mechanism |
 |---|---|---|
-| Sandbox / containment | **nono** | Landlock profile (`deny_credentials`, fs, per-command) |
-| Credential injection (REST/API) | **nono** ← rein | nono intercepts api.github.com; rein mints via `cmd://` |
-| Credential minting + per-issue scope + approval | **rein** | `cmd://` helper, host-side, App key local |
-| `git push` credential brokering | **rein** | minimized local relay (nono can't do it) |
-| Egress control | **nono** ← rein | rein writes a tightened `allow_domain` profile |
-| GitHub App onboarding | **rein** | manifest flow (existing) |
-| Install/orchestration | **rein** | verified nono fetch + profile gen + CLI drive |
-| Containment **assurance** | **rein** | sandbox prober: fail-closed launch gate + CI differential harness (trust-but-verify the substrate) |
+| Sandbox / containment | **nono** | Landlock profile (`deny_credentials`, fs, seccomp) |
+| github egress transport | **nono** | opaque **external-proxy** CONNECT tunnel to rein (no terminate, no buffer) |
+| TLS-terminate + inject + stream + declare-tap | **rein** | the existing `internal/proxy` (minimized + fuzzed), fronted by nono's tunnel instead of srt's socket |
+| Mint / per-issue scope / approval / declare | **rein** | `internal/broker` etc., App key local |
+| Egress control | **nono** ← rein | rein writes a tightened `allow_domain` + `upstream_proxy` profile |
+| Containment **assurance** | **rein** | sandbox prober: fail-closed launch gate + CI differential harness |
+| Install / orchestration | **rein** | verified nono fetch + profile gen + CLI drive |
 
-Integration boundary = **nono CLI + JSON profile + the `cmd://` subprocess
-contract** (the same clean subprocess boundary rein already uses for srt — no
-CGo, no SDK; nono's Go SDK is a thin FFI binding and less capable than the CLI,
-so we orchestrate the CLI). Pin the nono version; treat the profile schema + CLI
-flags as a contract to re-verify on bump (existing srt policy).
+Integration boundary = **nono CLI + JSON profile** (no SDK — nono's Go binding is
+a thin, less-capable FFI). nono's front-end to rein is a **standard forward
+CONNECT** (rein is "the enterprise proxy"), which is why rein's proxy needs no
+`cmd://` and why the CLAUDE.md goproxy-rejection rationale (tied to srt's socket)
+relaxes — though we still keep stdlib, see "Libraries".
+
+## The one open gate (must close before committing)
+
+**`nono run` (sandbox mode) did not route to the upstream proxy in the spike.**
+The standalone `nono proxy --upstream-proxy <rein>` works; `nono run` with the
+same setting (CLI flag *and* profile `network.upstream_proxy`) aborts the CONNECT
+before contacting rein, and the supervised proxy's reason is not surfaced
+(`NONO_LOG`/`NONO_PROXY_LOG`/session dir all silent). Source shows the wiring
+*should* be present (`proxy_runtime.rs:2412`). **This is the #1 unknown** — resolve
+it (a nono-maintainer question / issue, or the correct supervised config) before
+any cutover. If it proves unfixable, the fallback composition to evaluate is
+"nono sandbox + rein's proxy as the sandbox's forced `HTTPS_PROXY`, egress-confined
+to rein" — but that needs its own spike (nono forces its own proxy env today).
 
 ## What we TEAR OUT
 
-| Package / area | LOC | Why it goes |
+| Area | LOC | Why |
 |---|---|---|
-| `internal/srt` | ~2030 | nono replaces the entire srt sandbox composition (Build/Validate, denyRead, seccomp, env allowlist, `VerifyConfigApplied`, /dev/tty probe, bwrap preflight). |
-| `cmd/rein/run_sandboxed.go`, `sandbox_home.go`, `sandbox_claude_home.go` | large | srt launch + `~/.claude` bind/overlay hardening (#94) → nono profile handles the fs policy. |
-| `internal/proxy` REST/GraphQL **injection** path + `classPassthrough`/CDN relay | part of ~2260 | REST injection moves to `cmd://` (nono injects); the CDN passthrough arm is already dead code in sandboxed mode. |
-| Most of `internal/proxy` CA management | part | keep only the minimal CA the git-push relay needs. |
-| srt-specific doctor checks (`cmd/rein/doctor.go` bwrap/userns/seccomp) | part | replaced by nono health checks. |
+| `internal/srt` | ~2030 | nono owns the sandbox (Landlock `deny_credentials` proven to hide `app.pem`/gh/ssh/history). |
+| `cmd/rein/run_sandboxed.go`, `sandbox_home.go`, `sandbox_claude_home.go` | large | srt launch + `~/.claude` bind/overlay (#94) → nono profile fs policy. |
+| srt-specific `doctor` checks (bwrap/userns/seccomp) | part | → nono health checks. |
+
+Note vs the old draft: **`internal/proxy` is NOT torn out** — under (b) it is the
+injection layer and stays (minimized + fuzzed). Only its front-end changes (srt
+socket → nono external-proxy CONNECT).
 
 ## What we KEEP
 
-| Package / area | LOC | Role |
-|---|---|---|
-| `internal/broker` + `internal/brokercore` | ~730 | mint / scope / approval core — rein's heart. |
-| `internal/keystore` | ~370 | App private key, **on-box** (local-first, hard-constraint #6). |
-| `internal/githubapp`, `internal/tokencache`, `internal/ghsession` | — | App auth + token minting/caching. |
-| `internal/approvals`, `internal/declare`, `internal/issuemeta` | — | human approval + declare-first per-issue scoping (#35). |
-| `internal/classify` | — | tier (read/write) classification — **moves** into the `cmd://` mint decision (rein picks the token scope from the request context nono passes). |
-| `internal/runbroker`, `runscope`, `session` | — | session identity + scope expansion (#69), adapted to the nono launch. |
-| `internal/gitidentity` | — | non-impersonating commit author. |
-| `internal/proxy` git-push relay + `receivepack.go` + declare gate (`gate.go`) | part of ~2260 | the one thing nono can't do — **minimized + fuzzed** (below). |
-| `internal/appsetup` + `cmd/rein/init.go` | — | GitHub App manifest flow, **extended** to install nono. |
-| Direct mode (Shape B) + `proctree*` | — | untouched; separate track. |
+`internal/broker` + `brokercore` (mint/scope/approval), `keystore` (App key,
+on-box), `githubapp`/`tokencache`/`ghsession`, `approvals`/`declare`/`issuemeta`
+(#35), `classify` (tier — still body-based, which (b) preserves), `runbroker`/
+`runscope`/`session`, `gitidentity`, `appsetup`/`init.go` (extended to install
+nono), **`internal/proxy` (minimized + fuzzed)**, and direct mode (Shape B,
+untouched).
 
 ## What's NEW
 
-1. **Verified nono install (the `curl | sh` fix).** `rein init` fetches a
-   **pinned** nono release binary and verifies it — signature (nono is from the
-   Sigstore founder; releases are signed) + SHA-256 digest against the pinned
-   expected value — before installing to a rein-managed path. `rein doctor`
-   re-checks the pinned digest. Strictly better supply chain than `curl | sh`,
-   and a story security teams accept. *(Confirm nono's exact signing mechanism —
-   cosign bundle / SLSA provenance — during CP-install.)*
-2. **`rein credential-capture` subcommand** — the `cmd://` helper nono invokes
-   host-side: reads the `nono.credential-provider.v1` request (host/repo-path/
-   method/session), runs the broker core (scope check → approval prompt on
-   `/dev/tty` for writes → mint), returns the token as `Basic`/`Bearer`.
-3. **Opinionated profile generator** — rein writes the nono profile: `cmd://`
-   wiring to `rein credential-capture`, tightened `allow_domain` (restores rein's
-   strict egress that nono's stock profile lacks), `open_port` for the git-push
-   relay, and the sandbox git-config that points push traffic at the relay.
-4. **Repositioned git-push relay** — a standalone local proxy (nono's profile
-   confines the sandboxed git to reach *only* it), rebuilt on `httputil.
-   ReverseProxy` (stdlib streaming/chunked/Expect) with a thin rein inject +
-   receive-pack-tap layer.
+1. **Verified nono install (the `curl | sh` fix).** `rein init` fetches a *pinned*
+   nono release + verifies signature (Sigstore-founder project; releases signed) +
+   SHA-256 digest before installing; `rein doctor` re-checks. (Confirm nono's exact
+   signing mechanism during P0.)
+2. **Opinionated profile generator** — nono profile: `upstream_proxy` → rein's
+   proxy, tightened `allow_domain` (rein's strict egress; nono's stock profile is
+   open), fs deny-read parity, CA-trust env so the sandboxed client trusts rein's
+   leaf.
+3. **Proxy front-end swap** — `internal/proxy` accepts nono's external-proxy
+   CONNECT (a normal forward-proxy entry) instead of srt's `mitmProxy.socketPath`.
+4. **The sandbox prober** (its own section) as the trust-but-verify layer.
 
-## Assurance over a substrate we don't own: the sandbox prober
+## Assurance: the sandbox prober
 
-Ceding containment to nono — pre-1.0, fast-moving, not ours — means rein no longer
-controls the sandbox. The sandbox prober (`docs/containment-probe-harness.md`,
-written substrate-agnostic for exactly this moment) is how rein keeps assurance,
-and under the pivot it is **more central than it was under srt, not optional**.
-Two layers:
+Ceding containment to a pre-1.0 third party rein doesn't control makes the prober
+(`docs/containment-probe-harness.md`) load-bearing, in two layers:
+1. **Launch-time gate** (fail-closed, every run) — the nono analog of the deleted
+   `VerifyConfigApplied`: sentinel read-back + App-key-unreadable probe; refuse to
+   launch if nono didn't confine as configured.
+2. **CI differential harness** — `controlplaneio/sandbox-probe` inside `nono run`
+   vs host, classified against rein's config oracle. Test-only (like `pyte`).
+It is the **acceptance gate for the P3 cutover**.
 
-1. **Launch-time gate (fail-closed, every `rein run`).** The nono analog of the
-   `VerifyConfigApplied` we're deleting with `internal/srt`: before exposing the
-   agent, rein confirms nono actually applied the expected denials — a sentinel
-   read-back (a known file in the deny set must read empty in-sandbox) plus a probe
-   that the App key + cred stores are unreadable. If nono didn't confine as
-   configured — version drift, a profile bug, a Landlock-unavailable kernel — rein
-   **fails closed and refuses to launch**. We keep the *concept* of the launch gate
-   even as the srt implementation goes; with a third-party substrate it matters
-   more, not less.
-2. **CI / golden differential prober (dev + CI + on every nono bump).** Adopt
-   `controlplaneio/sandbox-probe` (Apache-2.0, Go, same host-vs-sandbox-diff
-   design): run inside `nono run` vs on the host, diff, and classify each
-   surviving-reachable observation against rein's config-derived oracle — expected
-   denials (`app.pem`, gh, ssh, history, keyring/agent sockets) and expected-open
-   (the tightened egress allowlist). Golden-committed; drift = red = re-review.
-   This is the check that caught, this session, that nono's stock profile leaves
-   egress wide open — exactly the kind of substrate surprise rein must not ship.
+## Libraries: keep the hand-rolled stdlib proxy
 
-The prober is also the **acceptance gate for the P3 cutover**: srt's containment
-tests are only safe to delete once the prober proves nono enforces the equivalent
-denials on the target platform(s). And it stays test-only / dev-invoked (like
-`pyte`), so its license never touches the shipped binary.
+Research verdict (findings §"Follow-up spike"): **no maintained Go proxy library
+fits** — goproxy (you'd gut its CONNECT layer, keep every rein invariant custom,
+add a 6.7k-line audit liability), go-mitmproxy (buffers by default — OOM footgun
+for streaming pushes), gomitmproxy (GPL-3.0, incompatible with a shipped binary).
+Infisical's `agent-vault` — the exact use case — also chose stdlib. rein's
+forward-MITM core is ~40 lines of stdlib; the security value (SNI==Host,
+no-token-on-response, HTTP/1.1 pin, the pkt-line declare tap) is custom regardless.
+**Minimize by deletion + fuzz (issue #136); do not adopt a library, do not rewrite
+on `httputil.ReverseProxy` (contradicts CLAUDE.md; retracted).**
 
 ## How we'd TEST
 
-The **golden-transcript journey model stays** (`tests/interactive/`): every
-behavior-changing PR moves a journey and ships a reviewable golden. But the split
-of labor changes what each journey proves.
-
-**KEEP (broker behavior — user-visible path is substrate-agnostic):**
-`write_ceremony`, `scope_expansion`, `git_author`, `gh_write`, `push_upstream`,
-`multi_repo`, `expansion_404`, `session_commands`, `tmux_popup_approval`,
-`credential_boundary`, `app_not_installed`, `realagent_write`, `claude_resume`,
-`init_*`/`onboarding`. These test declare → approve → push-lands, which is
-preserved; they re-point from srt to the nono-composed stack and regenerate
-goldens.
-
-**DROP / DEMOTE (srt-specific containment — now nono's job):**
-`sandbox_filesystem` (srt deny-read of cred stores) and the srt-only unit tests
-(`VerifyConfigApplied`, seccomp AF_UNIX, /dev/tty self-grant) go away **with**
-`internal/srt` — replaced by the **sandbox prober** (its own section above): the
-fail-closed launch gate + the differential CI harness verify nono's containment
-once and guard it against drift, instead of rein re-deriving it per release.
-`sandbox_gh_read_staleness` likely stays (broker cache behavior).
-
-**NEW:**
-- `nono_install` — `rein init` fetches + **verifies** (sig + digest) a pinned
-  nono, writes the profile; tampered binary fails closed.
-- `git_push_via_relay` — a real (chunked, > 16 MiB) `git push` through the
-  composed nono+relay stack lands on a throwaway repo (the capability nono can't
-  provide alone — the headline journey).
-- `cmd_capture_approval` — nono invokes `rein credential-capture`; write token
-  gated by the host-tty prompt; in-sandbox agent can't reach it.
-- **Fuzzing (the mediation-robustness track):** `go test -fuzz` on
-  `ParseReceivePackCommands` (untrusted pkt-line — top target), the tier
-  classifier, and `classifyHost`; smuggling/desync probes on the relay. Plus an
-  independent security review scoped to the relay + parsers. This is the answer to
-  "are we confident in that code" — currently it has unit tests + checkpoint
-  reviews but **zero fuzzing**.
-
-Net test surface: **smaller** (srt-composition tests deleted, containment
-delegated to one probe) but with a **new, higher-value focus** (fuzz the one
-custom security-critical component we keep).
+Golden-transcript journeys stay. **Keep** the broker journeys (`write_ceremony`,
+`scope_expansion`, `git_author`, `gh_write`, `push_upstream`, `tmux_popup_approval`,
+`credential_boundary`, `claude_resume`, `init_*`) — declare→approve→push-lands is
+substrate-agnostic; re-point srt→nono, regenerate goldens. **Drop** the
+srt-containment tests (`sandbox_filesystem`, `VerifyConfigApplied`, seccomp,
+/dev/tty) with `internal/srt` → replaced by the prober. **Add**: `nono_install`
+(verified fetch), `git_push_via_nono` (the composed nono→rein→github stack, incl.
+>16 MiB — the headline), and the **fuzzing track** (issue #136: `ParseReceivePack`
++ classifier). Net test surface shrinks; investment moves to fuzzing the one
+custom component we keep.
 
 ## Risks & open questions
 
-- **The relay is the residual risk.** It's the one hand-rolled component we keep.
-  Mitigation: rebuild on stdlib transport + fuzz + independent review (above).
-  Non-negotiable: it must fail loud, never the silent hang nono exhibits.
-- **nono is pre-1.0, fast-moving.** Pin + re-verify the profile schema/CLI on bump
-  (existing srt policy). The `cmd://` schema + 16 MiB cap are stable-ish (the cap
-  is intentional, so it won't silently change).
-- **Composition cost.** Three processes (nono, rein relay, `cmd://` helper) vs one
-  stack. More moving parts; the installer hides it from users.
-- **macOS.** nono uses Seatbelt on mac; verify `cmd://` + relay + git-config
-  routing compose there (folds into the CP5 mac parity track).
-- **Egress default.** nono's stock profile is open; rein's generated profile must
-  tighten it (and we should EGRESS-warn on wide sets, as today).
-- **Do we file the chunked/Expect issue upstream?** Courtesy + optionality (if
-  nono ever streams request bodies, the relay could shrink further), but we do NOT
-  depend on it — it's an intentional cap.
-- **Direct mode** stays as-is; whether it survives long-term is a separate call.
-
-## Phasing (spine, mirrors the CP discipline)
-
-- **P0 — Install+profile:** verified nono fetch + opinionated profile gen in
-  `rein init`; `doctor` nono health. Journey: `nono_install`.
-- **P1 — `cmd://` authority + prober:** `rein credential-capture` (broker core +
-  approval through it) **and** the sandbox prober — the fail-closed launch-time
-  gate plus the `sandbox-probe` differential CI harness. Journeys:
-  `cmd_capture_approval`, containment diff. The prober lands here because this is
-  the first phase rein actually launches nono, and it's the assurance we need
-  before trusting the substrate.
-- **P2 — Relay reposition + de-risk:** move git-push relay behind nono, rebuild on
-  stdlib transport, add fuzzers + review. Journey: `git_push_via_relay`.
-- **P3 — Cut over sandboxed mode:** `rein run` launches nono (not srt); delete
-  `internal/srt` + srt journeys. **Gated on the prober** proving nono enforces the
-  equivalent denials on the target platform(s). Regenerate kept goldens.
-- **P4 — Dogfood** on a throwaway, then wrangle (the existing CP6 gate).
+- **The `nono run` upstream-proxy gate (above)** — the biggest, unresolved.
+- **nono is a new TCB root** — it tunnels (not terminates) github, so it sees only
+  encrypted CONNECT for that path (good — rein holds the plaintext + tokens). But
+  it fully controls the sandbox; a nono compromise = containment loss. Add a
+  "nono compromised" row to the threat model: rein still guarantees key custody +
+  approval UX, nothing about containment.
+- **"Stronger sandbox" is unmeasured** — run the srt-vs-nono channel diff (env,
+  sockets, TTY, pid-ns, seccomp, fs, egress) before asserting it; both substrates
+  + the probe are available now.
+- **nono pre-1.0 churn** — pin + re-verify profile schema/CLI on bump (existing srt
+  policy). The `upstream_proxy` field + external-proxy tunnel are stable-shaped.
+- **macOS = Seatbelt**, different mechanism; re-derive containment there (CP5 track).
+- **Egress default open** in nono's stock profile — rein's generated profile
+  tightens it.
+- **git proxy auth** — git doesn't preempt Proxy-Authorization; rein's relay path
+  must use `--no-auth` on a loopback-only relay or handle 407.
+- **Large non-push uploads** (LFS, release assets) — under (b) they flow through
+  rein's streaming proxy too, so the cap doesn't apply. (This was a (c)-only risk.)
+- **Direct mode** diverges; separate call.
 
 ## How we'd develop this
 
-**Isolate the pivot from main until it fully replaces srt.** Per Tom's direction,
-this does *not* trickle onto main. Develop on a long-lived integration branch
-(`nono`, off main); main keeps shipping srt-based rein unchanged until the pivot
-is complete and cut over in one reviewed step.
+Long-lived `nono` integration branch off main (Tom's direction): phases as PRs
+*into* `nono`, kept continuously synced with main to avoid drift, always
+green/runnable (srt default on-branch until P3). **Carve-out lands on main NOW,
+independently** (fuzz relay + adopt sandbox-probe vs current srt — issue #136):
+pure wins, zero dependency, and its outputs feed the decision. Cutover (P3) is one
+atomic reviewed PR: flip default srt→nono, delete `internal/srt`, gated on P4
+dogfood + prober acceptance; rollback = revert it. Per-phase: advisor before,
+reviewer subagent after.
 
-- **Branch model.** `nono` is the pivot trunk. Each phase (P0–P4) is a normal
-  reviewed PR **targeting `nono`**, not main — so we keep per-phase review, green
-  CI, and journey goldens *within* the pivot, without ever leaving main in a
-  half-pivoted state. The flag that keeps srt default (proposal §"The decision")
-  lives on the branch; main never sees it.
-- **Keep `nono` synced with main — the one real risk of a long-lived branch is
-  drift.** Merge main → `nono` continuously (at least per merged main PR / weekly),
-  so the eventual cutover is a small reconciliation, not a big-bang. rein's
-  worktree workflow (`.claude/worktrees`) gives the branch its own workspace.
-- **The branch stays runnable throughout.** srt remains the default *on the branch*
-  until P3; nono is behind the flag. Every phase leaves `go test ./... -race`, vet,
-  gofmt, and the journey goldens green — so the branch is always dogfoodable (you
-  can run the composed nono stack on the branch long before it's near main).
-- **Carve-out: substrate-agnostic hardening goes to main NOW, independently.** Two
-  pieces are wins regardless of the pivot and should not wait on `nono`: (a)
-  **fuzzing the existing relay/parsers** (`ParseReceivePackCommands`, the
-  classifier) — it hardens *today's shipping* code; (b) **adopting `sandbox-probe`
-  as a CI check against the current srt setup** (the harness is substrate-agnostic,
-  written for exactly this). Landing these on main shrinks the `nono` branch and
-  de-risks the relay before it's ever repositioned.
-- **The cutover (P3) is one atomic, reviewed PR** merging `nono` → main: flips the
-  default srt→nono, deletes `internal/srt` + srt journeys, **gated on P4 dogfood +
-  the prober's acceptance** (equivalent denials proven on the target platform(s)).
-  Because srt lived until this PR, **rollback = revert it.**
-- **Discipline per phase** (unchanged from the CP model): advisor before each
-  phase's substantive work; a reviewer subagent (code + security) after each
-  phase's implementation; stop-and-surface at every phase gate.
+## Phasing
+
+- **P0 — Install + profile:** verified nono fetch, opinionated profile gen,
+  `doctor` nono health. Journey: `nono_install`.
+- **P1 — Compose + close the gate:** re-front `internal/proxy` on nono's
+  external-proxy; **resolve the `nono run` upstream-proxy routing (the open gate)**;
+  add the prober (launch gate + CI harness). Journeys: `git_push_via_nono`,
+  containment diff. *P1 is where the pivot lives or dies.*
+- **P2 — Minimize + fuzz the proxy:** delete dead arms; fuzz `ParseReceivePack` +
+  classifier (issue #136); independent security review of the relay.
+- **P3 — Cutover:** default srt→nono, delete `internal/srt`; gated on the prober +
+  P4 dogfood.
+- **P4 — Dogfood** on a throwaway, then wrangle (existing CP6 gate).
 
 ## The decision
 
-Adopting nono is a **forward-looking simplification**: rein sheds ~2000+ LOC of
-srt composition and its install friction, gains a stronger/better-maintained
-sandbox and a cleaner verified-install story, and concentrates its own code on
-what's differentiated (issuance, per-issue scope, approval) plus the one
-irreducible relay. The cost is composing two proxies, taking a dependency on a
-pre-1.0 tool, and owning + hardening the relay. The spike says the fit is real;
-this proposal is the shape. **Green-light P0–P2 as a spike-grade track** (behind
-a flag, srt still default) so we can prove the composed stack end-to-end before
-committing to the P3 cutover.
+(b) is the attractive pivot: shed srt's sandbox composition + install friction,
+keep a small fuzzed stdlib proxy + the broker, on a stronger-to-install (if
+unmeasured-stronger) sandbox — genuinely minimizing rein's security-critical
+surface. But it is **gated on one unresolved unknown** (the `nono run`
+upstream-proxy routing) and a set of honest risks (new TCB root, pre-1.0 churn,
+macOS parity). Recommendation: **land the carve-out (#136) now; make P1's gate a
+hard go/no-go spike with kill criteria** — if `nono run` can't be made to route to
+rein's proxy, the pivot does not proceed on this design. Do not green-light P3
+until P1's gate is closed and the srt-vs-nono channel diff is measured.

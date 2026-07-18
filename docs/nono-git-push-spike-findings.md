@@ -337,12 +337,15 @@ trace shows `inner POST /git-receive-pack cl=-1` — rein TLS-terminated, inject
 - routing is **nono config, not agent-settable git config** (closes review #3).
 
 **Caveats (the remaining integration work):**
-- Proven via `nono proxy` STANDALONE. `nono run --upstream-proxy` (supervised
-  sandbox mode) did NOT route to the external proxy — the CONNECT aborts inside
-  nono before reaching a reachable MITM. Wiring the external-proxy into `nono run`
-  is the open integration step (profile config, `NONO_UPSTREAM_PROXY`, or an
-  upstream question/fix). This is the one thing left to prove for the full
-  composed stack.
+- Proven via `nono proxy` STANDALONE. `nono run` (supervised sandbox mode) did
+  NOT route to the external proxy — via the `--upstream-proxy` CLI flag AND the
+  profile `network.upstream_proxy` field, the CONNECT aborts inside nono before
+  reaching a reachable MITM, and the supervised proxy's reason is not surfaced
+  (`NONO_LOG`/`NONO_PROXY_LOG`/session dir all silent). Source shows the wiring
+  *should* be present (`proxy_runtime.rs:2412` sets `external_proxy` when
+  `upstream_proxy` is Some), so this is likely a supervised-mode gate/bug or a
+  config nuance beyond what the spike cracked — **needs a nono-maintainer
+  question, and is the #1 open gate for the full composed stack.**
 - git does not send proxy credentials preemptively (curl does), so nono's proxy
   auth 407 aborts git — used `--no-auth` on the loopback proxy; production wiring
   must handle proxy auth (or `--no-auth` on a loopback-only relay).
