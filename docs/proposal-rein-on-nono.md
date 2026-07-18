@@ -97,6 +97,35 @@ dependency.
 Phases: install → compose + harden → shrink and fuzz the proxy → cut over →
 dogfood.
 
+## How we verify it works
+
+We already have live "journey" tests (`tests/interactive/`) that walk the real
+user path — declare an issue, approve, push, check the push lands — against a
+checked-in golden transcript. Those are the backbone here:
+
+- **Keep** the broker journeys (declare, approve, push, scope, git identity, gh
+  writes). The user-visible path doesn't change, so we point them at the nono
+  stack instead of srt and regenerate the goldens. Green journeys = behavior
+  preserved.
+- **Drop** the srt-specific containment tests; the **prober** replaces them —
+  it checks, against nono, that the sandbox really hides credentials and blocks
+  egress (run in CI and as a fail-closed check at launch).
+- **Add** one new journey for the full nono stack (a real `git push` through
+  nono → rein → GitHub, including a large chunked push), plus the fuzzing from
+  #136.
+- Existing unit/e2e tests for the broker and proxy stay; add unit tests for the
+  new installer and config generator.
+
+The prober is also how we keep trusting nono across its version bumps.
+
+## Future work (not now)
+
+nono already stores credentials in the **OS keychain** — something rein doesn't do
+today (rein keeps the App key in a file with uid/mode checks). Putting rein's App
+key (and minted tokens) in the OS keychain / Secure Enclave, via nono's mechanism
+or directly, is a real improvement we could adopt later. Noting it here — we can
+expand once the core pivot works.
+
 ## The decision
 
 The hard part works: rein can broker a real `git push` through nono, and nono's
