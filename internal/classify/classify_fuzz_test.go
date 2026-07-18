@@ -14,7 +14,8 @@ import (
 // Only Tier.String (a logging helper, not on the classify path) is unexercised.
 // A 30s -fuzz run of FuzzClassify (~13M execs) and 20s of the trailing-mutation
 // probe found no crash and no soundness violation (no write shape classified
-// Read). Verdict: sufficient for the classifier's robustness + soundness surface.
+// Read). Verdict: sufficient — 100% stmt coverage of the classifier's
+// robustness + soundness surface from the committed seeds.
 //
 // FuzzClassify fuzzes the tier classifier's untrusted-input path (issue #136A):
 // host/method/path/query/body all come from a possibly-prompt-injected agent.

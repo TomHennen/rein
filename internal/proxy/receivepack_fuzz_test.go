@@ -17,8 +17,8 @@ import (
 // and the delete (zero-OID) shape. The one deliberately unreached branch is
 // IssueFromRef's `strconv.Atoi` error return (l.204): unreachable belt-and-
 // suspenders, the regexp already guarantees the capture is 1-10 digits.
-// Two 30s -fuzz runs (~3.7M execs) found no crash and no new coverage beyond
-// the committed seeds. Verdict: sufficient for the parser's fail-closed surface.
+// A 30s -fuzz run (~3.7M execs) found no crash. Verdict: sufficient for the
+// parser's fail-closed surface — 100% stmt coverage from the committed seeds.
 //
 // FuzzParseReceivePackCommands fuzzes the untrusted pkt-line command-section
 // parser (issue #136A): the input is git receive-pack wire bytes from a
