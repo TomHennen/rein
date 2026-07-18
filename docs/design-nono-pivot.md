@@ -538,9 +538,13 @@ preserved** (the user's constraint).
 mediation is the real control); determine the *minimal* pathname unix sockets a real
 agent (claude/node/gh — DNS resolver, etc.) legitimately needs and grant ONLY those via
 `filesystem.unix_socket*`, **never the tmux/approval socket**; verify the agent still
-runs. The prober MUST assert (fail closed otherwise): tmux socket connect **denied**,
-`send-keys` denied, `/dev/tty` unopenable, `$TMUX` absent. This preserves rein's #32
-non-replayability guarantee under nono.
+runs. **Cost tested (empty allowlist): LOW** — DNS, nss/`getent`, git, curl-through-the-
+proxy (200), node, and gh all still work; nono blocked 6 non-essential unix-socket ops
+and nothing essential broke. So the allowlist can **start empty** and grow only if a
+specific tool needs a specific socket (P1 must verify the *real* `claude` agent runs
+clean — a bare `node -e` emitted a benign warning). The prober MUST assert (fail closed
+otherwise): tmux socket connect **denied**, `send-keys` denied, `/dev/tty` unopenable,
+`$TMUX` absent. This preserves rein's #32 non-replayability guarantee under nono.
 
 1. **Launch gate = nono analog of `VerifyConfigApplied`.** A tiny, dep-free,
    in-binary check that runs on every `rein run --nono` BEFORE the agent, and fails
