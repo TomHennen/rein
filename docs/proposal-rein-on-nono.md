@@ -62,18 +62,47 @@ CONNECT** (rein is "the enterprise proxy"), which is why rein's proxy needs no
 `cmd://` and why the CLAUDE.md goproxy-rejection rationale (tied to srt's socket)
 relaxes — though we still keep stdlib, see "Libraries".
 
-## The one open gate (must close before committing)
+## The composed stack is PROVEN (former #1 gate — RESOLVED)
 
-**`nono run` (sandbox mode) did not route to the upstream proxy in the spike.**
-The standalone `nono proxy --upstream-proxy <rein>` works; `nono run` with the
-same setting (CLI flag *and* profile `network.upstream_proxy`) aborts the CONNECT
-before contacting rein, and the supervised proxy's reason is not surfaced
-(`NONO_LOG`/`NONO_PROXY_LOG`/session dir all silent). Source shows the wiring
-*should* be present (`proxy_runtime.rs:2412`). **This is the #1 unknown** — resolve
-it (a nono-maintainer question / issue, or the correct supervised config) before
-any cutover. If it proves unfixable, the fallback composition to evaluate is
-"nono sandbox + rein's proxy as the sandbox's forced `HTTPS_PROXY`, egress-confined
-to rein" — but that needs its own spike (nono forces its own proxy env today).
+Empirically, `nono run` (full sandbox mode) → nono external-proxy → rein's proxy
+→ real github: a small AND a **20 MiB chunked `git push` both landed** (findings
+§"RESOLVED"). It was never a design-boundary refusal (the in-sandbox CONNECT
+returns 502, not 403, and nono does reach the external proxy). Two production
+requirements fell out, both cheap and profile-carried:
+- **`http.proxyAuthMethod=basic`** in the sandbox git config — nono's external-
+  proxy path uses strict CONNECT-auth and git doesn't preempt `Proxy-Authorization`
+  by default (curl does). rein's opinionated profile sets this.
+- rein's proxy should **require proxy-auth** (a per-session secret), carried in
+  nono's `external_proxy.auth` (`ExternalProxyAuth` exists in nono) — see the
+  listener-capability requirement below.
+
+## Design requirements surfaced by the re-review (must be in P1)
+
+The second review confirmed (b) fixes (c)'s problems but flagged real new items:
+
+1. **Listener capability (the socket→TCP regression).** Today the token-injection
+   capability is a placement-checked unix socket (`internal/proxy/placement.go`,
+   design §5.3). Under (b) rein listens on **loopback TCP** for nono to CONNECT to
+   — where any local process could otherwise reach it. Mitigation (required, not
+   optional): a **per-session ephemeral port + mandatory proxy-auth secret** on
+   rein's listener, carried in the generated profile's `external_proxy.auth`
+   (verified: nono supports upstream `Proxy-Authorization`), plus per-session token
+   binding. This must replace `placement.go`'s guarantees explicitly.
+2. **CA trust via nono fs policy, not env.** Bind rein's CA bundle **read-only over
+   the system trust paths** via nono's filesystem policy + pinned
+   `GIT_CONFIG_GLOBAL=/dev/null` — not agent-mutable `SSL_CERT_FILE`/`GIT_SSL_CAINFO`
+   env (TM-G8: agents "fix" TLS errors by rewriting config).
+3. **Host-routing table (carry srt gap #6 forward).** Specify exactly which hosts
+   tunnel to rein vs go direct: **only the exact inject hosts** (api/github/uploads)
+   route to rein — never a wildcard, or a CDN host (codeload/objects/raw) pulls the
+   token onto a pre-signed asset URL. rein's per-host-class inject is the second
+   line. This routing table is the token-leak boundary; name it.
+4. **Egress is plausibly WEAKER on nono — test the hypothesis, don't assume.**
+   Landlock network control is TCP-port-scoped, not host-scoped; a host allowlist
+   without a netns lives only in a proxy the agent's traffic voluntarily traverses.
+   srt/bwrap can hand an empty netns with only the proxy socket — airtight. The
+   channel diff (below) must include a **direct-connect-bypass probe** and be framed
+   as "prove nono's egress isn't weaker," not neutral curiosity.
 
 ## What we TEAR OUT
 
@@ -183,10 +212,11 @@ reviewer subagent after.
 
 - **P0 — Install + profile:** verified nono fetch, opinionated profile gen,
   `doctor` nono health. Journey: `nono_install`.
-- **P1 — Compose + close the gate:** re-front `internal/proxy` on nono's
-  external-proxy; **resolve the `nono run` upstream-proxy routing (the open gate)**;
-  add the prober (launch gate + CI harness). Journeys: `git_push_via_nono`,
-  containment diff. *P1 is where the pivot lives or dies.*
+- **P1 — Compose + harden:** re-front `internal/proxy` on nono's external-proxy
+  (routing already proven end-to-end); implement the four §"Design requirements"
+  (listener proxy-auth + per-session binding, CA-via-fs, host-routing table,
+  egress-bypass probe); add the prober (launch gate + CI harness). Journeys:
+  `git_push_via_nono`, containment diff.
 - **P2 — Minimize + fuzz the proxy:** delete dead arms; fuzz `ParseReceivePack` +
   classifier (issue #136); independent security review of the relay.
 - **P3 — Cutover:** default srt→nono, delete `internal/srt`; gated on the prober +
@@ -196,11 +226,14 @@ reviewer subagent after.
 ## The decision
 
 (b) is the attractive pivot: shed srt's sandbox composition + install friction,
-keep a small fuzzed stdlib proxy + the broker, on a stronger-to-install (if
-unmeasured-stronger) sandbox — genuinely minimizing rein's security-critical
-surface. But it is **gated on one unresolved unknown** (the `nono run`
-upstream-proxy routing) and a set of honest risks (new TCB root, pre-1.0 churn,
-macOS parity). Recommendation: **land the carve-out (#136) now; make P1's gate a
-hard go/no-go spike with kill criteria** — if `nono run` can't be made to route to
-rein's proxy, the pivot does not proceed on this design. Do not green-light P3
-until P1's gate is closed and the srt-vs-nono channel diff is measured.
+keep a small fuzzed stdlib proxy + the broker, minimizing rein's security-critical
+surface. **The load-bearing integration is proven** — a 20 MiB chunked `git push`
+lands through the full `nono run` → nono-tunnel → rein-inject → github stack — so
+the pivot is no longer gated on an unknown, only on *engineering* the four design
+requirements (listener auth, CA-via-fs, host-routing, egress probe) and honest
+risks (new TCB root — smaller under (b) since nono sees only github ciphertext;
+pre-1.0 churn; **unmeasured-and-plausibly-weaker egress**; macOS parity).
+Recommendation: **land the carve-out (#136) now, unconditionally**; then run P0/P1
+(behind a flag, srt default), with the **srt-vs-nono egress channel diff** and the
+listener-capability design as hard gates before P3 cutover. Build-vs-adopt on a
+pre-1.0 dependency remains Tom's call — but the empirics now support it.

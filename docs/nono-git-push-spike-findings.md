@@ -337,15 +337,24 @@ trace shows `inner POST /git-receive-pack cl=-1` — rein TLS-terminated, inject
 - routing is **nono config, not agent-settable git config** (closes review #3).
 
 **Caveats (the remaining integration work):**
-- Proven via `nono proxy` STANDALONE. `nono run` (supervised sandbox mode) did
-  NOT route to the external proxy — via the `--upstream-proxy` CLI flag AND the
-  profile `network.upstream_proxy` field, the CONNECT aborts inside nono before
-  reaching a reachable MITM, and the supervised proxy's reason is not surfaced
-  (`NONO_LOG`/`NONO_PROXY_LOG`/session dir all silent). Source shows the wiring
-  *should* be present (`proxy_runtime.rs:2412` sets `external_proxy` when
-  `upstream_proxy` is Some), so this is likely a supervised-mode gate/bug or a
-  config nuance beyond what the spike cracked — **needs a nono-maintainer
-  question, and is the #1 open gate for the full composed stack.**
+- **RESOLVED (2026-07-18, third pass): the full `nono run` composition works.**
+  Earlier this doc said `nono run` "did not route" to the external proxy — that
+  was WRONG, caused by (a) a broken test harness (bare listeners that never
+  completed the CONNECT tunnel, so nono 502'd) and (b) a git proxy-auth nuance.
+  The advisor's discriminator settled it: inside `nono run`, a github CONNECT
+  returns **502 (not 403)** and the external listener DID receive nono's
+  connection — so nono **does** route to the external proxy in sandbox mode, and
+  it is NOT a design-boundary refusal. With a proper MITM completing the tunnel,
+  **curl gets `200 Connection Established`**. git then aborted because git sends
+  the CONNECT **without preemptive `Proxy-Authorization`** and nono's external-
+  proxy path uses *strict* connect-auth (vs the lenient default path). Fix: set
+  **`http.proxyAuthMethod=basic`** in the sandbox git config. With that, a small
+  AND a **20 MiB chunked `git push` both LANDED on real github through `nono run`
+  → nono external-proxy → rein MITM** (trace: `inner POST git-receive-pack
+  cl=-1`). **Architecture (b) is proven end-to-end in the full sandbox
+  composition.** rein's opinionated profile must set `http.proxyAuthMethod=basic`
+  (and can require a per-session proxy-auth secret on rein's listener, carried in
+  nono's `external_proxy.auth` — closing the loopback-capability concern below).
 - git does not send proxy credentials preemptively (curl does), so nono's proxy
   auth 407 aborts git — used `--no-auth` on the loopback proxy; production wiring
   must handle proxy auth (or `--no-auth` on a loopback-only relay).
