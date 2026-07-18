@@ -34,7 +34,7 @@ func contained() Observations {
 	}
 }
 
-func chanStatus(v Verdict, ch Channel) Status {
+func chanStatus(v Verdict, ch Channel) ChannelStatus {
 	for _, c := range v.Channels {
 		if c.Channel == ch {
 			return c.Status
@@ -49,7 +49,7 @@ func TestClassify_Contained(t *testing.T) {
 		t.Fatalf("clean containment must not fail closed; got:\n%s", v.String())
 	}
 	for _, ch := range []Channel{ChanCredentials, ChanDirectTCP, ChanArbitraryLoopback, ChanGitHubViaProxy, ChanProxyReachable, ChanUDPEgress} {
-		if got := chanStatus(v, ch); got != StatusOK {
+		if got := chanStatus(v, ch); got != ChannelOK {
 			t.Errorf("channel %s = %s, want ok", ch, got)
 		}
 	}
@@ -61,7 +61,7 @@ func TestClassify_ArbitraryLoopbackReached_IsLeak(t *testing.T) {
 	obs := contained()
 	obs.PlantedLoop = reached("127.0.0.1:47999")
 	v := Classify(obs, Policy{})
-	if got := chanStatus(v, ChanArbitraryLoopback); got != StatusLeak {
+	if got := chanStatus(v, ChanArbitraryLoopback); got != ChannelLeak {
 		t.Fatalf("arbitrary loopback reached must be leak, got %s", got)
 	}
 	if !v.ShouldFailClosed() {
@@ -86,7 +86,7 @@ func TestClassify_RefusedIsUnknownNotOK(t *testing.T) {
 			obs := contained()
 			tc.set(&obs)
 			v := Classify(obs, Policy{})
-			if got := chanStatus(v, tc.ch); got != StatusUnknown {
+			if got := chanStatus(v, tc.ch); got != ChannelUnknown {
 				t.Errorf("%s refused: got %s, want unknown", tc.ch, got)
 			}
 			if v.ShouldFailClosed() {
@@ -112,7 +112,7 @@ func TestClassify_RequireControls_UnknownFailsClosed(t *testing.T) {
 			obs := contained()
 			tc.set(&obs)
 			v := Classify(obs, Policy{RequireControls: true})
-			if got := chanStatus(v, tc.ch); got != StatusFail {
+			if got := chanStatus(v, tc.ch); got != ChannelFail {
 				t.Errorf("%s under RequireControls: got %s, want fail", tc.ch, got)
 			}
 			if !v.ShouldFailClosed() {
@@ -127,7 +127,7 @@ func TestClassify_RequireControls_GitHubUnknownStillPasses(t *testing.T) {
 	obs := contained()
 	obs.GitHubDirect = ConnResult{} // unresolved / not attempted
 	v := Classify(obs, Policy{RequireControls: true})
-	if got := chanStatus(v, ChanGitHubViaProxy); got != StatusUnknown {
+	if got := chanStatus(v, ChanGitHubViaProxy); got != ChannelUnknown {
 		t.Errorf("github unknown under RequireControls: got %s, want unknown", got)
 	}
 	if v.ShouldFailClosed() {
@@ -139,7 +139,7 @@ func TestClassify_DirectEgressReached_IsLeak(t *testing.T) {
 	obs := contained()
 	obs.DirectExternal = reached("1.1.1.1:443")
 	v := Classify(obs, Policy{})
-	if chanStatus(v, ChanDirectTCP) != StatusLeak || !v.ShouldFailClosed() {
+	if chanStatus(v, ChanDirectTCP) != ChannelLeak || !v.ShouldFailClosed() {
 		t.Fatalf("direct external reach must leak + fail closed:\n%s", v.String())
 	}
 }
@@ -148,7 +148,7 @@ func TestClassify_GitHubDirectReached_IsLeak(t *testing.T) {
 	obs := contained()
 	obs.GitHubDirect = reached("140.82.121.3:443")
 	v := Classify(obs, Policy{})
-	if chanStatus(v, ChanGitHubViaProxy) != StatusLeak || !v.ShouldFailClosed() {
+	if chanStatus(v, ChanGitHubViaProxy) != ChannelLeak || !v.ShouldFailClosed() {
 		t.Fatalf("direct github reach must leak + fail closed:\n%s", v.String())
 	}
 }
@@ -157,7 +157,7 @@ func TestClassify_CredReadable_IsLeak(t *testing.T) {
 	obs := contained()
 	obs.Creds = []CredObs{{Path: "/home/u/.config/rein-credentials/app.pem", Existed: true, Readable: true}}
 	v := Classify(obs, Policy{})
-	if chanStatus(v, ChanCredentials) != StatusLeak || !v.ShouldFailClosed() {
+	if chanStatus(v, ChanCredentials) != ChannelLeak || !v.ShouldFailClosed() {
 		t.Fatalf("readable credential must leak + fail closed:\n%s", v.String())
 	}
 }
@@ -166,7 +166,7 @@ func TestClassify_SentinelReadable_IsLeak(t *testing.T) {
 	obs := contained()
 	obs.Creds = []CredObs{{Path: "/home/u/.ssh/rein-sentinel", Sentinel: true, Existed: true, Readable: true}}
 	v := Classify(obs, Policy{})
-	if chanStatus(v, ChanCredentials) != StatusLeak {
+	if chanStatus(v, ChanCredentials) != ChannelLeak {
 		t.Fatalf("readable sentinel must leak, got %s", chanStatus(v, ChanCredentials))
 	}
 }
@@ -175,7 +175,7 @@ func TestClassify_NoCredsPresent_IsUnknown(t *testing.T) {
 	obs := contained()
 	obs.Creds = []CredObs{{Path: "/nope", Existed: false, Denied: true}}
 	v := Classify(obs, Policy{})
-	if got := chanStatus(v, ChanCredentials); got != StatusUnknown {
+	if got := chanStatus(v, ChanCredentials); got != ChannelUnknown {
 		t.Fatalf("no creds present must be unknown, got %s", got)
 	}
 	if v.ShouldFailClosed() {
@@ -189,7 +189,7 @@ func TestClassify_ProxyUnreachable_FailsClosed(t *testing.T) {
 	obs := contained()
 	obs.NonoProxy = refused("127.0.0.1:33777")
 	v := Classify(obs, Policy{})
-	if got := chanStatus(v, ChanProxyReachable); got != StatusFail {
+	if got := chanStatus(v, ChanProxyReachable); got != ChannelFail {
 		t.Fatalf("proxy unreachable must be fail, got %s", got)
 	}
 	if !v.ShouldFailClosed() {
@@ -211,7 +211,7 @@ func TestClassify_UDPOpen_WarnsByDefault(t *testing.T) {
 	obs := contained()
 	obs.UDPExternal = reached("8.8.8.8:53")
 	v := Classify(obs, Policy{})
-	if got := chanStatus(v, ChanUDPEgress); got != StatusWarn {
+	if got := chanStatus(v, ChanUDPEgress); got != ChannelWarn {
 		t.Fatalf("UDP open must warn by default, got %s", got)
 	}
 	if v.ShouldFailClosed() {
@@ -226,7 +226,7 @@ func TestClassify_UDPOpen_FailsUnderPolicy(t *testing.T) {
 	obs := contained()
 	obs.UDPExternal = reached("8.8.8.8:53")
 	v := Classify(obs, Policy{FailOnUDP: true})
-	if got := chanStatus(v, ChanUDPEgress); got != StatusLeak {
+	if got := chanStatus(v, ChanUDPEgress); got != ChannelLeak {
 		t.Fatalf("UDP open under FailOnUDP must leak, got %s", got)
 	}
 	if !v.ShouldFailClosed() {
@@ -277,10 +277,10 @@ func TestLiveContainment(t *testing.T) {
 		t.Fatalf("live containment gate failed closed: %v", err)
 	}
 	// The crux must be an explicit denial, not merely unknown.
-	if got := chanStatus(verdict, ChanArbitraryLoopback); got != StatusOK {
+	if got := chanStatus(verdict, ChanArbitraryLoopback); got != ChannelOK {
 		t.Errorf("arbitrary-loopback control = %s, want ok (explicit denial)", got)
 	}
-	if got := chanStatus(verdict, ChanProxyReachable); got != StatusOK {
+	if got := chanStatus(verdict, ChanProxyReachable); got != ChannelOK {
 		t.Errorf("positive control (proxy reachable) = %s, want ok", got)
 	}
 }

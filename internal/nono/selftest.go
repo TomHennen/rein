@@ -67,23 +67,24 @@ const (
 // `send-keys` in particular is a session-disruption hazard needing an isolated
 // tmux fixture, not the user's real server.
 
-// Status is the per-channel verdict.
-type Status string
+// ChannelStatus is the per-channel containment verdict (distinct from the
+// doctor-facing sandboxutil.Status re-exported as nono.Status).
+type ChannelStatus string
 
 const (
-	// StatusOK — contained as expected (a positive denial was observed).
-	StatusOK Status = "ok"
-	// StatusLeak — containment FAILED: the channel was open when it must be shut.
-	StatusLeak Status = "leak"
-	// StatusFail — the gate cannot trust its own result (e.g. the positive
+	// ChannelOK — contained as expected (a positive denial was observed).
+	ChannelOK ChannelStatus = "ok"
+	// ChannelLeak — containment FAILED: the channel was open when it must be shut.
+	ChannelLeak ChannelStatus = "leak"
+	// ChannelFail — the gate cannot trust its own result (e.g. the positive
 	// control failed, or the probe could not run). Fails closed, distinct from a
 	// containment leak.
-	StatusFail Status = "fail"
-	// StatusWarn — an accepted residual is open (UDP), surfaced loudly.
-	StatusWarn Status = "warn"
-	// StatusUnknown — could not determine (target absent, ambiguous errno, no
+	ChannelFail ChannelStatus = "fail"
+	// ChannelWarn — an accepted residual is open (UDP), surfaced loudly.
+	ChannelWarn ChannelStatus = "warn"
+	// ChannelUnknown — could not determine (target absent, ambiguous errno, no
 	// network). Never counted as contained; never fails the gate on its own.
-	StatusUnknown Status = "unknown"
+	ChannelUnknown ChannelStatus = "unknown"
 )
 
 // Policy tunes classification.
@@ -140,7 +141,7 @@ type Observations struct {
 // ChannelVerdict is one channel's classified result.
 type ChannelVerdict struct {
 	Channel Channel
-	Status  Status
+	Status  ChannelStatus
 	Detail  string
 }
 
@@ -153,7 +154,7 @@ type Verdict struct {
 // leak, or any gate-integrity failure (positive control failed / probe error).
 func (v Verdict) ShouldFailClosed() bool {
 	for _, c := range v.Channels {
-		if c.Status == StatusLeak || c.Status == StatusFail {
+		if c.Status == ChannelLeak || c.Status == ChannelFail {
 			return true
 		}
 	}
@@ -165,7 +166,7 @@ func (v Verdict) ShouldFailClosed() bool {
 func (v Verdict) Warnings() []string {
 	var w []string
 	for _, c := range v.Channels {
-		if c.Status == StatusWarn {
+		if c.Status == ChannelWarn {
 			w = append(w, fmt.Sprintf("%s: %s", c.Channel, c.Detail))
 		}
 	}
@@ -176,7 +177,7 @@ func (v Verdict) Warnings() []string {
 func (v Verdict) Leaks() []ChannelVerdict {
 	var out []ChannelVerdict
 	for _, c := range v.Channels {
-		if c.Status == StatusLeak || c.Status == StatusFail {
+		if c.Status == ChannelLeak || c.Status == ChannelFail {
 			out = append(out, c)
 		}
 	}
@@ -231,13 +232,13 @@ func classifyCreds(creds []CredObs) ChannelVerdict {
 	}
 	switch {
 	case len(leaked) > 0:
-		return ChannelVerdict{ChanCredentials, StatusLeak,
+		return ChannelVerdict{ChanCredentials, ChannelLeak,
 			fmt.Sprintf("credential(s) READABLE inside the sandbox: %s (deny_credentials failed)", strings.Join(leaked, ", "))}
 	case existed == 0:
-		return ChannelVerdict{ChanCredentials, StatusUnknown,
+		return ChannelVerdict{ChanCredentials, ChannelUnknown,
 			"no credential files present to test (cannot prove deny_credentials)"}
 	default:
-		return ChannelVerdict{ChanCredentials, StatusOK,
+		return ChannelVerdict{ChanCredentials, ChannelOK,
 			fmt.Sprintf("%d credential file(s) present, all unreadable inside the sandbox", existed)}
 	}
 }
@@ -248,17 +249,17 @@ func classifyCreds(creds []CredObs) ChannelVerdict {
 func classifyNegative(ch Channel, r ConnResult, leakDetail, okDetail string, strictUnknown bool) ChannelVerdict {
 	unknown := func(detail string) ChannelVerdict {
 		if strictUnknown {
-			return ChannelVerdict{ch, StatusFail, detail + " — no legitimate Unknown for this control; failing closed"}
+			return ChannelVerdict{ch, ChannelFail, detail + " — no legitimate Unknown for this control; failing closed"}
 		}
-		return ChannelVerdict{ch, StatusUnknown, detail}
+		return ChannelVerdict{ch, ChannelUnknown, detail}
 	}
 	switch {
 	case !r.Attempted:
 		return unknown("not attempted (no target)")
 	case r.Succeeded:
-		return ChannelVerdict{ch, StatusLeak, leakDetail + " [" + r.Target + "]"}
+		return ChannelVerdict{ch, ChannelLeak, leakDetail + " [" + r.Target + "]"}
 	case r.Denied:
-		return ChannelVerdict{ch, StatusOK, okDetail + " [" + r.Target + "]"}
+		return ChannelVerdict{ch, ChannelOK, okDetail + " [" + r.Target + "]"}
 	default:
 		return unknown(fmt.Sprintf("connect to %s failed but not with a denial errno (%s); cannot conclude containment", r.Target, r.Err))
 	}
@@ -268,13 +269,13 @@ func classifyNegative(ch Channel, r ConnResult, leakDetail, okDetail string, str
 func classifyProxyControl(r ConnResult) ChannelVerdict {
 	switch {
 	case !r.Attempted:
-		return ChannelVerdict{ChanProxyReachable, StatusFail,
+		return ChannelVerdict{ChanProxyReachable, ChannelFail,
 			"positive control not run (HTTPS_PROXY absent?) — cannot trust the negative checks"}
 	case r.Succeeded:
-		return ChannelVerdict{ChanProxyReachable, StatusOK,
+		return ChannelVerdict{ChanProxyReachable, ChannelOK,
 			"nono's proxy is reachable from inside [" + r.Target + "]"}
 	default:
-		return ChannelVerdict{ChanProxyReachable, StatusFail,
+		return ChannelVerdict{ChanProxyReachable, ChannelFail,
 			fmt.Sprintf("nono's proxy UNREACHABLE [%s] (%s) — misconfig; the whole egress path is dead, failing closed", r.Target, r.Err)}
 	}
 }
@@ -282,18 +283,18 @@ func classifyProxyControl(r ConnResult) ChannelVerdict {
 func classifyUDP(r ConnResult, policy Policy) ChannelVerdict {
 	switch {
 	case !r.Attempted:
-		return ChannelVerdict{ChanUDPEgress, StatusUnknown, "not attempted"}
+		return ChannelVerdict{ChanUDPEgress, ChannelUnknown, "not attempted"}
 	case r.Succeeded:
 		if policy.FailOnUDP {
-			return ChannelVerdict{ChanUDPEgress, StatusLeak,
+			return ChannelVerdict{ChanUDPEgress, ChannelLeak,
 				"UDP egress OPEN and policy requires it closed [" + r.Target + "]"}
 		}
-		return ChannelVerdict{ChanUDPEgress, StatusWarn,
+		return ChannelVerdict{ChanUDPEgress, ChannelWarn,
 			"UDP egress OPEN (accepted residual — a prompt-injected agent has a UDP exfil channel) [" + r.Target + "]"}
 	case r.Denied:
-		return ChannelVerdict{ChanUDPEgress, StatusOK, "UDP egress denied [" + r.Target + "]"}
+		return ChannelVerdict{ChanUDPEgress, ChannelOK, "UDP egress denied [" + r.Target + "]"}
 	default:
-		return ChannelVerdict{ChanUDPEgress, StatusUnknown,
+		return ChannelVerdict{ChanUDPEgress, ChannelUnknown,
 			fmt.Sprintf("UDP send to %s failed but not with a denial errno (%s)", r.Target, r.Err)}
 	}
 }
