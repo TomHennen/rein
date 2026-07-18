@@ -319,3 +319,48 @@ forward-proxy library (`google/martian` the lead candidate — viable *because* 
 turns rein into a standard forward proxy, dissolving CLAUDE.md's goproxy
 rejection) against rein's injection invariants + the receive-pack declare tap. Do
 NOT green-light the five-phase plan on this spike.
+
+## Follow-up spike (2026-07-18, later) — architecture (b) CONFIRMED; keep stdlib proxy
+
+Both follow-up questions resolved, and they rehabilitate the pivot **as (b)**.
+
+**(b) works empirically.** Via `nono proxy --upstream-proxy <rein-MITM>` →
+real github.com: a small push AND a **20 MiB chunked push both LANDED**; the MITM
+trace shows `inner POST /git-receive-pack cl=-1` — rein TLS-terminated, injected
+`Basic x-access-token`, and **streamed** the chunked receive-pack body upstream
+(the exact case nono's own inject path 413s/hangs on). Consequences:
+- the **16 MiB/chunked cap dissolves** — it was an artifact of nono doing the
+  injection; when nono only *tunnels* (external proxy = opaque bidirectional
+  CONNECT) and rein injects+streams, there is no cap.
+- rein sees the **full plaintext request**, so GraphQL tier classification and the
+  receive-pack declare tap are preserved (closes review fatal #1/#2).
+- routing is **nono config, not agent-settable git config** (closes review #3).
+
+**Caveats (the remaining integration work):**
+- Proven via `nono proxy` STANDALONE. `nono run --upstream-proxy` (supervised
+  sandbox mode) did NOT route to the external proxy — the CONNECT aborts inside
+  nono before reaching a reachable MITM. Wiring the external-proxy into `nono run`
+  is the open integration step (profile config, `NONO_UPSTREAM_PROXY`, or an
+  upstream question/fix). This is the one thing left to prove for the full
+  composed stack.
+- git does not send proxy credentials preemptively (curl does), so nono's proxy
+  auth 407 aborts git — used `--no-auth` on the loopback proxy; production wiring
+  must handle proxy auth (or `--no-auth` on a loopback-only relay).
+
+**Library question (#3): keep the hand-rolled stdlib proxy + fuzz it.** No
+maintained Go lib fits this forward-MITM-with-body-tap shape: goproxy (maintained,
+BSD-3, but you'd gut its CONNECT layer and keep every rein invariant custom — a
+6.7k-line audit liability for little gain), go-mitmproxy (**buffers request bodies
+by default** — an OOM footgun for streaming pushes), gomitmproxy (**GPL-3.0**,
+incompatible with rein's shipped binary, hard-constraint #4). Corroboration:
+**Infisical/agent-vault** — the exact credential-injection MITM for AI agents,
+actively developed — also hand-rolled on stdlib with zero proxy-lib deps. And the
+rein-stand-in MITM used for this spike is **~40 lines of stdlib Go**, so under (b)
+the proxy *core* is tiny; the security-critical value (SNI==Host, no-token-on-
+response, the pkt-line declare tap) is custom regardless. Right investment:
+**fuzz the pkt-line/receive-pack parser** (issue #136), not a dependency swap.
+
+**Net:** the pivot, framed as **(b)**, delivers the goal — minimize rein's
+security-critical code — by deleting `internal/srt` (~2000 LOC) and keeping a
+small, fuzzed, stdlib forward-proxy that nono chains to as an external proxy. Next
+gate: wire the external-proxy into `nono run` (sandbox mode).
