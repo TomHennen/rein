@@ -391,15 +391,16 @@ enforced via **seccomp user notification — the supervisor validates every
 `connect`/`bind` call**."* Landlock alone is port-scoped (`capability.rs:927`);
 nono layers seccomp-notify connect-validation for host-scoped enforcement.
 Intentional + fail-closed (nono *refuses* proxy-only mode on WSL2 rather than allow
-bypass). **BUT the seccomp filter mediates `connect`/`bind`, not UDP `sendto`:**
-tested — a **direct UDP DNS query to `8.8.8.8:53` is REACHABLE** inside the
-sandbox, and arbitrary-name resolution via the system resolver leaves the sandbox.
-So **DNS is a live (low-bandwidth) exfil channel in nono**, which srt's empty netns
-plausibly blocks (no resolver reachable) — nono is **weaker on this one channel.**
-So: direct-TCP egress = parity-with-srt (strong); DNS/UDP = a real residual gap to
-mitigate (check whether a nono UDP-egress/`block:true` setting closes it) or
-document against the threat model. **Caveats: WSL2 → rein fails closed; DNS
-channel open by default.**
+bypass). **BUT UDP egress is open by default — and it is ALL UDP, not just DNS.**
+Tested inside `nono run`: `sendto` to `8.8.8.8:53`, `8.8.8.8:12345` (arbitrary),
+`1.1.1.1:443` (QUIC), and connected-UDP all **succeed**. So a prompt-injected agent
+has a general UDP exfil channel (DNS names, QUIC, raw UDP), which srt's empty netns
+blocks. **However nono CAN mediate UDP** — source (`sandbox/linux.rs:2064`) routes
+`sendto`/`sendmsg`/`sendmmsg` to the supervisor alongside `connect`/`bind`; the
+*default policy* just allows them. So it's a **closeable-but-open-by-default**
+residual (find/verify the stricter-UDP policy, or document it). Net: direct-**TCP**
+egress = strong (parity with srt); **UDP** = open by default, plausibly
+restrictable. **Caveat: WSL2 → rein fails closed.**
 
 **(3c) Host-routing boundary (srt gap #6) — CONFIRMED addressable.** With
 `upstream_bypass:["example.com"]` + `upstream_proxy:<rein>`, inside `nono run`:
