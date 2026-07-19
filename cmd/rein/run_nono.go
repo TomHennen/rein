@@ -99,7 +99,7 @@ func nonoGitIdentityConfig(id gitidentity.Identity) []nono.GitConfig {
 }
 
 // runNono is the entry point for `rein run --nono -- <cmd>`. cmdline is the
-// agent argv (after "--"). Returns (exitCode, error) like runSandboxed.
+// agent argv (after "--"). Returns (exitCode, error).
 func runNono(cmdline []string) (int, error) {
 	logger, closeLog, err := openLog()
 	if err != nil {
@@ -131,7 +131,7 @@ func runNono(cmdline []string) (int, error) {
 	config.WarnPartialAppEnv(os.Stderr)
 
 	// (3) App config + eager install-id resolve (fail loud here, not inside the
-	// sandbox's first git op). Mirrors runSandboxed.
+	// sandbox's first git op).
 	appCfg, ks, appSource, err := config.ResolveApp()
 	if err != nil {
 		return 1, fmt.Errorf("resolve App config: %w", err)

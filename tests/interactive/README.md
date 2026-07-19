@@ -96,13 +96,27 @@ cutover-correctness bug), tracked in the P3 cutover report:
   `internal/agentenv` contract vars (`REIN_UPSTREAM_INTENT_FILE`,
   `REIN_EPHEMERAL_CLONE_DIR`, `REIN_REPO_WORKTREES`) into the profile `set_vars`. The push
   lands; the upstream-recording / mid-run-clone plumbing does not.
-- `init_then_run`, `onboarding` — `internal/nono.pinnedDigests` is empty (#142 deferred),
-  so `rein init` cannot install nono; a fresh `git clone` + `rein init` + `rein run` fails
-  closed on any box where nono is not already placed by hand.
+- `init_then_run`, `onboarding` — `rein init` never installs nono: `internal/nono.Install`
+  (digest-pinned, and `pinnedDigests` IS populated for 0.68.0) has NO caller; `init.go`
+  only runs `nonoDoctorChecks` as a soft-block preflight. So a fresh `git clone` +
+  `rein init` + `rein run` fails closed on any box where nono is not already placed at
+  `~/.config/rein/nono/bin/nono` by hand. Wiring `Install` into `rein init` is the fix.
 - `sandbox_gh_read_staleness` — harness artifact: the journey's nono state root under `/tmp`
   overlaps nono's own `/tmp` state grant. Adapt the harness (state root off `/tmp`) or note.
 ENV-BLOCKED (no live claude TUI in this environment, not a nono defect): `realagent_write`,
 `claude_resume`. SKIP as before: `credential_boundary` (bagel).
+
+**SECURITY RESIDUAL surfaced by retiring `test_git_hardening.py` (Tom decision).** srt
+ro-bound `<tree>/.git/hooks` + `.git/config` to stop an agent planting a git hook that runs
+AS THE DEVELOPER on the host at their next git op (#64). run_nono grants the working tree
+AND every mapped checkout fully writable via nono `--allow` — including `.git` — with no
+read-only carve-out. Under Landlock there is NO "deny under an allowed parent" (the same
+limit that blocked the tmux-socket deny, design §3e), so srt's mechanism cannot be ported
+as-is. So the `.git`-hooks host-RCE threat SURVIVES under nono for mapped/real checkouts,
+and the containment probe does NOT cover write-confinement. This is an accepted-or-mitigate
+DESIGN decision (like the UDP residual §3d), not a cutover bug — but the cutover deleted the
+srt hardening + its test against the design's own "confirm before deleting" gate (§5), so it
+must be decided before nono runs on non-throwaway checkouts.
 
 **Not yet a journey** (no dir): the interactive `rein init` half is covered by the
 plain `test_init_interactive.py` (8 live specs) — App *creation* is **UNDRIVEABLE**

@@ -143,9 +143,21 @@ if [ "$RUN_SANDBOX" -eq 1 ]; then
   # Live nono containment probe (the §3e launch gate, end to end through a real
   # `nono run`): credentials unreadable, arbitrary loopback + direct external TCP
   # denied, direct-github blocked, the approval channel (tty + tmux socket +
-  # send-keys) isolated, UDP reported. Skips cleanly when nono is not installed.
-  run_suite "nono live containment (Go: internal/nono -run TestLiveContainment)" "$REPO_ROOT" \
-    go test ./internal/nono/ -run TestLiveContainment -count=1
+  # send-keys) isolated, UDP reported.
+  #
+  # nono-presence guard (avoids the #68 skip-as-PASS footgun): TestLiveContainment
+  # t.Skip()s when the managed nono binary is absent, which `go test` reports as
+  # exit 0 → run_suite would record a misleading PASS for a probe that never ran.
+  # So gate on the binary first and record an explicit SKIP instead.
+  managed_nono="${XDG_CONFIG_HOME:-$HOME/.config}/rein/nono/bin/nono"
+  if [ -x "$managed_nono" ]; then
+    run_suite "nono live containment (Go: internal/nono -run TestLiveContainment)" "$REPO_ROOT" \
+      go test ./internal/nono/ -run TestLiveContainment -count=1
+  else
+    sbx_summary+=("SKIP  nono live containment (managed nono absent at $managed_nono — probe did NOT run; place the pinned binary)")
+    echo "=== nono live containment: SKIPPED (managed nono absent — probe did NOT run) ==="
+    echo
+  fi
 
   # Interactive: a REAL claude actually STARTS in the sandbox and answers (the
   # egress/EROFS/MCP-startup floor). SELECTED here, never self-skipped in run.sh's

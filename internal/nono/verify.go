@@ -69,10 +69,9 @@ type VerifyParams struct {
 	Timeout time.Duration
 }
 
-// VerifyContainment is the launch-gate seam rein's `run --nono` path will call
-// to gate a launch on containment (P1e wiring; not yet invoked from cmd/rein —
-// the prober lands first per design §3e). It returns the classified Verdict and
-// a non-nil error when the launch must be refused (a leak, a failed positive
+// VerifyContainment is the launch gate rein's `rein run` path calls before
+// exec'ing the agent (run_nono.go, design §3e). It returns the classified Verdict
+// and a non-nil error when the launch must be refused (a leak, a failed positive
 // control, or the probe could not run). When nono is absent it returns
 // ErrNonoUnavailable so CI can skip.
 func VerifyContainment(vp VerifyParams) (Verdict, error) {

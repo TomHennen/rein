@@ -731,6 +731,19 @@ decisions.
 - **UDP exfil (§3d):** open by default, no nono config fixes it. Explicit Tom decision
   (accept vs block); a data-confidentiality regression from srt's empty namespace until
   closed. Must be resolved at the P3 gate, not slipped through.
+- **`.git`-hooks host-RCE (#64) — RESIDUAL under nono; the §5 "confirm before deleting"
+  gate resolved here.** srt ro-bound `<tree>/.git/hooks` + `.git/config` so a prompt-injected
+  agent could not plant a hook (or `core.fsmonitor`/`core.pager`) that runs AS THE DEVELOPER
+  on the host at their next git op. run_nono grants the working tree AND every mapped checkout
+  fully writable via nono `--allow`, `.git` included, with no read-only carve-out — and
+  Landlock has no "deny under an allowed parent" (the same limit as the tmux-socket deny,
+  §3e), so srt's mechanism **cannot be ported as-is**. So the threat SURVIVES for mapped/real
+  checkouts; the containment prober has no write-confinement channel, so nothing catches it.
+  The P3 cutover deleted `internal/srt/githard.go` + its test; this is the required
+  confirmation (threat survives, port infeasible under Landlock). Options for Tom: accept +
+  document like UDP; refuse to bind a mapped checkout writable (throwaway-clone-and-push only);
+  or a host-side mitigation (fs watch / a nono write-confinement primitive if one lands).
+  Must be decided before nono runs on non-throwaway checkouts.
 - **F2 anonymous direct-github (§3c):** confirmed blocked — a proxy-bypassing direct
   connect to an inject host is refused by seccomp. Keep the prober check as a regression
   guard.
