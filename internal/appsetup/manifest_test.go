@@ -50,6 +50,9 @@ func TestBuildManifest_Primary(t *testing.T) {
 		"issues":        "write",
 		"pull_requests": "write",
 		"metadata":      "read",
+		// One-time setup capability for the branch-floor ruleset; never in a
+		// per-run push token (internal/ruleset, githubapp mint tiers).
+		"administration": "write",
 	}
 	for k, v := range want {
 		if got := m.DefaultPermissions[k]; got != v {

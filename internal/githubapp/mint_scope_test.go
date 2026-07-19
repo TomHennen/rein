@@ -34,6 +34,11 @@ func TestMint_RequestBodyPinsScopeCeiling(t *testing.T) {
 		// capability only. Asserted explicitly below (in addition to the
 		// exact-map check) so the split is a named, self-documenting invariant.
 		readTier bool
+		// adminTier marks the sole administration-carrying tier (ruleset setup,
+		// host-side only). Every OTHER tier must carry NO "administration" — a
+		// push token that could delete its binding ruleset would defeat the
+		// server-side floor. Asserted explicitly below.
+		adminTier bool
 	}{
 		{
 			name: "read-only",
@@ -72,6 +77,19 @@ func TestMint_RequestBodyPinsScopeCeiling(t *testing.T) {
 				"pull_requests": "write",
 				"metadata":      "read",
 			},
+		},
+		{
+			// The ONE tier that carries administration. It is minted host-side
+			// for ruleset setup and never injected toward the agent; the
+			// per-tier "no administration on any other tier" check below is the
+			// named invariant that keeps it out of every push/read token.
+			name: "admin",
+			mint: (*Client).MintAdminToken,
+			wantPerms: map[string]string{
+				"administration": "write",
+				"metadata":       "read",
+			},
+			adminTier: true,
 		},
 	}
 
@@ -173,6 +191,15 @@ func TestMint_RequestBodyPinsScopeCeiling(t *testing.T) {
 					if v == "write" {
 						t.Errorf("read tier %q leaked a write permission on the wire: %q=write (tier split broken)", tc.name, k)
 					}
+				}
+			}
+
+			// Administration invariant: only the admin tier may carry it. A push
+			// or read token with administration could delete the ruleset that
+			// binds it, defeating the server-side branch floor.
+			if !tc.adminTier {
+				if v, ok := got.Permissions["administration"]; ok {
+					t.Errorf("non-admin tier %q leaked administration=%q on the wire (a push token must never be able to delete its binding ruleset)", tc.name, v)
 				}
 			}
 		})

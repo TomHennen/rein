@@ -172,11 +172,17 @@ func (c *Client) MintGhReadOnlyToken(ctx context.Context) (token string, expires
 // session-scoped in CP4+), so the blast radius of contents:write here is
 // the same as that of a successful git push to the same repo — they're
 // the same logical capability surface. A narrower grant (contents:read
-// only) was tried briefly but broke `gh pr merge`, which is necessary for
-// any workflow that uses branch-protection rules requiring PR-only merges
-// into the protected branch. The defense-in-depth from the narrower grant
-// was small in Shape B (an agent that can capture a git write token has
-// equivalent capability anyway).
+// only) was tried briefly but broke `gh pr merge`. The defense-in-depth from
+// the narrower grant was small in Shape B (an agent that can capture a git
+// write token has equivalent capability anyway).
+//
+// NOTE (branch floor, internal/ruleset): with the server-side agent/** floor
+// active and the App NOT on its bypass list, this token's contents:write can
+// only create/update refs under refs/heads/agent/** — a direct push OR a
+// `gh pr merge` into main is now rejected server-side (GH013). So the
+// "merge into the protected branch" capability this grant once implied is
+// bounded by the floor; agent-vs-human merge policy is a separate ruleset
+// (decision-rein-broker.md "Merge policy").
 //
 // Surface to call out for Shape A reviewers: pull_requests:write also
 // confers PR review/approve capability. Branch-protection rules that
@@ -198,6 +204,22 @@ func (c *Client) MintGhSessionToken(ctx context.Context) (token string, expiresA
 		Issues:       githubauth.Ptr("write"),
 		PullRequests: githubauth.Ptr("write"),
 		Metadata:     githubauth.Ptr("read"),
+	})
+}
+
+// MintAdminToken returns an installation token with {administration:write,
+// metadata:read} — the ONE-TIME setup capability rein uses to create/verify the
+// server-side `agent/**` branch-floor ruleset (internal/ruleset). It is minted
+// HOST-SIDE by rein and NEVER injected toward the sandboxed agent.
+//
+// SECURITY INVARIANT: administration lives in NO other mint tier. Every push
+// token (MintWriteToken / MintGhSessionToken and their read counterparts) stays
+// subset to {contents, [issues, pull_requests], metadata} — so a token the agent
+// could capture can never delete the ruleset that binds it. TestMint_* pins this.
+func (c *Client) MintAdminToken(ctx context.Context) (token string, expiresAt time.Time, err error) {
+	return c.mint(ctx, &githubauth.InstallationPermissions{
+		Administration: githubauth.Ptr("write"),
+		Metadata:       githubauth.Ptr("read"),
 	})
 }
 

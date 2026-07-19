@@ -9,8 +9,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"time"
 
@@ -21,6 +23,7 @@ import (
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
+	"github.com/TomHennen/rein/internal/ruleset"
 	"github.com/TomHennen/rein/internal/runbroker"
 	"github.com/TomHennen/rein/internal/runscope"
 	"github.com/TomHennen/rein/internal/session"
@@ -103,6 +106,14 @@ func startRunBroker(p runBrokerParams) (*runbroker.Host, error) {
 		return sandboxWriteMint(c, ctx)
 	})
 
+	// Server-authoritative `agent/**` branch floor (decision-rein-broker.md):
+	// install the GitHub rulesets that bind the per-run push token BEFORE the
+	// agent can push. Fail closed (hard-constraint #3) — a run must not proceed
+	// if GitHub can't be made to enforce the floor.
+	if err := ensureBranchFloor(context.Background(), scopedAppCfg(), rscope, p); err != nil {
+		return nil, err
+	}
+
 	approve := buildSandboxApprove(p.sess, p.stateDir, p.runID, p.logger)
 	revoke := productionRevoke(p.sess)
 
@@ -150,4 +161,60 @@ func startRunBroker(p runBrokerParams) (*runbroker.Host, error) {
 			printExpiryBanner(os.Stderr, reason)
 		},
 	})
+}
+
+// ensureBranchFloor installs/verifies the server-side `agent/**` branch-floor
+// rulesets on every repo in the run's initial ceiling, BEFORE the broker
+// starts. It mints a short-lived administration:write token (host-side only,
+// never injected) and revokes it immediately after. Fails closed: any error
+// aborts the run so the agent cannot push against an unenforced repo.
+//
+// The admin token is the ONLY place administration is minted; the per-run PUSH
+// tokens never carry it (see githubapp.MintAdminToken), so a captured push
+// token can never delete the ruleset binding it.
+//
+// LIMITATION: only the INITIAL ceiling is covered here. A repo added mid-run
+// via `rein declare` (scope expansion) is NOT floored — the client-side parser
+// still backstops it this cycle. Flooring scope-expansion repos is a
+// prerequisite for dropping the parser (tracked as future work).
+func ensureBranchFloor(ctx context.Context, cfg githubapp.Config, rscope *runscope.Resolver, p runBrokerParams) error {
+	owner := session.OwnerOf(p.sess)
+	if owner == "" {
+		return fmt.Errorf("cannot install the agent/** branch-floor ruleset: the session has no owner")
+	}
+	repos := rscope.BareNames()
+	if len(repos) == 0 {
+		return fmt.Errorf("cannot install the agent/** branch-floor ruleset: the session has no repositories")
+	}
+
+	c, err := githubapp.NewClient(cfg, p.ks, config.AppKeystoreRole)
+	if err != nil {
+		return err
+	}
+	mctx, cancel := context.WithTimeout(ctx, mintTimeout)
+	tok, _, err := c.MintAdminToken(mctx)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("mint administration token for the branch-floor ruleset failed "+
+			"(the GitHub App must be granted 'Administration: write'; if you recently updated rein, re-approve the App's new permission): %w", err)
+	}
+	defer func() {
+		rctx, rcancel := context.WithTimeout(context.Background(), mintTimeout)
+		defer rcancel()
+		if rerr := c.RevokeToken(rctx, tok); rerr != nil {
+			p.logger.Printf("branch-floor: revoke of the admin token failed (it expires on its own): %v", rerr)
+		}
+	}()
+
+	apiBase := os.Getenv("REIN_GITHUB_API_BASE")
+	for _, name := range repos {
+		ectx, ecancel := context.WithTimeout(ctx, mintTimeout)
+		err := ruleset.Ensure(ectx, http.DefaultClient, apiBase, tok, owner, name)
+		ecancel()
+		if err != nil {
+			return fmt.Errorf("install the agent/** branch-floor ruleset on %s/%s: %w", owner, name, err)
+		}
+		p.logger.Printf("branch-floor: agent/** ruleset active on %s/%s", owner, name)
+	}
+	return nil
 }

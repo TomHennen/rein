@@ -128,6 +128,13 @@ func manifestPermissions(r Role) map[string]string {
 			"issues":        "write",
 			"pull_requests": "write",
 			"metadata":      "read",
+			// administration:write is a ONE-TIME setup capability: rein uses it to
+			// create/verify the server-side `agent/**` branch-floor ruleset (see
+			// internal/ruleset). It is deliberately NOT part of any per-run PUSH
+			// token tier (githubapp.Mint*), so a token handed toward the agent can
+			// never delete the ruleset that binds it. Adding it here only affects
+			// newly-created or re-approved installations.
+			"administration": "write",
 		}
 	case RoleAudit:
 		return map[string]string{
