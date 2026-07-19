@@ -103,6 +103,16 @@ type Params struct {
 	// that never launches claude leaves it empty and CLAUDE_CONFIG_DIR unset.
 	ClaudeConfigDir string
 
+	// GhConfigDir, when non-empty, is delivered as GH_CONFIG_DIR — the rein-owned,
+	// agent-WRITABLE gh config overlay (the gh twin of ClaudeConfigDir). Host
+	// ~/.config/gh stays hidden by nono's default-deny fs (deny_credentials +
+	// nothing grants it), and gh reading it EACCESes and refuses to start; this
+	// override repoints gh at the writable overlay (which carries a placeholder
+	// hosts.yml so gh sends requests — rein's proxy injects the real token
+	// downstream). Must be absolute (also granted agent-WRITABLE via a nono
+	// --allow). Optional — a run that never launches gh may leave it empty.
+	GhConfigDir string
+
 	// Name / Description populate meta. Optional; sensible defaults applied.
 	Name        string
 	Description string
@@ -255,6 +265,17 @@ func Build(p Params) (Profile, error) {
 			return Profile{}, fmt.Errorf("nono: ClaudeConfigDir %q must be absolute (it is granted --allow and set as CLAUDE_CONFIG_DIR)", ccd)
 		}
 		setVars["CLAUDE_CONFIG_DIR"] = ccd
+	}
+
+	// GH_CONFIG_DIR overlay (the gh twin of CLAUDE_CONFIG_DIR): repoint gh at the
+	// rein-owned writable config dir. Host ~/.config/gh stays hidden; this override
+	// is what lets gh start (it EACCESes on the denied host dir otherwise). Emit
+	// only when set, so a non-gh run leaves the profile (and its golden) unchanged.
+	if gcd := strings.TrimSpace(p.GhConfigDir); gcd != "" {
+		if !filepath.IsAbs(gcd) {
+			return Profile{}, fmt.Errorf("nono: GhConfigDir %q must be absolute (it is granted --allow and set as GH_CONFIG_DIR)", gcd)
+		}
+		setVars["GH_CONFIG_DIR"] = gcd
 	}
 
 	name := p.Name

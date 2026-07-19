@@ -67,6 +67,42 @@ func TestBuild_ClaudeConfigDir(t *testing.T) {
 	})
 }
 
+// TestBuild_GhConfigDir mirrors TestBuild_ClaudeConfigDir for the gh overlay
+// (gap 2): set -> GH_CONFIG_DIR in set_vars; empty -> absent (golden-stable); a
+// relative path fails closed. Host ~/.config/gh is never a filesystem grant.
+func TestBuild_GhConfigDir(t *testing.T) {
+	const overlay = "/tmp/rein-gh-xyz"
+
+	t.Run("set", func(t *testing.T) {
+		p := goldenParams()
+		p.GhConfigDir = overlay
+		pr := mustBuild(t, p)
+		if got := pr.Environment.SetVars["GH_CONFIG_DIR"]; got != overlay {
+			t.Errorf("set_vars[GH_CONFIG_DIR] = %q, want the rein overlay %q", got, overlay)
+		}
+		for _, f := range pr.Filesystem.ReadFile {
+			if strings.Contains(f, "/.config/gh") {
+				t.Errorf("filesystem.read_file leaks a host gh path: %q", f)
+			}
+		}
+	})
+
+	t.Run("unset", func(t *testing.T) {
+		pr := mustBuild(t, goldenParams())
+		if v, ok := pr.Environment.SetVars["GH_CONFIG_DIR"]; ok {
+			t.Errorf("GH_CONFIG_DIR must be absent when GhConfigDir is empty; got %q", v)
+		}
+	})
+
+	t.Run("relative-fails-closed", func(t *testing.T) {
+		p := goldenParams()
+		p.GhConfigDir = "relative/gh"
+		if _, err := Build(p); err == nil {
+			t.Error("Build accepted a relative GhConfigDir; it must fail closed (granted --allow and set as GH_CONFIG_DIR)")
+		}
+	})
+}
+
 func mustBuild(t *testing.T, p Params) Profile {
 	t.Helper()
 	pr, err := Build(p)

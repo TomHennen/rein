@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -17,7 +19,7 @@ func TestBuildNonoParams_LoopbackPortFlowsToProxy(t *testing.T) {
 	const port = 47821
 	caPath := "/run/rein/ca-bundle.pem"
 	gitCfg := nonoGitIdentityConfig(gitidentity.Identity{Name: "rein bot", Email: "bot@users.noreply.github.com"})
-	p := buildNonoParams(port, caPath, []string{"api.anthropic.com"}, gitCfg, "")
+	p := buildNonoParams(port, caPath, []string{"api.anthropic.com"}, gitCfg, "", "")
 
 	if p.ListenAddr != "127.0.0.1:47821" {
 		t.Fatalf("ListenAddr = %q, want 127.0.0.1:47821", p.ListenAddr)
@@ -75,7 +77,7 @@ func hasGitConfigPair(sv map[string]string, key, value string) bool {
 // bound) must NOT silently produce a usable profile — Build fails closed. runNono
 // guards this before Build, but assert the shape here too.
 func TestBuildNonoParams_EmptyPortStillFormsAddr(t *testing.T) {
-	p := buildNonoParams(0, "/tmp/ca.pem", nil, nil, "")
+	p := buildNonoParams(0, "/tmp/ca.pem", nil, nil, "", "")
 	if p.ListenAddr != "127.0.0.1:0" {
 		t.Fatalf("ListenAddr = %q, want 127.0.0.1:0", p.ListenAddr)
 	}
@@ -90,7 +92,7 @@ func TestBuildNonoParams_EmptyPortStillFormsAddr(t *testing.T) {
 // hidden by nono's default-deny fs).
 func TestBuildNonoParams_ClaudeConfigDirFlows(t *testing.T) {
 	const overlay = "/home/dev/.config/rein-sandbox-home/.claude"
-	p := buildNonoParams(47821, "/run/rein/ca.pem", nil, nil, overlay)
+	p := buildNonoParams(47821, "/run/rein/ca.pem", nil, nil, overlay, "")
 	if p.ClaudeConfigDir != overlay {
 		t.Fatalf("ClaudeConfigDir = %q, want %q", p.ClaudeConfigDir, overlay)
 	}
@@ -111,12 +113,77 @@ func TestBuildNonoParams_ClaudeConfigDirFlows(t *testing.T) {
 // TestBuildNonoParams_NoClaudeConfigDir: a run that does not launch claude passes
 // an empty overlay and the profile carries no CLAUDE_CONFIG_DIR (golden-stable).
 func TestBuildNonoParams_NoClaudeConfigDir(t *testing.T) {
-	prof, err := nono.Build(buildNonoParams(47821, "/run/rein/ca.pem", nil, nil, ""))
+	prof, err := nono.Build(buildNonoParams(47821, "/run/rein/ca.pem", nil, nil, "", ""))
 	if err != nil {
 		t.Fatalf("nono.Build: %v", err)
 	}
 	if v, ok := prof.Environment.SetVars["CLAUDE_CONFIG_DIR"]; ok {
 		t.Errorf("CLAUDE_CONFIG_DIR must be absent when no overlay is passed; got %q", v)
+	}
+}
+
+// TestBuildNonoParams_GhConfigDirFlows pins the gh overlay wiring (gap 2): the
+// rein-owned overlay path passed to buildNonoParams becomes GH_CONFIG_DIR in the
+// emitted profile's set_vars, and no host ~/.config/gh path is granted read (it
+// stays hidden by nono's default-deny fs).
+func TestBuildNonoParams_GhConfigDirFlows(t *testing.T) {
+	const ghOverlay = "/tmp/rein-gh-abc123"
+	p := buildNonoParams(47821, "/run/rein/ca.pem", nil, nil, "", ghOverlay)
+	if p.GhConfigDir != ghOverlay {
+		t.Fatalf("GhConfigDir = %q, want %q", p.GhConfigDir, ghOverlay)
+	}
+	prof, err := nono.Build(p)
+	if err != nil {
+		t.Fatalf("nono.Build: %v", err)
+	}
+	if got := prof.Environment.SetVars["GH_CONFIG_DIR"]; got != ghOverlay {
+		t.Errorf("set_vars[GH_CONFIG_DIR] = %q, want the rein overlay %q", got, ghOverlay)
+	}
+	for _, f := range prof.Filesystem.ReadFile {
+		if strings.Contains(f, "/.config/gh") {
+			t.Errorf("profile grants read on a host gh path %q (must stay hidden by default-deny)", f)
+		}
+	}
+}
+
+// TestBuildNonoParams_NoGhConfigDir: a run that does not launch gh passes an
+// empty overlay and the profile carries no GH_CONFIG_DIR (golden-stable).
+func TestBuildNonoParams_NoGhConfigDir(t *testing.T) {
+	prof, err := nono.Build(buildNonoParams(47821, "/run/rein/ca.pem", nil, nil, "", ""))
+	if err != nil {
+		t.Fatalf("nono.Build: %v", err)
+	}
+	if v, ok := prof.Environment.SetVars["GH_CONFIG_DIR"]; ok {
+		t.Errorf("GH_CONFIG_DIR must be absent when no overlay is passed; got %q", v)
+	}
+}
+
+// TestPrepareGhOverlay verifies the host-side overlay: a fresh writable dir with
+// a scaffolded hosts.yml carrying the placeholder token (never the host's real
+// creds), hardened to 0700.
+func TestPrepareGhOverlay(t *testing.T) {
+	overlay, err := prepareGhOverlay(t.TempDir())
+	if err != nil {
+		t.Fatalf("prepareGhOverlay: %v", err)
+	}
+	fi, err := os.Stat(overlay)
+	if err != nil || !fi.IsDir() {
+		t.Fatalf("overlay %q not a dir: %v", overlay, err)
+	}
+	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("overlay mode = %o, want 0700 (no group/other access)", perm)
+	}
+	hosts, err := os.ReadFile(filepath.Join(overlay, "hosts.yml"))
+	if err != nil {
+		t.Fatalf("read scaffolded hosts.yml: %v", err)
+	}
+	if !strings.Contains(string(hosts), ghStubToken) {
+		t.Errorf("hosts.yml missing placeholder token; got:\n%s", hosts)
+	}
+	// The overlay must be WRITABLE by the agent (gh writes state): prove we can
+	// write into it, standing in for the nono --allow grant.
+	if err := os.WriteFile(filepath.Join(overlay, "probe"), []byte("x"), 0o600); err != nil {
+		t.Errorf("overlay not writable: %v", err)
 	}
 }
 

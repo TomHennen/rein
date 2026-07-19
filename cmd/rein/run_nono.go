@@ -69,13 +69,14 @@ import (
 // and the git identity is injected — without a live launch. The security host
 // lists (inject / CDN / declare) are NOT passed here — nono.Build reads them
 // straight from internal/proxy so the profile and the proxy can never drift.
-func buildNonoParams(loopbackPort int, caBundlePath string, extraDomains []string, extraGitConfig []nono.GitConfig, claudeConfigDir string) nono.Params {
+func buildNonoParams(loopbackPort int, caBundlePath string, extraDomains []string, extraGitConfig []nono.GitConfig, claudeConfigDir, ghConfigDir string) nono.Params {
 	return nono.Params{
 		ListenAddr:      "127.0.0.1:" + strconv.Itoa(loopbackPort),
 		CACertPath:      caBundlePath,
 		ExtraDomains:    extraDomains,
 		ExtraGitConfig:  extraGitConfig,
 		ClaudeConfigDir: claudeConfigDir,
+		GhConfigDir:     ghConfigDir,
 		// UnixSockets left EMPTY: never grant the tmux/approval socket (the
 		// af_unix_mediation crux, §3e). A real agent that needs a specific
 		// pathname socket gets it added deliberately, never by default.
@@ -254,6 +255,22 @@ func runNono(cmdline []string) (int, error) {
 	}
 	allowPaths = append(allowPaths, claudeOverlay)
 
+	// (5e) Rein-owned, per-run, agent-WRITABLE GH_CONFIG_DIR overlay (the gh twin
+	// of 5d). Host ~/.config/gh is hidden by nono's default-deny fs; without an
+	// override gh EACCESes on it and refuses to start. Point gh at this writable
+	// overlay (scaffolded with a placeholder hosts.yml so gh sends requests; the
+	// proxy injects the real token downstream). Bound WRITABLE via a nono --allow.
+	ghOverlay, err := prepareGhOverlay("")
+	if err != nil {
+		return 1, fmt.Errorf("prepare gh overlay: %w", err)
+	}
+	defer os.RemoveAll(ghOverlay)
+	ghOverlay, err = proxy.ResolveAbs(ghOverlay)
+	if err != nil {
+		return 1, fmt.Errorf("resolve gh overlay: %w", err)
+	}
+	allowPaths = append(allowPaths, ghOverlay)
+
 	// (6) Per-run runtime dir for the proxy's unix socket — user-writable, NOT
 	// under the working tree. nono reaches the proxy over the LOOPBACK front, not
 	// this socket, but runbroker still creates+serves it (dual-front during the
@@ -350,7 +367,7 @@ func runNono(cmdline []string) (int, error) {
 
 	// (11) Generate + write the nono profile. Build enforces the six security
 	// invariants and fails CLOSED rather than emit a permissive profile.
-	profile, err := nono.Build(buildNonoParams(loopbackPort, bundlePath, extraDomains, nonoGitIdentityConfig(gitID), claudeOverlay))
+	profile, err := nono.Build(buildNonoParams(loopbackPort, bundlePath, extraDomains, nonoGitIdentityConfig(gitID), claudeOverlay, ghOverlay))
 	if err != nil {
 		return 1, fmt.Errorf("build nono profile: %w", err)
 	}
@@ -432,7 +449,7 @@ func runNono(cmdline []string) (int, error) {
 	// dir plus the profile set_vars CLAUDE_CONFIG_DIR override (the overlay), which
 	// wins regardless; the scrub just keeps the stale parent value from riding along.
 	execEnv := os.Environ()
-	for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "TMUX", "TMUX_PANE", "CLAUDE_CONFIG_DIR"} {
+	for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "TMUX", "TMUX_PANE", "CLAUDE_CONFIG_DIR", "GH_CONFIG_DIR"} {
 		execEnv = unsetEnv(execEnv, name)
 	}
 	// Prepend the staged-rein dir to PATH: nono passes its OWN launch env's PATH
