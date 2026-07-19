@@ -49,8 +49,8 @@ import (
 )
 
 // EnvWorktrees is the per-run override / addition to the session's `worktrees:`
-// map: a colon-separated list of `owner/repo=/abs/path` entries (the same
-// PATH-style separator convention as REIN_SANDBOX_ALLOW_READ). An entry here
+// map: a colon-separated (PATH-style) list of `owner/repo=/abs/path` entries.
+// An entry here
 // REPLACES a same-repo entry from the session file, so a developer with two
 // checkouts can point one run at the other without editing the session.
 const EnvWorktrees = "REIN_WORKTREES"

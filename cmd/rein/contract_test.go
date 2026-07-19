@@ -42,8 +42,8 @@ func TestBuildAgentContract_StatesTheEnforcedRules(t *testing.T) {
 	}
 }
 
-// TestBuildAgentContract_KillSwitchTellsNoLie: under REIN_SANDBOX_SHOW_HOME the
-// $HOME deny is OFF, so $HOME is a real, persistent home. Telling the agent its
+// TestBuildAgentContract_KillSwitchTellsNoLie: when $HOME is NOT hidden
+// (HomeEphemeral=false), it is a real, persistent home. Telling the agent its
 // $HOME is ephemeral would then be a LIE that could make it refuse to use a
 // perfectly good cache — or, worse, distrust the rest of the contract.
 func TestBuildAgentContract_KillSwitchTellsNoLie(t *testing.T) {

@@ -230,17 +230,3 @@ func printExpiryBanner(w io.Writer, reason string) {
 	fmt.Fprintln(w, "  continue with a fresh, re-authorized session.")
 	fmt.Fprintln(w, "===============================================================")
 }
-
-// contractStatus renders the agent-contract line for the launch banner: whether
-// the agent was told $HOME is ephemeral, credentials are absent, and how to
-// declare its issue.
-func contractStatus(off, injected bool) string {
-	switch {
-	case off:
-		return "  WARNING: agent contract DISABLED (" + EnvDisableAgentContract + ") — the agent was NOT told that $HOME is\n    ephemeral, that credentials are absent, or how to declare its issue. It will find out by failing."
-	case injected:
-		return "  agent contract injected via --append-system-prompt (claude): $HOME is ephemeral, no creds, declare-then-push."
-	default:
-		return "  agent contract PRINTED to the agent's output (this agent has no system-prompt channel, so it may or\n    may not reach the model's context; the REIN_IN_SANDBOX_* env vars carry the same facts machine-readably)."
-	}
-}

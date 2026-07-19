@@ -63,7 +63,7 @@ import (
 //	rein run --no-sandbox -- <cmd> # alias for --direct
 //
 // --sandbox and --nono are kept as no-op aliases for the default (nono is now the
-// only sandbox backend). REIN_SANDBOX=nono is accepted too but redundant.
+// only sandbox backend).
 func dispatchRun(argv []string) (int, error) {
 	mode, cmdline, err := parseRunMode(argv)
 	if err != nil {
