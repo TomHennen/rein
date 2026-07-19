@@ -150,14 +150,19 @@ func TestGitConfigWiring(t *testing.T) {
 	p.ExtraGitConfig = []GitConfig{{Key: "http.version", Value: "HTTP/1.1"}}
 	pr := mustBuild(t, p)
 	sv := pr.Environment.SetVars
-	if sv["GIT_CONFIG_COUNT"] != "3" {
-		t.Errorf("GIT_CONFIG_COUNT = %q, want 3", sv["GIT_CONFIG_COUNT"])
+	// 3 baseline entries (proxyAuthMethod, postBuffer, core.excludesFile) + 1 extra.
+	if sv["GIT_CONFIG_COUNT"] != "4" {
+		t.Errorf("GIT_CONFIG_COUNT = %q, want 4", sv["GIT_CONFIG_COUNT"])
 	}
 	if sv["GIT_CONFIG_KEY_0"] != "http.proxyAuthMethod" || sv["GIT_CONFIG_VALUE_0"] != "basic" {
 		t.Errorf("baseline proxyAuthMethod pair wrong: %q=%q", sv["GIT_CONFIG_KEY_0"], sv["GIT_CONFIG_VALUE_0"])
 	}
-	if sv["GIT_CONFIG_KEY_2"] != "http.version" {
-		t.Errorf("extra git config not appended: %q", sv["GIT_CONFIG_KEY_2"])
+	if sv["GIT_CONFIG_KEY_2"] != "core.excludesFile" || sv["GIT_CONFIG_VALUE_2"] != "/dev/null" {
+		t.Errorf("baseline excludesFile pair wrong: %q=%q", sv["GIT_CONFIG_KEY_2"], sv["GIT_CONFIG_VALUE_2"])
+	}
+	// The extra config lands AFTER the baseline entries (index 3).
+	if sv["GIT_CONFIG_KEY_3"] != "http.version" {
+		t.Errorf("extra git config not appended: %q", sv["GIT_CONFIG_KEY_3"])
 	}
 }
 

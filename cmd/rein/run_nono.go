@@ -19,21 +19,17 @@
 // non-impersonating git identity IS ported — as GIT_CONFIG_* in the profile
 // (not srt's GIT_CONFIG_GLOBAL file), since nono owns env injection.
 //
-// TODO (post-merge integration): this launch does NOT yet run the nono
-// containment prober before the agent. When this branch merges with current
-// nono-pivot-design (which now carries internal/nono.VerifyContainment +
-// RunContainmentProbe + the `__nono-probe` subcommand — the §3e launch gate,
-// the nono counterpart of srt's VerifyConfigApplied), wire VerifyContainment in
-// as the fail-closed pre-launch gate here. Until then the launch trusts the
-// profile applies (digest-verified binary + Build's invariant checks only).
+// Containment gate: before exec'ing the agent, runNono runs nono.VerifyContainment
+// (the §3e launch gate, nono's counterpart of srt's VerifyConfigApplied) through a
+// real `nono run` under the emitted profile and FAILS CLOSED on any leak. UDP-open
+// stays a warning (Policy.FailOnUDP unset), matching the prober's residual finding.
 //
-// DEFERRED write-journey enablers (a full declare→approve→push journey is the
-// next wave; these are needed for it):
-//   - in-sandbox `rein declare <n>`: the declare-host TUNNEL is verified (nono
-//     tunnels the unresolvable declare.rein.internal by CONNECT hostname, no
-//     DNS; rein terminates TLS + answers locally), but the agent invoking the
-//     `rein` BINARY in-sandbox needs it reachable+executable under nono (srt
-//     staged a copy + PATH; nono owns PATH — that path is unverified).
+// In-sandbox `rein declare <n>`: the running rein binary is staged into runTmp and
+// exec-granted via `--read-file`; runTmp is prepended to nono's launch-env PATH
+// (nono passes that through — it REJECTS a set_vars PATH as reserved). So the agent
+// runs `rein declare` exactly as the deny messages instruct.
+//
+// DEFERRED write-journey enablers:
 //   - CLAUDE_CONFIG_DIR / #94 overlay: `rein run --nono -- claude` needs a
 //     rein-owned CLAUDE_CONFIG_DIR (host ~/.claude is hidden by default-deny);
 //     requires an ExtraEnv channel in the profile generator.
@@ -344,12 +340,60 @@ func runNono(cmdline []string) (int, error) {
 		return 1, fmt.Errorf("write nono profile: %w", err)
 	}
 
+	// (11b) Stage the rein binary so the agent can run `rein declare <n>`
+	// IN-SANDBOX exactly as the deny messages instruct (the nono counterpart of
+	// srt's ExtraPathDir staging). Two facts drove this shape:
+	//   - nono REJECTS a set_vars PATH ("PATH is reserved") but PASSES THROUGH the
+	//     PATH of nono's own launch env — so we prepend stagedDir to execEnv's PATH
+	//     (below), not the profile.
+	//   - a bare `--read-file <bin>` grant alone lets nono exec the binary (no
+	//     parent --allow needed), so runTmp stays NON-writable to the agent — no
+	//     PATH-shadowing hole (the agent cannot overwrite the rein on its PATH).
+	self, err := resolveSelf()
+	if err != nil {
+		return 1, fmt.Errorf("resolve rein binary for in-sandbox staging: %w", err)
+	}
+	stagedRein := filepath.Join(runTmp, "rein")
+	if err := copyFile(self, stagedRein, 0o755); err != nil {
+		return 1, fmt.Errorf("stage in-sandbox rein binary: %w", err)
+	}
+
+	// (11c) CONTAINMENT GATE (design §3e): before exec'ing the agent, launch the
+	// prober through a REAL `nono run` under the profile Build emits and FAIL
+	// CLOSED on any leak (credentials readable, planted loopback reachable, direct
+	// external TCP allowed). Point it at rein's real listener + CA bundle so the
+	// gated config matches the launch. UDP-open stays a WARNING (FailOnUDP unset) —
+	// the accepted residual from the prober findings. If nono is somehow absent
+	// (it isn't — we digest-verified it above), skip cleanly rather than block.
+	fmt.Fprintln(os.Stderr, "rein: verifying nono containment (creds hidden; loopback + direct egress denied)…")
+	verdict, verifyErr := nono.VerifyContainment(nono.VerifyParams{
+		ReinBin:      stagedRein,
+		NonoBin:      nonoPath,
+		CACertPath:   bundlePath,
+		ListenAddr:   "127.0.0.1:" + strconv.Itoa(loopbackPort),
+		ExtraDomains: extraDomains,
+	})
+	if verifyErr != nil {
+		if errors.Is(verifyErr, nono.ErrNonoUnavailable) {
+			fmt.Fprintf(os.Stderr, "rein: warning: containment probe skipped (nono unavailable): %v\n", verifyErr)
+		} else {
+			return 1, fmt.Errorf("nono containment gate failed (refusing to launch): %w", verifyErr)
+		}
+	} else {
+		for _, w := range verdict.Warnings() {
+			fmt.Fprintf(os.Stderr, "rein: containment WARNING: %s\n", w)
+		}
+		fmt.Fprintln(os.Stderr, "rein: containment gate passed.")
+	}
+
 	// (12) Build the nono argv: managed path, run, the profile, one --allow per
-	// writable path, then the agent command after "--".
+	// writable path, a read-only grant on the staged rein (exec, not write), then
+	// the agent command after "--".
 	nonoArgv := []string{"run", "--profile", profilePath}
 	for _, p := range allowPaths {
 		nonoArgv = append(nonoArgv, "--allow", p)
 	}
+	nonoArgv = append(nonoArgv, "--read-file", stagedRein)
 	nonoArgv = append(nonoArgv, "--")
 	nonoArgv = append(nonoArgv, cmdline...)
 
@@ -363,6 +407,11 @@ func runNono(cmdline []string) (int, error) {
 	for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "TMUX", "TMUX_PANE"} {
 		execEnv = unsetEnv(execEnv, name)
 	}
+	// Prepend the staged-rein dir to PATH: nono passes its OWN launch env's PATH
+	// through to the sandbox (verified — unlike set_vars PATH, which nono rejects
+	// as reserved), so this is what puts `rein` on the in-sandbox PATH for
+	// `rein declare <n>`. Prepend so the staged copy wins over any host rein.
+	execEnv = setEnv(execEnv, "PATH", runTmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	printNonoBanner(os.Stderr, sess, sessSource, loopbackPort, allowPaths, extraDomains, cmdline)
 
@@ -372,12 +421,24 @@ func runNono(cmdline []string) (int, error) {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Dir = workTree
+	// Run nono in its OWN session (no controlling terminal), the nono equivalent of
+	// srt's bwrap --new-session. Two load-bearing effects:
+	//   1. the host `rein run` process stays the sole owner of the controlling
+	//      terminal, so the declare Form A prompt's /dev/tty read is NOT contended
+	//      by the sandbox child (without this the child shares the terminal and the
+	//      host prompt cancels — the agent's declare never gets confirmed).
+	//   2. the sandboxed agent has no controlling terminal, so it cannot open
+	//      /dev/tty to read/answer the approval prompt itself (self-approval hole,
+	//      the tty-asymmetry srt closes the same way).
+	// Also satisfies the run-discipline rule that a nono launch never shares the
+	// caller's session (it must not touch the operator's tmux/session).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	if err := cmd.Start(); err != nil {
 		return 127, fmt.Errorf("start nono: %w", err)
 	}
-	// Forward SIGTERM-to-rein to the nono child (SIGINT reaches both via the
-	// shared process group; mirrors srt/direct mode).
+	// Forward SIGTERM-to-rein to the nono child. nono is its own session leader
+	// (Setsid above), so signal cmd.Process directly; nono propagates to its tree.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM)
 	defer signal.Stop(sigCh)

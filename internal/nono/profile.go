@@ -46,6 +46,13 @@ var caEnvVars = []string{
 var baselineGitConfig = []GitConfig{
 	{Key: "http.proxyAuthMethod", Value: "basic"},
 	{Key: "http.postBuffer", Value: "524288000"},
+	// core.excludesFile has a COMPILE-TIME default (~/.config/git/ignore) that git
+	// reads even with an empty global config. Under nono's default-deny fs that
+	// read returns EACCES — FATAL to `git add`/`status` ("cannot use … as an
+	// exclude file") — unlike the tolerated ENOENT srt's tmpfs $HOME produces.
+	// Pin it to /dev/null so git reads an empty exclude set instead of the denied
+	// path. Same rationale as the GIT_CONFIG_GLOBAL/SYSTEM redirect.
+	{Key: "core.excludesFile", Value: "/dev/null"},
 }
 
 // GitConfig is one git config key/value pair injected via GIT_CONFIG_*.
@@ -218,6 +225,16 @@ func Build(p Params) (Profile, error) {
 	for _, k := range caEnvVars {
 		setVars[k] = p.CACertPath
 	}
+	// Redirect git's global + system config to /dev/null so git never opens the
+	// developer's ~/.gitconfig (or /etc/gitconfig). Under nono's default-deny fs
+	// that read returns EACCES, which git treats as a FATAL config error — not the
+	// tolerated ENOENT — so WITHOUT this every in-sandbox git op dies before it
+	// runs ("unknown error occurred while reading the configuration files"). The
+	// nono equivalent of srt's GIT_CONFIG_GLOBAL/SYSTEM redirect (env.go). The
+	// non-impersonating identity still comes from the GIT_CONFIG_* entries below,
+	// which layer ON TOP of these empty files.
+	setVars["GIT_CONFIG_GLOBAL"] = "/dev/null"
+	setVars["GIT_CONFIG_SYSTEM"] = "/dev/null"
 	gitCfg := append(append([]GitConfig(nil), baselineGitConfig...), p.ExtraGitConfig...)
 	applyGitConfig(setVars, gitCfg)
 
