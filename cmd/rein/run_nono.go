@@ -105,7 +105,8 @@ func nonoGitIdentityConfig(id gitidentity.Identity) []nono.GitConfig {
 // agents' argv unchanged), the contract text, the one-line banner status, and
 // whether the contract should be PRINTED to the agent's stdout (its only channel
 // when it is not claude). Pure so the wiring is unit-testable without a live
-// launch. Matches run_sandboxed.go's behavior; off honors REIN_DISABLE_AGENT_CONTRACT.
+// launch. Ports the contract mechanism the (now-deleted) srt path used; off
+// honors REIN_DISABLE_AGENT_CONTRACT.
 func briefNonoAgent(cmdline []string, p contractParams, off bool) (argv []string, contract, statusLine string, printToStdout bool) {
 	if off {
 		return cmdline, "", contractStatus(true, false), false

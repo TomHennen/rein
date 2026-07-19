@@ -29,6 +29,11 @@ const ghStubToken = "x-access-token-rein-sandbox-stub"
 // overlay's absolute path. The dir is created 0700 and hardened to the same bar
 // as the claude overlay (not a symlink, user-owned, tight mode) before anything
 // is written. Host-side, before launch. Per-run: the caller removes it at teardown.
+//
+// Unlike the claude overlay, this does NOT symlink-harden the parent (os.TempDir):
+// the file written here is only the fixed non-secret placeholder hosts.yml — there
+// is no OAuth token a redirected parent could exfiltrate — so MkdirTemp's fresh
+// 0700 dir under a sticky-bit temp root is a sufficient bar.
 func prepareGhOverlay(parent string) (string, error) {
 	overlay, err := os.MkdirTemp(parent, "rein-gh-")
 	if err != nil {
