@@ -344,17 +344,20 @@ func classifyPtrace(o PtraceObs, strict bool) ChannelVerdict {
 		}
 		return ChannelVerdict{ChanPtrace, ChannelUnknown, detail}
 	}
+	// The sentinel pid (o.Target) is deterministically volatile — kept in the
+	// Observations JSON for debugging, but NOT in the surfaced detail (it would
+	// break golden determinism when this verdict reaches the transcript).
 	switch {
 	case !o.Attempted:
 		return unknown("ptrace not attempted (no co-located sentinel staged)")
 	case o.Attached || o.MemReadable:
 		return ChannelVerdict{ChanPtrace, ChannelLeak,
-			"co-located process ptrace-ATTACH / /proc/<pid>/mem read SUCCEEDED — a prompt-injected agent could dump rein's broker heap for the token [" + o.Target + "]"}
+			"co-located process ptrace-ATTACH / /proc/<pid>/mem read SUCCEEDED — a prompt-injected agent could dump rein's broker heap for the token"}
 	case o.Denied:
 		return ChannelVerdict{ChanPtrace, ChannelOK,
-			"ptrace-attach + /proc/<pid>/mem of a co-located process denied — broker heap not dumpable [" + o.Target + "]"}
+			"ptrace-attach + /proc/<pid>/mem of a co-located process denied — broker heap not dumpable"}
 	default:
-		return unknown(fmt.Sprintf("ptrace of %s failed but not with a denial errno (%s); cannot conclude isolation", o.Target, o.Err))
+		return unknown(fmt.Sprintf("ptrace failed but not with a denial errno (%s); cannot conclude isolation", o.Err))
 	}
 }
 
@@ -365,18 +368,21 @@ func classifyPtrace(o PtraceObs, strict bool) ChannelVerdict {
 // blocks it (measured); if it ever became readable it is still only a residual here
 // (rein carries no minted secret in env either) — reported, not failed.
 func classifyProcVisibility(o ProcVisObs) ChannelVerdict {
+	// The sentinel pid (o.Target) stays in the Observations JSON but is kept OUT of
+	// the surfaced detail: this Warn reaches the user transcript, and a live pid
+	// would make the golden non-deterministic.
 	switch {
 	case !o.Attempted:
 		return ChannelVerdict{ChanProcVisibility, ChannelUnknown, "not attempted (no co-located sentinel staged)"}
 	case o.EnvironReadable:
 		return ChannelVerdict{ChanProcVisibility, ChannelWarn,
-			"co-located /proc/<pid>/environ readable — a neighbor process's env is exposed (nono usually blocks this); rein places no minted secret in env [" + o.Target + "]"}
+			"co-located /proc/<pid>/environ readable — a neighbor process's env is exposed (nono usually blocks this); rein places no minted secret in env"}
 	case o.CmdlineReadable:
 		return ChannelVerdict{ChanProcVisibility, ChannelWarn,
-			"co-located /proc/<pid>/cmdline (argv) readable — documented residual (no PID namespace); environ is nono-blocked. rein places no minted secret in argv [" + o.Target + "]"}
+			"co-located /proc/<pid>/cmdline (argv) readable — documented residual (no PID namespace); environ is nono-blocked. rein places no minted secret in argv"}
 	default:
 		return ChannelVerdict{ChanProcVisibility, ChannelOK,
-			"co-located /proc cmdline + environ both unreadable [" + o.Target + "]"}
+			"co-located /proc cmdline + environ both unreadable"}
 	}
 }
 

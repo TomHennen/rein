@@ -1,14 +1,15 @@
-$ rein run -- bash -c <declare-uninstalled agent script> /tmp/rein-itest-vqdvv1v9
-rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-vqdvv1v9 (git -C /tmp/rein-itest-vqdvv1v9 rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
+$ rein run -- bash -c <declare-uninstalled agent script> /tmp/rein-itest-qwbmn48o
+rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-qwbmn48o (git -C /tmp/rein-itest-qwbmn48o rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
 rein: verifying nono containment (creds hidden; loopback + direct egress denied)…
 rein: containment WARNING: udp_egress: UDP egress OPEN (accepted residual — a prompt-injected agent has a UDP exfil channel) [8.8.8.8:53]
+rein: containment WARNING: proc_visibility: co-located /proc/<pid>/cmdline (argv) readable — documented residual (no PID namespace); environ is nono-blocked. rein places no minted secret in argv
 rein: containment gate passed.
 rein: launching SANDBOXED (nono) run:
-  session: sess_journey_expansion_404 (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-404-34dibiha/session.yaml]
-  GitHub egress tunnels through rein's loopback proxy: 127.0.0.1:34763
+  session: sess_journey_expansion_404 (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-404-ltmf537r/session.yaml]
+  GitHub egress tunnels through rein's loopback proxy: 127.0.0.1:32817
   the agent sees NO real token; git/gh are injected at the proxy (downstream of the sandbox).
   credentials are hidden (deny_credentials); the approval channel is isolated (af_unix_mediation).
-  writable in sandbox (--allow): [/tmp/rein-itest-vqdvv1v9 /home/admin/.config/rein-sandbox-home/.claude /tmp/rein-gh-2175417641]
+  writable in sandbox (--allow): [/tmp/rein-itest-qwbmn48o /home/admin/.config/rein-sandbox-home/.claude /tmp/rein-gh-1934233678]
   extra egress ALLOWED (direct, NOT injected, no rein token): [api.anthropic.com]
   writes are LOCKED until the agent declares its issue:  rein declare <n>
   the declaration will prompt on THIS terminal.
@@ -25,14 +26,14 @@ emit "@DECLARE_START  rein declare 1 --repo TomHennen/definitely-not-installed  
 run rein declare 1 --repo TomHennen/definitely-not-installed
 emit "@DECLARE_RC=$?"
 emit "@SCRIPT_DONE"
- /tmp/rein-itest-vqdvv1v9
+ /tmp/rein-itest-qwbmn48o
 ---
   agent contract PRINTED to the agent's output (this agent has no system-prompt channel, so it may or
     may not reach the model's context; the REIN_IN_SANDBOX_* env vars carry the same facts machine-readably).
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/rein-itest-vqdvv1v9
+- Your work persists ONLY in the working tree: /tmp/rein-itest-qwbmn48o
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
@@ -61,14 +62,24 @@ NETWORK
 - Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.
 
   nono v0.68.0
+  Verified 1 pack(s)
   Capabilities:
   ────────────────────────────────────────────────────
-    r   /tmp/rein-nono-1339140560/ca-bundle.pem (file)
-   r+w  /tmp/rein-itest-vqdvv1v9 (dir)
+   r+w  /home/admin/.claude (dir)
+   r+w  /home/admin/.local/state/claude/locks (dir)
+   r+w  /home/admin/.cache/claude (dir)
+   r+w  /home/admin/.config/nono/profile-drafts (dir)
+   r+w  /tmp/claude-1000 (dir)
+    r   /home/admin/.config/nono/packages (dir)
+    r   /home/admin/.config/nono/profiles (dir)
+   r+w  /home/admin/.claude/claude.json (file)
+   r+w  /home/admin/.claude.json.lock (file)
+    r   /tmp/rein-nono-3917382023/ca-bundle.pem (file)
+   r+w  /tmp/rein-itest-qwbmn48o (dir)
    r+w  /home/admin/.config/rein-sandbox-home/.claude (dir)
-   r+w  /tmp/rein-gh-2175417641 (dir)
-    r   /tmp/rein-nono-1339140560/rein (file)
-       + 49 system/group paths (-v to show)
+   r+w  /tmp/rein-gh-1934233678 (dir)
+    r   /tmp/rein-nono-3917382023/rein (file)
+       + 57 system/group paths (-v to show)
    net  proxy
   ────────────────────────────────────────────────────
 

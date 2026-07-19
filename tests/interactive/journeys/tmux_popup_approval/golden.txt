@@ -1,15 +1,16 @@
-$ bash /tmp/rein-journey-launch-k9_80c_i/rein-run.sh
+$ bash /tmp/rein-journey-launch-b6xigafe/rein-run.sh
 
-rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-k84cokla (git -C /tmp/rein-itest-k84cokla rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
+rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-0bf5m_yv (git -C /tmp/rein-itest-0bf5m_yv rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
 rein: verifying nono containment (creds hidden; loopback + direct egress denied)…
 rein: containment WARNING: udp_egress: UDP egress OPEN (accepted residual — a prompt-injected agent has a UDP exfil channel) [8.8.8.8:53]
+rein: containment WARNING: proc_visibility: co-located /proc/<pid>/cmdline (argv) readable — documented residual (no PID namespace); environ is nono-blocked. rein places no minted secret in argv
 rein: containment gate passed.
 rein: launching SANDBOXED (nono) run:
-  session: sess_journey_popup (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-yyv8mddk/session.yaml]
-  GitHub egress tunnels through rein's loopback proxy: 127.0.0.1:45411
+  session: sess_journey_popup (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-b2hr6c50/session.yaml]
+  GitHub egress tunnels through rein's loopback proxy: 127.0.0.1:46749
   the agent sees NO real token; git/gh are injected at the proxy (downstream of the sandbox).
   credentials are hidden (deny_credentials); the approval channel is isolated (af_unix_mediation).
-  writable in sandbox (--allow): [/tmp/rein-itest-k84cokla /home/admin/.config/rein-sandbox-home/.claude /tmp/rein-gh-272094992]
+  writable in sandbox (--allow): [/tmp/rein-itest-0bf5m_yv /home/admin/.config/rein-sandbox-home/.claude /tmp/rein-gh-657815742]
   extra egress ALLOWED (direct, NOT injected, no rein token): [api.anthropic.com]
   writes are LOCKED until the agent declares its issue:  rein declare <n>
   the declaration will prompt on THIS terminal.
@@ -31,29 +32,29 @@ emit "@PHASE1_START  push BEFORE declare (expect: locked, no prompt)"
 echo "phase 1" >> probe-1.txt
 run git add -A
 run git commit -q -m "popup ceremony: pre-declaration write attempt"
-run git push --progress origin HEAD:refs/heads/agent/367/popup-20260719-150357-7df841
+run git push --progress origin HEAD:refs/heads/agent/373/popup-20260719-162856-096cfa
 emit "@PHASE1_RC=$?"
 
-emit "@PHASE2_START  rein declare 367 (blocks; approval fires in a tmux POPUP)"
-run rein declare 367
+emit "@PHASE2_START  rein declare 373 (blocks; approval fires in a tmux POPUP)"
+run rein declare 373
 emit "@PHASE2_RC=$?"
 
-emit "@PHASE3_START  push agent/367/<nonce> (expect: lands)"
-run git push --progress origin HEAD:refs/heads/agent/367/popup-20260719-150357-7df841
+emit "@PHASE3_START  push agent/373/<nonce> (expect: lands)"
+run git push --progress origin HEAD:refs/heads/agent/373/popup-20260719-162856-096cfa
 emit "@PHASE3_RC=$?"
 
 emit "@PHASE4_START  push a non-convention ref (expect: rejected)"
-run git push --progress origin HEAD:refs/heads/popup-nonconvention-20260719-150357-183e40
+run git push --progress origin HEAD:refs/heads/popup-nonconvention-20260719-162856-a7bf60
 emit "@PHASE4_RC=$?"
 emit "@SCRIPT_DONE"
- /tmp/rein-itest-k84cokla
+ /tmp/rein-itest-0bf5m_yv
 ---
   agent contract PRINTED to the agent's output (this agent has no system-prompt channel, so it may or
     may not reach the model's context; the REIN_IN_SANDBOX_* env vars carry the same facts machine-readably).
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/rein-itest-k84cokla
+- Your work persists ONLY in the working tree: /tmp/rein-itest-0bf5m_yv
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
@@ -82,14 +83,24 @@ NETWORK
 - Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.
 
   nono v0.68.0
+  Verified 1 pack(s)
   Capabilities:
   ────────────────────────────────────────────────────
-    r   /tmp/rein-nono-1193161291/ca-bundle.pem (file)
-   r+w  /tmp/rein-itest-k84cokla (dir)
+   r+w  /home/admin/.claude (dir)
+   r+w  /home/admin/.local/state/claude/locks (dir)
+   r+w  /home/admin/.cache/claude (dir)
+   r+w  /home/admin/.config/nono/profile-drafts (dir)
+   r+w  /tmp/claude-1000 (dir)
+    r   /home/admin/.config/nono/packages (dir)
+    r   /home/admin/.config/nono/profiles (dir)
+   r+w  /home/admin/.claude/claude.json (file)
+   r+w  /home/admin/.claude.json.lock (file)
+    r   /tmp/rein-nono-1521875711/ca-bundle.pem (file)
+   r+w  /tmp/rein-itest-0bf5m_yv (dir)
    r+w  /home/admin/.config/rein-sandbox-home/.claude (dir)
-   r+w  /tmp/rein-gh-272094992 (dir)
-    r   /tmp/rein-nono-1193161291/rein (file)
-       + 49 system/group paths (-v to show)
+   r+w  /tmp/rein-gh-657815742 (dir)
+    r   /tmp/rein-nono-1521875711/rein (file)
+       + 57 system/group paths (-v to show)
    net  proxy
   ────────────────────────────────────────────────────
 
@@ -108,43 +119,43 @@ SBX| @CLONE_OK  (reads flow with no declaration at all)
 SBX| @PHASE1_START  push BEFORE declare (expect: locked, no prompt)
 SBX| $ git add -A
 SBX| $ git commit -q -m popup ceremony: pre-declaration write attempt
-SBX| $ git push --progress origin HEAD:refs/heads/agent/367/popup-20260719-150357-7df841
+SBX| $ git push --progress origin HEAD:refs/heads/agent/373/popup-20260719-162856-096cfa
 SBX| fatal: remote error: rein: writes are locked until you declare your issue. Run: rein declare <n> (then push to agent/<n>/<nonce>)
 SBX| @PHASE1_RC=128
-SBX| @PHASE2_START  rein declare 367 (blocks; approval fires in a tmux POPUP)
-SBX| $ rein declare 367
+SBX| @PHASE2_START  rein declare 373 (blocks; approval fires in a tmux POPUP)
+SBX| $ rein declare 373
 
 POPUP| === rein: agent declares work on an issue ===
-POPUP|    issue:    #367 "rein journey: tmux-popup approval walkthrough (safe to close)"  [open]
+POPUP|    issue:    #373 "rein journey: tmux-popup approval walkthrough (safe to close)"  [open]
 POPUP|              in TomHennen/agentcreds-validation-a
 POPUP|    session:  sess_journey_popup (role=implement, repos=[TomHennen/agentcreds-validation-a])
 POPUP|    approving covers ALL writes for this run (git push, gh, API).
 POPUP|
-POPUP| To approve, type the issue number (367) and press enter.
+POPUP| To approve, type the issue number (373) and press enter.
 POPUP| To deny, press Ctrl-C or type anything else.
-POPUP| > 367
-SBX| issue #367 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/367/<nonce>)
+POPUP| > 373
+SBX| issue #373 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/373/<nonce>)
 SBX| @PHASE2_RC=0
-SBX| @PHASE3_START  push agent/367/<nonce> (expect: lands)
-SBX| $ git push --progress origin HEAD:refs/heads/agent/367/popup-20260719-150357-7df841
+SBX| @PHASE3_START  push agent/373/<nonce> (expect: lands)
+SBX| $ git push --progress origin HEAD:refs/heads/agent/373/popup-20260719-162856-096cfa
 SBX| Enumerating objects: 4, done.
 SBX| Counting objects: 100% (4/4), done.
 SBX| Delta compression using up to 8 threads
 SBX| Compressing objects: 100% (2/2), done.
-SBX| Writing objects: 100% (3/3), 347 bytes | 347.00 KiB/s, done.
+SBX| Writing objects: 100% (3/3), 346 bytes | 346.00 KiB/s, done.
 SBX| Total 3 (delta 1), reused 0 (delta 0), pack-reused 0
 SBX| remote:
-SBX| remote: Create a pull request for 'agent/367/popup-20260719-150357-7df841' on GitHub by visiting:
-SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/367/popup-20260719-150357-7df841
+SBX| remote: Create a pull request for 'agent/373/popup-20260719-162856-096cfa' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/373/popup-20260719-162856-096cfa
 SBX| remote:
 SBX| To https://github.com/TomHennen/agentcreds-validation-a
-SBX|  * [new branch]      HEAD -> agent/367/popup-20260719-150357-7df841
+SBX|  * [new branch]      HEAD -> agent/373/popup-20260719-162856-096cfa
 SBX| @PHASE3_RC=0
 SBX| @PHASE4_START  push a non-convention ref (expect: rejected)
-SBX| $ git push --progress origin HEAD:refs/heads/popup-nonconvention-20260719-150357-183e40
+SBX| $ git push --progress origin HEAD:refs/heads/popup-nonconvention-20260719-162856-a7bf60
 SBX| Total 0 (delta 0), reused 0 (delta 0), pack-reused 0
 SBX| To https://github.com/TomHennen/agentcreds-validation-a
-SBX|  ! [remote rejected] HEAD -> popup-nonconvention-20260719-150357-183e40 (rein: refs must match agent/<issue>/<nonce> (e.g. agent/73/kx3q))
+SBX|  ! [remote rejected] HEAD -> popup-nonconvention-20260719-162856-a7bf60 (rein: refs must match agent/<issue>/<nonce> (e.g. agent/73/kx3q))
 SBX| error: failed to push some refs to 'https://github.com/TomHennen/agentcreds-validation-a'
 SBX| @PHASE4_RC=1
 SBX| @SCRIPT_DONE

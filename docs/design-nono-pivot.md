@@ -84,8 +84,11 @@ wiring stays in `cmd/rein/doctor.go`).
 - The profile is **nested** (`network.*`, `filesystem.*`, `linux.*`, `environment.*`,
   `groups.include`), not a flat struct.
 - `upstream_proxy` is a **bare `host:port` string**, not a URL.
-- `deny_credentials` is a **policy group** turned on via
-  `groups.include: ["deny_credentials"]`, not a list of paths.
+- `deny_credentials` is a **policy group**, not a list of paths. rein no longer lists
+  it (or any group) literally: the generated profile `extends: "claude-code"` and
+  **inherits** deny_credentials + the ~28 other curated deny groups; `groups.include`
+  carries only broker-specific additions (none today). `Validate` confirms
+  deny_credentials is *effective* via the extended base, not that rein added it.
 - Env vars go in **`environment.set_vars`**.
 - The filesystem is default-deny, so the CA cert is granted via `filesystem.read_file`.
   `filesystem.deny` is a no-op on Linux — grant nothing extra rather than deny.
@@ -549,6 +552,56 @@ briefed under nono.
 
 ## 8. Risks and residuals
 
+**Posture — no general-containment claim.** rein does **not** claim to be a general
+sandbox. It plugs into nono's **standard `claude-code` profile** (rein's generated
+profile now `extends: "claude-code"` and adds only the broker delta — network
+routing, CA trust, `af_unix_mediation`; the ~29 curated deny groups are inherited,
+not hand-rolled) and stands behind exactly **one** boundary: the credential broker.
+Concretely, rein asserts only that
+
+- the brokered credentials are hidden (`deny_credentials` — App key, gh token, ssh
+  keys unreadable in-sandbox),
+- the approval channel has integrity (`af_unix_mediation: "pathname"` — the agent
+  cannot reach or drive the host approval popup; §3e),
+- the GitHub token never reaches the agent (injected downstream at rein's proxy,
+  never in the sandbox), and
+- rein's **own co-located broker process** exposes no secret — the agent cannot
+  ptrace/dump its heap, and rein keeps every minted secret out of its argv/env.
+
+**Everything else is the substrate's (nono's) documented property, at the substrate's
+maturity — not a rein guarantee.** The measured residuals below are nono's, not
+rein's; the containment prober (`internal/nono`, §3e; harness in
+`docs/containment-probe-harness.md`) measures them on every launch and the git-push
+spike (`docs/nono-git-push-spike-findings.md`) is the recorded evidence. As a
+concrete example of the substrate owning its own choices: under `extends: claude-code`
+nono **grants the agent `~/.claude` / `~/.claude.json` r+w** (the operator's Claude
+session config — not a broker credential); rein does not attempt to hide it.
+
+- **Prerequisite: the `claude-code` pack must be installed in nono's config.**
+  `claude-code` is a **registry package** (`nolabs-ai/claude`), not a nono built-in
+  (`nono profile list` shows it under *Packages*; the only credential-denying built-in,
+  `default`, lacks the curated hardening). So `extends: "claude-code"` requires the pack
+  present in the run's nono config dir (`$XDG_CONFIG_HOME/nono/packages`). Without it,
+  `nono profile validate` (which `rein doctor` runs) and every sandboxed run **fail
+  closed** with *"base profile 'claude-code' not found"*. Verified present on a normally
+  set-up machine; absent in a fresh/isolated home. **Open item (needs a decision):**
+  whether rein's setup/doctor should provision it (`nono pull nolabs-ai/claude` /
+  `NONO_AUTO_MIGRATE=1` — a network + supply-chain action) or document it as a manual
+  prereq; either way doctor should fail closed with a clean remediation message rather
+  than dumping nono's raw parse error. The `init_then_run` + `onboarding` journeys are
+  red pending this decision (their isolated homes have no pack).
+- **Process-table + argv visibility — substrate residual (no PID namespace).** nono
+  runs the agent at rein's **own uid with no PID namespace**, so every host process
+  is `/proc`-visible to the agent and `/proc/<pid>/cmdline` (argv) is world-readable —
+  measured: a co-located sentinel's argv is readable from in-sandbox, while its
+  `/proc/<pid>/environ` is **blocked** by nono (EACCES) and `ptrace`/`/proc/<pid>/mem`
+  are **denied** (yama `ptrace_scope` for non-descendant attach + nono seccomp). This
+  is exactly why the credential-brokering boundary is defined at the process level and
+  why the prober adds the co-located-broker hardening checks (`ptrace_isolation`,
+  hard; `proc_visibility`, residual): rein's minted token lives only in the proxy's
+  heap (ptrace-protected), and rein keeps no secret in its argv or env, so the
+  readable process table exposes nothing sensitive. The residual is the substrate's:
+  a co-resident non-rein process's argv is visible to the agent.
 - **Approval-channel isolation — was the top risk; confirmed then resolved.** The
   sandboxed agent connected to the tmux socket and drove `send-keys` to self-approve
   (`filesystem.deny` does not block socket `connect()`; `/dev/tty` was already blocked).
@@ -558,19 +611,20 @@ briefed under nono.
 - **UDP exfil (§3d):** open by default, no nono config fixes it. Accepted and documented —
   a data-confidentiality regression from srt's empty namespace. The prober reports it
   loudly.
-- **`.git`-hooks host-RCE (#64) — RESIDUAL under nono.** srt ro-bound
-  `<tree>/.git/hooks` + `.git/config` so a prompt-injected agent could not plant a hook
-  (or `core.fsmonitor`/`core.pager`) that runs AS THE DEVELOPER on the host at their next
-  git op. `run_nono` grants the working tree AND every mapped checkout fully writable via
-  nono `--allow`, `.git` included, with no read-only carve-out — and Landlock has no "deny
-  under an allowed parent" (same limit as the tmux-socket deny), so srt's mechanism
-  **cannot be ported as-is**. The threat **survives** for mapped/real checkouts, and the
-  containment prober has no write-confinement channel to catch it. The cutover deleted
-  `internal/srt/githard.go`; the threat surviving + port being infeasible under Landlock
-  is the recorded confirmation. Options for Tom: accept + document like UDP; refuse to
-  bind a mapped checkout writable (throwaway-clone-and-push only); or a host-side
-  mitigation (fs watch / a nono write-confinement primitive if one lands). **To decide
-  before nono runs on non-throwaway checkouts.**
+- **`.git`-hooks host-code-execution in an in-place writable tree — substrate
+  residual.** A prompt-injected agent can plant a `.git/hooks` hook (or
+  `core.fsmonitor`/`core.pager`) that runs AS THE DEVELOPER on the host at their next
+  git op. `run_nono` grants the working tree (and every mapped checkout) fully writable
+  via nono `--allow`, `.git` included — and Landlock has **no "deny under an allowed
+  parent"** (the same limit as the tmux-socket deny), so srt's old read-only `.git`
+  bind-mount (`internal/srt/githard.go`, deleted at cutover) **cannot be ported**.
+  Under the reframe this is **the substrate's property, accepted, not fought**:
+  nono is *meant* to be used **in place** on the developer's real tree, so rein does
+  **not** attempt a clone-and-push detour to dodge it. It sits outside the
+  credential-brokering boundary (the prober has no write-confinement channel), same
+  posture as UDP: documented, not claimed away. A host-side mitigation (fs watch, or a
+  nono write-confinement primitive if one lands) remains open if the substrate offers
+  one.
 - **F2 anonymous direct-github (§3c):** confirmed blocked — a proxy-bypassing direct
   connect to an inject host is refused by seccomp. The prober keeps it as a regression
   guard.
@@ -578,9 +632,12 @@ briefed under nono.
   CONNECT name is asserted from the spike and exercised by the declare journeys, not
   independently spiked; it's the heart of the write gate, so keep it verified across nono
   bumps.
-- **claude config-dir under nono (§5):** no overlay under nono; #94 is met by a per-run
-  `CLAUDE_CONFIG_DIR` + `~/.claude` hidden by default-deny fs. The
-  `realagent_write`/`claude_resume` journeys guard it.
+- **claude config-dir under nono (§5):** #94 is met by a per-run `CLAUDE_CONFIG_DIR`
+  overlay. Note: under `extends: claude-code` the host `~/.claude` / `~/.claude.json`
+  are **granted r+w by nono's own profile** (the substrate's choice — the operator's
+  Claude session config, not a broker credential; see the posture note above), so they
+  are no longer hidden by default-deny fs; the overlay still isolates each run's config.
+  The `realagent_write`/`claude_resume` journeys guard it.
 - **macOS / Seatbelt:** entirely untested. nono uses a different sandbox on macOS. This
   doc is Linux-scoped; a macOS cutover is a separate open gate needing its own spike
   (containment parity, CA-env behavior, and re-verifying the loopback-mediation property
