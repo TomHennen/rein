@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -135,12 +136,23 @@ func VerifyContainment(vp VerifyParams) (Verdict, error) {
 	credTargets, credExist, sentinelCleanup := stageCredTargets(vp.CredPaths)
 	defer sentinelCleanup()
 
+	// Approval-channel fixture (§3e): a DEDICATED throwaway tmux server on a socket
+	// in a NON-granted dir. Non-granted is load-bearing — §3e proved fs-deny does
+	// NOT block AF_UNIX connect, so a denied connect here is the runtime proof that
+	// af_unix_mediation is enforced, not just declared. Absent tmux ⇒ empty ⇒ the
+	// socket/send-keys checks are skipped (never fail the gate). Cleaned in defer.
+	tmuxFx := stageTmuxFixture()
+	defer tmuxFx.cleanup()
+
 	cfg := probeConfig{
 		Creds:           credTargets,
 		ExternalTarget:  "1.1.1.1:443", // literal, no DNS — blocked at connect, robust offline
 		GitHubTarget:    resolveGitHub(),
 		PlantedLoopback: planted,
 		UDPTarget:       "8.8.8.8:53",
+		TmuxSocket:      tmuxFx.probeSocket(),
+		TmuxBin:         tmuxFx.probeBin(),
+		TmuxTarget:      tmuxFx.probeSession(),
 		DialTimeoutMS:   3000,
 	}
 	cfgPath := filepath.Join(work, "probe-config.json")
@@ -170,7 +182,7 @@ func VerifyContainment(vp VerifyParams) (Verdict, error) {
 		return Verdict{}, fmt.Errorf("nono verify: write profile: %w", err)
 	}
 
-	stderr, runErr := launchProbe(nonoBin, vp.ReinBin, profPath, work, outPath, cfgPath, vp.Timeout)
+	stderr, runErr := launchProbe(nonoBin, vp.ReinBin, profPath, work, outPath, cfgPath, tmuxFx.readDirs(), vp.Timeout)
 
 	// Read observations regardless of nono's exit — a leak still produces output.
 	obs, oerr := readObservations(outPath)
@@ -183,6 +195,10 @@ func VerifyContainment(vp VerifyParams) (Verdict, error) {
 	for i := range obs.Creds {
 		obs.Creds[i].Existed = credExist[obs.Creds[i].Path]
 	}
+	// Overlay host truth: if tmux is present but the fixture failed to stage, the
+	// approval-socket/send-keys proof was skipped despite a real approval surface —
+	// don't let that pass silently (fail closed under RequireControls below).
+	obs.ApprovalFixtureErr = tmuxFx.stageError()
 
 	// The gate guarantees the planted loopback listener is live and that direct
 	// TCP is seccomp-denied pre-network, so an Unknown on those controls is an
@@ -207,16 +223,23 @@ func VerifyContainment(vp VerifyParams) (Verdict, error) {
 // != cmd.Process.Pid, so the group kill would miss it (nono orphaned to init).
 // cmd.Run waits for nono to exit, so there is no race with the child (a BARE
 // `setsid` returns immediately and races it).
-func launchProbe(nonoBin, reinBin, profPath, work, outPath, cfgPath string, timeout time.Duration) ([]byte, error) {
+func launchProbe(nonoBin, reinBin, profPath, work, outPath, cfgPath string, extraReadDirs []string, timeout time.Duration) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, nonoBin,
+	args := []string{
 		"run", "-p", profPath,
 		"--allow", work, // config + observations output
 		"--read-file", reinBin, // the probe binary must be readable to exec
-		"--", reinBin, "__nono-probe", outPath, cfgPath,
-	)
+	}
+	// Read-only grants so the in-sandbox send-keys probe can exec the dynamically
+	// linked tmux (binary + libs). These do NOT weaken the other channels (they
+	// test network + $HOME creds, not /usr /lib) and never grant the fixture dir.
+	for _, d := range extraReadDirs {
+		args = append(args, "--read", d)
+	}
+	args = append(args, "--", reinBin, "__nono-probe", outPath, cfgPath)
+	cmd := exec.CommandContext(ctx, nonoBin, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	// On timeout, kill the whole session group (nono + its supervised children),
 	// not just the direct child. cmd.Process.Pid is the session leader, so -pid
@@ -336,6 +359,132 @@ func stageCredTargets(paths []string) (targets []CredTarget, existed map[string]
 		break
 	}
 	return targets, existed, cleanup
+}
+
+// tmuxFixture is a DEDICATED throwaway tmux server used to test approval-channel
+// isolation (§3e). It is NEVER the operator's server: it runs on its own socket
+// in an own temp dir, started with $TMUX/$TMUX_PANE stripped, and killed in a
+// defer. usable is set only when the server started AND passed a liveness check,
+// so a "denied" verdict is never vacuous (a dead fixture is a skip, not a leak).
+type tmuxFixture struct {
+	bin     string
+	dir     string
+	socket  string
+	session string
+	present bool // tmux is installed on the host (a real approval surface exists)
+	server  bool // a server was started (must be killed)
+	usable  bool // started AND live — the probe may target it
+}
+
+// stageError is non-empty when tmux IS present but the fixture could not be
+// staged, so the socket/send-keys enforcement proof was skipped even though a
+// real approval surface exists. Overlaid onto Observations so Classify fails
+// closed (under RequireControls) instead of silently passing. Empty when tmux is
+// simply absent (a legitimate clean skip).
+func (f tmuxFixture) stageError() string {
+	if f.present && !f.usable {
+		return "tmux is installed but the approval-isolation fixture could not be staged (server start/liveness failed); the socket/send-keys enforcement proof was skipped"
+	}
+	return ""
+}
+
+func (f tmuxFixture) probeSocket() string {
+	if f.usable {
+		return f.socket
+	}
+	return ""
+}
+func (f tmuxFixture) probeBin() string {
+	if f.usable {
+		return f.bin
+	}
+	return ""
+}
+func (f tmuxFixture) probeSession() string {
+	if f.usable {
+		return f.session
+	}
+	return ""
+}
+
+// readDirs are the read-only grants the send-keys probe needs to exec the
+// dynamically linked tmux inside the sandbox. Only when the fixture is usable.
+// NOTE: this makes the probe sandbox's fs read surface broader than a production
+// agent profile's (extra /usr, /lib). It does not weaken the cred/egress
+// channels (they test network + $HOME creds, not /usr /lib — confirmed live: the
+// 5 cred files stay unreadable with these grants active), but the probe profile
+// does diverge from production in a fixture-staged run.
+func (f tmuxFixture) readDirs() []string {
+	if f.usable {
+		return []string{"/usr", "/lib"}
+	}
+	return nil
+}
+
+// cleanup kills the dedicated server (only ever OUR socket) and removes its dir.
+func (f tmuxFixture) cleanup() {
+	if f.server && f.bin != "" && f.socket != "" {
+		c := exec.Command(f.bin, "-S", f.socket, "kill-server")
+		c.Env = withoutTmux(os.Environ())
+		_ = c.Run()
+	}
+	if f.dir != "" {
+		_ = os.RemoveAll(f.dir)
+	}
+}
+
+// stageTmuxFixture starts a dedicated tmux server on a socket in a NON-granted
+// temp dir. On any failure (tmux absent, mkdir, start, or a failed liveness
+// check) it returns a non-usable fixture so the approval-socket/send-keys checks
+// are SKIPPED — a machine without tmux must not fail the launch gate. The
+// non-granted dir is deliberate: §3e showed fs-deny does not block AF_UNIX
+// connect, so a denied connect proves af_unix_mediation is enforced at runtime.
+func stageTmuxFixture() tmuxFixture {
+	var f tmuxFixture
+	bin, err := exec.LookPath("tmux")
+	if err != nil {
+		return f // tmux absent — legitimate clean skip (no approval surface)
+	}
+	f.present = true // tmux exists: a real approval surface. From here a failure
+	// is a fail-open risk (stageError), not a clean skip.
+	dir, err := os.MkdirTemp("", "rein-approvalfix-*")
+	if err != nil {
+		return f
+	}
+	f.bin, f.dir, f.session = bin, dir, "probe"
+	f.socket = filepath.Join(dir, "tmux.sock")
+	env := withoutTmux(os.Environ())
+
+	start := exec.Command(bin, "-S", f.socket, "new-session", "-d", "-s", f.session)
+	start.Env = env
+	start.Stdin = nil
+	if err := start.Run(); err != nil {
+		return f // could not start — skip (dir still cleaned)
+	}
+	f.server = true
+
+	// Liveness positive control: a "denied" connect is only meaningful against a
+	// server that is actually up.
+	ls := exec.Command(bin, "-S", f.socket, "list-sessions")
+	ls.Env = env
+	if err := ls.Run(); err != nil {
+		return f // started but not live — skip (cleanup still kills it)
+	}
+	f.usable = true
+	return f
+}
+
+// withoutTmux drops $TMUX/$TMUX_PANE so a tmux command starting the fixture can
+// never attach to or nest inside the operator's session.
+func withoutTmux(env []string) []string {
+	out := env[:0:0]
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "TMUX=") || strings.HasPrefix(kv, "TMUX_PANE=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
 }
 
 // resolveGitHub resolves github.com host-side to an IP:443 for the direct-connect
