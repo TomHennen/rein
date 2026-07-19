@@ -1,15 +1,9 @@
 {
   "$schema": "https://nono.sh/schema/profile.json",
+  "extends": "claude-code",
   "meta": {
     "name": "rein-sandbox",
     "description": "rein credential-broker sandbox profile (generated)."
-  },
-  "groups": {
-    "include": [
-      "deny_credentials",
-      "deny_shell_history",
-      "deny_shell_configs"
-    ]
   },
   "network": {
     "block": false,

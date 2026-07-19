@@ -1,14 +1,22 @@
 // Package nono generates the nono sandbox profile rein hands to
-// `nono run --profile`. The profile IS the security boundary: it routes the
-// agent's GitHub egress through rein's loopback proxy (TLS-terminate + token
-// inject + declare tap), hides credentials, and isolates the approval channel.
+// `nono run --profile`. The profile EXTENDS nono's standard `claude-code` profile
+// and adds ONLY the broker-specific delta: it routes the agent's GitHub egress
+// through rein's loopback proxy (TLS-terminate + token inject + declare tap), wires
+// CA trust, and isolates the approval channel. The credential-hiding, dangerous-
+// command, keychain/browser, and language-runtime hardening are INHERITED from
+// claude-code (~29 curated deny groups) — rein does NOT hand-roll a group list.
 // One source of truth — cmd/rein/run_nono.go writes Build's output each launch.
 //
+// Reframe (design §8): rein makes no general-containment claim. It plugs into
+// nono's standard profile and stands behind only the credential-brokering boundary;
+// everything else is the substrate's documented property at the substrate's maturity.
+//
 // Schema is nono 0.68.0 (verified in docs/design-nono-profile-schema.md): the
-// profile is nested (network/filesystem/linux/environment/groups), upstream_proxy
-// is a bare host:port string, deny_credentials is a policy group (not a path list),
-// env injection is environment.set_vars, and 0.68.0 has no working upstream-proxy
-// auth (external_proxy.auth is unimplemented — do not emit it).
+// profile is nested (network/filesystem/linux/environment/groups), `extends` is a
+// profile name (string or array), upstream_proxy is a bare host:port string,
+// deny_credentials is a policy group (not a path list), env injection is
+// environment.set_vars, and 0.68.0 has no working upstream-proxy auth
+// (external_proxy.auth is unimplemented — do not emit it).
 package nono
 
 import (
@@ -93,18 +101,20 @@ type Params struct {
 	ExtraGitConfig []GitConfig
 
 	// ClaudeConfigDir, when non-empty, is delivered as CLAUDE_CONFIG_DIR — the
-	// rein-owned, agent-WRITABLE claude config overlay (issue #94). Host ~/.claude
-	// / ~/.claude.json stay hidden by nono's default-deny fs (nothing grants them);
-	// claude is repointed here so a real agent can still run. Must be an absolute
-	// path (it is also granted agent-WRITABLE via a nono --allow). Optional — a run
-	// that never launches claude leaves it empty and CLAUDE_CONFIG_DIR unset.
+	// rein-owned, agent-WRITABLE claude config overlay (issue #94). NOTE: under
+	// extends claude-code, nono's own profile GRANTS host ~/.claude / ~/.claude.json
+	// r+w (the substrate's choice — the operator's claude session config, NOT a
+	// broker credential; rein does not claim to hide it, §8). This overlay repoints
+	// claude at a rein-owned dir anyway so a run's config is isolated per run. Must
+	// be an absolute path (also granted agent-WRITABLE via a nono --allow). Optional
+	// — a run that never launches claude leaves it empty and CLAUDE_CONFIG_DIR unset.
 	ClaudeConfigDir string
 
 	// GhConfigDir, when non-empty, is delivered as GH_CONFIG_DIR — the rein-owned,
 	// agent-WRITABLE gh config overlay (the gh twin of ClaudeConfigDir). Host
-	// ~/.config/gh stays hidden by nono's default-deny fs (deny_credentials +
-	// nothing grants it), and gh reading it EACCESes and refuses to start; this
-	// override repoints gh at the writable overlay (which carries a placeholder
+	// ~/.config/gh stays hidden (deny_credentials covers it — claude-code does NOT
+	// grant it, unlike ~/.claude), and gh reading it EACCESes and refuses to start;
+	// this override repoints gh at the writable overlay (which carries a placeholder
 	// hosts.yml so gh sends requests — rein's proxy injects the real token
 	// downstream). Must be absolute (also granted agent-WRITABLE via a nono
 	// --allow). Optional — a run that never launches gh may leave it empty.
@@ -118,8 +128,9 @@ type Params struct {
 // Profile is the nono 0.68.0 profile, nested per the real schema.
 type Profile struct {
 	Schema      string      `json:"$schema,omitempty"`
+	Extends     string      `json:"extends,omitempty"`
 	Meta        *Meta       `json:"meta,omitempty"`
-	Groups      Groups      `json:"groups"`
+	Groups      *Groups     `json:"groups,omitempty"`
 	Network     Network     `json:"network"`
 	Linux       Linux       `json:"linux"`
 	Filesystem  Filesystem  `json:"filesystem"`
@@ -131,10 +142,13 @@ type Meta struct {
 	Description string `json:"description,omitempty"`
 }
 
-// Groups selects nono policy groups. deny_credentials is a fixed, required
-// policy group that blocks known credential locations — NOT a path list.
+// Groups selects EXTRA nono policy groups on top of the extended base. rein adds
+// none today (all hardening — deny_credentials, deny_shell_*, dangerous_commands,
+// keychains, browser data, language runtimes, git_config, unlink_protection … — is
+// inherited from claude-code), so Build leaves this nil and no "groups" block is
+// emitted. Kept as a delta hook: a future broker-specific group would go in Include.
 type Groups struct {
-	Include []string `json:"include"`
+	Include []string `json:"include,omitempty"`
 	Exclude []string `json:"exclude,omitempty"`
 }
 
@@ -177,11 +191,21 @@ const (
 	defaultDescription = "rein credential-broker sandbox profile (generated)."
 	afUnixMediation    = "pathname"
 	denyCredentials    = "deny_credentials"
+	// baseProfile is nono's standard, registry-managed profile for Claude Code.
+	// rein extends it so all ~29 curated deny groups (deny_credentials, the shell
+	// groups, dangerous_commands, keychains, browser data, language runtimes,
+	// git_config, unlink_protection, vscode, …) and the workdir grant come from
+	// nono, not from a hand-rolled rein list. DO NOT "helpfully" re-add an explicit
+	// group list here — it is all inherited; the delta is network + CA + mediation.
+	baseProfile = "claude-code"
 )
 
-// includedGroups are the policy groups rein always includes. deny_credentials
-// is load-bearing (invariant 3); the shell groups are defense-in-depth.
-var includedGroups = []string{denyCredentials, "deny_shell_history", "deny_shell_configs"}
+// credentialDenyingBases are the extendable bases known to carry deny_credentials
+// in their resolved group set. Used by Validate to confirm deny_credentials is
+// EFFECTIVE (inherited) without resolving the profile itself (which would need to
+// shell out to nono). claude-code extends default; both carry it. The nono-gated
+// TestNonoResolvesInheritedHardening test proves this against the real binary.
+var credentialDenyingBases = map[string]bool{"claude-code": true, "default": true}
 
 // Build assembles the nono profile from p and the proxy package's host lists,
 // enforcing the six security invariants and failing CLOSED on any violation
@@ -190,7 +214,8 @@ var includedGroups = []string{denyCredentials, "deny_shell_history", "deny_shell
 //  1. GitHub → rein: every inject host + DeclareHost tunnels through
 //     upstream_proxy (rein's listener) — NOT in upstream_bypass.
 //  2. CDN → direct: CDN hosts in upstream_bypass so no token lands on a CDN.
-//  3. Credentials hidden: deny_credentials group included.
+//  3. Credentials hidden: deny_credentials EFFECTIVE — inherited via extends
+//     claude-code (Validate confirms it resolves, not that rein added it literally).
 //  4. Approval-channel isolation: af_unix_mediation:"pathname", no tmux socket
 //     grant (UnixSockets defaults empty).
 //  5. Loopback isolation is nono's job: a sandboxed connect() to rein's port is
@@ -254,9 +279,10 @@ func Build(p Params) (Profile, error) {
 	applyGitConfig(setVars, gitCfg)
 
 	// CLAUDE_CONFIG_DIR overlay (#94): repoint claude at the rein-owned writable
-	// config dir. Host ~/.claude stays hidden by nono's default-deny fs; this env
-	// override is what lets a real claude agent run in-sandbox. Emit only when set,
-	// so a non-claude run leaves the profile (and its golden) unchanged.
+	// config dir so a run's claude config is isolated per run. (Under extends
+	// claude-code the host ~/.claude is granted by nono's own profile — see the
+	// ClaudeConfigDir field doc.) Emit only when set, so a non-claude run leaves the
+	// profile (and its golden) unchanged.
 	if ccd := strings.TrimSpace(p.ClaudeConfigDir); ccd != "" {
 		if !filepath.IsAbs(ccd) {
 			return Profile{}, fmt.Errorf("nono: ClaudeConfigDir %q must be absolute (it is granted --allow and set as CLAUDE_CONFIG_DIR)", ccd)
@@ -285,9 +311,11 @@ func Build(p Params) (Profile, error) {
 	}
 
 	pr := Profile{
-		Schema: schemaURL,
-		Meta:   &Meta{Name: name, Description: desc},
-		Groups: Groups{Include: append([]string(nil), includedGroups...)},
+		Schema:  schemaURL,
+		Extends: baseProfile,
+		Meta:    &Meta{Name: name, Description: desc},
+		// Groups nil: no broker-specific group delta — all hardening is inherited
+		// from claude-code (see baseProfile). Do not re-add a hand-picked list.
 		Network: Network{
 			Block:          false,
 			AllowDomain:    allow,
@@ -381,9 +409,14 @@ func (pr Profile) Validate() error {
 		}
 	}
 
-	// Invariant 3: credentials hidden.
-	if !contains(pr.Groups.Include, denyCredentials) {
-		return fmt.Errorf("nono: groups.include is missing %q (the agent could read the App key / gh token / ssh keys)", denyCredentials)
+	// Invariant 3: credentials hidden. deny_credentials is now INHERITED via
+	// extends (claude-code), not added literally by rein — so confirm it is
+	// EFFECTIVE in the resolved profile: either the extended base is one known to
+	// carry it, or rein explicitly listed it in the group delta. A caller who
+	// strips extends AND doesn't list it fails closed here (and the nono-gated
+	// TestNonoResolvesInheritedHardening proves the base really resolves it).
+	if !pr.deniesCredentials() {
+		return fmt.Errorf("nono: deny_credentials is not effective — extends is %q (not a credential-denying base) and groups.include does not list %q (the agent could read the App key / gh token / ssh keys)", pr.Extends, denyCredentials)
 	}
 
 	// Invariant 4: approval-channel isolation. The omitempty footgun means an
@@ -486,6 +519,17 @@ func toSet(in []string) map[string]bool {
 		m[lower(s)] = true
 	}
 	return m
+}
+
+// deniesCredentials reports whether deny_credentials is effective in the resolved
+// profile: inherited from a credential-denying base (claude-code/default) or listed
+// explicitly in the group delta. Pure — it trusts the static base knowledge rather
+// than resolving the profile (which would require shelling out to nono).
+func (pr Profile) deniesCredentials() bool {
+	if pr.Groups != nil && contains(pr.Groups.Include, denyCredentials) {
+		return true
+	}
+	return credentialDenyingBases[strings.TrimSpace(pr.Extends)]
 }
 
 func contains(in []string, want string) bool {

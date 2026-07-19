@@ -180,10 +180,20 @@ func TestInvariant_CDNHostsBypass(t *testing.T) {
 	}
 }
 
-func TestInvariant_DenyCredentialsGroup(t *testing.T) {
+// TestInvariant_DenyCredentialsEffective: rein no longer hand-lists deny_credentials
+// (it is inherited via extends claude-code). Assert the profile extends a
+// credential-denying base and that Validate deems deny_credentials effective. The
+// real resolution is proven by the nono-gated TestNonoResolvesInheritedHardening.
+func TestInvariant_DenyCredentialsEffective(t *testing.T) {
 	pr := mustBuild(t, goldenParams())
-	if !contains(pr.Groups.Include, "deny_credentials") {
-		t.Errorf("groups.include = %v, missing deny_credentials", pr.Groups.Include)
+	if pr.Extends != "claude-code" {
+		t.Errorf("extends = %q, want claude-code (deny_credentials + hardening inherited)", pr.Extends)
+	}
+	if pr.Groups != nil {
+		t.Errorf("groups = %v, want nil (no broker-specific group delta; all inherited)", pr.Groups)
+	}
+	if !pr.deniesCredentials() {
+		t.Error("deniesCredentials() = false; deny_credentials must be effective via extends")
 	}
 }
 
@@ -282,7 +292,8 @@ func TestValidate_RejectsTampered(t *testing.T) {
 		mut  func(*Profile)
 	}{
 		{"drop af_unix_mediation", func(pr *Profile) { pr.Linux.AfUnixMediation = "" }},
-		{"drop deny_credentials", func(pr *Profile) { pr.Groups.Include = []string{"deny_shell_history"} }},
+		{"strip credential-denying base", func(pr *Profile) { pr.Extends = ""; pr.Groups = nil }},
+		{"base swapped to a non-denying profile", func(pr *Profile) { pr.Extends = "node-dev"; pr.Groups = nil }},
 		{"inject host bypassed", func(pr *Profile) {
 			pr.Network.UpstreamBypass = append(pr.Network.UpstreamBypass, proxy.InjectHosts[0])
 		}},
@@ -333,6 +344,45 @@ func TestNonoValidate(t *testing.T) {
 		t.Fatalf("nono profile validate failed: %v\n%s", err, out)
 	}
 	t.Logf("nono profile validate: %s", out)
+}
+
+// TestNonoResolvesInheritedHardening proves the whole point of Change 1 against the
+// REAL binary: `nono profile show` on the generated profile resolves the claude-code
+// hardening (deny_credentials + representative groups) that rein no longer lists
+// literally, AND the broker delta (upstream_proxy + af_unix_mediation Pathname)
+// composes on top. This is the permanent form of the "verify against real nono" step.
+func TestNonoResolvesInheritedHardening(t *testing.T) {
+	bin := nonoBin()
+	if bin == "" {
+		t.Skip("nono binary not found; skipping real-binary resolution check")
+	}
+	pr := mustBuild(t, goldenParams())
+	b, err := pr.MarshalIndent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(t.TempDir(), "profile.json")
+	if err := os.WriteFile(f, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(bin, "profile", "show", f).CombinedOutput()
+	if err != nil {
+		t.Fatalf("nono profile show failed: %v\n%s", err, out)
+	}
+	s := string(out)
+	// Inherited hardening rein no longer lists — must appear in the resolved output.
+	for _, want := range []string{"deny_credentials", "dangerous_commands", "git_config", "unlink_protection"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("resolved profile missing inherited group %q (extends claude-code not applied?)\n%s", want, s)
+		}
+	}
+	// Broker delta must compose on top of the inherited base.
+	if !strings.Contains(s, "127.0.0.1:47821") {
+		t.Errorf("resolved profile missing rein upstream_proxy\n%s", s)
+	}
+	if !strings.Contains(strings.ToLower(s), "pathname") {
+		t.Errorf("resolved profile missing af_unix_mediation Pathname\n%s", s)
+	}
 }
 
 func nonoBin() string {
