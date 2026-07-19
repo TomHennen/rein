@@ -18,7 +18,7 @@ func TestBuildNonoParams_LoopbackPortFlowsToProxy(t *testing.T) {
 	const port = 47821
 	caPath := "/run/rein/ca-bundle.pem"
 	gitCfg := nonoGitIdentityConfig(gitidentity.Identity{Name: "rein bot", Email: "bot@users.noreply.github.com"})
-	p := buildNonoParams(port, caPath, []string{"api.anthropic.com"}, gitCfg)
+	p := buildNonoParams(port, caPath, []string{"api.anthropic.com"}, gitCfg, "")
 
 	if p.ListenAddr != "127.0.0.1:47821" {
 		t.Fatalf("ListenAddr = %q, want 127.0.0.1:47821", p.ListenAddr)
@@ -76,7 +76,7 @@ func hasGitConfigPair(sv map[string]string, key, value string) bool {
 // bound) must NOT silently produce a usable profile — Build fails closed. runNono
 // guards this before Build, but assert the shape here too.
 func TestBuildNonoParams_EmptyPortStillFormsAddr(t *testing.T) {
-	p := buildNonoParams(0, "/tmp/ca.pem", nil, nil)
+	p := buildNonoParams(0, "/tmp/ca.pem", nil, nil, "")
 	if p.ListenAddr != "127.0.0.1:0" {
 		t.Fatalf("ListenAddr = %q, want 127.0.0.1:0", p.ListenAddr)
 	}

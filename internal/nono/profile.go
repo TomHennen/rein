@@ -95,6 +95,14 @@ type Params struct {
 	// additional git config. Optional.
 	ExtraGitConfig []GitConfig
 
+	// ClaudeConfigDir, when non-empty, is delivered as CLAUDE_CONFIG_DIR — the
+	// rein-owned, agent-WRITABLE claude config overlay (issue #94). Host ~/.claude
+	// / ~/.claude.json stay hidden by nono's default-deny fs (nothing grants them);
+	// claude is repointed here so a real agent can still run. Must be an absolute
+	// path (it is also granted agent-WRITABLE via a nono --allow). Optional — a run
+	// that never launches claude leaves it empty and CLAUDE_CONFIG_DIR unset.
+	ClaudeConfigDir string
+
 	// Name / Description populate meta. Optional; sensible defaults applied.
 	Name        string
 	Description string
@@ -237,6 +245,17 @@ func Build(p Params) (Profile, error) {
 	setVars["GIT_CONFIG_SYSTEM"] = "/dev/null"
 	gitCfg := append(append([]GitConfig(nil), baselineGitConfig...), p.ExtraGitConfig...)
 	applyGitConfig(setVars, gitCfg)
+
+	// CLAUDE_CONFIG_DIR overlay (#94): repoint claude at the rein-owned writable
+	// config dir. Host ~/.claude stays hidden by nono's default-deny fs; this env
+	// override is what lets a real claude agent run in-sandbox. Emit only when set,
+	// so a non-claude run leaves the profile (and its golden) unchanged.
+	if ccd := strings.TrimSpace(p.ClaudeConfigDir); ccd != "" {
+		if !filepath.IsAbs(ccd) {
+			return Profile{}, fmt.Errorf("nono: ClaudeConfigDir %q must be absolute (it is granted --allow and set as CLAUDE_CONFIG_DIR)", ccd)
+		}
+		setVars["CLAUDE_CONFIG_DIR"] = ccd
+	}
 
 	name := p.Name
 	if name == "" {

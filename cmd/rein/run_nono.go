@@ -29,10 +29,11 @@
 // (nono passes that through — it REJECTS a set_vars PATH as reserved). So the agent
 // runs `rein declare` exactly as the deny messages instruct.
 //
-// DEFERRED write-journey enablers:
-//   - CLAUDE_CONFIG_DIR / #94 overlay: `rein run --nono -- claude` needs a
-//     rein-owned CLAUDE_CONFIG_DIR (host ~/.claude is hidden by default-deny);
-//     requires an ExtraEnv channel in the profile generator.
+// CLAUDE_CONFIG_DIR / #94 overlay (WIRED — step 5d + Params.ClaudeConfigDir):
+// `rein run --nono -- claude` gets a rein-owned, writable CLAUDE_CONFIG_DIR
+// overlay (reusing srt's host-side seeding helper, prepareClaudeOverlay). The
+// overlay is --allow'd writable and set via the profile's CLAUDE_CONFIG_DIR;
+// host ~/.claude / ~/.claude.json stay hidden by nono's default-deny fs.
 package main
 
 import (
@@ -69,12 +70,13 @@ import (
 // and the git identity is injected — without a live launch. The security host
 // lists (inject / CDN / declare) are NOT passed here — nono.Build reads them
 // straight from internal/proxy so the profile and the proxy can never drift.
-func buildNonoParams(loopbackPort int, caBundlePath string, extraDomains []string, extraGitConfig []nono.GitConfig) nono.Params {
+func buildNonoParams(loopbackPort int, caBundlePath string, extraDomains []string, extraGitConfig []nono.GitConfig, claudeConfigDir string) nono.Params {
 	return nono.Params{
-		ListenAddr:     "127.0.0.1:" + strconv.Itoa(loopbackPort),
-		CACertPath:     caBundlePath,
-		ExtraDomains:   extraDomains,
-		ExtraGitConfig: extraGitConfig,
+		ListenAddr:      "127.0.0.1:" + strconv.Itoa(loopbackPort),
+		CACertPath:      caBundlePath,
+		ExtraDomains:    extraDomains,
+		ExtraGitConfig:  extraGitConfig,
+		ClaudeConfigDir: claudeConfigDir,
 		// UnixSockets left EMPTY: never grant the tmux/approval socket (the
 		// af_unix_mediation crux, §3e). A real agent that needs a specific
 		// pathname socket gets it added deliberately, never by default.
@@ -226,11 +228,32 @@ func runNono(cmdline []string) (int, error) {
 		fmt.Fprintf(os.Stderr, "rein: worktrees: %s\n", w)
 	}
 	// allow paths = the working tree + every mapped checkout (read+write grants).
-	allowPaths := make([]string, 0, len(wt.Bindings)+1)
+	allowPaths := make([]string, 0, len(wt.Bindings)+2)
 	allowPaths = append(allowPaths, workTree)
 	for _, b := range wt.Bindings {
 		allowPaths = append(allowPaths, b.Path)
 	}
+
+	// (5d) Rein-owned, PERSISTENT, agent-WRITABLE CLAUDE_CONFIG_DIR overlay (#94 —
+	// the nono counterpart of srt's sandbox_claude_home.go, reusing the SAME
+	// host-side seeding helper unchanged; it is substrate-neutral). Host ~/.claude
+	// and ~/.claude.json are hidden by nono's default-deny fs (nothing grants them),
+	// so claude is repointed at this overlay via the profile's CLAUDE_CONFIG_DIR
+	// (set below) and can still run + resume across runs. Bound WRITABLE via a nono
+	// --allow grant (appended to allowPaths). Prepared HOST-SIDE, before launch.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return 1, fmt.Errorf("resolve home dir for claude overlay: %w", err)
+	}
+	claudeOverlay, err := prepareClaudeOverlay(logger, home)
+	if err != nil {
+		return 1, fmt.Errorf("prepare claude overlay: %w", err)
+	}
+	claudeOverlay, err = proxy.ResolveAbs(claudeOverlay)
+	if err != nil {
+		return 1, fmt.Errorf("resolve claude overlay: %w", err)
+	}
+	allowPaths = append(allowPaths, claudeOverlay)
 
 	// (6) Per-run runtime dir for the proxy's unix socket — user-writable, NOT
 	// under the working tree. nono reaches the proxy over the LOOPBACK front, not
@@ -328,7 +351,7 @@ func runNono(cmdline []string) (int, error) {
 
 	// (11) Generate + write the nono profile. Build enforces the six security
 	// invariants and fails CLOSED rather than emit a permissive profile.
-	profile, err := nono.Build(buildNonoParams(loopbackPort, bundlePath, extraDomains, nonoGitIdentityConfig(gitID)))
+	profile, err := nono.Build(buildNonoParams(loopbackPort, bundlePath, extraDomains, nonoGitIdentityConfig(gitID), claudeOverlay))
 	if err != nil {
 		return 1, fmt.Errorf("build nono profile: %w", err)
 	}
@@ -403,9 +426,14 @@ func runNono(cmdline []string) (int, error) {
 	// Scrub ambient GitHub tokens (the agent uses only rein-brokered,
 	// downstream-injected credentials) AND $TMUX/$TMUX_PANE (design §3e:
 	// defense-in-depth — af_unix_mediation already blocks the approval socket, but
-	// don't leak its path into the sandbox in the first place).
+	// don't leak its path into the sandbox in the first place). Scrub
+	// CLAUDE_CONFIG_DIR too: a dev running rein from inside a claude session would
+	// otherwise leak that session's host config dir into nono's launch env. This is
+	// belt-and-suspenders — the real controls are nono's default-deny on the host
+	// dir plus the profile set_vars CLAUDE_CONFIG_DIR override (the overlay), which
+	// wins regardless; the scrub just keeps the stale parent value from riding along.
 	execEnv := os.Environ()
-	for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "TMUX", "TMUX_PANE"} {
+	for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "TMUX", "TMUX_PANE", "CLAUDE_CONFIG_DIR"} {
 		execEnv = unsetEnv(execEnv, name)
 	}
 	// Prepend the staged-rein dir to PATH: nono passes its OWN launch env's PATH
