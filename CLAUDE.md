@@ -5,7 +5,12 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 ## Read first
 
 - `docs/design.md` — full design. §0 TL;DR is enough for routine work; read specific sections as needed.
-- `PLAN-1.md` — current phase plan (Phase 1: sandboxed mode, CP1-CP6). Design of record: `docs/phase1-design.md` + `docs/phase1-srt-spike-findings.md`.
+- `docs/design-nono-pivot.md` — **design of record for the sandbox.** The agent runs under
+  **nono** (Landlock + seccomp); the old `srt`/bubblewrap backend was removed at the P3
+  cutover. Read §3 (compose) and §5 (what srt left behind) before touching the run path.
+- `PLAN-1.md` — earlier phase plan (srt sandboxed mode, CP1-CP6). Historical for the
+  sandbox now (superseded by the nono pivot); the broker/mint/scope spine it describes is
+  unchanged. `docs/phase1-srt-spike-findings.md` is a historical srt spike record.
 - `HANDOFF.md` — bring up Phase 1 on a fresh `git clone` (env prereqs + `rein init` for your own App) and the live resume pointer. Read when picking up on another machine.
 - `PLAN-0.5.md` and `PLAN.md` — Phase 0.5 / Phase 0 records, historical.
 - `phase0_findings.md` — what Phase 0 actually built + the 7 design corrections to the original PLAN.md + the 4 Shape B limits observed empirically. Read before doing Phase 0.5 design work; don't re-derive.
@@ -22,13 +27,13 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 ## Libraries (don't reinvent these)
 
 - Proxy: **hand-rolled** in `internal/proxy` (the CP1 relay recipe), NOT
-  goproxy. Do not "helpfully" swap goproxy back in: srt hands rein an
-  opaque byte tunnel to a unix socket (`mitmProxy.socketPath`) that rein
-  must TLS-terminate, inject into, and relay itself, and the injection
-  invariants (SNI==Host, per-host-class inject, no token on the response
-  path, HTTP/1.1-only relay, ContentLength/TransferEncoding copy,
+  goproxy. Do not "helpfully" swap goproxy back in: nono tunnels the agent's
+  GitHub egress to rein's loopback-TCP listener (`upstream_proxy`) as an opaque
+  byte stream that rein must TLS-terminate, inject into, and relay itself, and
+  the injection invariants (SNI==Host, per-host-class inject, no token on the
+  response path, HTTP/1.1-only relay, ContentLength/TransferEncoding copy,
   no-redirect-follow) need direct control of the request/response loop —
-  goproxy's shape doesn't fit either the socket hook or those invariants.
+  goproxy's shape doesn't fit either the tunnel hook or those invariants.
 - GitHub App tokens: `github.com/jferrl/go-githubauth` (MIT)
 - Key storage: hand-rolled `internal/keystore` file backend (PEMs under ConfigDir with uid + mode `0o077` + O_NOFOLLOW checks). `github.com/99designs/keyring` (MIT) was planned but never adopted — it is NOT in go.mod; `internal/keystore` is the swap point for future backends (hard-constraint #6).
 - Hardware keys (Phase 1+): `github.com/facebookincubator/sks` (Apache 2.0). Not used in Phase 0.
@@ -48,7 +53,12 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 - Setup is the `rein init` world: run `rein init` once (see `HANDOFF.md`) and rein resolves your App from `state.json` + the managed keystore — no env vars needed. **Do NOT `source ./dev-env`**: that file is untracked per-developer scaffolding (`dev-env.example` is the template), and the old committed copy pinned a dead App whose `REIN_APP_*` *override* the real one (#126). Only source a dev-env you filled in yourself, and only for the env-var path (e.g. the opt-in live Go tests).
 - The GitHub App private key is at `$REIN_APP_PRIVATE_KEY_PATH` (`~/.config/rein-credentials/app.pem`).
 - Secure Enclave is not available on Linux. Phase 0/1 use the `internal/keystore` file backend. Phase 1's hardware-backed work would require TPM2 (if this VM has one) or shift to a Mac host.
-- srt sandbox is out of scope for Phase 0.
+- The sandbox is **nono** (Landlock + seccomp): `rein run -- <agent>` runs the agent
+  through it by default (`--direct` opts out). The old `srt`/bubblewrap backend was
+  removed at the nono cutover; `docs/design-nono-pivot.md` is the design of record.
+  nono is run by absolute path from a rein-managed dir (`~/.config/rein/nono/bin/nono`),
+  so a real launch needs that binary present (the installer's digest pins are not
+  vendored yet — #142 — so `rein init` can't auto-install it; place it by hand for now).
 - run `gofmt -w .` before all commits.
 
 ## CI/CD

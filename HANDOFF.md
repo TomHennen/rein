@@ -1,8 +1,22 @@
 # HANDOFF — continuing Phase 1 on another machine
 
+> **⚠️ SANDBOX CHANGED (P3 nono cutover).** The agent sandbox is now **nono**
+> (Landlock + seccomp), not `srt`/bubblewrap. `rein run -- <agent>` runs under
+> nono by default (`--direct` opts out). This changes the bring-up:
+> - You do **NOT** need `bubblewrap`, the AppArmor `bwrap` profile, `socat`, or
+>   `@anthropic-ai/sandbox-runtime`. §1a/§1b below are **historical (srt)** — skip
+>   them for a nono bring-up.
+> - You **DO** need the pinned `nono` binary at `~/.config/rein/nono/bin/nono`
+>   (run by absolute path, never `$PATH`). The installer's digest pins are **not
+>   vendored yet (#142)**, so `rein init` cannot auto-install it — place the pinned
+>   `nono 0.68.0` binary there by hand until #142 lands. `rein doctor` shows a
+>   `nono present` / `nono digest` row; a fresh box without the binary fails closed.
+> - Design of record for the sandbox: **`docs/design-nono-pivot.md`** (not
+>   `phase1-design.md`, which describes the removed srt path).
+
 You are an agent picking up Phase 1 work from a `git clone` on a fresh
 machine, and you need to **run and test live** (mint tokens, push to a
-throwaway repo, run `srt`). This doc gets you from a bare clone to a
+throwaway repo, run the sandbox). This doc gets you from a bare clone to a
 runnable machine, then points you at where the work stands.
 
 No secrets are transferred: you create your **own** GitHub App via `rein
@@ -39,7 +53,7 @@ except this repo.
 Arch note: the origin machine is **aarch64** (Apple VZ guest). Commands
 below are arch-agnostic except where noted.
 
-### 1a. System deps for `srt`
+### 1a. System deps for `srt` (HISTORICAL — srt removed at the nono cutover; skip)
 
 `srt` (Anthropic's sandbox-runtime) needs `bubblewrap`, `ripgrep`, `socat`,
 and Node. Install directly (NOTE: a stale `cli.github.com` apt repo key can
@@ -57,7 +71,7 @@ from 0.0.54 on 2026-07-05; CP3 builds + re-verifies against it). Its
 mitm/proxy hooks are undocumented and may move across versions — install
 the pinned version and re-verify if you bump (`docs/phase1-srt-spike-findings.md`).
 
-### 1b. AppArmor profile for bwrap (Ubuntu 24.04+ ONLY)
+### 1b. AppArmor profile for bwrap (HISTORICAL — srt/bwrap removed; skip for nono)
 
 Ubuntu 24.04+ sets `kernel.apparmor_restrict_unprivileged_userns=1`, which
 strips capabilities from unprivileged user namespaces, so `bwrap` fails
