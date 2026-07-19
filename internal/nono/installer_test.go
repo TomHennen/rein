@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -145,8 +146,11 @@ func TestInstall_TarballDigestMismatch_OneByteFlip(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected digest mismatch error, got nil")
 	}
-	if !strings.Contains(err.Error(), "tarball digest mismatch") {
-		t.Fatalf("error = %v, want tarball digest mismatch", err)
+	if !errors.Is(err, ErrDigestMismatch) {
+		t.Fatalf("error = %v, want errors.Is ErrDigestMismatch", err)
+	}
+	if !strings.Contains(err.Error(), "tarball") {
+		t.Fatalf("error = %v, want it to name the tarball", err)
 	}
 	assertNoPartial(t, dest)
 }
@@ -162,8 +166,8 @@ func TestInstall_BinaryDigestMismatch(t *testing.T) {
 		Version: testVer, Platform: testPlat, DestDir: dest,
 		HTTPGet: getterFor(tgz, nil),
 	})
-	if err == nil || !strings.Contains(err.Error(), "binary digest mismatch") {
-		t.Fatalf("error = %v, want binary digest mismatch", err)
+	if err == nil || !errors.Is(err, ErrDigestMismatch) || !strings.Contains(err.Error(), "binary") {
+		t.Fatalf("error = %v, want errors.Is ErrDigestMismatch naming the binary", err)
 	}
 	assertNoPartial(t, dest)
 }
@@ -275,8 +279,8 @@ func TestVerifyInstalled_Mismatch(t *testing.T) {
 	if err := os.WriteFile(p, []byte("tampered-on-disk"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyInstalled(p, testVer, testPlat); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
-		t.Fatalf("error = %v, want digest mismatch", err)
+	if err := VerifyInstalled(p, testVer, testPlat); err == nil || !errors.Is(err, ErrDigestMismatch) {
+		t.Fatalf("error = %v, want errors.Is ErrDigestMismatch", err)
 	}
 }
 

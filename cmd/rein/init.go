@@ -51,8 +51,56 @@ import (
 	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
+	"github.com/TomHennen/rein/internal/nono"
 	"github.com/TomHennen/rein/internal/session"
 )
+
+// installNono places the pinned, digest-verified nono runtime at the managed
+// path so the default `rein run` backend works on a fresh clone. Idempotent:
+// a VerifyInstalled hit (matching pin) skips the download; a stale pin fails
+// verify and re-downloads.
+//
+// Fail-closed policy: Install itself NEVER writes an unverified binary. Here a
+// digest MISMATCH (errors.Is ErrDigestMismatch) is returned so init exits
+// non-zero — a tampered/served binary must not be shrugged off. Unsupported
+// platform (non-Linux, design §8) or a network failure is a soft warning: init
+// finishes its other scaffolding, the sandbox-health block reports `nono
+// present` fail, and `rein run` fails closed at launch anyway.
+func installNono(skip bool) error {
+	if skip {
+		fmt.Println("  nono:       skipped (--skip-nono-install)")
+		return nil
+	}
+	path, err := nono.ManagedNonoPath()
+	if err != nil {
+		return fmt.Errorf("resolve managed nono path: %w", err)
+	}
+	platform, err := nono.DetectPlatform()
+	if err != nil {
+		// Non-Linux / unsupported arch: nono is Linux-only. Not fatal to init.
+		fmt.Printf("  nono:       not installed (%v)\n", err)
+		return nil
+	}
+	if verr := nono.VerifyInstalled(path, nono.PinnedVersion, platform); verr == nil {
+		fmt.Printf("  nono:       already installed at %s (pinned %s, digest ok)\n", path, nono.PinnedVersion)
+		return nil
+	}
+	fmt.Printf("  nono:       installing pinned runtime %s (%s)\n", nono.PinnedVersion, platform)
+	installed, ierr := nono.Install(nono.InstallParams{})
+	if ierr != nil {
+		if errors.Is(ierr, nono.ErrDigestMismatch) {
+			return fmt.Errorf("nono install: %w", ierr)
+		}
+		fmt.Fprintf(os.Stderr, "  WARN:       nono install failed: %v\n", ierr)
+		fmt.Fprintln(os.Stderr, "              `rein run` will fail closed until nono is installed; re-run `rein init` when online.")
+		return nil
+	}
+	if verr := nono.VerifyInstalled(installed, nono.PinnedVersion, platform); verr != nil {
+		return fmt.Errorf("nono install verify: %w", verr)
+	}
+	fmt.Printf("              ok (installed %s, digest verified)\n", installed)
+	return nil
+}
 
 func runInit(args []string) error {
 	fs := flag.NewFlagSet("rein init", flag.ContinueOnError)
@@ -69,7 +117,9 @@ func runInit(args []string) error {
 	var repoFlag string
 	var machineLabelFlag string
 	var assumeYes bool
+	var skipNonoInstall bool
 	fs.BoolVar(&skipMint, "skip-mint-check", false, "skip the App credentials network check (useful for repeated re-runs; GitHub's installation-token mint has secondary rate limits)")
+	fs.BoolVar(&skipNonoInstall, "skip-nono-install", false, "skip downloading/verifying the pinned nono sandbox runtime (keeps init network-free; `rein run` fails closed until nono is installed)")
 	fs.BoolVar(&noSymlink, "no-symlink", false, "skip creating the ~/.local/bin/rein symlink")
 	fs.BoolVar(&aliasFlag, "alias", false, "install the `alias claude='rein run -- claude'` block to your shell rc (opt-in; default is NOT to install)")
 	fs.BoolVar(&noAlias, "no-alias", false, "force-skip the shell alias (wins if both --alias and --no-alias are given)")
@@ -433,6 +483,16 @@ func runInit(args []string) error {
 	// (Primary + Audit), so this would just duplicate them.
 	if !ranManifest {
 		appsetup.OfferInstallOnRepo(os.Stdout, configDir, sessionRepo)
+	}
+
+	// Install the pinned, digest-verified nono sandbox runtime to the managed
+	// path (the default `rein run` backend; without this a fresh clone fails
+	// closed forever). Idempotent — skips when an already-installed binary matches
+	// the pin. A digest MISMATCH is a supply-chain event and hard-fails init;
+	// unsupported-platform / network errors soft-warn and let the sandbox-health
+	// block below own the exit code (`rein run` still fails closed at launch).
+	if err := installNono(skipNonoInstall); err != nil {
+		return err
 	}
 
 	// Sandbox-stack health (onboarding-ux-design.md decision 2 / §3 step 1).

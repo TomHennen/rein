@@ -87,6 +87,13 @@ var pinnedDigests = map[string]map[string]digests{
 	},
 }
 
+// ErrDigestMismatch wraps every digest-verification failure (tarball, extracted
+// binary, or on-disk re-hash). A caller wiring Install into a larger flow (e.g.
+// `rein init`) uses errors.Is to HARD-FAIL on a mismatch — a tampered/served
+// binary is a supply-chain event — while still soft-handling unsupported-platform
+// or network errors. Install never places a file on a mismatch regardless.
+var ErrDigestMismatch = errors.New("nono digest mismatch")
+
 // pinFor returns the vendored digests for (version, platform), or an error
 // naming the fix. Fail-closed: a missing pin NEVER falls through to trusting a
 // fetched checksum.
@@ -197,7 +204,7 @@ func Install(p InstallParams) (string, error) {
 		return "", err
 	}
 	if got := sha256Hex(tarball); got != pin.Tarball {
-		return "", fmt.Errorf("nono tarball digest mismatch for %s/%s: got %s, want %s (refusing install)", version, platform, got, pin.Tarball)
+		return "", fmt.Errorf("%w: tarball for %s/%s: got %s, want %s (refusing install)", ErrDigestMismatch, version, platform, got, pin.Tarball)
 	}
 
 	// Extract the inner binary and verify it against the binary pin.
@@ -206,7 +213,7 @@ func Install(p InstallParams) (string, error) {
 		return "", err
 	}
 	if got := sha256Hex(binBytes); got != pin.Binary {
-		return "", fmt.Errorf("nono binary digest mismatch for %s/%s: got %s, want %s (refusing install)", version, platform, got, pin.Binary)
+		return "", fmt.Errorf("%w: binary for %s/%s: got %s, want %s (refusing install)", ErrDigestMismatch, version, platform, got, pin.Binary)
 	}
 
 	// Atomic place: temp file in DestDir -> fsync -> rename. Any error unlinks
@@ -240,7 +247,7 @@ func VerifyInstalled(path, version, platform string) error {
 	}
 	got := hex.EncodeToString(h.Sum(nil))
 	if got != pin.Binary {
-		return fmt.Errorf("installed nono digest mismatch at %s: got %s, want %s (reinstall)", path, got, pin.Binary)
+		return fmt.Errorf("%w: installed nono at %s: got %s, want %s (reinstall)", ErrDigestMismatch, path, got, pin.Binary)
 	}
 	return nil
 }
