@@ -1,14 +1,14 @@
-$ rein run -- bash -c <clone+declare+push A and B> /tmp/rein-itest-81ulxqzh
-rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-81ulxqzh (git -C /tmp/rein-itest-81ulxqzh rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
+$ rein run -- bash -c <clone+declare+push A and B> /tmp/rein-itest-sfi166_f
+rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-sfi166_f (git -C /tmp/rein-itest-sfi166_f rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
 rein: verifying nono containment (creds hidden; loopback + direct egress denied)…
 rein: containment WARNING: udp_egress: UDP egress OPEN (accepted residual — a prompt-injected agent has a UDP exfil channel) [8.8.8.8:53]
 rein: containment gate passed.
 rein: launching SANDBOXED (nono) run:
-  session: sess_journey_multirepo (role=implement, repos=[TomHennen/agentcreds-validation-a TomHennen/agentcreds-validation-b]) [source=file:/tmp/rein-journey-sess-92rfmec4/session.yaml]
-  GitHub egress tunnels through rein's loopback proxy: 127.0.0.1:38213
+  session: sess_journey_multirepo (role=implement, repos=[TomHennen/agentcreds-validation-a TomHennen/agentcreds-validation-b]) [source=file:/tmp/rein-journey-sess-7pa8qjdb/session.yaml]
+  GitHub egress tunnels through rein's loopback proxy: 127.0.0.1:41705
   the agent sees NO real token; git/gh are injected at the proxy (downstream of the sandbox).
   credentials are hidden (deny_credentials); the approval channel is isolated (af_unix_mediation).
-  writable in sandbox (--allow): [/tmp/rein-itest-81ulxqzh /home/admin/.config/rein-sandbox-home/.claude]
+  writable in sandbox (--allow): [/tmp/rein-itest-sfi166_f /home/admin/.config/rein-sandbox-home/.claude /tmp/rein-gh-313329274]
   extra egress ALLOWED (direct, NOT injected, no rein token): [api.anthropic.com]
   writes are LOCKED until the agent declares its issue:  rein declare <n>
   the declaration will prompt on THIS terminal.
@@ -34,41 +34,74 @@ run git clone https://github.com/TomHennen/agentcreds-validation-b repoB
 emit "@READ_B_RC=$?"
 [ -d repoB/.git ] && emit "@READ_B_OK"
 
-emit "@DECLARE_A_START  rein declare 352 --repo TomHennen/agentcreds-validation-a  (1st issue: plain confirm, in scope)"
-run rein declare 352 --repo TomHennen/agentcreds-validation-a
+emit "@DECLARE_A_START  rein declare 363 --repo TomHennen/agentcreds-validation-a  (1st issue: plain confirm, in scope)"
+run rein declare 363 --repo TomHennen/agentcreds-validation-a
 emit "@DECLARE_A_RC=$?"
 
-emit "@PUSH_A_START  push agent/352/<nonce> -> TomHennen/agentcreds-validation-a (expect: LANDS on A)"
+emit "@PUSH_A_START  push agent/363/<nonce> -> TomHennen/agentcreds-validation-a (expect: LANDS on A)"
 cd repoA
 echo "multi-repo journey: real agent work in repo A" >> agent-note.txt
 run git add -A
 run git commit -q -m "multi-repo journey: real agent work (repo A)"
-run git push --progress origin HEAD:refs/heads/agent/352/mr-a-20260719-022013-ef81b4
+run git push --progress origin HEAD:refs/heads/agent/363/mr-a-20260719-150210-bb05e1
 emit "@PUSH_A_RC=$?"
 cd "$0"
 
-emit "@DECLARE_B_START  rein declare 43 --repo TomHennen/agentcreds-validation-b  (2nd issue mid-run: the 'ALSO work on an issue' confirm; B is already in scope, so NOT a repo scope-expansion)"
-run rein declare 43 --repo TomHennen/agentcreds-validation-b
+emit "@DECLARE_B_START  rein declare 45 --repo TomHennen/agentcreds-validation-b  (2nd issue mid-run: the 'ALSO work on an issue' confirm; B is already in scope, so NOT a repo scope-expansion)"
+run rein declare 45 --repo TomHennen/agentcreds-validation-b
 emit "@DECLARE_B_RC=$?"
 
-emit "@PUSH_B_START  push agent/43/<nonce> -> TomHennen/agentcreds-validation-b (expect: LANDS on B)"
+emit "@PUSH_B_START  push agent/45/<nonce> -> TomHennen/agentcreds-validation-b (expect: LANDS on B)"
 cd repoB
 echo "multi-repo journey: real agent work in repo B" >> agent-note.txt
 run git add -A
 run git commit -q -m "multi-repo journey: real agent work (repo B)"
-run git push --progress origin HEAD:refs/heads/agent/43/mr-b-20260719-022013-32551b
+run git push --progress origin HEAD:refs/heads/agent/45/mr-b-20260719-150210-383dba
 emit "@PUSH_B_RC=$?"
 emit "@SCRIPT_DONE"
- /tmp/rein-itest-81ulxqzh
+ /tmp/rein-itest-sfi166_f
 ---
+  agent contract PRINTED to the agent's output (this agent has no system-prompt channel, so it may or
+    may not reach the model's context; the REIN_IN_SANDBOX_* env vars carry the same facts machine-readably).
+rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
+
+FILES
+- Your work persists ONLY in the working tree: /tmp/rein-itest-sfi166_f
+  Write anything that must outlive this run THERE. Nothing else survives.
+- $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
+  DISCARDED when the run ends. You will get no error. Do not keep work there.
+- Most of $HOME reads as empty/missing; a few paths are re-exposed READ-ONLY, where
+  writes fail with "Read-only file system". Caches work but start cold each run.
+
+CREDENTIALS
+- There are NO credentials in this environment. Tokens, keys, and credential stores
+  are hidden on purpose. Do not go looking for them, and do not ask the user for one.
+- git and gh still work anyway: a proxy OUTSIDE the sandbox injects a short-lived
+  GitHub token you never see. Just use them normally.
+
+GITHUB WRITES
+- Writes to GitHub (push, PRs, comments, any API mutation) are LOCKED until you
+  declare the issue this work is for:
+      rein declare <n>
+  That asks the human to approve, on their terminal. Reads work without it.
+- Once confirmed, push ONLY to a branch named:
+      agent/<n>/<nonce>
+  where <n> is the declared issue number and <nonce> is a short name you choose
+  (letters/digits, then letters/digits/./_/-). Any other ref is rejected.
+- One issue per push.
+
+NETWORK
+- Egress is restricted to GitHub plus: api.anthropic.com
+- Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.
 
   nono v0.68.0
   Capabilities:
   ────────────────────────────────────────────────────
-    r   /tmp/rein-nono-3905264443/ca-bundle.pem (file)
-   r+w  /tmp/rein-itest-81ulxqzh (dir)
+    r   /tmp/rein-nono-1498066231/ca-bundle.pem (file)
+   r+w  /tmp/rein-itest-sfi166_f (dir)
    r+w  /home/admin/.config/rein-sandbox-home/.claude (dir)
-    r   /tmp/rein-nono-3905264443/rein (file)
+   r+w  /tmp/rein-gh-313329274 (dir)
+    r   /tmp/rein-nono-1498066231/rein (file)
        + 49 system/group paths (-v to show)
    net  proxy
   ────────────────────────────────────────────────────
@@ -86,25 +119,25 @@ SBX| $ git clone https://github.com/TomHennen/agentcreds-validation-b repoB
 SBX| Cloning into 'repoB'...
 SBX| @READ_B_RC=0
 SBX| @READ_B_OK
-SBX| @DECLARE_A_START  rein declare 352 --repo TomHennen/agentcreds-validation-a  (1st issue: plain confirm, in scope)
-SBX| $ rein declare 352 --repo TomHennen/agentcreds-validation-a
+SBX| @DECLARE_A_START  rein declare 363 --repo TomHennen/agentcreds-validation-a  (1st issue: plain confirm, in scope)
+SBX| $ rein declare 363 --repo TomHennen/agentcreds-validation-a
 
 === rein: agent declares work on an issue ===
-   issue:    #352 "rein journey: multi-repo fixture (safe to close)"  [open]
+   issue:    #363 "rein journey: multi-repo fixture (safe to close)"  [open]
              in TomHennen/agentcreds-validation-a
    session:  sess_journey_multirepo (role=implement, repos=[TomHennen/agentcreds-validation-a, TomHennen/agentcreds-validation-b])
    approving covers ALL writes for this run (git push, gh, API).
 
-To approve, type the issue number (352) and press enter.
+To approve, type the issue number (363) and press enter.
 To deny, press Ctrl-C or type anything else.
-> 352
+> 363
   [approved]
-SBX| issue #352 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/352/<nonce>)
+SBX| issue #363 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/363/<nonce>)
 SBX| @DECLARE_A_RC=0
-SBX| @PUSH_A_START  push agent/352/<nonce> -> TomHennen/agentcreds-validation-a (expect: LANDS on A)
+SBX| @PUSH_A_START  push agent/363/<nonce> -> TomHennen/agentcreds-validation-a (expect: LANDS on A)
 SBX| $ git add -A
 SBX| $ git commit -q -m multi-repo journey: real agent work (repo A)
-SBX| $ git push --progress origin HEAD:refs/heads/agent/352/mr-a-20260719-022013-ef81b4
+SBX| $ git push --progress origin HEAD:refs/heads/agent/363/mr-a-20260719-150210-bb05e1
 SBX| Enumerating objects: 4, done.
 SBX| Counting objects: 100% (4/4), done.
 SBX| Delta compression using up to 8 threads
@@ -112,31 +145,31 @@ SBX| Compressing objects: 100% (2/2), done.
 SBX| Writing objects: 100% (3/3), 372 bytes | 372.00 KiB/s, done.
 SBX| Total 3 (delta 1), reused 0 (delta 0), pack-reused 0
 SBX| remote:
-SBX| remote: Create a pull request for 'agent/352/mr-a-20260719-022013-ef81b4' on GitHub by visiting:
-SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/352/mr-a-20260719-022013-ef81b4
+SBX| remote: Create a pull request for 'agent/363/mr-a-20260719-150210-bb05e1' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/363/mr-a-20260719-150210-bb05e1
 SBX| remote:
 SBX| To https://github.com/TomHennen/agentcreds-validation-a
-SBX|  * [new branch]      HEAD -> agent/352/mr-a-20260719-022013-ef81b4
+SBX|  * [new branch]      HEAD -> agent/363/mr-a-20260719-150210-bb05e1
 SBX| @PUSH_A_RC=0
-SBX| @DECLARE_B_START  rein declare 43 --repo TomHennen/agentcreds-validation-b  (2nd issue mid-run: the 'ALSO work on an issue' confirm; B is already in scope, so NOT a repo scope-expansion)
-SBX| $ rein declare 43 --repo TomHennen/agentcreds-validation-b
+SBX| @DECLARE_B_START  rein declare 45 --repo TomHennen/agentcreds-validation-b  (2nd issue mid-run: the 'ALSO work on an issue' confirm; B is already in scope, so NOT a repo scope-expansion)
+SBX| $ rein declare 45 --repo TomHennen/agentcreds-validation-b
 
 === rein: agent wants to ALSO work on an issue ===
-   issue:    #43 "rein journey: multi-repo fixture (safe to close)"  [open]
+   issue:    #45 "rein journey: multi-repo fixture (safe to close)"  [open]
              in TomHennen/agentcreds-validation-b
    session:  sess_journey_multirepo (role=implement, repos=[TomHennen/agentcreds-validation-a, TomHennen/agentcreds-validation-b])
    approving covers ALL writes for this run (git push, gh, API).
 
-To approve, type the issue number (43) and press enter.
+To approve, type the issue number (45) and press enter.
 To deny, press Ctrl-C or type anything else.
-> 43
+> 45
   [approved]
-SBX| issue #43 in TomHennen/agentcreds-validation-b confirmed — writes are unlocked for this run (push to agent/43/<nonce>)
+SBX| issue #45 in TomHennen/agentcreds-validation-b confirmed — writes are unlocked for this run (push to agent/45/<nonce>)
 SBX| @DECLARE_B_RC=0
-SBX| @PUSH_B_START  push agent/43/<nonce> -> TomHennen/agentcreds-validation-b (expect: LANDS on B)
+SBX| @PUSH_B_START  push agent/45/<nonce> -> TomHennen/agentcreds-validation-b (expect: LANDS on B)
 SBX| $ git add -A
 SBX| $ git commit -q -m multi-repo journey: real agent work (repo B)
-SBX| $ git push --progress origin HEAD:refs/heads/agent/43/mr-b-20260719-022013-32551b
+SBX| $ git push --progress origin HEAD:refs/heads/agent/45/mr-b-20260719-150210-383dba
 SBX| Enumerating objects: 4, done.
 SBX| Counting objects: 100% (4/4), done.
 SBX| Delta compression using up to 8 threads
@@ -144,11 +177,11 @@ SBX| Compressing objects: 100% (2/2), done.
 SBX| Writing objects: 100% (3/3), 401 bytes | 401.00 KiB/s, done.
 SBX| Total 3 (delta 0), reused 0 (delta 0), pack-reused 0
 SBX| remote:
-SBX| remote: Create a pull request for 'agent/43/mr-b-20260719-022013-32551b' on GitHub by visiting:
-SBX| remote:      https://github.com/TomHennen/agentcreds-validation-b/pull/new/agent/43/mr-b-20260719-022013-32551b
+SBX| remote: Create a pull request for 'agent/45/mr-b-20260719-150210-383dba' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-b/pull/new/agent/45/mr-b-20260719-150210-383dba
 SBX| remote:
 SBX| To https://github.com/TomHennen/agentcreds-validation-b
-SBX|  * [new branch]      HEAD -> agent/43/mr-b-20260719-022013-32551b
+SBX|  * [new branch]      HEAD -> agent/45/mr-b-20260719-150210-383dba
 SBX| @PUSH_B_RC=0
 SBX| @SCRIPT_DONE
 rein: revoked 1 of 1 write token(s) on exit
