@@ -187,5 +187,69 @@ func TestPrepareGhOverlay(t *testing.T) {
 	}
 }
 
+// TestBriefNonoAgent_Claude asserts the sandbox contract reaches a claude launch
+// via --append-system-prompt (gap 3): the flag is inserted right after argv0,
+// before user args, and carries the ephemeral-$HOME / no-creds / declare wording.
+func TestBriefNonoAgent_Claude(t *testing.T) {
+	cmdline := []string{"claude", "-p", "do the thing"}
+	argv, contract, statusLine, printToStdout := briefNonoAgent(cmdline, contractParams{
+		WorkTree:      "/work/tree",
+		HomeEphemeral: true,
+		ExtraDomains:  []string{"api.anthropic.com"},
+	}, false)
+
+	if printToStdout {
+		t.Error("claude has a system-prompt channel; must NOT also print to stdout")
+	}
+	if len(argv) != len(cmdline)+2 || argv[0] != "claude" || argv[1] != "--append-system-prompt" {
+		t.Fatalf("argv = %v, want claude --append-system-prompt <contract> then user args", argv)
+	}
+	if argv[2] != contract {
+		t.Errorf("injected system prompt %q != returned contract", argv[2])
+	}
+	// User args must follow, unseparated from a trailing positional prompt.
+	if argv[3] != "-p" || argv[4] != "do the thing" {
+		t.Errorf("user args not preserved after injection: %v", argv[2:])
+	}
+	if !strings.Contains(contract, "rein declare") || !strings.Contains(contract, "$HOME is EPHEMERAL") {
+		t.Errorf("contract missing declare/ephemeral wording:\n%s", contract)
+	}
+	if !strings.Contains(statusLine, "injected via --append-system-prompt") {
+		t.Errorf("status line does not report injection: %q", statusLine)
+	}
+}
+
+// TestBriefNonoAgent_NonClaude: a non-claude agent's argv is unchanged and the
+// contract is printed to its stdout (its only briefing channel).
+func TestBriefNonoAgent_NonClaude(t *testing.T) {
+	cmdline := []string{"bash", "-c", "echo hi"}
+	argv, contract, _, printToStdout := briefNonoAgent(cmdline, contractParams{WorkTree: "/w", HomeEphemeral: true}, false)
+	if !printToStdout {
+		t.Error("non-claude agent must have the contract printed to stdout")
+	}
+	if len(argv) != len(cmdline) || argv[0] != "bash" {
+		t.Errorf("non-claude argv must be unchanged; got %v", argv)
+	}
+	if contract == "" {
+		t.Error("contract must still be built (to print) for a non-claude agent")
+	}
+}
+
+// TestBriefNonoAgent_Off: REIN_DISABLE_AGENT_CONTRACT leaves argv untouched, emits
+// no contract, and the banner warns the agent was NOT briefed.
+func TestBriefNonoAgent_Off(t *testing.T) {
+	cmdline := []string{"claude"}
+	argv, contract, statusLine, printToStdout := briefNonoAgent(cmdline, contractParams{WorkTree: "/w", HomeEphemeral: true}, true)
+	if len(argv) != 1 || argv[0] != "claude" {
+		t.Errorf("off: argv must be unchanged; got %v", argv)
+	}
+	if contract != "" || printToStdout {
+		t.Errorf("off: no contract must be built or printed; contract=%q print=%v", contract, printToStdout)
+	}
+	if !strings.Contains(statusLine, "DISABLED") {
+		t.Errorf("off: status line must warn DISABLED; got %q", statusLine)
+	}
+}
+
 // Mode routing (nono default + --sandbox/--nono aliases + --direct opt-out) is
 // pinned by TestParseRunModeRouting in run_broker_shared_test.go.

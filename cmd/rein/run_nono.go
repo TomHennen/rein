@@ -50,6 +50,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/TomHennen/rein/internal/agentenv"
 	"github.com/TomHennen/rein/internal/approvals"
 	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/gitidentity"
@@ -97,6 +98,23 @@ func nonoGitIdentityConfig(id gitidentity.Identity) []nono.GitConfig {
 		{Key: "user.name", Value: id.Name},
 		{Key: "user.email", Value: id.Email},
 	}
+}
+
+// briefNonoAgent builds the sandbox contract (#63) for a nono run and returns
+// the launch argv (contract injected into claude's --append-system-prompt; other
+// agents' argv unchanged), the contract text, the one-line banner status, and
+// whether the contract should be PRINTED to the agent's stdout (its only channel
+// when it is not claude). Pure so the wiring is unit-testable without a live
+// launch. Matches run_sandboxed.go's behavior; off honors REIN_DISABLE_AGENT_CONTRACT.
+func briefNonoAgent(cmdline []string, p contractParams, off bool) (argv []string, contract, statusLine string, printToStdout bool) {
+	if off {
+		return cmdline, "", contractStatus(true, false), false
+	}
+	contract = buildAgentContract(p)
+	argv, injected := injectContract(cmdline, contract)
+	// Non-claude agents have no system-prompt channel: the caller prints the
+	// contract to stdout instead (weaker, but honest — the banner says which).
+	return argv, contract, contractStatus(false, injected), !injected
 }
 
 // runNono is the entry point for `rein run --nono -- <cmd>`. cmdline is the
@@ -426,16 +444,29 @@ func runNono(cmdline []string) (int, error) {
 		fmt.Fprintln(os.Stderr, "rein: containment gate passed.")
 	}
 
+	// (11d) SANDBOX CONTRACT (#63). Everything the banner says goes to the HUMAN's
+	// terminal; the agent sees none of it. Brief the AGENT itself: claude gets it
+	// in its system prompt (--append-system-prompt); every other agent gets it
+	// printed into the sandbox's own stdout. Under nono $HOME is always ephemeral
+	// (default-deny fs), and the real working tree is always bound (no #64
+	// unhardenable-cwd fallback), so WorkTreeEphemeral stays false.
+	contractOff := agentenv.DisableClaudeMCPFromEnv(os.Getenv(EnvDisableAgentContract))
+	agentArgv, contract, contractLine, printContract := briefNonoAgent(cmdline, contractParams{
+		WorkTree:      workTree,
+		HomeEphemeral: true,
+		ExtraDomains:  extraDomains,
+	}, contractOff)
+
 	// (12) Build the nono argv: managed path, run, the profile, one --allow per
 	// writable path, a read-only grant on the staged rein (exec, not write), then
-	// the agent command after "--".
+	// the (contract-injected) agent command after "--".
 	nonoArgv := []string{"run", "--profile", profilePath}
 	for _, p := range allowPaths {
 		nonoArgv = append(nonoArgv, "--allow", p)
 	}
 	nonoArgv = append(nonoArgv, "--read-file", stagedRein)
 	nonoArgv = append(nonoArgv, "--")
-	nonoArgv = append(nonoArgv, cmdline...)
+	nonoArgv = append(nonoArgv, agentArgv...)
 
 	// (13) Scrubbed exec environment. nono OWNS HTTP(S)_PROXY/NO_PROXY and the
 	// profile's set_vars carries the CA + git config — rein must not set those.
@@ -459,6 +490,15 @@ func runNono(cmdline []string) (int, error) {
 	execEnv = setEnv(execEnv, "PATH", runTmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	printNonoBanner(os.Stderr, sess, sessSource, loopbackPort, allowPaths, extraDomains, cmdline)
+	// How the agent was briefed with the contract above (injected / printed /
+	// disabled) — one honest line so the operator isn't told the agent was briefed
+	// when it wasn't.
+	fmt.Fprintln(os.Stderr, contractLine)
+	// Non-claude agents: print the contract where the AGENT's own output goes, so
+	// it lands in its transcript rather than only on the human's side.
+	if printContract {
+		fmt.Fprintln(os.Stdout, contract)
+	}
 
 	cmd := exec.Command(nonoPath, nonoArgv...)
 	cmd.Env = execEnv
