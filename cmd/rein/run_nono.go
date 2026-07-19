@@ -58,6 +58,7 @@ import (
 	"github.com/TomHennen/rein/internal/sandboxutil"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/srt"
+	"github.com/TomHennen/rein/internal/ui/grant"
 	"github.com/TomHennen/rein/internal/worktree"
 )
 
@@ -417,21 +418,31 @@ func runNono(cmdline []string) (int, error) {
 
 	cmd := exec.Command(nonoPath, nonoArgv...)
 	cmd.Env = execEnv
-	cmd.Stdin = os.Stdin
+	// STDIN OWNERSHIP (the determinism crux — pairs with Setsid below, which
+	// alone is NOT enough). nono's supervisor read()s whatever fd is the child's
+	// stdin and forwards it; when approval is the INLINE /dev/tty Form A prompt
+	// (PopupPreferenceFromEnv()==false), that supervisor read races the host's
+	// /dev/tty read and steals the operator's keystrokes — the declare never gets
+	// confirmed (intermittent on nono, never on srt, whose bash agent reads no
+	// stdin). So in inline mode the host must own the terminal exclusively: give
+	// the child /dev/null (exec wires nil→/dev/null). In POPUP mode the
+	// interactive agent legitimately keeps the pty and approval runs on its own
+	// popup pty — no contention — so pass os.Stdin through. Read from the HOST
+	// env (the $TMUX scrub only touched the child env).
+	if grant.PopupPreferenceFromEnv() {
+		cmd.Stdin = os.Stdin
+	} else {
+		cmd.Stdin = nil
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Dir = workTree
 	// Run nono in its OWN session (no controlling terminal), the nono equivalent of
-	// srt's bwrap --new-session. Two load-bearing effects:
-	//   1. the host `rein run` process stays the sole owner of the controlling
-	//      terminal, so the declare Form A prompt's /dev/tty read is NOT contended
-	//      by the sandbox child (without this the child shares the terminal and the
-	//      host prompt cancels — the agent's declare never gets confirmed).
-	//   2. the sandboxed agent has no controlling terminal, so it cannot open
-	//      /dev/tty to read/answer the approval prompt itself (self-approval hole,
-	//      the tty-asymmetry srt closes the same way).
-	// Also satisfies the run-discipline rule that a nono launch never shares the
-	// caller's session (it must not touch the operator's tmux/session).
+	// srt's bwrap --new-session. This is the SELF-APPROVAL defense (distinct from
+	// the stdin-race fix above): with no controlling terminal the sandboxed agent
+	// cannot open /dev/tty to read/answer the approval prompt itself (the tty
+	// asymmetry srt closes the same way). It also isolates the launch from the
+	// caller's session, so a nono run never touches the operator's tmux/session.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	if err := cmd.Start(); err != nil {
