@@ -28,9 +28,9 @@ about the sandbox; it stands behind the credential boundary alone.
 | Piece | Package(s) | Role |
 |---|---|---|
 | **Minter** | `internal/githubapp`, `internal/broker`, `internal/ghsession` | Mint short-lived, per-issue-ceiling, read/write-tiered GitHub App installation tokens |
-| **Relay** | `internal/proxy` (minus the parser) | A loopback listener the sandbox tunnels to; TLS-terminate, inject the auth header, stream the body opaquely. Kept for srt and as the portable fallback; on nono a tool-sandbox + credential socket can replace it (see the proxy section) |
+| **Relay** | `internal/proxy` (minus the parser) | A loopback listener the sandbox tunnels to; TLS-terminate, inject the auth header, stream the body opaquely. Kept on every backend — the token is injected downstream and never enters the sandbox (the tool-sandbox 'shed it on nono' alternative was disproven: it leaks the token to the agent; see the proxy section) |
 | **Ceremony** | `internal/approvals`, `internal/ui/grant` | `rein declare <n>` → human approval → write tier unlocked; revocable in one place |
-| **Verifier** | `internal/nono` prober (`selftest`, `verify`) | Assert the *user's* sandbox confines: creds hidden, egress routed as the profile declares (to rein's relay, or straight to GitHub with the token scoped to git), approval channel isolated, broker leaks no secret |
+| **Verifier** | `internal/nono` prober (`selftest`, `verify`) | Assert the *user's* sandbox confines: creds hidden, egress routed to rein's relay, approval channel isolated, broker leaks no secret |
 | **Audit** | existing + GitHub-sourced | Reconstruct "what the run wrote" from GitHub's own record (pushes, PRs, comments), keyed to the declared issue |
 
 That's rein. Everything else is just how a sandbox gets pointed at it.
@@ -57,73 +57,44 @@ the product: bring your own sandbox; rein brokers the credentials.
 
 ## The proxy, simplified
 
-**On nono, rein can shed the streaming relay. For srt — and as the portable fallback — it
-stays.** A spike verified the load-bearing pieces on real nono 0.68.0 against real GitHub (the
-credential-helper wiring is the one part still pending — see the costs below).
+**Keep the relay — on every backend — but drop the parser.** A spike tried to shed the relay on
+nono by delivering the token to git *inside* the sandbox (a nono tool-sandbox policy + a
+credential socket). It works mechanically (no cap, mid-run tiering) but **fails on security,
+decisively**: *any token delivered into the sandbox is extractable by the agent that controls
+the sandbox.* Two independent leaks, one unmitigable — the agent `nc -U`'d the credential socket
+and got the raw write token (nono's egress confinement is **TCP-only** on Linux; `filesystem.deny`
+does **not** block an AF_UNIX `connect`), and `git credential fill` makes git print even a *baked*
+token. The relay is safe precisely because it injects **downstream** of the sandbox behind a
+loopback-TCP front (which nono *does* gate): the token value **never enters the sandbox**, so
+there is nothing to `nc` or `git credential fill` out. So the relay **stays**, nono and srt alike.
+The lasting value of the tool-sandbox detour is a hard **negative result that vindicates
+downstream injection.**
 
-The relay exists to inject the auth header into git's byte stream, because no sandbox injects
-per-request. But nono has a second egress path that skips injection entirely:
+What the relay does *not* need is the **parser**. Drop the receive-pack and GraphQL classifiers
+(`internal/classify` + `proxy/receivepack` + `gate`, the `#136` fuzz surface). The relay becomes
+**inject-the-current-tier-header + stream opaquely** — it never parses attacker-controlled bytes.
+Enforcement moves off the byte stream, none of it needing rein to read the body:
 
-- **Two nono paths, one cap.** The 16 MiB body cap is an artifact of nono's *inject* path,
-  where nono MITM-terminates the connection and rewrites the request to add the token — it
-  buffers the whole body (hence the cap) and hangs on chunked encoding. On the **opaque
-  CONNECT-passthrough** path — git carries its own auth, nono just tunnels the bytes — there is
-  **no cap** and no buffering. A 30 MiB incompressible push landed.
-- **The agent can't read the token.** A nono *tool-sandbox* scopes the token to git's child
-  process, so the outer agent can't read it out: `/proc/*/environ` returns EACCES, and a live
-  sweep found 0 leaks. This is *passive*-read closure — see the confused-deputy cost below. Host
-  egress is preserved via `allow_domain` plus the CONNECT proxy.
+- **Branch floor** (`agent/**`, never `main`/tags) → **GitHub rulesets** (server-side, bound to
+  the token; one-time setup costs the App `administration:write`).
+- **Read/write tiering** → **rein injects the current-tier token** (read pre-declare, write
+  after; a pre-declare mutation 403s server-side). The mid-run switch is trivial and safe on the
+  relay — rein just flips which token it injects, per request, and the token never being in the
+  sandbox is exactly what makes that safe (it was the sandbox-side delivery that leaked).
+- **"Where it wrote" (audit)** → **GitHub's own record**, more complete than the stream tap (it
+  catches gh-API merges/PRs/comments the receive-pack parser never saw). The one real loss:
+  real-time *denied-attempt* visibility — GitHub's record shows only successful writes.
 
-So the shape on nono becomes a **tool-sandbox git/gh policy** plus a **credential-helper
-socket** — git's `credential.helper` calls rein for the current-tier token, which is what lets a
-mid-run read→write switch happen without a streaming relay. That sheds the relay on nono. It
-**stays for srt and as the portable fallback.**
+So the parser goes (attack surface removed), the relay stays and *simplifies* to inject-and-stream,
+and it's **universal**: both nono and srt route GitHub egress to rein's relay. `gh`/REST/GraphQL
+ride the same relay (small requests, no cap).
 
-Shedding it loses no *enforcement* capability, because decision 2 already moved everything that
-needed rein in the byte path elsewhere: branch floor → rulesets, tiering → token scope, audit →
-GitHub's record. No rule left depends on rein terminating the stream. The one real loss is
-observability: the relay saw denied attempts (pre-declare 403s, out-of-ceiling pushes) in real
-time, and GitHub's record only shows *successful* writes — a minor tripwire we trade away.
-
-**Honest costs of the nono path:**
-
-- The per-run tool-sandbox profile carries the token **on disk** — written outside the agent's
-  grants, and verified unreadable by the agent, but on disk nonetheless.
-- **Confused-deputy channel.** The sweep proved the agent can't *passively* read the token; it
-  did not prove the agent can't make *git itself* hand the token over. Because the token lives in
-  git's process, an agent that can steer git — `git credential fill`, a `.git` hook, a
-  `-c credential.helper=...` alias — can extract it. The relay never had this exposure (git held
-  no real credential under it). Blast radius is bounded: the token is short-lived and repo-scoped,
-  and post-declare the agent can already write. Closing the channel means denying agent writes to
-  hook/config paths and limiting how often the helper answers — which is part of the fiddly
-  grants below, not a free property. This is an **open item, not yet closed.**
-- Tool-sandbox grants are **fiddly and per-host:** git-core exec paths, the library closure, CA
-  and DNS files. A missing git-core path surfaces as an *auth* error, not an obvious sandbox one.
-- The credential-helper socket is **verified in mechanism, not yet in wiring** — and this is the
-  **load-bearing gate** for the whole nono shed, not a side cost. Socket forwarding itself is
-  proven (ssh-agent), but the git-credential-helper wiring on top of it is a **pending
-  verification**; if it doesn't hold, the nono path falls back to the relay.
-- **`gh` is a separate delivery path.** `gh` doesn't consult git's credential helper — it reads
-  its own token. So the on-disk profile token and the helper-fetched current-tier token need
-  reconciling: which token `gh` uses, and how it tier-switches on declare, is open design.
-
-**Commit signing.** A tool-sandbox can forward a signing-agent socket scoped to just `git`, so
-the signing key never reaches the agent — same mechanism as the credential socket. Caveat:
-forwarding the *developer's* key signs commits as the developer, which conflicts with rein's
-non-impersonation attribution. So signing must use a **rein/bot signing identity** — a
-rein-managed key registered to the bot — not the user's key. Open design, not a blocker.
-
-**Drop the parser** — the receive-pack and GraphQL classifiers (`internal/classify` +
-`proxy/receivepack` + `gate`), the `#136` fuzz attack surface. Each thing it did moves
-somewhere better:
-
-- **Branch floor** (`agent/**`, never `main`/tags) → **GitHub rulesets**: server-side, bound
-  to the installation token. One-time setup costs the App `administration:write`.
-- **Read/write tiering** → **token scope**: read-only token before declare, write token after;
-  a pre-declare mutation just 403s server-side. GraphQL body inspection buys ~nothing the scope
-  doesn't already enforce.
-- **"Where it wrote" (audit)** → **GitHub's own record**: more complete than the stream tap; it
-  also catches the gh-API merges, PRs, and comments the receive-pack parser never saw.
+**Commit signing.** Forwarding a signing-**agent** socket (ssh-agent/gpg-agent) is *not* the same
+as delivering a token: the agent protocol signs on request but never reveals the key, so the key
+isn't `nc`-extractable even though the socket is reachable. Two caveats remain: the forwarded
+agent can be *used* to sign arbitrary things, so scope it to `git` (tool-sandbox `intercept`); and
+the signer must be a **rein/bot identity** — forwarding the *developer's* key signs commits as the
+human, breaking non-impersonation. Open design, not a blocker.
 
 Tying a write to its issue was always **audit, not a hard boundary.** rein's claim is a per-issue
 *ceiling* plus attribution plus audit — not "the token can only write issue N's branch." GitHub
