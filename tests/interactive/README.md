@@ -83,6 +83,27 @@ prerequisite is absent — `credential_boundary` (bagel), `tmux_popup_approval` 
 pyte), `realagent_write` (claude / tmux / pyte), `init_then_run` (no configured App); a
 skip is not a pass. Details in each dir's README.
 
+**nono status (after the P3 srt→nono cutover).** The goldens were regenerated on the
+nono default. GREEN on nono: `write_ceremony`, `multi_repo`, `git_author`,
+`tmux_popup_approval`, `direct_mode`, `expansion_404`, `app_not_installed`,
+`init_autodetect`, `init_steady_state`, `session_commands`. Known-RED on nono — each
+exposes an UNFINISHED run_nono/installer item (a Tom decision before merge, NOT a
+cutover-correctness bug), tracked in the P3 cutover report:
+- `gh_write` — run_nono sets no `GH_CONFIG_DIR`; nono correctly denies host `~/.config/gh`
+  (oauth token), so `gh` hits EACCES and won't start when the developer has run
+  `gh auth login`. Needs a gh config-dir overlay (the gh twin of #94's `CLAUDE_CONFIG_DIR`).
+- `push_upstream`, and plausibly `scope_expansion` — run_nono never wired the
+  `internal/agentenv` contract vars (`REIN_UPSTREAM_INTENT_FILE`,
+  `REIN_EPHEMERAL_CLONE_DIR`, `REIN_REPO_WORKTREES`) into the profile `set_vars`. The push
+  lands; the upstream-recording / mid-run-clone plumbing does not.
+- `init_then_run`, `onboarding` — `internal/nono.pinnedDigests` is empty (#142 deferred),
+  so `rein init` cannot install nono; a fresh `git clone` + `rein init` + `rein run` fails
+  closed on any box where nono is not already placed by hand.
+- `sandbox_gh_read_staleness` — harness artifact: the journey's nono state root under `/tmp`
+  overlaps nono's own `/tmp` state grant. Adapt the harness (state root off `/tmp`) or note.
+ENV-BLOCKED (no live claude TUI in this environment, not a nono defect): `realagent_write`,
+`claude_resume`. SKIP as before: `credential_boundary` (bagel).
+
 **Not yet a journey** (no dir): the interactive `rein init` half is covered by the
 plain `test_init_interactive.py` (8 live specs) — App *creation* is **UNDRIVEABLE**
 (browser/manifest → `scripts/cp5-manifest-manual-test.sh`), and a full first-run
@@ -167,7 +188,7 @@ the throwaway clean.
   tmux pane + the real popup), the real-agent API (`split_at_agent_launch`,
   `write_agent_session`), and the pyte layer (`RenderedScreen`, `wait_for_screen`; #100).
 - `itest_base.py` — `ReinTestCase` (one-time build, env + throwaway repo, cleanup).
-- `journeys/<name>/` — the 18 journeys (index above); each holds `journey.py`,
+- `journeys/<name>/` — the 20 journeys (index above); each holds `journey.py`,
   `golden.txt` (+ `session.txt` for `realagent_write`), and its own `README.md`.
 - `test_write_approval.py`, `test_init_interactive.py`, `test_confirm_shows_title.py`,
   `test_scope_expansion.py` — the plain-test invariants beside the journeys.
