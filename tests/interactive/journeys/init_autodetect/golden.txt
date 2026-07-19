@@ -1,19 +1,19 @@
-$ cd /tmp/rein-journey-checkout-foeyrbr4 && rein init --no-alias --no-symlink --skip-mint-check
+$ cd /tmp/rein-journey-checkout-xrluh9mq && rein init --no-alias --no-symlink --skip-mint-check
 rein init: setting up local scaffolding
-  state dir:  /tmp/rein-itest-home-c9t9869t/.local/state/rein
-  config dir: /tmp/rein-itest-home-c9t9869t/.config/rein
+  state dir:  /tmp/rein-itest-home-t0cett7x/.local/state/rein
+  config dir: /tmp/rein-itest-home-t0cett7x/.config/rein
 Name this machine [demo-box]:
   machine:    demo-box (label for this machine's App name)
   setup:      no state.json; REIN_APP_* env vars detected — using env-managed path (marker state.json will be written)
               wrote managed_externally marker (state.json)
-  app:        client_id=Iv23lihaPgKgifHps75d installation_id=145330081
-  shim:       3 binaries under /tmp/rein-itest-home-c9t9869t/.local/state/rein/shim
+  app:        client_id=Iv23liHH7Gu2xMxCZ7rz installation_id=138434780
+  shim:       3 binaries under /tmp/rein-itest-home-t0cett7x/.local/state/rein/shim
   symlink:    skipped (--no-symlink)
   mint check: skipped (--skip-mint-check)
   (add more later with `rein session add-repo`, or approve the agent's
    expansion requests as it encounters work)
 Which repo should the agent work on? (default detected from this dir) [TomHennen/agentcreds-validation-a]:
-  session:    scaffolded at /tmp/rein-itest-home-c9t9869t/.config/rein/dev-session.yaml (repos: [TomHennen/agentcreds-validation-a])
+  session:    scaffolded at /tmp/rein-itest-home-t0cett7x/.config/rein/dev-session.yaml (repos: [TomHennen/agentcreds-validation-a])
               writes are agent-declared (#35): the agent runs `rein declare <n>`,
               you confirm on your terminal, then writes flow for that run. Reads work immediately.
   alias:      not installed (opt-in; enable with `rein init --alias`)
@@ -22,24 +22,31 @@ Which repo should the agent work on? (default detected from this dir) [TomHennen
     (env-managed App: pick it from your installations list)
     visit this URL in your browser:
       https://github.com/settings/installations
+    (no local browser detected; open the link above on any machine — no ssh -L needed)
 
 rein init: done.
 Next:
-  - /tmp/rein-itest-home-c9t9869t/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
+  - /tmp/rein-itest-home-t0cett7x/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
   - run `rein run -- claude` (or another agent) to launch with rein in effect
   - (optional) enable the `claude` alias with `rein init --alias`
   - run `rein doctor` to verify everything is wired up
 
-$ cd /tmp/rein-journey-nongit-dzuclt6b && rein init --no-alias --no-symlink --skip-mint-check
+WARNING: sandbox stack is UNHEALTHY
+  [fail] nono present: nono not installed at /tmp/rein-itest-home-t0cett7x/.config/rein/nono/bin/nono; install the pinned runtime (nono 0.68.0)
+  sandboxed `rein run` will NOT work until you fix this. Run `rein doctor --fix`
+  for the consolidated remediation (the sandbox steps are privileged/external and
+  are shown, never run); see also the Prerequisites in README.md
+
+$ cd /tmp/rein-journey-nongit-f85w0pdp && rein init --no-alias --no-symlink --skip-mint-check
 rein init: setting up local scaffolding
-  state dir:  /tmp/rein-itest-home-_xvbmmy3/.local/state/rein
-  config dir: /tmp/rein-itest-home-_xvbmmy3/.config/rein
+  state dir:  /tmp/rein-itest-home-x1yx6q4o/.local/state/rein
+  config dir: /tmp/rein-itest-home-x1yx6q4o/.config/rein
 Name this machine [demo-box]:
   machine:    demo-box (label for this machine's App name)
   setup:      no state.json; REIN_APP_* env vars detected — using env-managed path (marker state.json will be written)
               wrote managed_externally marker (state.json)
-  app:        client_id=Iv23lihaPgKgifHps75d installation_id=145330081
-  shim:       3 binaries under /tmp/rein-itest-home-_xvbmmy3/.local/state/rein/shim
+  app:        client_id=Iv23liHH7Gu2xMxCZ7rz installation_id=138434780
+  shim:       3 binaries under /tmp/rein-itest-home-x1yx6q4o/.local/state/rein/shim
   symlink:    skipped (--no-symlink)
   mint check: skipped (--skip-mint-check)
 Which repo should the agent work on? (owner/name, Enter to skip):
@@ -50,34 +57,41 @@ Which repo should the agent work on? (owner/name, Enter to skip):
     (env-managed App: pick it from your installations list)
     visit this URL in your browser:
       https://github.com/settings/installations
+    (no local browser detected; open the link above on any machine — no ssh -L needed)
 
 rein init: done.
 Next:
-  - /tmp/rein-itest-home-_xvbmmy3/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
+  - /tmp/rein-itest-home-x1yx6q4o/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
   - run `rein run -- claude` (or another agent) to launch with rein in effect
   - (optional) enable the `claude` alias with `rein init --alias`
   - run `rein doctor` to verify everything is wired up
 
-$ cd /tmp/rein-journey-checkout-foeyrbr4 && rein run --direct -- echo hi
+WARNING: sandbox stack is UNHEALTHY
+  [fail] nono present: nono not installed at /tmp/rein-itest-home-x1yx6q4o/.config/rein/nono/bin/nono; install the pinned runtime (nono 0.68.0)
+  sandboxed `rein run` will NOT work until you fix this. Run `rein doctor --fix`
+  for the consolidated remediation (the sandbox steps are privileged/external and
+  are shown, never run); see also the Prerequisites in README.md
+
+$ cd /tmp/rein-journey-checkout-xrluh9mq && rein run --direct -- echo hi
 ===============================================================
 rein: WARNING — DIRECT (UNSANDBOXED) MODE
-  The agent runs OUTSIDE the srt sandbox. It shares your user
+  The agent runs OUTSIDE the nono sandbox. It shares your user
   account: it CAN read your ambient credentials (gh login, SSH
   keys, ~/.netrc, keyrings) and the rein-brokered token is only
   hidden by process boundaries, not a sandbox. Use this ONLY on a
   THROWAWAY repo. For real work, drop --direct to run sandboxed.
 ===============================================================
-rein run: load session: no session file at /tmp/rein-itest-home-_xvbmmy3/.config/rein/dev-session.yaml and no usable fallback repo (see README for dev-session.yaml format)
+rein run: load session: no session file at /tmp/rein-itest-home-x1yx6q4o/.config/rein/dev-session.yaml and no usable fallback repo (see README for dev-session.yaml format)
       run `rein init --repo TomHennen/agentcreds-validation-a` to scaffold a session for the repo you are standing in
 
-$ cd /tmp/rein-journey-nongit-dzuclt6b && rein run --direct -- echo hi
+$ cd /tmp/rein-journey-nongit-f85w0pdp && rein run --direct -- echo hi
 ===============================================================
 rein: WARNING — DIRECT (UNSANDBOXED) MODE
-  The agent runs OUTSIDE the srt sandbox. It shares your user
+  The agent runs OUTSIDE the nono sandbox. It shares your user
   account: it CAN read your ambient credentials (gh login, SSH
   keys, ~/.netrc, keyrings) and the rein-brokered token is only
   hidden by process boundaries, not a sandbox. Use this ONLY on a
   THROWAWAY repo. For real work, drop --direct to run sandboxed.
 ===============================================================
-rein run: load session: no session file at /tmp/rein-itest-home-_xvbmmy3/.config/rein/dev-session.yaml and no usable fallback repo (see README for dev-session.yaml format)
+rein run: load session: no session file at /tmp/rein-itest-home-x1yx6q4o/.config/rein/dev-session.yaml and no usable fallback repo (see README for dev-session.yaml format)
       run `rein init` to create one
