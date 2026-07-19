@@ -85,6 +85,42 @@ func TestBuildNonoParams_EmptyPortStillFormsAddr(t *testing.T) {
 	// documents that buildNonoParams itself is a pure formatter.
 }
 
+// TestBuildNonoParams_ClaudeConfigDirFlows pins the #94 nono wiring: the
+// rein-owned overlay path passed to buildNonoParams becomes CLAUDE_CONFIG_DIR in
+// the emitted profile's set_vars, and host ~/.claude is never granted (it stays
+// hidden by nono's default-deny fs).
+func TestBuildNonoParams_ClaudeConfigDirFlows(t *testing.T) {
+	const overlay = "/home/dev/.config/rein-sandbox-home/.claude"
+	p := buildNonoParams(47821, "/run/rein/ca.pem", nil, nil, overlay)
+	if p.ClaudeConfigDir != overlay {
+		t.Fatalf("ClaudeConfigDir = %q, want %q", p.ClaudeConfigDir, overlay)
+	}
+	prof, err := nono.Build(p)
+	if err != nil {
+		t.Fatalf("nono.Build: %v", err)
+	}
+	if got := prof.Environment.SetVars["CLAUDE_CONFIG_DIR"]; got != overlay {
+		t.Errorf("set_vars[CLAUDE_CONFIG_DIR] = %q, want the rein overlay %q", got, overlay)
+	}
+	for _, f := range prof.Filesystem.ReadFile {
+		if strings.Contains(f, "/.claude") && !strings.Contains(f, "rein-sandbox-home") {
+			t.Errorf("profile grants read on a host claude path %q (must stay hidden by default-deny)", f)
+		}
+	}
+}
+
+// TestBuildNonoParams_NoClaudeConfigDir: a run that does not launch claude passes
+// an empty overlay and the profile carries no CLAUDE_CONFIG_DIR (golden-stable).
+func TestBuildNonoParams_NoClaudeConfigDir(t *testing.T) {
+	prof, err := nono.Build(buildNonoParams(47821, "/run/rein/ca.pem", nil, nil, ""))
+	if err != nil {
+		t.Fatalf("nono.Build: %v", err)
+	}
+	if v, ok := prof.Environment.SetVars["CLAUDE_CONFIG_DIR"]; ok {
+		t.Errorf("CLAUDE_CONFIG_DIR must be absent when no overlay is passed; got %q", v)
+	}
+}
+
 // TestParseRunMode_Nono covers the --nono flag and the REIN_SANDBOX=nono env
 // selector, and that an explicit leading flag wins over the env.
 func TestParseRunMode_Nono(t *testing.T) {

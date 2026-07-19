@@ -24,6 +24,49 @@ func goldenParams() Params {
 	}
 }
 
+// TestBuild_ClaudeConfigDir pins the #94 nono replacement: when ClaudeConfigDir
+// is set, the profile carries CLAUDE_CONFIG_DIR=<overlay> in set_vars; when
+// empty, the var is absent (golden-stable); a relative path fails closed. The
+// host ~/.claude is never a filesystem grant — it stays hidden by default-deny.
+func TestBuild_ClaudeConfigDir(t *testing.T) {
+	const overlay = "/home/user/.config/rein-sandbox-home/.claude"
+
+	t.Run("set", func(t *testing.T) {
+		p := goldenParams()
+		p.ClaudeConfigDir = overlay
+		pr := mustBuild(t, p)
+		if got := pr.Environment.SetVars["CLAUDE_CONFIG_DIR"]; got != overlay {
+			t.Errorf("set_vars[CLAUDE_CONFIG_DIR] = %q, want the rein overlay %q", got, overlay)
+		}
+		// The overlay must NOT be the host ~/.claude, and host claude must never be
+		// granted read — it is hidden by nono's default-deny fs, not listed here.
+		for _, f := range pr.Filesystem.ReadFile {
+			if strings.Contains(f, "/.claude") && !strings.Contains(f, "rein-sandbox-home") {
+				t.Errorf("filesystem.read_file leaks a host claude path: %q", f)
+			}
+		}
+		if strings.HasSuffix(pr.Environment.SetVars["CLAUDE_CONFIG_DIR"], "/.claude") &&
+			!strings.Contains(pr.Environment.SetVars["CLAUDE_CONFIG_DIR"], "rein-sandbox-home") {
+			t.Errorf("CLAUDE_CONFIG_DIR points at a host-looking ~/.claude, not the rein overlay: %q", pr.Environment.SetVars["CLAUDE_CONFIG_DIR"])
+		}
+	})
+
+	t.Run("unset", func(t *testing.T) {
+		pr := mustBuild(t, goldenParams())
+		if v, ok := pr.Environment.SetVars["CLAUDE_CONFIG_DIR"]; ok {
+			t.Errorf("CLAUDE_CONFIG_DIR must be absent when ClaudeConfigDir is empty; got %q", v)
+		}
+	})
+
+	t.Run("relative-fails-closed", func(t *testing.T) {
+		p := goldenParams()
+		p.ClaudeConfigDir = "relative/overlay"
+		if _, err := Build(p); err == nil {
+			t.Error("Build accepted a relative ClaudeConfigDir; it must fail closed (the path is granted --allow and set as CLAUDE_CONFIG_DIR)")
+		}
+	})
+}
+
 func mustBuild(t *testing.T, p Params) Profile {
 	t.Helper()
 	pr, err := Build(p)
