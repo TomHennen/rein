@@ -58,6 +58,7 @@ import (
 	"github.com/TomHennen/rein/internal/sandboxutil"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/srt"
+	"github.com/TomHennen/rein/internal/ui/grant"
 	"github.com/TomHennen/rein/internal/worktree"
 )
 
@@ -417,7 +418,23 @@ func runNono(cmdline []string) (int, error) {
 
 	cmd := exec.Command(nonoPath, nonoArgv...)
 	cmd.Env = execEnv
-	cmd.Stdin = os.Stdin
+	// stdin: nono's supervisor reads/forwards the child's stdin, which races the
+	// host's inline /dev/tty approval read (bwrap/srt is transparent and never
+	// contends). When the tmux popup is NOT the primary approval path
+	// (PopupPreferenceFromEnv()==false: REIN_APPROVAL=tty or no $TMUX), the host
+	// must own the terminal exclusively, so give the child /dev/null. With the
+	// popup, the interactive agent needs the pty and the popup uses its own, so
+	// keep os.Stdin.
+	if grant.PopupPreferenceFromEnv() {
+		cmd.Stdin = os.Stdin
+	} else {
+		devNull, err := os.Open(os.DevNull)
+		if err != nil {
+			return 1, fmt.Errorf("open %s for sandbox stdin: %w", os.DevNull, err)
+		}
+		defer devNull.Close()
+		cmd.Stdin = devNull
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Dir = workTree
