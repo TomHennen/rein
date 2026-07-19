@@ -143,16 +143,25 @@ func VerifyContainment(vp VerifyParams) (Verdict, error) {
 	tmuxFx := stageTmuxFixture()
 	defer tmuxFx.cleanup()
 
+	// Co-located-broker sentinel (§8): a dedicated same-uid host process holding a
+	// fake token marker in its argv + env, so the in-sandbox probe can measure
+	// whether it can ptrace/dump a neighbor (HARD) and read its argv/env (residual).
+	// Session-isolated (setsid, no tmux, stdin /dev/null); killed in defer.
+	sentinel := stageProcSentinel(vp.Timeout)
+	defer sentinel.cleanup()
+
 	cfg := probeConfig{
-		Creds:           credTargets,
-		ExternalTarget:  "1.1.1.1:443", // literal, no DNS — blocked at connect, robust offline
-		GitHubTarget:    resolveGitHub(),
-		PlantedLoopback: planted,
-		UDPTarget:       "8.8.8.8:53",
-		TmuxSocket:      tmuxFx.probeSocket(),
-		TmuxBin:         tmuxFx.probeBin(),
-		TmuxTarget:      tmuxFx.probeSession(),
-		DialTimeoutMS:   3000,
+		Creds:              credTargets,
+		ExternalTarget:     "1.1.1.1:443", // literal, no DNS — blocked at connect, robust offline
+		GitHubTarget:       resolveGitHub(),
+		PlantedLoopback:    planted,
+		UDPTarget:          "8.8.8.8:53",
+		TmuxSocket:         tmuxFx.probeSocket(),
+		TmuxBin:            tmuxFx.probeBin(),
+		TmuxTarget:         tmuxFx.probeSession(),
+		ProcSentinelPID:    sentinel.pid,
+		ProcSentinelMarker: sentinel.marker,
+		DialTimeoutMS:      3000,
 	}
 	cfgPath := filepath.Join(work, "probe-config.json")
 	cfgBytes, _ := json.MarshalIndent(cfg, "", "  ")
@@ -471,6 +480,62 @@ func stageTmuxFixture() tmuxFixture {
 	}
 	f.usable = true
 	return f
+}
+
+// procSentinel is a dedicated, short-lived same-uid host process used to measure
+// the co-located-broker self-hardening (§8). It holds procSentinelMarker (a fake,
+// non-secret token canary) in BOTH its argv and its env, so the in-sandbox probe can
+// test whether it can ptrace/dump the neighbor (must be denied) and read its
+// argv/env via /proc (argv readable = documented residual). It is NEVER rein's real
+// broker — it is a throwaway `sh -c sleep` launched with a marker; killed in cleanup.
+type procSentinel struct {
+	pid     int
+	marker  string
+	proc    *os.Process
+	started bool
+}
+
+const procSentinelMarker = "REIN-CO-BROKER-SENTINEL-ghpFAKE-DO-NOT-LEAK-7c2e9a"
+
+// stageProcSentinel launches the sentinel and returns its pid + marker. On any
+// failure it returns a zero pid so the ptrace/proc-visibility checks skip (a machine
+// where we can't stage it must not brick the gate). Session-isolated: setsid, stdin
+// /dev/null, $TMUX stripped — it never touches the operator's tmux.
+func stageProcSentinel(timeout time.Duration) procSentinel {
+	f := procSentinel{marker: procSentinelMarker}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		return f
+	}
+	secs := int(timeout/time.Second) + 30
+	if secs < 60 {
+		secs = 60
+	}
+	// argv: [sh -c "sleep N" <marker>] — the marker rides in argv[3] (world-readable
+	// /proc/<pid>/cmdline); it is $0 for the sleep-holding shell and otherwise inert.
+	cmd := exec.Command(sh, "-c", fmt.Sprintf("sleep %d", secs), f.marker)
+	cmd.Env = append(withoutTmux(os.Environ()), "REIN_PROC_SENTINEL="+f.marker)
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return f
+	}
+	f.proc = cmd.Process
+	f.pid = cmd.Process.Pid
+	f.started = true
+	return f
+}
+
+// cleanup kills the sentinel session group and reaps it. Only ever OUR pid.
+func (f procSentinel) cleanup() {
+	if !f.started || f.proc == nil {
+		return
+	}
+	_ = syscall.Kill(-f.pid, syscall.SIGKILL) // session group (setsid leader)
+	_ = f.proc.Kill()
+	_, _ = f.proc.Wait()
 }
 
 // withoutTmux drops $TMUX/$TMUX_PANE so a tmux command starting the fixture can

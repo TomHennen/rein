@@ -650,6 +650,24 @@ func writeRunGitConfig(path, reinBin string) error {
 
 // setEnv replaces (or appends) the named env var in env. Returns the
 // new slice.
+// ambientGitHubTokenNames are the env vars carrying a GitHub token that run_nono
+// scrubs from the sandbox launch env. Kept beside ambientTokenValues so the scrub
+// list and the fail-closed self-check can never drift.
+var ambientGitHubTokenNames = []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}
+
+// ambientTokenValues returns the non-empty values of the operator's ambient GitHub
+// token env vars, for the co-located-broker self-check (§8): these must not survive
+// into the sandbox child's argv or env (agent-readable via /proc under no-PID-ns).
+func ambientTokenValues() []string {
+	var out []string
+	for _, name := range ambientGitHubTokenNames {
+		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 func setEnv(env []string, name, value string) []string {
 	prefix := name + "="
 	for i, kv := range env {

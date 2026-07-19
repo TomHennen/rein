@@ -214,6 +214,13 @@ func main() {
 		// writes an Observations JSON the host-side gate classifies. Not
 		// user-facing.
 		os.Exit(nono.RunContainmentProbe(os.Args[2:]))
+	case "__nono-ptrace-attach":
+		// Hidden subcommand: the fork-safe ptrace attempt. RunContainmentProbe
+		// forks THIS (via os.Executable) so a seccomp RET_KILL on ptrace cannot
+		// take the whole probe down before it writes observations. It only
+		// attempts PTRACE_ATTACH against the given pid and encodes the outcome
+		// in its exit code. Not user-facing.
+		os.Exit(nono.RunPtraceAttachProbe(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage()
 	default:

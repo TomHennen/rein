@@ -473,7 +473,7 @@ func runNono(cmdline []string) (int, error) {
 	// dev's own claude session must not ride along — the profile's set_vars override
 	// wins regardless).
 	execEnv := os.Environ()
-	for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "TMUX", "TMUX_PANE", "CLAUDE_CONFIG_DIR", "GH_CONFIG_DIR"} {
+	for _, name := range append(append([]string(nil), ambientGitHubTokenNames...), "TMUX", "TMUX_PANE", "CLAUDE_CONFIG_DIR", "GH_CONFIG_DIR") {
 		execEnv = unsetEnv(execEnv, name)
 	}
 	// Prepend the staged-rein dir to PATH: nono passes its OWN launch env's PATH
@@ -481,6 +481,18 @@ func runNono(cmdline []string) (int, error) {
 	// as reserved), so this is what puts `rein` on the in-sandbox PATH for
 	// `rein declare <n>`. Prepend so the staged copy wins over any host rein.
 	execEnv = setEnv(execEnv, "PATH", runTmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// Co-located-broker discipline (design §8): nono has no PID namespace and runs
+	// the agent at rein's uid, so the agent can read rein's /proc/<pid>/cmdline
+	// (argv). rein's minted GitHub token lives only in the proxy's heap (injected
+	// downstream, never in argv/env), but the operator's AMBIENT GitHub tokens must
+	// not ride into the child either — assert the scrub above actually removed their
+	// VALUES from the child's argv + env, and fail closed if any survived.
+	if secrets := ambientTokenValues(); len(secrets) > 0 {
+		if err := nono.AssertNoSecretInLaunch(nonoArgv, execEnv, secrets); err != nil {
+			return 1, fmt.Errorf("refusing to launch: %w", err)
+		}
+	}
 
 	printNonoBanner(os.Stderr, sess, sessSource, loopbackPort, allowPaths, extraDomains, cmdline)
 	// How the agent was briefed with the contract above (injected / printed /

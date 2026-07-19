@@ -24,6 +24,7 @@ package nono
 // docs/containment-probe-harness.md "Limits (state loudly)".
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,8 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -82,6 +85,23 @@ const (
 	// agent is not even told the popup socket path (defense-in-depth; the mediation
 	// is the real control).
 	ChanApprovalTmuxEnv Channel = "approval_tmux_env"
+
+	// Co-located-broker self-hardening (design §8). nono has NO PID namespace and
+	// runs the agent at rein's own uid, so rein's broker process is /proc-visible to
+	// the agent. These assert the credential-brokering boundary survives co-location.
+
+	// ChanPtrace — HARD (fail-closed): the agent cannot ptrace-ATTACH (or read
+	// /proc/<pid>/mem of) a co-located same-uid process. If it could, a prompt-
+	// injected agent could dump rein's broker heap for the minted token. Blocked by
+	// yama ptrace_scope (ancestor/non-descendant attach) + nono's seccomp; a
+	// reachable attach is a leak that refuses the launch.
+	ChanPtrace Channel = "ptrace_isolation"
+	// ChanProcVisibility — RESIDUAL (reported, not failed): /proc/<pid>/cmdline
+	// (argv) of a co-located process is world-readable under nono (no PID ns) — the
+	// documented residual, and WHY rein keeps every minted secret out of its own
+	// argv (AssertNoSecretInLaunch). /proc/<pid>/environ is additionally blocked by
+	// nono (measured EACCES — better than the host default), so env is not exposed.
+	ChanProcVisibility Channel = "proc_visibility"
 )
 
 // ChannelStatus is the per-channel containment verdict (distinct from the
@@ -170,6 +190,34 @@ type EnvObs struct {
 	TMUXPane string `json:"tmux_pane,omitempty"`
 }
 
+// PtraceObs is the co-located-broker ptrace hardening measurement against a planted
+// host sentinel (a same-uid process). Attached/MemReadable ⇒ the agent could dump a
+// neighbor's memory (rein's broker heap holds the token) — a LEAK. Denied ⇒ blocked.
+// No credential content is recorded, only the outcome.
+type PtraceObs struct {
+	Attempted   bool   `json:"attempted"`
+	Attached    bool   `json:"attached"`     // PTRACE_ATTACH succeeded ⇒ LEAK
+	Denied      bool   `json:"denied"`       // EPERM/EACCES or seccomp-kill ⇒ blocked (ok)
+	MemReadable bool   `json:"mem_readable"` // /proc/<pid>/mem opened ⇒ LEAK
+	Target      string `json:"target,omitempty"`
+	Err         string `json:"err,omitempty"`
+}
+
+// ProcVisObs is the co-located-broker /proc self-hardening measurement against the
+// same host sentinel, which holds a fake token marker in its argv + env. cmdline
+// (argv) is world-readable under nono (no PID ns) — the documented residual; environ
+// is nono-blocked (EACCES). Only booleans are recorded — the marker is a planted
+// canary, never a real credential.
+type ProcVisObs struct {
+	Attempted       bool   `json:"attempted"`
+	CmdlineReadable bool   `json:"cmdline_readable"` // argv of the co-located process readable
+	CmdlineMarker   bool   `json:"cmdline_marker"`   // the planted marker was seen in cmdline
+	EnvironReadable bool   `json:"environ_readable"` // environ readable ⇒ env exposed (nono blocks it)
+	EnvironMarker   bool   `json:"environ_marker"`
+	Target          string `json:"target,omitempty"`
+	Err             string `json:"err,omitempty"`
+}
+
 // Observations are the raw facts the in-sandbox probe measures. Classification
 // is a separate, pure step (Classify) so it is unit-testable with synthetic
 // Observations and never needs nono.
@@ -189,8 +237,11 @@ type Observations struct {
 	// tmux IS present on the host but the isolation fixture could not be staged, so
 	// the socket/send-keys enforcement proof was skipped despite a real approval
 	// surface existing. Distinguishes that fail-open from a clean tmux-absent skip.
-	ApprovalFixtureErr string   `json:"approval_fixture_err,omitempty"`
-	Errors             []string `json:"errors,omitempty"`
+	ApprovalFixtureErr string `json:"approval_fixture_err,omitempty"`
+	// Co-located-broker self-hardening (§8).
+	Ptrace  PtraceObs  `json:"ptrace"`
+	ProcVis ProcVisObs `json:"proc_visibility"`
+	Errors  []string   `json:"errors,omitempty"`
 }
 
 // ChannelVerdict is one channel's classified result.
@@ -274,8 +325,59 @@ func Classify(obs Observations, policy Policy) Verdict {
 		classifyApprovalEnv(obs.ApprovalEnv),
 		classifyApprovalSocket(obs.ApprovalTmuxSock, obs.ApprovalFixtureErr, policy.RequireControls),
 		classifyApprovalSendKeys(obs.ApprovalSendKeys, obs.ApprovalFixtureErr, policy.RequireControls),
+		classifyPtrace(obs.Ptrace, policy.RequireControls),
+		classifyProcVisibility(obs.ProcVis),
 	)
 	return v
+}
+
+// classifyPtrace: the agent must NOT be able to ptrace-attach or read the memory of
+// a co-located same-uid process (rein's broker). Attached/MemReadable ⇒ leak; a
+// denial (EPERM/EACCES, or a seccomp kill of the forked attempt) ⇒ ok. Like the
+// other hard controls, a not-attempted / ambiguous outcome fails closed under the
+// live gate's RequireControls (the gate stages the sentinel) but is Unknown for
+// synthetic unit tests.
+func classifyPtrace(o PtraceObs, strict bool) ChannelVerdict {
+	unknown := func(detail string) ChannelVerdict {
+		if strict {
+			return ChannelVerdict{ChanPtrace, ChannelFail, detail + " — no legitimate Unknown for this control; failing closed"}
+		}
+		return ChannelVerdict{ChanPtrace, ChannelUnknown, detail}
+	}
+	switch {
+	case !o.Attempted:
+		return unknown("ptrace not attempted (no co-located sentinel staged)")
+	case o.Attached || o.MemReadable:
+		return ChannelVerdict{ChanPtrace, ChannelLeak,
+			"co-located process ptrace-ATTACH / /proc/<pid>/mem read SUCCEEDED — a prompt-injected agent could dump rein's broker heap for the token [" + o.Target + "]"}
+	case o.Denied:
+		return ChannelVerdict{ChanPtrace, ChannelOK,
+			"ptrace-attach + /proc/<pid>/mem of a co-located process denied — broker heap not dumpable [" + o.Target + "]"}
+	default:
+		return unknown(fmt.Sprintf("ptrace of %s failed but not with a denial errno (%s); cannot conclude isolation", o.Target, o.Err))
+	}
+}
+
+// classifyProcVisibility: /proc/<pid>/cmdline (argv) of a co-located process is
+// world-readable under nono (no PID namespace) — a documented RESIDUAL surfaced
+// loudly (like UDP), never a launch failure, because rein keeps every minted secret
+// out of its own argv (AssertNoSecretInLaunch). environ readable is worse but nono
+// blocks it (measured); if it ever became readable it is still only a residual here
+// (rein carries no minted secret in env either) — reported, not failed.
+func classifyProcVisibility(o ProcVisObs) ChannelVerdict {
+	switch {
+	case !o.Attempted:
+		return ChannelVerdict{ChanProcVisibility, ChannelUnknown, "not attempted (no co-located sentinel staged)"}
+	case o.EnvironReadable:
+		return ChannelVerdict{ChanProcVisibility, ChannelWarn,
+			"co-located /proc/<pid>/environ readable — a neighbor process's env is exposed (nono usually blocks this); rein places no minted secret in env [" + o.Target + "]"}
+	case o.CmdlineReadable:
+		return ChannelVerdict{ChanProcVisibility, ChannelWarn,
+			"co-located /proc/<pid>/cmdline (argv) readable — documented residual (no PID namespace); environ is nono-blocked. rein places no minted secret in argv [" + o.Target + "]"}
+	default:
+		return ChannelVerdict{ChanProcVisibility, ChannelOK,
+			"co-located /proc cmdline + environ both unreadable [" + o.Target + "]"}
+	}
 }
 
 // approvalSkip resolves a not-attempted approval check: a clean skip (tmux
@@ -472,10 +574,14 @@ type probeConfig struct {
 	PlantedLoopback string       `json:"planted_loopback"` // 127.0.0.1:PORT host listener
 	UDPTarget       string       `json:"udp_target"`       // e.g. "8.8.8.8:53"
 	// Approval-channel isolation fixture (§3e). Empty ⇒ that check is skipped.
-	TmuxSocket    string `json:"tmux_socket,omitempty"` // dedicated fixture socket path (NON-granted dir)
-	TmuxBin       string `json:"tmux_bin,omitempty"`    // tmux path for the send-keys probe
-	TmuxTarget    string `json:"tmux_target,omitempty"` // fixture session name for send-keys -t
-	DialTimeoutMS int    `json:"dial_timeout_ms"`
+	TmuxSocket string `json:"tmux_socket,omitempty"` // dedicated fixture socket path (NON-granted dir)
+	TmuxBin    string `json:"tmux_bin,omitempty"`    // tmux path for the send-keys probe
+	TmuxTarget string `json:"tmux_target,omitempty"` // fixture session name for send-keys -t
+	// Co-located-broker self-hardening (§8): a planted host sentinel (same-uid
+	// process) holding the marker in its argv + env. Empty pid ⇒ those checks skip.
+	ProcSentinelPID    int    `json:"proc_sentinel_pid,omitempty"`
+	ProcSentinelMarker string `json:"proc_sentinel_marker,omitempty"`
+	DialTimeoutMS      int    `json:"dial_timeout_ms"`
 }
 
 // CredTarget is one credential path for the probe to attempt to read.
@@ -543,6 +649,11 @@ func RunContainmentProbe(args []string) int {
 	obs.ApprovalEnv = EnvObs{Checked: true, TMUX: os.Getenv("TMUX"), TMUXPane: os.Getenv("TMUX_PANE")}
 	obs.ApprovalTmuxSock = probeUnixConnect(cfg.TmuxSocket, timeout)
 	obs.ApprovalSendKeys = probeSendKeys(cfg.TmuxBin, cfg.TmuxSocket, cfg.TmuxTarget, timeout)
+	// 8. Co-located-broker self-hardening (§8): against the planted host sentinel,
+	//    the agent must not be able to ptrace/dump a neighbor's memory (HARD); its
+	//    argv is a documented residual (readable), its environ nono-blocked.
+	obs.Ptrace = probePtrace(cfg.ProcSentinelPID, timeout)
+	obs.ProcVis = probeProcVisibility(cfg.ProcSentinelPID, cfg.ProcSentinelMarker)
 
 	data, err := json.MarshalIndent(obs, "", "  ")
 	if err != nil {
@@ -715,6 +826,145 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// ---- Co-located-broker self-hardening probes (§8) ----
+
+// ptrace child exit codes: the __nono-ptrace-attach subcommand encodes ONLY the
+// attach outcome in its exit code (so a seccomp RET_KILL of the attempt cannot take
+// the parent probe down before it writes observations).
+const (
+	ptraceChildAttached = 0  // PTRACE_ATTACH succeeded ⇒ LEAK
+	ptraceChildDenied   = 20 // EPERM/EACCES ⇒ blocked (ok)
+	ptraceChildOther    = 21 // some other error ⇒ unknown
+	ptraceChildUsage    = 22
+)
+
+// RunPtraceAttachProbe is the body of the hidden `rein __nono-ptrace-attach <pid>`
+// subcommand. It runs the ptrace attempt in ISOLATION (its own process, so a
+// seccomp kill can't cascade) and reports the outcome via exit code only. It never
+// reads or emits any memory content — a successful attach is immediately detached.
+func RunPtraceAttachProbe(args []string) int {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "nono ptrace: usage: __nono-ptrace-attach <pid>")
+		return ptraceChildUsage
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(args[0]))
+	if err != nil || pid <= 0 {
+		return ptraceChildUsage
+	}
+	runtime.LockOSThread() // PTRACE_ATTACH is per-thread
+	if err := syscall.PtraceAttach(pid); err != nil {
+		if isDenied(err) {
+			return ptraceChildDenied
+		}
+		return ptraceChildOther
+	}
+	_ = syscall.PtraceDetach(pid)
+	return ptraceChildAttached
+}
+
+// probePtrace forks the fork-safe __nono-ptrace-attach child against the sentinel
+// pid and interprets its exit: attached ⇒ leak, denied (errno OR the child was
+// killed by a seccomp RET_KILL) ⇒ blocked, other ⇒ unknown. It also directly opens
+// /proc/<pid>/mem (needs PTRACE_MODE_ATTACH — a clean read/open outcome, no kill).
+func probePtrace(pid int, timeout time.Duration) PtraceObs {
+	o := PtraceObs{}
+	if pid <= 0 {
+		return o
+	}
+	o.Attempted = true
+	o.Target = "pid " + strconv.Itoa(pid)
+
+	self, err := os.Executable()
+	if err != nil {
+		o.Err = "resolve self: " + err.Error()
+		return o
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, self, "__nono-ptrace-attach", strconv.Itoa(pid))
+	runErr := cmd.Run()
+	switch {
+	case cmd.ProcessState == nil:
+		o.Err = "ptrace child did not run: " + errString(runErr)
+	case cmd.ProcessState.Exited():
+		switch cmd.ProcessState.ExitCode() {
+		case ptraceChildAttached:
+			o.Attached = true
+		case ptraceChildDenied:
+			o.Denied = true
+		default:
+			o.Err = fmt.Sprintf("ptrace child exit %d", cmd.ProcessState.ExitCode())
+		}
+	default:
+		// Not a normal exit ⇒ the child was signaled. A seccomp RET_KILL of the
+		// ptrace syscall is a BLOCK, so treat a kill as denied.
+		o.Denied = true
+		o.Err = "ptrace child killed by signal (seccomp RET_KILL treated as blocked): " + errString(runErr)
+	}
+
+	// /proc/<pid>/mem: opening for read requires PTRACE_MODE_ATTACH. A successful
+	// open is a leak; EACCES/EPERM is the expected block.
+	if f, e := os.Open(fmt.Sprintf("/proc/%d/mem", pid)); e == nil {
+		o.MemReadable = true
+		_ = f.Close()
+	} else if o.Err == "" && !isDenied(e) {
+		o.Err = "procmem: " + e.Error()
+	}
+	return o
+}
+
+// probeProcVisibility reads /proc/<pid>/cmdline and /proc/<pid>/environ of the
+// co-located sentinel and records only whether each was readable and whether the
+// planted (non-secret) marker appeared. Under nono cmdline is readable (residual)
+// and environ is blocked (EACCES). It never records real credential content.
+func probeProcVisibility(pid int, marker string) ProcVisObs {
+	o := ProcVisObs{}
+	if pid <= 0 {
+		return o
+	}
+	o.Attempted = true
+	o.Target = "pid " + strconv.Itoa(pid)
+
+	if b, e := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid)); e == nil {
+		o.CmdlineReadable = true
+		o.CmdlineMarker = marker != "" && bytes.Contains(b, []byte(marker))
+	} else {
+		o.Err = "cmdline: " + e.Error()
+	}
+	if b, e := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid)); e == nil {
+		o.EnvironReadable = true
+		o.EnvironMarker = marker != "" && bytes.Contains(b, []byte(marker))
+	} else if o.Err == "" {
+		o.Err = "environ: " + e.Error()
+	}
+	return o
+}
+
+// AssertNoSecretInLaunch is the co-located-broker DISCIPLINE check (§8): because the
+// agent can read /proc/<rein-pid>/cmdline (argv) of a co-located process, rein's
+// broker/proxy launch must place NO real credential in its own (or a child's) argv
+// or env. It fails closed if any secret value appears in argv or an env value. Pure
+// and content-free in its error (it names the vector, never the secret).
+func AssertNoSecretInLaunch(argv, env, secrets []string) error {
+	for _, s := range secrets {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		for _, a := range argv {
+			if strings.Contains(a, s) {
+				return fmt.Errorf("nono: broker launch argv exposes a credential (agent-readable via /proc/<pid>/cmdline under no-PID-ns nono)")
+			}
+		}
+		for _, e := range env {
+			if i := strings.IndexByte(e, '='); i >= 0 && strings.Contains(e[i+1:], s) {
+				return fmt.Errorf("nono: broker launch env exposes a credential (co-located process env must carry no minted secret)")
+			}
+		}
+	}
+	return nil
 }
 
 // nonoProxyAddr extracts nono's proxy host:port from the HTTP(S)_PROXY env nono

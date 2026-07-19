@@ -35,6 +35,8 @@ func contained() Observations {
 		ApprovalTmuxSock: denied("/tmp/rein-approvalfix-x/tmux.sock"),
 		ApprovalSendKeys: ExecResult{Attempted: true, Ran: true, ExitZero: false, ExitCode: 1},
 		ApprovalEnv:      EnvObs{Checked: true},
+		Ptrace:           PtraceObs{Attempted: true, Denied: true, Target: "pid 4242"},
+		ProcVis:          ProcVisObs{Attempted: true, Target: "pid 4242"}, // both unreadable ⇒ ok
 	}
 }
 
@@ -52,10 +54,89 @@ func TestClassify_Contained(t *testing.T) {
 	if v.ShouldFailClosed() {
 		t.Fatalf("clean containment must not fail closed; got:\n%s", v.String())
 	}
-	for _, ch := range []Channel{ChanCredentials, ChanDirectTCP, ChanArbitraryLoopback, ChanGitHubViaProxy, ChanProxyReachable, ChanUDPEgress, ChanApprovalTTY, ChanApprovalTmuxSocket, ChanApprovalTmuxSendKeys, ChanApprovalTmuxEnv} {
+	for _, ch := range []Channel{ChanCredentials, ChanDirectTCP, ChanArbitraryLoopback, ChanGitHubViaProxy, ChanProxyReachable, ChanUDPEgress, ChanApprovalTTY, ChanApprovalTmuxSocket, ChanApprovalTmuxSendKeys, ChanApprovalTmuxEnv, ChanPtrace} {
 		if got := chanStatus(v, ch); got != ChannelOK {
 			t.Errorf("channel %s = %s, want ok", ch, got)
 		}
+	}
+}
+
+// Co-located-broker (§8): ptrace-attach of a neighbor is a HARD leak (the agent
+// could dump rein's broker heap). Same for reading /proc/<pid>/mem.
+func TestClassify_Ptrace(t *testing.T) {
+	cases := []struct {
+		name string
+		o    PtraceObs
+		strict,
+		wantFail bool
+		want ChannelStatus
+	}{
+		{"attached is leak", PtraceObs{Attempted: true, Attached: true}, false, true, ChannelLeak},
+		{"procmem readable is leak", PtraceObs{Attempted: true, MemReadable: true}, false, true, ChannelLeak},
+		{"denied is ok", PtraceObs{Attempted: true, Denied: true}, false, false, ChannelOK},
+		{"killed-child (denied) is ok", PtraceObs{Attempted: true, Denied: true, Err: "seccomp RET_KILL"}, false, false, ChannelOK},
+		{"not attempted, lax is unknown", PtraceObs{}, false, false, ChannelUnknown},
+		{"not attempted, strict fails closed", PtraceObs{}, true, true, ChannelFail},
+		{"ambiguous, strict fails closed", PtraceObs{Attempted: true, Err: "weird"}, true, true, ChannelFail},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			v := classifyPtrace(c.o, c.strict)
+			if v.Status != c.want {
+				t.Errorf("status = %s, want %s (%s)", v.Status, c.want, v.Detail)
+			}
+			failed := v.Status == ChannelLeak || v.Status == ChannelFail
+			if failed != c.wantFail {
+				t.Errorf("failClosed = %v, want %v", failed, c.wantFail)
+			}
+		})
+	}
+}
+
+// Co-located-broker (§8): /proc argv visibility is a documented RESIDUAL (Warn),
+// never a launch failure — because rein keeps no minted secret in argv.
+func TestClassify_ProcVisibility(t *testing.T) {
+	cases := []struct {
+		name string
+		o    ProcVisObs
+		want ChannelStatus
+	}{
+		{"cmdline readable is residual warn", ProcVisObs{Attempted: true, CmdlineReadable: true, CmdlineMarker: true}, ChannelWarn},
+		{"environ readable is residual warn", ProcVisObs{Attempted: true, EnvironReadable: true}, ChannelWarn},
+		{"both unreadable is ok", ProcVisObs{Attempted: true}, ChannelOK},
+		{"not attempted is unknown", ProcVisObs{}, ChannelUnknown},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			v := classifyProcVisibility(c.o)
+			if v.Status != c.want {
+				t.Errorf("status = %s, want %s (%s)", v.Status, c.want, v.Detail)
+			}
+			if v.Status == ChannelLeak || v.Status == ChannelFail {
+				t.Errorf("proc visibility must never fail the gate; got %s", v.Status)
+			}
+		})
+	}
+}
+
+// AssertNoSecretInLaunch (§8 discipline): a secret in argv or an env value fails
+// closed; a clean launch passes; the error never echoes the secret.
+func TestAssertNoSecretInLaunch(t *testing.T) {
+	const secret = "ghp_REALTOKEN_shouldnotappear"
+	if err := AssertNoSecretInLaunch([]string{"run", "--profile", "/x"}, []string{"PATH=/bin", "HOME=/h"}, []string{secret}); err != nil {
+		t.Errorf("clean launch flagged: %v", err)
+	}
+	if err := AssertNoSecretInLaunch([]string{"run", "--token=" + secret}, nil, []string{secret}); err == nil {
+		t.Error("secret in argv not caught")
+	} else if strings.Contains(err.Error(), secret) {
+		t.Errorf("error echoes the secret: %v", err)
+	}
+	if err := AssertNoSecretInLaunch(nil, []string{"GH_TOKEN=" + secret}, []string{secret}); err == nil {
+		t.Error("secret in env value not caught")
+	}
+	// An empty/whitespace secret must not match everything.
+	if err := AssertNoSecretInLaunch([]string{"run"}, []string{"PATH=/bin"}, []string{"", "  "}); err != nil {
+		t.Errorf("empty secret should be ignored: %v", err)
 	}
 }
 
@@ -461,6 +542,15 @@ func TestLiveContainment(t *testing.T) {
 		if got := chanStatus(verdict, ChanApprovalTmuxSendKeys); got != ChannelOK {
 			t.Errorf("approval tmux send-keys = %s, want ok (refused)", got)
 		}
+	}
+	// Co-located-broker self-hardening (§8): ptrace of the sentinel MUST be denied
+	// (it is the hard control — a reachable attach would have already failed the gate
+	// above). proc visibility is a residual (Warn: argv readable) — never ok-required.
+	if got := chanStatus(verdict, ChanPtrace); got != ChannelOK {
+		t.Errorf("co-located ptrace isolation = %s, want ok (attach denied)", got)
+	}
+	if got := chanStatus(verdict, ChanProcVisibility); got != ChannelWarn && got != ChannelOK {
+		t.Errorf("co-located proc visibility = %s, want warn (residual) or ok", got)
 	}
 }
 
