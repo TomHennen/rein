@@ -58,7 +58,6 @@ import (
 	"github.com/TomHennen/rein/internal/proxy"
 	"github.com/TomHennen/rein/internal/sandboxutil"
 	"github.com/TomHennen/rein/internal/session"
-	"github.com/TomHennen/rein/internal/srt"
 	"github.com/TomHennen/rein/internal/ui/grant"
 	"github.com/TomHennen/rein/internal/worktree"
 )
@@ -325,7 +324,7 @@ func runNono(cmdline []string) (int, error) {
 	// System roots are REQUIRED: CDN hosts get direct TLS with GitHub's real cert
 	// (a rein-only bundle would reject them). The four CA env vars point at this
 	// bundle via the profile's environment.set_vars.
-	bundle, err := srt.BuildCABundle(host.CACertPEM())
+	bundle, err := sandboxutil.BuildCABundle(host.CACertPEM())
 	if err != nil {
 		return 1, fmt.Errorf("build CA bundle: %w", err)
 	}
