@@ -24,12 +24,14 @@ package nono
 // docs/containment-probe-harness.md "Limits (state loudly)".
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"syscall"
 	"time"
@@ -59,13 +61,28 @@ const (
 	// accepted residual (spike §3d). Reported loudly, not failed unless policy
 	// opts in.
 	ChanUDPEgress Channel = "udp_egress"
-)
 
-// Deferred (issue #146): the approval-channel isolation assertions the design
-// (§3e) calls the crux — tmux socket connect denied, `send-keys` denied,
-// /dev/tty unopenable, $TMUX absent. Out of this P1 prober's 5-channel contract;
-// `send-keys` in particular is a session-disruption hazard needing an isolated
-// tmux fixture, not the user's real server.
+	// Approval-channel isolation (issue #146, design §3e — the crux). nono has no
+	// namespaces, so the agent runs at rein's uid in the same terminal session;
+	// these four assert it still cannot reach or drive the human approval surface
+	// to self-approve a push. Each is HARD (fail-closed): a leak refuses the launch.
+
+	// ChanApprovalTTY — /dev/tty is unopenable in the sandbox. Setsid gives the run
+	// no controlling terminal, so the agent cannot answer an inline approval prompt.
+	ChanApprovalTTY Channel = "approval_tty"
+	// ChanApprovalTmuxSocket — connect() to the host tmux control socket is denied
+	// by af_unix_mediation:"pathname", so the agent cannot reach the approval popup.
+	// The runtime proof that nono ENFORCES the mediation the profile only declares.
+	ChanApprovalTmuxSocket Channel = "approval_tmux_socket"
+	// ChanApprovalTmuxSendKeys — `tmux send-keys` against that socket fails: a
+	// consequence of the connect denial, proving the actual tool an attacker would
+	// use cannot drive the popup.
+	ChanApprovalTmuxSendKeys Channel = "approval_tmux_send_keys"
+	// ChanApprovalTmuxEnv — $TMUX/$TMUX_PANE are absent in the sandbox env, so the
+	// agent is not even told the popup socket path (defense-in-depth; the mediation
+	// is the real control).
+	ChanApprovalTmuxEnv Channel = "approval_tmux_env"
+)
 
 // ChannelStatus is the per-channel containment verdict (distinct from the
 // doctor-facing sandboxutil.Status re-exported as nono.Status).
@@ -125,6 +142,34 @@ type CredObs struct {
 	Err      string `json:"err,omitempty"`
 }
 
+// TTYObs is the /dev/tty open outcome, measured in-sandbox. Opened ⇒ the agent
+// has a controlling terminal it could prompt on (a LEAK); any open failure
+// (ENXIO from no controlling tty, or fs-deny) ⇒ contained. No credential content.
+type TTYObs struct {
+	Attempted bool   `json:"attempted"`
+	Opened    bool   `json:"opened"` // got a usable fd ⇒ leak
+	Err       string `json:"err,omitempty"`
+}
+
+// ExecResult is one in-sandbox subprocess (tmux send-keys) outcome. Ran
+// distinguishes "the tool started and exited non-zero" (a real refusal) from
+// "the tool could not be exec'd at all" (skip, not a pass).
+type ExecResult struct {
+	Attempted bool   `json:"attempted"` // a target was staged
+	Ran       bool   `json:"ran"`       // exec started (vs binary not found / unstageable)
+	ExitZero  bool   `json:"exit_zero"` // ran AND exited 0 ⇒ send-keys landed ⇒ leak
+	ExitCode  int    `json:"exit_code,omitempty"`
+	Err       string `json:"err,omitempty"`
+}
+
+// EnvObs records the approval-related env the sandbox was handed. The values are
+// socket paths, not secrets; non-empty ⇒ the popup socket path leaked in.
+type EnvObs struct {
+	Checked  bool   `json:"checked"`
+	TMUX     string `json:"tmux,omitempty"`
+	TMUXPane string `json:"tmux_pane,omitempty"`
+}
+
 // Observations are the raw facts the in-sandbox probe measures. Classification
 // is a separate, pure step (Classify) so it is unit-testable with synthetic
 // Observations and never needs nono.
@@ -135,7 +180,12 @@ type Observations struct {
 	PlantedLoop    ConnResult `json:"planted_loopback"`
 	NonoProxy      ConnResult `json:"nono_proxy"` // positive control
 	UDPExternal    ConnResult `json:"udp_external"`
-	Errors         []string   `json:"errors,omitempty"`
+	// Approval-channel isolation (§3e).
+	ApprovalTTY      TTYObs     `json:"approval_tty"`
+	ApprovalTmuxSock ConnResult `json:"approval_tmux_socket"`
+	ApprovalSendKeys ExecResult `json:"approval_tmux_send_keys"`
+	ApprovalEnv      EnvObs     `json:"approval_tmux_env"`
+	Errors           []string   `json:"errors,omitempty"`
 }
 
 // ChannelVerdict is one channel's classified result.
@@ -215,8 +265,92 @@ func Classify(obs Observations, policy Policy) Verdict {
 			"direct github connect denied — github egress must route through the proxy", false),
 		classifyProxyControl(obs.NonoProxy),
 		classifyUDP(obs.UDPExternal, policy),
+		classifyApprovalTTY(obs.ApprovalTTY),
+		classifyApprovalEnv(obs.ApprovalEnv),
+		classifyApprovalSocket(obs.ApprovalTmuxSock, policy.RequireControls),
+		classifyApprovalSendKeys(obs.ApprovalSendKeys),
 	)
 	return v
+}
+
+// classifyApprovalTTY: /dev/tty is a HARD control with no external dependency —
+// it is always measurable, so a probe that did not run it is a gate-integrity
+// FAIL, and an OPENED tty is a leak (the agent could answer an inline approval).
+func classifyApprovalTTY(o TTYObs) ChannelVerdict {
+	switch {
+	case !o.Attempted:
+		return ChannelVerdict{ChanApprovalTTY, ChannelFail,
+			"/dev/tty was not probed — cannot confirm the approval tty is unreachable; failing closed"}
+	case o.Opened:
+		return ChannelVerdict{ChanApprovalTTY, ChannelLeak,
+			"/dev/tty OPENED inside the sandbox — the agent has a controlling terminal and could drive an inline approval prompt"}
+	default:
+		return ChannelVerdict{ChanApprovalTTY, ChannelOK,
+			"/dev/tty unopenable inside the sandbox (" + o.Err + ")"}
+	}
+}
+
+// classifyApprovalEnv: $TMUX/$TMUX_PANE must be absent so the agent is never even
+// told the popup socket path. Always measurable ⇒ not-checked is a gate FAIL.
+func classifyApprovalEnv(o EnvObs) ChannelVerdict {
+	switch {
+	case !o.Checked:
+		return ChannelVerdict{ChanApprovalTmuxEnv, ChannelFail,
+			"approval env was not probed — failing closed"}
+	case o.TMUX != "" || o.TMUXPane != "":
+		return ChannelVerdict{ChanApprovalTmuxEnv, ChannelLeak,
+			fmt.Sprintf("$TMUX/$TMUX_PANE present in the sandbox — the approval socket path leaked to the agent (TMUX=%q TMUX_PANE=%q)", o.TMUX, o.TMUXPane)}
+	default:
+		return ChannelVerdict{ChanApprovalTmuxEnv, ChannelOK,
+			"$TMUX and $TMUX_PANE absent in the sandbox env"}
+	}
+}
+
+// classifyApprovalSocket: connect() to the host tmux socket must be DENIED. Same
+// errno discipline as the other negatives (Succeeded ⇒ leak, EPERM/EACCES ⇒ ok),
+// EXCEPT a not-attempted result (no tmux fixture could be staged — tmux absent)
+// is always a plain skip Unknown, never a strict Fail: a machine without tmux
+// must not fail the launch gate. Only an ambiguous errno against a LIVE fixture
+// fails closed under strict.
+func classifyApprovalSocket(r ConnResult, strict bool) ChannelVerdict {
+	switch {
+	case !r.Attempted:
+		return ChannelVerdict{ChanApprovalTmuxSocket, ChannelUnknown,
+			"no tmux fixture staged (tmux absent) — approval-socket connect not tested"}
+	case r.Succeeded:
+		return ChannelVerdict{ChanApprovalTmuxSocket, ChannelLeak,
+			"tmux approval socket REACHED — af_unix_mediation not enforced; the agent can drive the approval popup [" + r.Target + "]"}
+	case r.Denied:
+		return ChannelVerdict{ChanApprovalTmuxSocket, ChannelOK,
+			"tmux approval socket connect denied [" + r.Target + "]"}
+	default:
+		detail := fmt.Sprintf("connect to a LIVE tmux fixture %s failed but not with a denial errno (%s); cannot conclude the mediation held", r.Target, r.Err)
+		if strict {
+			return ChannelVerdict{ChanApprovalTmuxSocket, ChannelFail, detail + " — no legitimate Unknown for this control; failing closed"}
+		}
+		return ChannelVerdict{ChanApprovalTmuxSocket, ChannelUnknown, detail}
+	}
+}
+
+// classifyApprovalSendKeys: `tmux send-keys` against the fixture socket must fail.
+// ExitZero ⇒ the keys landed ⇒ leak. A non-zero exit ⇒ refused ⇒ ok. A tool that
+// could not be staged or exec'd (no fixture / tmux not readable in-sandbox) is a
+// skip Unknown, not a pass — but never a Fail, so a tmux-less host still passes.
+func classifyApprovalSendKeys(e ExecResult) ChannelVerdict {
+	switch {
+	case !e.Attempted:
+		return ChannelVerdict{ChanApprovalTmuxSendKeys, ChannelUnknown,
+			"no tmux fixture staged (tmux absent) — send-keys not tested"}
+	case !e.Ran:
+		return ChannelVerdict{ChanApprovalTmuxSendKeys, ChannelUnknown,
+			"tmux could not be exec'd inside the sandbox — send-keys not tested (" + e.Err + ")"}
+	case e.ExitZero:
+		return ChannelVerdict{ChanApprovalTmuxSendKeys, ChannelLeak,
+			"tmux send-keys SUCCEEDED inside the sandbox — the agent drove the approval popup and can self-approve"}
+	default:
+		return ChannelVerdict{ChanApprovalTmuxSendKeys, ChannelOK,
+			fmt.Sprintf("tmux send-keys refused inside the sandbox (exit %d)", e.ExitCode)}
+	}
 }
 
 func classifyCreds(creds []CredObs) ChannelVerdict {
@@ -317,7 +451,11 @@ type probeConfig struct {
 	GitHubTarget    string       `json:"github_target"`    // resolved github IP:443 (may be empty)
 	PlantedLoopback string       `json:"planted_loopback"` // 127.0.0.1:PORT host listener
 	UDPTarget       string       `json:"udp_target"`       // e.g. "8.8.8.8:53"
-	DialTimeoutMS   int          `json:"dial_timeout_ms"`
+	// Approval-channel isolation fixture (§3e). Empty ⇒ that check is skipped.
+	TmuxSocket    string `json:"tmux_socket,omitempty"` // dedicated fixture socket path (NON-granted dir)
+	TmuxBin       string `json:"tmux_bin,omitempty"`    // tmux path for the send-keys probe
+	TmuxTarget    string `json:"tmux_target,omitempty"` // fixture session name for send-keys -t
+	DialTimeoutMS int    `json:"dial_timeout_ms"`
 }
 
 // CredTarget is one credential path for the probe to attempt to read.
@@ -378,6 +516,13 @@ func RunContainmentProbe(args []string) int {
 	obs.NonoProxy = probeTCP(nonoProxyAddr(), timeout, false)
 	// 6. UDP residual.
 	obs.UDPExternal = probeUDP(cfg.UDPTarget, timeout)
+	// 7. Approval-channel isolation (§3e): the agent must not reach or drive the
+	//    human approval surface. /dev/tty and env are always measured; the tmux
+	//    socket/send-keys checks run only when a fixture was staged.
+	obs.ApprovalTTY = probeDevTTY()
+	obs.ApprovalEnv = EnvObs{Checked: true, TMUX: os.Getenv("TMUX"), TMUXPane: os.Getenv("TMUX_PANE")}
+	obs.ApprovalTmuxSock = probeUnixConnect(cfg.TmuxSocket, timeout)
+	obs.ApprovalSendKeys = probeSendKeys(cfg.TmuxBin, cfg.TmuxSocket, cfg.TmuxTarget, timeout)
 
 	data, err := json.MarshalIndent(obs, "", "  ")
 	if err != nil {
@@ -475,6 +620,81 @@ func probeUDP(target string, timeout time.Duration) ConnResult {
 	}
 	r.Succeeded = true
 	return r
+}
+
+// probeDevTTY attempts to open /dev/tty read-write. Under Setsid the run has no
+// controlling terminal, so this fails with ENXIO (and fs-deny would also refuse).
+// A success means the agent has a tty it could prompt on — a leak. No content.
+func probeDevTTY() TTYObs {
+	o := TTYObs{Attempted: true}
+	f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		o.Err = err.Error()
+		return o
+	}
+	o.Opened = true
+	_ = f.Close()
+	return o
+}
+
+// probeUnixConnect attempts an AF_UNIX connect to a pathname socket (the host
+// tmux control socket). Succeeded ⇒ the socket was reachable (a leak); Denied ⇒
+// af_unix_mediation refused it (EPERM/EACCES). Empty target ⇒ not attempted.
+func probeUnixConnect(sock string, timeout time.Duration) ConnResult {
+	r := ConnResult{Target: sock}
+	if strings.TrimSpace(sock) == "" {
+		return r
+	}
+	r.Attempted = true
+	conn, err := net.DialTimeout("unix", sock, timeout)
+	if err != nil {
+		r.Denied = isDenied(err)
+		r.Err = err.Error()
+		return r
+	}
+	_ = conn.Close()
+	r.Succeeded = true
+	return r
+}
+
+// probeSendKeys runs `tmux -S <sock> send-keys` against the fixture. A zero exit
+// means the keystrokes landed (the agent drove the popup — a leak); a non-zero
+// exit means it was refused. Ran=false distinguishes "tmux not exec'able here"
+// (a skip) from a real refusal. It never targets anything but the passed fixture
+// socket, so it cannot touch the operator's tmux server.
+func probeSendKeys(tmuxBin, sock, target string, timeout time.Duration) ExecResult {
+	e := ExecResult{}
+	if strings.TrimSpace(tmuxBin) == "" || strings.TrimSpace(sock) == "" {
+		return e
+	}
+	e.Attempted = true
+	if strings.TrimSpace(target) == "" {
+		target = "probe"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, tmuxBin, "-S", sock, "send-keys", "-t", target, "echo rein-probe", "Enter")
+	err := cmd.Run()
+	var execErr *exec.Error
+	if errors.As(err, &execErr) || cmd.ProcessState == nil {
+		// tmux could not be started (not readable/exec'able in the sandbox).
+		e.Err = "exec tmux: " + errString(err)
+		return e
+	}
+	e.Ran = true
+	e.ExitCode = cmd.ProcessState.ExitCode()
+	e.ExitZero = err == nil
+	if err != nil {
+		e.Err = err.Error()
+	}
+	return e
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // nonoProxyAddr extracts nono's proxy host:port from the HTTP(S)_PROXY env nono
