@@ -485,9 +485,9 @@ func runNono(cmdline []string) (int, error) {
 	// Co-located-broker discipline (design §8): nono has no PID namespace and runs
 	// the agent at rein's uid, so the agent can read rein's /proc/<pid>/cmdline
 	// (argv). rein's minted GitHub token lives only in the proxy's heap (injected
-	// downstream, never in argv/env), but the operator's AMBIENT GitHub tokens must
-	// not ride into the child either — assert the scrub above actually removed their
-	// VALUES from the child's argv + env, and fail closed if any survived.
+	// downstream, never in argv/env), and the operator's ambient GitHub tokens were
+	// already removed from rein's own process at startup — assert none of their values
+	// (captured then) survive into the child's argv or env, and fail closed if any do.
 	if secrets := ambientTokenValues(); len(secrets) > 0 {
 		if err := nono.AssertNoSecretInLaunch(nonoArgv, execEnv, secrets); err != nil {
 			return 1, fmt.Errorf("refusing to launch: %w", err)

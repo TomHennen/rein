@@ -376,7 +376,7 @@ func classifyProcVisibility(o ProcVisObs) ChannelVerdict {
 		return ChannelVerdict{ChanProcVisibility, ChannelUnknown, "not attempted (no co-located sentinel staged)"}
 	case o.EnvironReadable:
 		return ChannelVerdict{ChanProcVisibility, ChannelWarn,
-			"co-located /proc/<pid>/environ readable — a neighbor process's env is exposed (nono usually blocks this); rein places no minted secret in env"}
+			"co-located /proc/<pid>/environ readable — a neighbor process's env is exposed (nono usually blocks this); rein's own env carries no GitHub credential (minted token is heap-only; ambient tokens scrubbed at startup)"}
 	case o.CmdlineReadable:
 		return ChannelVerdict{ChanProcVisibility, ChannelWarn,
 			"co-located /proc/<pid>/cmdline (argv) readable — documented residual (no PID namespace); environ is nono-blocked. rein places no minted secret in argv"}
@@ -903,9 +903,15 @@ func probePtrace(pid int, timeout time.Duration) PtraceObs {
 		default:
 			o.Err = fmt.Sprintf("ptrace child exit %d", cmd.ProcessState.ExitCode())
 		}
+	case ctx.Err() == context.DeadlineExceeded:
+		// The timeout SIGKILL'd the child — NOT a seccomp block. Leave it
+		// unresolved (ambiguous) so the strict gate fails closed rather than
+		// mistaking a hung attempt for a denial.
+		o.Err = "ptrace child timed out: " + errString(runErr)
 	default:
-		// Not a normal exit ⇒ the child was signaled. A seccomp RET_KILL of the
-		// ptrace syscall is a BLOCK, so treat a kill as denied.
+		// Not a normal exit and not our timeout ⇒ the child was signaled by the
+		// kernel. A seccomp RET_KILL of the ptrace syscall is a BLOCK, so treat
+		// such a kill as denied.
 		o.Denied = true
 		o.Err = "ptrace child killed by signal (seccomp RET_KILL treated as blocked): " + errString(runErr)
 	}

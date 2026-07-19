@@ -147,6 +147,12 @@ const (
 )
 
 func main() {
+	// Co-located-broker hardening (design §8): remove the operator's ambient GitHub
+	// tokens from rein's OWN process env before doing anything. Under nono (no PID
+	// namespace) the agent shares rein's uid and could read /proc/<rein-pid>/environ;
+	// rein mints via the App key and never consumes these, so it exposes none.
+	scrubAmbientTokensFromSelf()
+
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)

@@ -293,7 +293,8 @@ func TestValidate_RejectsTampered(t *testing.T) {
 	}{
 		{"drop af_unix_mediation", func(pr *Profile) { pr.Linux.AfUnixMediation = "" }},
 		{"strip credential-denying base", func(pr *Profile) { pr.Extends = ""; pr.Groups = nil }},
-		{"base swapped to a non-denying profile", func(pr *Profile) { pr.Extends = "node-dev"; pr.Groups = nil }},
+		{"base rein does not recognize as credential-denying", func(pr *Profile) { pr.Extends = "node-dev"; pr.Groups = nil }},
+		{"deny_credentials explicitly excluded", func(pr *Profile) { pr.Groups = &Groups{Exclude: []string{denyCredentials}} }},
 		{"inject host bypassed", func(pr *Profile) {
 			pr.Network.UpstreamBypass = append(pr.Network.UpstreamBypass, proxy.InjectHosts[0])
 		}},

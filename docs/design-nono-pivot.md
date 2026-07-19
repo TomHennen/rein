@@ -566,7 +566,10 @@ Concretely, rein asserts only that
 - the GitHub token never reaches the agent (injected downstream at rein's proxy,
   never in the sandbox), and
 - rein's **own co-located broker process** exposes no secret — the agent cannot
-  ptrace/dump its heap, and rein keeps every minted secret out of its argv/env.
+  ptrace/dump its heap; the minted token is heap-only (injected downstream, never in
+  argv/env); and rein **scrubs the operator's ambient GitHub tokens from its own
+  process env at startup** (rein mints via the App key and never consumes them), so
+  even `/proc/<rein-pid>/environ` carries no GitHub credential.
 
 **Everything else is the substrate's (nono's) documented property, at the substrate's
 maturity — not a rein guarantee.** The measured residuals below are nono's, not

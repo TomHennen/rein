@@ -200,11 +200,13 @@ const (
 	baseProfile = "claude-code"
 )
 
-// credentialDenyingBases are the extendable bases known to carry deny_credentials
-// in their resolved group set. Used by Validate to confirm deny_credentials is
-// EFFECTIVE (inherited) without resolving the profile itself (which would need to
-// shell out to nono). claude-code extends default; both carry it. The nono-gated
-// TestNonoResolvesInheritedHardening test proves this against the real binary.
+// credentialDenyingBases are the base profile NAMES rein statically recognizes as
+// carrying deny_credentials in their resolved group set. This is a CONSERVATIVE
+// name-allowlist, not a resolution: Validate stays pure (no shelling out to nono),
+// so it trusts these names and fails closed on any OTHER base — even one that might
+// resolve deny_credentials transitively (e.g. node-dev via default). Over-strict is
+// safe; the nono-gated TestNonoResolvesInheritedHardening backstops the trust that
+// claude-code (what rein emits) really resolves the hardening against the real binary.
 var credentialDenyingBases = map[string]bool{"claude-code": true, "default": true}
 
 // Build assembles the nono profile from p and the proxy package's host lists,
@@ -526,6 +528,12 @@ func toSet(in []string) map[string]bool {
 // explicitly in the group delta. Pure — it trusts the static base knowledge rather
 // than resolving the profile (which would require shelling out to nono).
 func (pr Profile) deniesCredentials() bool {
+	// A profile that explicitly excludes deny_credentials cannot be trusted to hide
+	// creds even if the base carries it. (nono itself also refuses this exclusion, but
+	// rein's gate must not depend on that.)
+	if pr.Groups != nil && contains(pr.Groups.Exclude, denyCredentials) {
+		return false
+	}
 	if pr.Groups != nil && contains(pr.Groups.Include, denyCredentials) {
 		return true
 	}
