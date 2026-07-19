@@ -4,13 +4,11 @@
 // inject + declare tap), hides credentials, and isolates the approval channel.
 // One source of truth — cmd/rein/run_nono.go writes Build's output each launch.
 //
-// Schema is nono 0.68.0, verified in docs/design-nono-profile-schema.md. The
-// PROVISIONAL struct in design-nono-pivot.md §2.2 is SUPERSEDED by that doc:
-// the profile is NESTED (network/filesystem/linux/environment/groups),
-// upstream_proxy is a bare host:port string, deny_credentials is a policy GROUP
-// (not a path list), env injection is environment.set_vars, and there is NO
-// working upstream-proxy auth in 0.68.0 (external_proxy.auth is unimplemented —
-// do not emit it).
+// Schema is nono 0.68.0 (verified in docs/design-nono-profile-schema.md): the
+// profile is nested (network/filesystem/linux/environment/groups), upstream_proxy
+// is a bare host:port string, deny_credentials is a policy group (not a path list),
+// env injection is environment.set_vars, and 0.68.0 has no working upstream-proxy
+// auth (external_proxy.auth is unimplemented — do not emit it).
 package nono
 
 import (
@@ -23,11 +21,10 @@ import (
 	"github.com/TomHennen/rein/internal/proxy"
 )
 
-// caEnvVars are the env vars that point the agent's tools at rein's CA PEM so
-// they trust rein's re-signed certs. Hardcoded here (with agreement to migrate
-// to internal/sandboxutil.CAEnvVars once PR #140 lands — that is the eventual
-// single source of truth). Injected via environment.set_vars; nono passes them
-// through verbatim (unlike HTTP(S)_PROXY/NO_PROXY, which nono owns and overrides).
+// caEnvVars point the agent's tools at rein's CA PEM so they trust rein's re-signed
+// certs. Duplicated from internal/sandboxutil.CAEnvVars pending consolidation.
+// Injected via environment.set_vars; nono passes them through verbatim (unlike
+// HTTP(S)_PROXY/NO_PROXY, which nono owns and overrides).
 var caEnvVars = []string{
 	"SSL_CERT_FILE",
 	"GIT_SSL_CAINFO",

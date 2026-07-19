@@ -228,12 +228,11 @@ func (p *Proxy) Serve(ctx context.Context, ln net.Listener) error {
 	}
 }
 
-// handleConn consumes any CONNECT preamble (both fronts use it: srt's
-// unix-socket tunnel and nono's loopback-TCP upstream_proxy), terminates TLS
-// (leaf keyed on SNI), then serves HTTP/1.1 requests. SNI is the single
-// identity source
-// (design §4.1): the upstream connection AND the injection host class both
-// derive from it, and each request's Host header is validated against it.
+// handleConn consumes any CONNECT preamble (both fronts use it: the unix-socket
+// tunnel and nono's loopback-TCP upstream_proxy), terminates TLS (leaf keyed on
+// SNI), then serves HTTP/1.1 requests. SNI is the single identity source (design
+// §4.1): the upstream connection AND the injection host class both derive from it,
+// and each request's Host header is validated against it.
 func (p *Proxy) handleConn(conn net.Conn) {
 	defer conn.Close()
 

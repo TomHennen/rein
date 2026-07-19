@@ -24,16 +24,11 @@
 // real `nono run` under the emitted profile and FAILS CLOSED on any leak. UDP-open
 // stays a warning (Policy.FailOnUDP unset), matching the prober's residual finding.
 //
-// In-sandbox `rein declare <n>`: the running rein binary is staged into runTmp and
-// exec-granted via `--read-file`; runTmp is prepended to nono's launch-env PATH
-// (nono passes that through — it REJECTS a set_vars PATH as reserved). So the agent
-// runs `rein declare` exactly as the deny messages instruct.
+// In-sandbox `rein declare <n>`: rein stages its own binary into runTmp, exec-grants
+// it via `--read-file`, and prepends runTmp to nono's launch-env PATH (step 11b).
 //
-// CLAUDE_CONFIG_DIR / #94 overlay (WIRED — step 5d + Params.ClaudeConfigDir):
-// `rein run --nono -- claude` gets a rein-owned, writable CLAUDE_CONFIG_DIR
-// overlay (reusing srt's host-side seeding helper, prepareClaudeOverlay). The
-// overlay is --allow'd writable and set via the profile's CLAUDE_CONFIG_DIR;
-// host ~/.claude / ~/.claude.json stay hidden by nono's default-deny fs.
+// claude and gh get rein-owned, writable CONFIG_DIR overlays (steps 5d/5e), since
+// nono's default-deny fs hides the host ~/.claude / ~/.claude.json and ~/.config/gh.
 package main
 
 import (
@@ -469,17 +464,14 @@ func runNono(cmdline []string) (int, error) {
 	nonoArgv = append(nonoArgv, "--")
 	nonoArgv = append(nonoArgv, agentArgv...)
 
-	// (13) Scrubbed exec environment. nono OWNS HTTP(S)_PROXY/NO_PROXY and the
-	// profile's set_vars carries the CA + git config — rein must not set those.
+	// (13) Scrubbed exec environment. nono owns HTTP(S)_PROXY/NO_PROXY and the
+	// profile's set_vars carries the CA + git config, so rein must not set those.
 	// Scrub ambient GitHub tokens (the agent uses only rein-brokered,
-	// downstream-injected credentials) AND $TMUX/$TMUX_PANE (design §3e:
-	// defense-in-depth — af_unix_mediation already blocks the approval socket, but
-	// don't leak its path into the sandbox in the first place). Scrub
-	// CLAUDE_CONFIG_DIR too: a dev running rein from inside a claude session would
-	// otherwise leak that session's host config dir into nono's launch env. This is
-	// belt-and-suspenders — the real controls are nono's default-deny on the host
-	// dir plus the profile set_vars CLAUDE_CONFIG_DIR override (the overlay), which
-	// wins regardless; the scrub just keeps the stale parent value from riding along.
+	// downstream-injected credentials), $TMUX/$TMUX_PANE (§3e defense-in-depth: the
+	// profile's af_unix_mediation already blocks the approval socket, but don't leak
+	// its path in either), and CLAUDE_CONFIG_DIR/GH_CONFIG_DIR (a stale value from a
+	// dev's own claude session must not ride along — the profile's set_vars override
+	// wins regardless).
 	execEnv := os.Environ()
 	for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "TMUX", "TMUX_PANE", "CLAUDE_CONFIG_DIR", "GH_CONFIG_DIR"} {
 		execEnv = unsetEnv(execEnv, name)

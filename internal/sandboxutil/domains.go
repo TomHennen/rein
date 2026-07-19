@@ -85,7 +85,7 @@ func normalizeDomain(d string) string {
 }
 
 // validateEgressDomain rejects entries that are not a bare host or a strict
-// `*.suffix` wildcard — the only two forms srt's domain matcher accepts. d is
+// `*.suffix` wildcard — the only two forms the egress matcher accepts. d is
 // expected already normalized (lowercased, trimmed).
 func validateEgressDomain(d string) error {
 	if d == "" {

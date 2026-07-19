@@ -11,13 +11,10 @@
 // serves both. A fully compromised nono release (swapped tarball + checksums +
 // forged attestations) still cannot pass this pin without editing rein's source.
 //
-// nono 0.68.0 releases DO carry GitHub build-provenance attestations
-// (sigstore-backed, via actions/attest — verified empirically 2026-07-18).
-// Attestation verification is a documented, additive UPGRADE (gate before the
-// digest; the vendored digest stays as belt-and-suspenders) tracked as a
-// follow-up — NOT built here, because a vendored pin is already the strongest
-// trust root for a pinned version and adding a sigstore-verify dependency is a
-// stop-and-ask supply-chain decision (CLAUDE.md #5). See the task handoff.
+// nono 0.68.0 releases also carry sigstore-backed build-provenance attestations
+// (verified 2026-07-18). Verifying them is a deferred, additive upgrade: a vendored
+// pin is already the strongest trust root for a pinned version, and adding a
+// sigstore-verify dependency is a stop-and-ask supply-chain decision (CLAUDE.md #5).
 package nono
 
 import (
