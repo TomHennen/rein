@@ -160,15 +160,54 @@ rein is agnostic. It ships a snippet and a verified config for each supported sa
   binary. Cost: three documented residuals that are the **substrate's, not rein's** —
   process-table/argv visibility, open UDP, and `.git` hooks in an in-place tree.
 
-## Open design work (two real wrinkles)
+## Plug-in architecture (the two wrinkles, resolved)
 
-1. **Broker lifecycle.** As a plug-in, rein's relay must already be running on a stable local
-   endpoint when the sandbox launches — a small daemon or service, rather than launched together
-   by the wrapper.
-2. **Session identity.** When rein controls the launch, it knows "this request belongs to the
-   run that declared #123." As a plug-in, requests arrive at a stable port and rein must tie them
-   to a run and its declare state. Solvable with a per-session token the profile or env carries —
-   but it needs design.
+The design worried about two wrinkles — a standing daemon and a session-identity token. Grounding
+them in the code dissolved both. Today the broker is **in-process, one relay per `rein run`, with
+identity implicit** (one proxy = one run; no on-the-wire run discriminator). The reorientation
+keeps that property and just *decouples the relay from launching the sandbox* — it does **not**
+introduce a resident multi-run daemon.
+
+1. **Broker lifecycle — a per-session relay, not a daemon.** `rein session start` reuses today's
+   per-run relay (`runbroker.Start`) on an **ephemeral `127.0.0.1:0` port** and prints the launch
+   routing instead of exec-ing the sandbox itself. It lives from `session start` to `session end`
+   / idle-TTL. The user then launches *their* sandbox pointed at it. The one already-standing
+   thing rein reuses is the persistent trust material (App key + proxy CA); `internal/daemon`
+   stays shelved. A resident multi-run daemon is explicitly rejected: multiplexing runs over one
+   endpoint is the *only* shape that needs a wire discriminator, and nono can't carry one
+   (`external_proxy.auth` is unimplemented). Don't build the thing that manufactures the problem.
+
+2. **Session identity — stays implicit.** One relay = one session = one `runID` = one
+   confirmed-issue file; the read→write flip is still a file the relay re-reads per request. No
+   per-session bearer token (it couldn't ride anyway). Concurrency = multiple `rein session start`
+   on different ephemeral ports; nono's loopback mediation isolates them.
+
+**How the ephemeral port reaches a user-owned profile — without rein writing the profile.** nono
+exposes `--upstream-proxy <host:port>` / `NONO_UPSTREAM_PROXY=` (and `--allow-domain` /
+`--upstream-bypass`) as launch-time overrides. So the per-session port travels on the user's
+*launch command* (`NONO_UPSTREAM_PROXY=127.0.0.1:<port> nono run -p their-profile …`), and their
+profile stays **static and entirely theirs**: CA trust (stable path), `allow_domain` (inject hosts
++ `declare.rein.internal`), `upstream_bypass` (CDN), `af_unix_mediation`, `block:false`. rein
+injects **nothing** into the profile. (nono's profile fields do **not** interpolate arbitrary host
+env — expansion is a fixed variable set on path/`set_vars` fields only — so the launch-flag
+override, not profile interpolation, is what makes an ephemeral port work.)
+
+**The one residual, and it's the honest "verify" tax.** rein can no longer *guarantee*
+one-sandbox-per-relay the way owning the launch did. If a user *deliberately* points two sandboxes
+at one running relay, both share the one approved write session (agent B inherits agent A's write
+tier). An ephemeral fresh-port-per-session makes this a deliberate misuse, not the default — and
+the containment prober asserts it, plus the docs warn. Anyone wanting the old *guarantee* keeps
+the thin `rein run` wrapper (decision #1), which still owns the launch. Guarantee vs. verify is
+exactly the wrapper-vs-plug-in axis.
+
+**Two build-time must-dos** (not open questions — requirements):
+- **Prober invocation.** The verify half of guarantee→verify needs a concrete hook: `rein session
+  start` (or a `rein verify`) runs the prober against the launched sandbox before the agent does
+  real work, and fails closed on a bad config. Not a silent gap.
+- **Approval fails closed.** With rein no longer owning a terminal, the in-sandbox `rein declare`
+  surfaces its host-side approval via the **tmux popup** (already built, af_unix-mediated) or the
+  **foreground `rein session start` terminal**. Detached + no-tmux has nowhere to prompt — that
+  must be a clear fail-closed error at `session start`, never a hang.
 
 ## Tradeoffs and options considered
 
