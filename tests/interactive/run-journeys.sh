@@ -41,6 +41,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 cd "$REPO_ROOT"
 
+# Journeys assume they run OUTSIDE tmux ($TMUX unset -> inline /dev/tty approval);
+# the popup journey makes its OWN dedicated `tmux -L <unique>` server. If this
+# script is launched from inside the operator's tmux, a leaked $TMUX routes every
+# journey's approval popup into the operator's LIVE session (a real incident).
+# Clear it defensively so no journey can ever reach the operator's tmux.
+unset TMUX TMUX_PANE
+
 RUN_SANDBOX=0
 for arg in "$@"; do
   case "$arg" in
