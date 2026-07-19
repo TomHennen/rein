@@ -33,7 +33,7 @@ import (
 //
 // Allowlisted:
 //   - internal/keystore/... — the enforcement point itself;
-//   - internal/srt/cabundle.go — reads and PEM-decodes CA CERTIFICATE
+//   - internal/sandboxutil/cabundle.go — reads and PEM-decodes CA CERTIFICATE
 //     bundles (public trust anchors, never private keys).
 //
 // If this test fires on legitimate new code, either route the read through

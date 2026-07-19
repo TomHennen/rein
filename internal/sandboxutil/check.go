@@ -1,7 +1,8 @@
-// Package sandboxutil holds substrate-neutral pieces shared by every sandbox
-// backend (srt today, nono during the pivot) so a new backend's package never
-// needs to import another backend's package. Extracted from internal/srt per
-// docs/design-nono-pivot.md §5/§7 ("shared-substrate extraction").
+// Package sandboxutil holds substrate-neutral pieces shared by the sandbox
+// launch/preflight spine (the CA bundle, the CA-trust env vars, the preflight
+// Check/Status types, the extra-egress resolver) so backend and command code
+// share one copy. Established by the shared-substrate extraction in
+// docs/design-nono-pivot.md §5/§7.
 package sandboxutil
 
 // Status is a preflight verdict, matching doctor's three-value framing.

@@ -1,9 +1,9 @@
 // nono launch preflight / doctor health checks (design-nono-pivot.md §2.3).
 //
-// Same shape as internal/srt/preflight.go: Preflight returns a stable-ordered
-// []sandboxutil.Check; the caller decides policy (`rein run --nono` fails closed
-// on any Hard() check, `rein doctor` prints them all read-only). Env injects the
-// environment-touching operations so verdict logic is unit-testable with fakes.
+// Preflight returns a stable-ordered []sandboxutil.Check; the caller decides
+// policy (`rein run` fails closed on any Hard() check, `rein doctor` prints them
+// all read-only). Env injects the environment-touching operations so verdict
+// logic is unit-testable with fakes.
 //
 // Any nono invocation is session-isolated (setsid + /dev/null stdin, never a
 // tty) per the git-push spike discipline — a stray tty-attached nono disrupts

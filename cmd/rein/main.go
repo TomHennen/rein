@@ -45,26 +45,25 @@ import (
 	"github.com/TomHennen/rein/internal/nono"
 	"github.com/TomHennen/rein/internal/runscope"
 	"github.com/TomHennen/rein/internal/session"
-	"github.com/TomHennen/rein/internal/srt"
 	"github.com/TomHennen/rein/internal/tokencache"
 	"github.com/TomHennen/rein/internal/ui/grant"
 )
 
-// dispatchRun routes `rein run`. CP4 flips the default: sandboxed (srt) mode is
-// now the DEFAULT (where srt is healthy — runSandboxed hard-gates preflight and
-// fails closed, never silently dropping to unsandboxed on a real repo). Direct
-// mode moves behind an explicit --direct/--no-sandbox flag with a loud banner
+// dispatchRun routes `rein run`. Sandboxed (nono) mode is the DEFAULT: runNono
+// digest-verifies the managed nono binary and fails closed (→ `rein init`) if it
+// is absent/mismatched, never silently dropping to unsandboxed on a real repo.
+// Direct mode is behind an explicit --direct/--no-sandbox flag with a loud banner
 // (the reduced-protection, throwaway-only path). The mode flag, if present, must
 // come BEFORE the "--" separator:
 //
-//	rein run -- <cmd>              # sandboxed (default: srt)
+//	rein run -- <cmd>              # sandboxed (default: nono)
 //	rein run --sandbox -- <cmd>    # sandboxed (explicit; alias for the default)
-//	rein run --nono -- <cmd>       # sandboxed via nono (the pivot; opt-in for now)
+//	rein run --nono -- <cmd>       # sandboxed (explicit; alias for the default)
 //	rein run --direct -- <cmd>     # DIRECT/unsandboxed (explicit opt-in + banner)
 //	rein run --no-sandbox -- <cmd> # alias for --direct
 //
-// REIN_SANDBOX=nono selects nono without the flag (a leading --sandbox/--nono/
-// --direct flag still wins).
+// --sandbox and --nono are kept as no-op aliases for the default (nono is now the
+// only sandbox backend). REIN_SANDBOX=nono is accepted too but redundant.
 func dispatchRun(argv []string) (int, error) {
 	mode, cmdline, err := parseRunMode(argv)
 	if err != nil {
@@ -76,15 +75,11 @@ func dispatchRun(argv []string) (int, error) {
 		// usage error first), so a usage error never prints the scary warning.
 		printDirectModeBanner(os.Stderr)
 		return runWrapped(append([]string{"--"}, cmdline...))
-	case modeNono:
-		// nono-sandboxed (the pivot). runNono digest-verifies the managed nono
-		// binary and fails closed (→ `rein init`) if it is absent/mismatched.
-		return runNono(cmdline)
 	default:
-		// Sandboxed (default + --sandbox). runSandboxed runs preflight and fails
-		// closed (with a `rein doctor` pointer) if srt is unhealthy — it does NOT
-		// fall back to unsandboxed mode on its own (design §2-3; CP3 fallback rule).
-		return runSandboxed(cmdline)
+		// Sandboxed (default + --sandbox + --nono). runNono digest-verifies the
+		// managed nono binary and fails closed (→ `rein init`) if it is
+		// absent/mismatched — it does NOT fall back to unsandboxed mode.
+		return runNono(cmdline)
 	}
 }
 
@@ -92,30 +87,23 @@ func dispatchRun(argv []string) (int, error) {
 type runMode int
 
 const (
-	modeSandbox runMode = iota
+	// modeNono is the default sandboxed mode (nono is the sole sandbox backend).
+	modeNono runMode = iota
 	modeDirect
-	modeNono
 )
 
-// parseRunMode decides the run mode from the leading flag (falling back to the
-// REIN_SANDBOX env selector) and validates the command shape, returning the mode
-// and the cmdline (the argv AFTER "--"). The default (no flag, no env) is
-// modeSandbox — the CP4 flip. A leading mode flag always wins over the env. A
-// usage error is returned for a bad command shape BEFORE any side effect, so
-// dispatchRun can reject it without printing the direct-mode banner.
+// parseRunMode decides the run mode from the leading flag and validates the
+// command shape, returning the mode and the cmdline (the argv AFTER "--"). The
+// default (no flag) is modeNono. A usage error is returned for a bad command
+// shape BEFORE any side effect, so dispatchRun can reject it without printing the
+// direct-mode banner.
 func parseRunMode(argv []string) (runMode, []string, error) {
-	// Env selector first; an explicit leading flag overrides it below.
-	mode := modeSandbox
-	if os.Getenv("REIN_SANDBOX") == "nono" {
-		mode = modeNono
-	}
+	mode := modeNono
 	rest := argv
 	if len(argv) > 0 {
 		switch argv[0] {
-		case "--sandbox":
-			mode = modeSandbox
-			rest = argv[1:]
-		case "--nono":
+		case "--sandbox", "--nono":
+			// No-op aliases: nono is the only sandbox backend.
 			mode = modeNono
 			rest = argv[1:]
 		case "--direct", "--no-sandbox":
@@ -137,7 +125,7 @@ func parseRunMode(argv []string) (runMode, []string, error) {
 func printDirectModeBanner(w io.Writer) {
 	fmt.Fprintln(w, "===============================================================")
 	fmt.Fprintln(w, "rein: WARNING — DIRECT (UNSANDBOXED) MODE")
-	fmt.Fprintln(w, "  The agent runs OUTSIDE the srt sandbox. It shares your user")
+	fmt.Fprintln(w, "  The agent runs OUTSIDE the nono sandbox. It shares your user")
 	fmt.Fprintln(w, "  account: it CAN read your ambient credentials (gh login, SSH")
 	fmt.Fprintln(w, "  keys, ~/.netrc, keyrings) and the rein-brokered token is only")
 	fmt.Fprintln(w, "  hidden by process boundaries, not a sandbox. Use this ONLY on a")
@@ -220,11 +208,6 @@ func main() {
 			fmt.Fprintf(os.Stderr, "rein declare: %v\n", err)
 		}
 		os.Exit(code)
-	case "__sandbox-probe":
-		// Hidden subcommand: runs INSIDE srt during VerifyConfigApplied to
-		// prove the deny-read + seccomp protections took effect. Exits with a
-		// srt.Probe* code the parent interprets. Not user-facing.
-		os.Exit(srt.RunProbe(os.Args[2:]))
 	case "__nono-probe":
 		// Hidden subcommand: runs INSIDE `nono run` during
 		// nono.VerifyContainment. It measures the containment channels and
@@ -254,8 +237,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  rein session show                         (standing scope ceiling + live runs' expansions)")
 	fmt.Fprintln(os.Stderr, "  rein session add-repo <owner/name>        (validated widening of the standing ceiling)")
 	fmt.Fprintln(os.Stderr, "  rein declare <issue-number> [--repo owner/name]  (declare the issue this run's work is for)")
-	fmt.Fprintln(os.Stderr, "  rein run -- <cmd> [args...]                (sandboxed by default)")
-	fmt.Fprintln(os.Stderr, "  rein run --nono -- <cmd> [args...]         (sandboxed via nono; the pivot)")
+	fmt.Fprintln(os.Stderr, "  rein run -- <cmd> [args...]                (sandboxed via nono by default)")
 	fmt.Fprintln(os.Stderr, "  rein run --direct -- <cmd> [args...]       (unsandboxed; throwaway repos only)")
 }
 

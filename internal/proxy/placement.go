@@ -62,10 +62,10 @@ func pathWithin(child, parent string) bool {
 // leaf doesn't exist yet (the socket isn't bound), it resolves the longest
 // existing ancestor and re-appends the remainder, so a symlinked parent dir is
 // still followed. Exported because it is the ONE symlink-resolution primitive
-// shared by every sandbox path comparison: the socket placement check here,
-// and internal/srt's widening-path checks (workdir / extra allowWrite /
-// allowRead vs the credential deny-read set — audit finding D6, issue #44). A
-// symlinked path must never smuggle a widening under (or a capability into) a
+// shared by every sandbox path comparison: the socket placement check here, and
+// run_nono's working-tree / mapped-checkout resolution before it grants those
+// paths writable via nono --allow. A symlinked path must never smuggle a
+// widening under (or a capability into) a
 // checked directory just because the comparison ran on the unresolved form.
 func ResolveAbs(p string) (string, error) {
 	abs := cleanAbs(p)

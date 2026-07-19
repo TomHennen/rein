@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"strings"
 	"testing"
 
@@ -121,52 +120,5 @@ func TestBuildNonoParams_NoClaudeConfigDir(t *testing.T) {
 	}
 }
 
-// TestParseRunMode_Nono covers the --nono flag and the REIN_SANDBOX=nono env
-// selector, and that an explicit leading flag wins over the env.
-func TestParseRunMode_Nono(t *testing.T) {
-	t.Run("flag", func(t *testing.T) {
-		mode, cmd, err := parseRunMode([]string{"--nono", "--", "curl", "https://api.github.com"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if mode != modeNono {
-			t.Errorf("mode = %v, want modeNono", mode)
-		}
-		if len(cmd) != 2 || cmd[0] != "curl" {
-			t.Errorf("cmdline = %v", cmd)
-		}
-	})
-
-	t.Run("env-selector", func(t *testing.T) {
-		t.Setenv("REIN_SANDBOX", "nono")
-		mode, _, err := parseRunMode([]string{"--", "echo", "hi"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if mode != modeNono {
-			t.Errorf("mode = %v, want modeNono from REIN_SANDBOX=nono", mode)
-		}
-	})
-
-	t.Run("flag-overrides-env", func(t *testing.T) {
-		t.Setenv("REIN_SANDBOX", "nono")
-		mode, _, err := parseRunMode([]string{"--sandbox", "--", "echo", "hi"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if mode != modeSandbox {
-			t.Errorf("mode = %v, want modeSandbox (--sandbox overrides REIN_SANDBOX=nono)", mode)
-		}
-	})
-
-	t.Run("default-unset", func(t *testing.T) {
-		os.Unsetenv("REIN_SANDBOX")
-		mode, _, err := parseRunMode([]string{"--", "echo", "hi"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if mode != modeSandbox {
-			t.Errorf("mode = %v, want modeSandbox by default", mode)
-		}
-	})
-}
+// Mode routing (nono default + --sandbox/--nono aliases + --direct opt-out) is
+// pinned by TestParseRunModeRouting in run_broker_shared_test.go.

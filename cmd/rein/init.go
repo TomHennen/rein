@@ -436,12 +436,12 @@ func runInit(args []string) error {
 	}
 
 	// Sandbox-stack health (onboarding-ux-design.md decision 2 / §3 step 1).
-	// SOFT-BLOCK by default: run the same srt preflight `rein doctor`
-	// surfaces (reuse sandboxDoctorChecks so there's one detection path),
+	// SOFT-BLOCK by default: run the same nono preflight `rein doctor`
+	// surfaces (reuse nonoDoctorChecks so there's one detection path),
 	// then decide via a pure function. init has already done ALL its other
 	// setup at this point; a failing sandbox never aborts that work.
-	sandboxResults := make([]checkResult, 0, 4)
-	for _, c := range sandboxDoctorChecks() {
+	sandboxResults := make([]checkResult, 0, 5)
+	for _, c := range nonoDoctorChecks() {
 		sandboxResults = append(sandboxResults, c())
 	}
 	healthy, failMsg := sandboxHealthOutcome(sandboxResults, requireSandbox)

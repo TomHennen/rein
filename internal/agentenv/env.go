@@ -1,6 +1,6 @@
 // Package agentenv holds the substrate-neutral agent-visible env-var contract
-// (names + a parse helper), so a future nono launcher can set the same vars
-// without importing internal/srt. Extracted per docs/design-nono-pivot.md §5/§7.
+// (names + a parse helper), so the nono launcher sets the same vars without
+// reaching into any backend package. Established per docs/design-nono-pivot.md §5/§7.
 package agentenv
 
 import "strings"
@@ -14,7 +14,7 @@ const EnvAgentWorktrees = "REIN_REPO_WORKTREES"
 const EnvAgentCloneDir = "REIN_EPHEMERAL_CLONE_DIR"
 
 // EnvUpstreamIntentFile: shim-internal rendezvous for `git push -u` tracking intent
-// (#102/#119). See srt.EnvParams.UpstreamIntentFile.
+// (#102/#119).
 const EnvUpstreamIntentFile = "REIN_UPSTREAM_INTENT_FILE"
 
 // EnvDisableClaudeMCP: per-run opt-OUT restoring the old behavior of disabling
