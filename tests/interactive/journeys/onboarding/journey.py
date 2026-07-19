@@ -70,7 +70,7 @@ def main() -> int:
         (result.steps[0].exitstatus == 0, "init must exit 0 on the happy env path"),
         # doctor's output is now IN the captured session (not dropped).
         ("rein doctor: ok" in text, "`rein doctor` output must be captured in the session"),
-        ("sandbox: srt present" in text, "doctor's full check table must be present (complete capture)"),
+        ("nono present" in text, "doctor's full check table must be present (complete capture)"),
     ]
     broken = [msg for ok, msg in checks if not ok]
     if broken:

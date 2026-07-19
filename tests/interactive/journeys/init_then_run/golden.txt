@@ -1,24 +1,27 @@
 $ rein init --yes --no-alias --no-symlink  (real mint check, App from state.json, NO env vars)
 rein init: setting up local scaffolding
-  state dir:  /tmp/rein-itest-home-fd6564eb/.local/state/rein
-  config dir: /tmp/rein-itest-home-fd6564eb/.config/rein
+  state dir:  /tmp/rein-itest-home-nc_psgk_/.local/state/rein
+  config dir: /tmp/rein-itest-home-nc_psgk_/.config/rein
   machine:    demo-box (label for this machine's App name)
   setup:      state.json: audit_done (steady state from manifest flow)
-  app:        client_id=Iv23lihaPgKgifHps75d installation_id=145330081
-  shim:       3 binaries under /tmp/rein-itest-home-fd6564eb/.local/state/rein/shim
+  app:        client_id=Iv23liHH7Gu2xMxCZ7rz installation_id=138434780
+  shim:       3 binaries under /tmp/rein-itest-home-nc_psgk_/.local/state/rein/shim
   symlink:    skipped (--no-symlink)
   mint check: minting a read-only installation token to verify App credentials
-              ok (token expires 2026-07-16T11:57:29Z)
+              ok (token expires 2026-07-19T16:04:05Z)
   session:    not scaffolded (pass --repo owner/name to scaffold)
   alias:      not installed (opt-in; enable with `rein init --alias`)
   install on repo:
     install the App on the repos you want it to broker tokens for.
     visit this URL in your browser:
-      https://github.com/apps/rein-primary-56e410c903/installations/new
+      https://github.com/apps/rein-primary-735a3bbe20/installations/new
+    (no local browser detected; open the link above on any machine — no ssh -L needed)
+  nono:       installing pinned runtime 0.68.0 (aarch64-unknown-linux-gnu)
+              ok (installed /tmp/rein-itest-home-nc_psgk_/.config/rein/nono/bin/nono, digest verified)
 
 rein init: done.
 Next:
-  - /tmp/rein-itest-home-fd6564eb/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
+  - /tmp/rein-itest-home-nc_psgk_/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
   - run `rein run -- claude` (or another agent) to launch with rein in effect
   - (optional) enable the `claude` alias with `rein init --alias`
   - run `rein doctor` to verify everything is wired up
@@ -26,16 +29,16 @@ Next:
 $ rein run --direct -- git clone --quiet https://github.com/TomHennen/agentcreds-validation-a clone
 ===============================================================
 rein: WARNING — DIRECT (UNSANDBOXED) MODE
-  The agent runs OUTSIDE the srt sandbox. It shares your user
+  The agent runs OUTSIDE the nono sandbox. It shares your user
   account: it CAN read your ambient credentials (gh login, SSH
   keys, ~/.netrc, keyrings) and the rein-brokered token is only
   hidden by process boundaries, not a sandbox. Use this ONLY on a
   THROWAWAY repo. For real work, drop --direct to run sandboxed.
 ===============================================================
 rein: launching wrapped process with:
-  session: sess_init_then_run (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-itest-home-fd6564eb/session.yaml]
-  PATH-front shim dir: /tmp/rein-itest-home-fd6564eb/.local/state/rein/shim
-  per-process git config: /tmp/rein-run-2076579004/gitconfig
+  session: sess_init_then_run (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-itest-home-nc_psgk_/session.yaml]
+  PATH-front shim dir: /tmp/rein-itest-home-nc_psgk_/.local/state/rein/shim
+  per-process git config: /tmp/rein-run-613380043/gitconfig
   (your real ~/.gitconfig is layered in via include.path)
 
   Writes are LOCKED until the agent declares its issue:  rein declare <n>
@@ -46,43 +49,19 @@ rein: running: git clone --quiet https://github.com/TomHennen/agentcreds-validat
 ---
 
 $ rein run -- bash -c <sandboxed git clone TomHennen/agentcreds-validation-a> <workdir>
-rein: sandbox preflight:
-  [ok]   srt present: /home/tom.linux/.npm-global/bin/srt
-  [ok]   srt version: 0.0.63 (package.json; note `srt --version` misreports 1.0.0)
-  [ok]   seccomp: apply-seccomp present (unix-socket block available)
-  [ok]   bwrap userns: unprivileged user namespace works
-  [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
-rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-journey-sbxclone-9go34jzg (git -C /tmp/rein-journey-sbxclone-9go34jzg rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
-rein: verifying sandbox config applies (deny-read + seccomp self-test)…
-rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
-rein: launching SANDBOXED (srt) run:
-  session: sess_init_then_run (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-itest-home-fd6564eb/session.yaml]
-  proxy socket (out of sandbox): /run/user/501/rein/run-JDp-uDAlEidiP6KM2aKWww/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-journey-sbxclone-9go34jzg
-  a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-492053826
-    (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
-     never inside the working tree, where a nested clone can be committed into it).
-    map it under `worktrees:` to use your own checkout on the NEXT run.
-  the agent sees NO real token; git/gh are injected at the proxy.
-  credential stores, ~/.ssh, on-disk keyrings, and keyring/agent sockets are hidden.
-  $HOME is HIDDEN in-sandbox. Three different behaviors — know which one you get:
-    READS of a hidden path FAIL LOUDLY: ENOENT, or an empty listing for a dir.
-    WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
-      DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
-    WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-journey-sbxclone-9go34jzg
-    => work the agent must keep has to be written INTO the working tree.
-    allowed back read-only: /tmp/rein-itest-home-fd6564eb/.claude, /tmp/rein-itest-home-fd6564eb/.claude.json, /tmp/rein-itest-home-fd6564eb/.local/bin, /tmp/rein-itest-home-fd6564eb/.cargo, /tmp/rein-itest-home-fd6564eb/.rustup, /tmp/rein-itest-home-fd6564eb/go, /tmp/rein-itest-home-fd6564eb/.pyenv
-    if a tool breaks on a hidden $HOME path, allow it back narrowly:
-      REIN_SANDBOX_ALLOW_READ=/abs/path[:/more] rein run --sandbox -- …
-    or (NOT recommended — exposes your whole home dir): REIN_SANDBOX_SHOW_HOME=1
-  extra egress ALLOWED (direct TLS, NOT injected, no rein token): api.anthropic.com
+rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-journey-sbxclone-3hcr4gw8 (git -C /tmp/rein-journey-sbxclone-3hcr4gw8 rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
+rein: verifying nono containment (creds hidden; loopback + direct egress denied)…
+rein: containment WARNING: udp_egress: UDP egress OPEN (accepted residual — a prompt-injected agent has a UDP exfil channel) [8.8.8.8:53]
+rein: containment gate passed.
+rein: launching SANDBOXED (nono) run:
+  session: sess_init_then_run (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-itest-home-nc_psgk_/session.yaml]
+  GitHub egress tunnels through rein's loopback proxy: 127.0.0.1:35673
+  the agent sees NO real token; git/gh are injected at the proxy (downstream of the sandbox).
+  credentials are hidden (deny_credentials); the approval channel is isolated (af_unix_mediation).
+  writable in sandbox (--allow): [/tmp/rein-journey-sbxclone-3hcr4gw8 /tmp/rein-itest-home-nc_psgk_/.config/rein-sandbox-home/.claude /tmp/rein-gh-1824857033]
+  extra egress ALLOWED (direct, NOT injected, no rein token): [api.anthropic.com]
   writes are LOCKED until the agent declares its issue:  rein declare <n>
-  then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.
-  to run bash WITHOUT rein for one command: `\bash` (bash/zsh) or `command bash` (fish)
-  agent contract PRINTED to the agent's output (this agent has no system-prompt channel, so it may or
-    may not reach the model's context; the REIN_IN_SANDBOX_* env vars carry the same facts machine-readably).
+  the declaration will prompt on THIS terminal.
 rein: running: bash -c set +e
 emit() { printf '%s%s\n' 'SBX| ' "$*"; }
 run() {
@@ -93,12 +72,14 @@ run() {
 cd "$0"
 run git clone --quiet https://github.com/TomHennen/agentcreds-validation-a clone
 [ -d clone/.git ] && emit "@SBX_CLONE_RC=0" || emit "@SBX_CLONE_RC=1"
- /tmp/rein-journey-sbxclone-9go34jzg
+ /tmp/rein-journey-sbxclone-3hcr4gw8
 ---
+  agent contract PRINTED to the agent's output (this agent has no system-prompt channel, so it may or
+    may not reach the model's context; the REIN_IN_SANDBOX_* env vars carry the same facts machine-readably).
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/rein-journey-sbxclone-9go34jzg
+- Your work persists ONLY in the working tree: /tmp/rein-journey-sbxclone-3hcr4gw8
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
@@ -125,6 +106,23 @@ GITHUB WRITES
 NETWORK
 - Egress is restricted to GitHub plus: api.anthropic.com
 - Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.
+
+  nono v0.68.0
+2026-07-19T15:04:08.691497Z  WARN Skipping Linux system temp grant '/tmp' from group 'system_write_linux' because HOME '/tmp/rein-itest-home-nc_psgk_' is nested inside it. Landlock cannot enforce deny rules beneath an allowed parent.
+2026-07-19T15:04:08.691560Z  WARN Skipping Linux system temp grant '/tmp' from group 'system_write_linux' because HOME '/tmp/rein-itest-home-nc_psgk_' is nested inside it. Landlock cannot enforce deny rules beneath an allowed parent.
+  Capabilities:
+  ────────────────────────────────────────────────────
+    r   /tmp/rein-nono-3402660995/ca-bundle.pem (file)
+   r+w  /tmp/rein-journey-sbxclone-3hcr4gw8 (dir)
+   r+w  /tmp/rein-itest-home-nc_psgk_/.config/rein-sandbox-home/.claude (dir)
+   r+w  /tmp/rein-gh-1824857033 (dir)
+    r   /tmp/rein-nono-3402660995/rein (file)
+       + 46 system/group paths (-v to show)
+   net  proxy
+  ────────────────────────────────────────────────────
+
+  mode supervised (proxy, supervisor)
+  Applying sandbox...
 
 SBX| $ git clone --quiet https://github.com/TomHennen/agentcreds-validation-a clone
 SBX| @SBX_CLONE_RC=0
