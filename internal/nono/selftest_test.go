@@ -291,30 +291,40 @@ func TestClassify_ApprovalEnv(t *testing.T) {
 }
 
 // tmux socket connect: denied ⇒ ok, reached ⇒ leak. A refused connect against a
-// LIVE fixture is Unknown by default but fails closed under RequireControls; NO
-// fixture (not attempted) is always a plain skip Unknown, even under strict.
+// LIVE fixture is Unknown by default but fails closed under RequireControls. NO
+// fixture with tmux ABSENT is always a plain skip Unknown, even under strict. But
+// tmux PRESENT + unstageable fixture must not silently pass: Warn (lax) / Fail
+// (strict).
 func TestClassify_ApprovalSocket(t *testing.T) {
 	sock := "/tmp/rein-approvalfix-x/tmux.sock"
+	const stageErr = "tmux present but fixture unstageable"
 	for _, tc := range []struct {
 		name   string
 		r      ConnResult
+		fixErr string
 		strict bool
 		want   ChannelStatus
 	}{
-		{"denied", denied(sock), false, ChannelOK},
-		{"reached", reached(sock), false, ChannelLeak},
-		{"reached-strict", reached(sock), true, ChannelLeak},
-		{"ambiguous-lax", refused(sock), false, ChannelUnknown},
-		{"ambiguous-strict", refused(sock), true, ChannelFail},
-		{"no-fixture-lax", ConnResult{}, false, ChannelUnknown},
-		{"no-fixture-strict", ConnResult{}, true, ChannelUnknown}, // skip, NOT fail
+		{"denied", denied(sock), "", false, ChannelOK},
+		{"reached", reached(sock), "", false, ChannelLeak},
+		{"reached-strict", reached(sock), "", true, ChannelLeak},
+		{"ambiguous-lax", refused(sock), "", false, ChannelUnknown},
+		{"ambiguous-strict", refused(sock), "", true, ChannelFail},
+		{"tmux-absent-lax", ConnResult{}, "", false, ChannelUnknown},
+		{"tmux-absent-strict", ConnResult{}, "", true, ChannelUnknown}, // clean skip, NOT fail
+		{"unstageable-lax", ConnResult{}, stageErr, false, ChannelWarn},
+		{"unstageable-strict", ConnResult{}, stageErr, true, ChannelFail}, // fail-open closed
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			obs := contained()
 			obs.ApprovalTmuxSock = tc.r
+			obs.ApprovalFixtureErr = tc.fixErr
 			v := Classify(obs, Policy{RequireControls: tc.strict})
 			if got := chanStatus(v, ChanApprovalTmuxSocket); got != tc.want {
 				t.Fatalf("socket %s: got %s, want %s", tc.name, got, tc.want)
+			}
+			if tc.want == ChannelFail && !v.ShouldFailClosed() {
+				t.Fatalf("socket %s: a Fail must fail the gate closed", tc.name)
 			}
 		})
 	}
@@ -324,43 +334,64 @@ func TestClassify_ApprovalSocket(t *testing.T) {
 // (refused); could-not-run / no-fixture ⇒ Unknown skip (never fails the gate,
 // even under strict, so a tmux-less host still passes).
 func TestClassify_ApprovalSendKeys(t *testing.T) {
+	const stageErr = "tmux present but fixture unstageable"
 	for _, tc := range []struct {
-		name string
-		e    ExecResult
-		want ChannelStatus
+		name   string
+		e      ExecResult
+		fixErr string
+		strict bool
+		want   ChannelStatus
 	}{
-		{"refused", ExecResult{Attempted: true, Ran: true, ExitZero: false, ExitCode: 1}, ChannelOK},
-		{"landed", ExecResult{Attempted: true, Ran: true, ExitZero: true}, ChannelLeak},
-		{"could-not-exec", ExecResult{Attempted: true, Ran: false, Err: "exec tmux: not found"}, ChannelUnknown},
-		{"no-fixture", ExecResult{}, ChannelUnknown},
+		{"refused", ExecResult{Attempted: true, Ran: true, ExitZero: false, ExitCode: 1}, "", true, ChannelOK},
+		{"landed", ExecResult{Attempted: true, Ran: true, ExitZero: true}, "", true, ChannelLeak},
+		{"could-not-exec", ExecResult{Attempted: true, Ran: false, Err: "exec tmux: not found"}, "", true, ChannelUnknown},
+		{"tmux-absent", ExecResult{}, "", true, ChannelUnknown},
+		{"unstageable-lax", ExecResult{}, stageErr, false, ChannelWarn},
+		{"unstageable-strict", ExecResult{}, stageErr, true, ChannelFail},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			obs := contained()
 			obs.ApprovalSendKeys = tc.e
-			// strict must never turn a send-keys skip into a fail.
-			v := Classify(obs, Policy{RequireControls: true})
+			obs.ApprovalFixtureErr = tc.fixErr
+			v := Classify(obs, Policy{RequireControls: tc.strict})
 			if got := chanStatus(v, ChanApprovalTmuxSendKeys); got != tc.want {
 				t.Fatalf("sendkeys %s: got %s, want %s", tc.name, got, tc.want)
 			}
 			if tc.want == ChannelUnknown && v.ShouldFailClosed() {
-				t.Fatalf("sendkeys %s: a skip must not fail the gate closed", tc.name)
+				t.Fatalf("sendkeys %s: a clean skip must not fail the gate closed", tc.name)
 			}
 		})
 	}
 }
 
-// A tmux-less host (no fixture) must still pass the gate: the two tmux channels
-// go Unknown but /dev/tty + $TMUX stay hard, and nothing fails closed.
-func TestClassify_NoTmuxFixture_GatePasses(t *testing.T) {
+// A tmux-ABSENT host (no fixture, no stage error) must still pass the gate: the
+// two tmux channels go Unknown but /dev/tty + $TMUX stay hard, and nothing fails
+// closed. (Distinct from tmux-present-but-unstageable, which fails closed.)
+func TestClassify_TmuxAbsent_GatePasses(t *testing.T) {
 	obs := contained()
 	obs.ApprovalTmuxSock = ConnResult{}
 	obs.ApprovalSendKeys = ExecResult{}
+	obs.ApprovalFixtureErr = "" // tmux genuinely absent
 	v := Classify(obs, Policy{RequireControls: true})
 	if v.ShouldFailClosed() {
-		t.Fatalf("no tmux fixture must not fail the gate:\n%s", v.String())
+		t.Fatalf("tmux-absent must not fail the gate:\n%s", v.String())
 	}
 	if got := chanStatus(v, ChanApprovalTTY); got != ChannelOK {
 		t.Fatalf("tty must stay ok without a tmux fixture, got %s", got)
+	}
+}
+
+// tmux PRESENT but the fixture could not be staged must fail closed under the
+// live gate's RequireControls — the enforcement proof was skipped while a real
+// approval surface exists.
+func TestClassify_TmuxUnstageable_FailsClosed(t *testing.T) {
+	obs := contained()
+	obs.ApprovalTmuxSock = ConnResult{}
+	obs.ApprovalSendKeys = ExecResult{}
+	obs.ApprovalFixtureErr = "tmux present but fixture unstageable"
+	v := Classify(obs, Policy{RequireControls: true})
+	if !v.ShouldFailClosed() {
+		t.Fatalf("tmux-present-but-unstageable must fail the gate closed:\n%s", v.String())
 	}
 }
 

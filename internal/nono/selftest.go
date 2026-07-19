@@ -185,7 +185,12 @@ type Observations struct {
 	ApprovalTmuxSock ConnResult `json:"approval_tmux_socket"`
 	ApprovalSendKeys ExecResult `json:"approval_tmux_send_keys"`
 	ApprovalEnv      EnvObs     `json:"approval_tmux_env"`
-	Errors           []string   `json:"errors,omitempty"`
+	// ApprovalFixtureErr is HOST-overlaid (like Creds[].Existed): non-empty when
+	// tmux IS present on the host but the isolation fixture could not be staged, so
+	// the socket/send-keys enforcement proof was skipped despite a real approval
+	// surface existing. Distinguishes that fail-open from a clean tmux-absent skip.
+	ApprovalFixtureErr string   `json:"approval_fixture_err,omitempty"`
+	Errors             []string `json:"errors,omitempty"`
 }
 
 // ChannelVerdict is one channel's classified result.
@@ -267,10 +272,25 @@ func Classify(obs Observations, policy Policy) Verdict {
 		classifyUDP(obs.UDPExternal, policy),
 		classifyApprovalTTY(obs.ApprovalTTY),
 		classifyApprovalEnv(obs.ApprovalEnv),
-		classifyApprovalSocket(obs.ApprovalTmuxSock, policy.RequireControls),
-		classifyApprovalSendKeys(obs.ApprovalSendKeys),
+		classifyApprovalSocket(obs.ApprovalTmuxSock, obs.ApprovalFixtureErr, policy.RequireControls),
+		classifyApprovalSendKeys(obs.ApprovalSendKeys, obs.ApprovalFixtureErr, policy.RequireControls),
 	)
 	return v
+}
+
+// approvalSkip resolves a not-attempted approval check: a clean skip (tmux
+// absent, stageErr empty) is Unknown; but if tmux WAS present and only the
+// fixture failed to stage, the enforcement proof was skipped while a real
+// approval surface exists — that must not silently pass, so it is a loud Warn,
+// or a fail-closed Fail under the live gate's RequireControls.
+func approvalSkip(ch Channel, stageErr string, strict bool, absentDetail string) ChannelVerdict {
+	if stageErr == "" {
+		return ChannelVerdict{ch, ChannelUnknown, absentDetail}
+	}
+	if strict {
+		return ChannelVerdict{ch, ChannelFail, stageErr + " — failing closed (a tmux approval surface exists but the control could not be verified)"}
+	}
+	return ChannelVerdict{ch, ChannelWarn, stageErr}
 }
 
 // classifyApprovalTTY: /dev/tty is a HARD control with no external dependency —
@@ -312,11 +332,11 @@ func classifyApprovalEnv(o EnvObs) ChannelVerdict {
 // is always a plain skip Unknown, never a strict Fail: a machine without tmux
 // must not fail the launch gate. Only an ambiguous errno against a LIVE fixture
 // fails closed under strict.
-func classifyApprovalSocket(r ConnResult, strict bool) ChannelVerdict {
+func classifyApprovalSocket(r ConnResult, stageErr string, strict bool) ChannelVerdict {
 	switch {
 	case !r.Attempted:
-		return ChannelVerdict{ChanApprovalTmuxSocket, ChannelUnknown,
-			"no tmux fixture staged (tmux absent) — approval-socket connect not tested"}
+		return approvalSkip(ChanApprovalTmuxSocket, stageErr, strict,
+			"no tmux fixture staged (tmux absent) — approval-socket connect not tested")
 	case r.Succeeded:
 		return ChannelVerdict{ChanApprovalTmuxSocket, ChannelLeak,
 			"tmux approval socket REACHED — af_unix_mediation not enforced; the agent can drive the approval popup [" + r.Target + "]"}
@@ -336,11 +356,11 @@ func classifyApprovalSocket(r ConnResult, strict bool) ChannelVerdict {
 // ExitZero ⇒ the keys landed ⇒ leak. A non-zero exit ⇒ refused ⇒ ok. A tool that
 // could not be staged or exec'd (no fixture / tmux not readable in-sandbox) is a
 // skip Unknown, not a pass — but never a Fail, so a tmux-less host still passes.
-func classifyApprovalSendKeys(e ExecResult) ChannelVerdict {
+func classifyApprovalSendKeys(e ExecResult, stageErr string, strict bool) ChannelVerdict {
 	switch {
 	case !e.Attempted:
-		return ChannelVerdict{ChanApprovalTmuxSendKeys, ChannelUnknown,
-			"no tmux fixture staged (tmux absent) — send-keys not tested"}
+		return approvalSkip(ChanApprovalTmuxSendKeys, stageErr, strict,
+			"no tmux fixture staged (tmux absent) — send-keys not tested")
 	case !e.Ran:
 		return ChannelVerdict{ChanApprovalTmuxSendKeys, ChannelUnknown,
 			"tmux could not be exec'd inside the sandbox — send-keys not tested (" + e.Err + ")"}

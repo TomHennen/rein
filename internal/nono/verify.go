@@ -195,6 +195,10 @@ func VerifyContainment(vp VerifyParams) (Verdict, error) {
 	for i := range obs.Creds {
 		obs.Creds[i].Existed = credExist[obs.Creds[i].Path]
 	}
+	// Overlay host truth: if tmux is present but the fixture failed to stage, the
+	// approval-socket/send-keys proof was skipped despite a real approval surface —
+	// don't let that pass silently (fail closed under RequireControls below).
+	obs.ApprovalFixtureErr = tmuxFx.stageError()
 
 	// The gate guarantees the planted loopback listener is live and that direct
 	// TCP is seccomp-denied pre-network, so an Unknown on those controls is an
@@ -367,8 +371,21 @@ type tmuxFixture struct {
 	dir     string
 	socket  string
 	session string
+	present bool // tmux is installed on the host (a real approval surface exists)
 	server  bool // a server was started (must be killed)
 	usable  bool // started AND live — the probe may target it
+}
+
+// stageError is non-empty when tmux IS present but the fixture could not be
+// staged, so the socket/send-keys enforcement proof was skipped even though a
+// real approval surface exists. Overlaid onto Observations so Classify fails
+// closed (under RequireControls) instead of silently passing. Empty when tmux is
+// simply absent (a legitimate clean skip).
+func (f tmuxFixture) stageError() string {
+	if f.present && !f.usable {
+		return "tmux is installed but the approval-isolation fixture could not be staged (server start/liveness failed); the socket/send-keys enforcement proof was skipped"
+	}
+	return ""
 }
 
 func (f tmuxFixture) probeSocket() string {
@@ -421,8 +438,10 @@ func stageTmuxFixture() tmuxFixture {
 	var f tmuxFixture
 	bin, err := exec.LookPath("tmux")
 	if err != nil {
-		return f // tmux absent — skip cleanly
+		return f // tmux absent — legitimate clean skip (no approval surface)
 	}
+	f.present = true // tmux exists: a real approval surface. From here a failure
+	// is a fail-open risk (stageError), not a clean skip.
 	dir, err := os.MkdirTemp("", "rein-approvalfix-*")
 	if err != nil {
 		return f
