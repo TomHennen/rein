@@ -5,8 +5,9 @@
 **TL;DR:** Stop trying to *own* the sandbox. rein becomes a **credential broker you plug a
 sandbox into.** It mints per-issue scoped tokens, gets them to the agent's git without leaving
 them where the agent can read them out, and runs the declare→approve ceremony. The sandbox (nono, srt, ...) is the
-user's — configured from rein's snippet and **verified** by rein's prober. This sheds ~2.0k lines
-of wrapper code (if we adopt the plug-in shape) and makes no claims about the sandbox itself.
+user's — configured from rein's snippet and **verified** by rein's prober. This sheds ~1.7k lines
+of sandbox-*config* code (profile-gen, installer, doctor) while keeping a thin launch, and makes
+no claims about the sandbox itself.
 
 ---
 
@@ -37,23 +38,38 @@ That's rein. Everything else is just how a sandbox gets pointed at it.
 
 ## Plug-in, not wrapper
 
-- **Wrapper (today):** `rein run -- claude` installs nono, generates the whole profile,
-  launches `nono run`, runs a nono doctor. rein owns install, pack provisioning, profile
-  shape, and version churn.
-- **Plug-in (proposed):** rein runs as a local broker. The user adds a **snippet** to *their*
-  nono (or srt) profile — route GitHub egress to rein's relay, trust rein's CA,
-  `af_unix_mediation`, keep `deny_credentials` (their standard profile already has it). rein
-  publishes the snippet (`rein profile-snippet nono`) plus docs, and **verifies** the running
-  sandbox with the prober before trusting it. The user launches the sandbox their way.
+The axis that matters is **who owns the sandbox profile/config — not who owns the launch.**
 
-**The one honest shift: guarantee → verify.** The wrapper *generates* the profile, so it
-*guarantees* the routing. The plug-in has the user write it, so rein *verifies* it. The
-containment prober we already built is exactly that verifier — which is why it earns its keep.
+- **Today:** `rein run -- claude` installs nono, generates the whole profile, provisions the
+  `claude-code` pack, launches `nono run`, runs a nono doctor. rein owns install, pack
+  provisioning, profile shape, and version churn — it makes claims about the sandbox.
+- **Plug-in:** the user brings *their own* nono (or srt) profile — they add a small **snippet**
+  (route GitHub egress to rein's relay, trust rein's CA, `af_unix_mediation`, keep
+  `deny_credentials`). rein **generates, installs, and provisions nothing**; it publishes the
+  snippet (`rein profile-snippet nono`) plus docs, and **verifies** the running sandbox with the
+  prober. That is the whole shed — sandbox-config ownership — and rein stops making sandbox
+  claims.
 
-**Why plug-in wins:** every finding dragged the wrapper deeper into sandbox ownership — the
-`claude-code` profile is a registry *pack* it must provision, nono moves fast, profiles differ
-per backend. The plug-in leaves all that with the user, where it belongs — the purest form of
-the product: bring your own sandbox; rein brokers the credentials.
+**rein still owns a thin launch by default** — and that's a feature, not a wrapper relapse.
+`rein run -- claude` becomes a thin launcher over the *user's* profile: start one ephemeral
+relay, then `nono run -p <their-profile> --upstream-proxy 127.0.0.1:<port> -- claude`. Owning the
+launch is what keeps **one relay per sandbox** (see the architecture section) — the guarantee the
+verify-only path can't make. So the two shapes are:
+
+- **Default — thin launcher** (`rein run`): rein execs the user's sandbox, guarantees
+  one-relay-per-sandbox, ephemeral relay dies with the run. Sheds config, keeps launch.
+- **Advanced — standalone broker** (`rein session start`): rein is fully out of the launch path
+  for users who drive the sandbox from their own tooling/IDE; they accept the documented
+  one-sandbox-per-relay *verify* responsibility.
+
+**The honest shift is narrower than "guarantee → verify" everywhere:** the default still
+*guarantees* one-relay-per-sandbox (it owns the launch) and only *verifies* the profile the user
+wrote (via the prober). Full guarantee→verify applies only to the advanced standalone path.
+
+**Why this wins:** every finding dragged the old wrapper deeper into sandbox *config* ownership —
+the `claude-code` profile is a registry pack it must provision, nono moves fast, profiles differ
+per backend. Handing the profile to the user sheds all of that, while a thin launch keeps the
+containment guarantee. Bring your own sandbox; rein brokers the credentials.
 
 ## The proxy: relay and parser, both kept
 
@@ -135,19 +151,22 @@ an opt-in, not the default — the common path never touches rulesets.
 
 ## Kept vs. shed
 
-About **~2.0k non-test lines** shed from a ~22k branch — **if the plug-in shape is adopted**:
+Roughly **~1.7k non-test lines** of sandbox-*config* code shed from a ~22k branch (recompute at
+build; the reorientation sheds config ownership, not the launch):
 
-- **Shed → docs + a snippet command:** `cmd/rein/run_nono.go` + home overlays (~810);
-  `internal/nono` installer + profile-generator + doctor (~1.2k).
+- **Shed → docs + a snippet command:** `internal/nono` profile-generator (~550), installer (~365),
+  doctor/preflight (~303), and the home overlays (`sandbox_claude_home` + `sandbox_gh_home`, ~215)
+  — all now the user's profile. `cmd/rein/run_nono.go` (~590) **thins to a ~300-line launcher**
+  (start relay → exec the user's `nono run` with injected routing → agent contract), so ~290 of it
+  goes too.
 - **Kept:** minter, the relay **with its parser** (`internal/classify` + `proxy/receivepack` +
-  `gate`, ~860 — the universal branch floor), ceremony, prober-as-verifier (the ~1.6k `selftest`
-  + `verify`), audit — the broker itself. **No ruleset code is adopted, and the App manifest does
-  not gain `administration:write`.** Nothing built this cycle is wasted; the shed wrapper code
-  becomes documentation.
+  `gate`, ~860 — the universal branch floor), ceremony, prober-as-verifier (the ~1.6k `selftest` +
+  `verify`, now with the end-to-end round-trip fix), audit, and the thin launcher — the broker
+  itself. **No ruleset code is adopted, and the App manifest does not gain `administration:write`.**
+  Nothing built this cycle is wasted; the shed config code becomes documentation.
 
 The relay + parser stay on **every** backend (nono and srt alike) — they carry the universal
-branch floor and the downstream injection that keeps the token out of the sandbox. The ~2.0k is
-only the wrapper, and only if we move to the plug-in shape.
+branch floor and the downstream injection that keeps the token out of the sandbox.
 
 ## Backends
 
@@ -165,49 +184,86 @@ rein is agnostic. It ships a snippet and a verified config for each supported sa
 The design worried about two wrinkles — a standing daemon and a session-identity token. Grounding
 them in the code dissolved both. Today the broker is **in-process, one relay per `rein run`, with
 identity implicit** (one proxy = one run; no on-the-wire run discriminator). The reorientation
-keeps that property and just *decouples the relay from launching the sandbox* — it does **not**
-introduce a resident multi-run daemon.
+keeps that property; it does **not** introduce a resident multi-run daemon (multiplexing runs over
+one endpoint is the only shape that needs a wire discriminator, and nono can't carry one —
+`external_proxy.auth` is unimplemented; `internal/daemon` stays shelved).
 
-1. **Broker lifecycle — a per-session relay, not a daemon.** `rein session start` reuses today's
-   per-run relay (`runbroker.Start`) on an **ephemeral `127.0.0.1:0` port** and prints the launch
-   routing instead of exec-ing the sandbox itself. It lives from `session start` to `session end`
-   / idle-TTL. The user then launches *their* sandbox pointed at it. The one already-standing
-   thing rein reuses is the persistent trust material (App key + proxy CA); `internal/daemon`
-   stays shelved. A resident multi-run daemon is explicitly rejected: multiplexing runs over one
-   endpoint is the *only* shape that needs a wire discriminator, and nono can't carry one
-   (`external_proxy.auth` is unimplemented). Don't build the thing that manufactures the problem.
+**Two entry shapes over the same relay:**
 
-2. **Session identity — stays implicit.** One relay = one session = one `runID` = one
-   confirmed-issue file; the read→write flip is still a file the relay re-reads per request. No
-   per-session bearer token (it couldn't ride anyway). Concurrency = multiple `rein session start`
-   on different ephemeral ports; nono's loopback mediation isolates them.
+1. **Default — thin launcher (`rein run`).** rein starts one **ephemeral `127.0.0.1:0`** relay and
+   execs the *user's* sandbox pointed at it: `nono run -p <their-profile> --upstream-proxy
+   127.0.0.1:<port> -- claude`. Because rein owns the launch, this is **one relay per sandbox,
+   ephemeral, torn down with the run** — no lingering write-approved relay, and rein injects the
+   routing so there is no "forgot the flag" path. This is the recommended default. It sheds sandbox
+   *config* ownership (no profile-gen, no install, no pack) but keeps a thin launch.
+
+2. **Advanced — standalone broker (`rein session start`).** For users driving the sandbox from
+   their own tooling/IDE, rein runs the relay out of the launch path and prints the routing; the
+   user launches their sandbox themselves. This path accepts a real residual (below).
 
 **How the ephemeral port reaches a user-owned profile — without rein writing the profile.** nono
 exposes `--upstream-proxy <host:port>` / `NONO_UPSTREAM_PROXY=` (and `--allow-domain` /
-`--upstream-bypass`) as launch-time overrides. So the per-session port travels on the user's
-*launch command* (`NONO_UPSTREAM_PROXY=127.0.0.1:<port> nono run -p their-profile …`), and their
-profile stays **static and entirely theirs**: CA trust (stable path), `allow_domain` (inject hosts
-+ `declare.rein.internal`), `upstream_bypass` (CDN), `af_unix_mediation`, `block:false`. rein
-injects **nothing** into the profile. (nono's profile fields do **not** interpolate arbitrary host
-env — expansion is a fixed variable set on path/`set_vars` fields only — so the launch-flag
-override, not profile interpolation, is what makes an ephemeral port work.)
+`--upstream-bypass`) as launch-time overrides. The port travels on the *launch command* — set by
+rein in the default path, by the user in the standalone path — so their profile stays **static and
+entirely theirs**: CA trust (stable path), `allow_domain` (inject hosts + `declare.rein.internal`),
+`upstream_bypass` (CDN), `af_unix_mediation`, `block:false`, and **`deny_credentials`**. rein
+injects **nothing** into the profile. (nono profile fields do **not** interpolate arbitrary host
+env, so the launch-flag override — not profile interpolation — is what makes an ephemeral port
+work.)
 
-**The one residual, and it's the honest "verify" tax.** rein can no longer *guarantee*
-one-sandbox-per-relay the way owning the launch did. If a user *deliberately* points two sandboxes
-at one running relay, both share the one approved write session (agent B inherits agent A's write
-tier). An ephemeral fresh-port-per-session makes this a deliberate misuse, not the default — and
-the containment prober asserts it, plus the docs warn. Anyone wanting the old *guarantee* keeps
-the thin `rein run` wrapper (decision #1), which still owns the launch. Guarantee vs. verify is
-exactly the wrapper-vs-plug-in axis.
+**Session identity stays implicit.** One relay = one session = one `runID` = one confirmed-issue
+file the relay re-reads per request. No per-session bearer token (it couldn't ride anyway).
+Concurrency = multiple relays on different ephemeral ports.
 
-**Two build-time must-dos** (not open questions — requirements):
-- **Prober invocation.** The verify half of guarantee→verify needs a concrete hook: `rein session
-  start` (or a `rein verify`) runs the prober against the launched sandbox before the agent does
-  real work, and fails closed on a bad config. Not a silent gap.
-- **Approval fails closed.** With rein no longer owning a terminal, the in-sandbox `rein declare`
-  surfaces its host-side approval via the **tmux popup** (already built, af_unix-mediated) or the
-  **foreground `rein session start` terminal**. Detached + no-tmux has nowhere to prompt — that
-  must be a clear fail-closed error at `session start`, never a hang.
+### Security properties and fixes (from the fable review)
+
+The relay is **unauthenticated on the wire** and that is a deliberate, bounded choice — but the
+old claim that "reaching the port buys no capability" is **wrong** and is retracted. Token
+*secrecy* holds (the value is injected on the rein→GitHub leg, never enters the sandbox — nothing
+to `nc -U` or `git credential fill` out). But the relay's job is to *authorize the connector's
+requests*: any process that reaches the port gets its own requests decorated with the current-tier
+token and executed against GitHub. That is **action authority**, not nil capability. Consequences
+and the fixes that ship with the reorientation:
+
+- **Different-uid reach (multi-user box).** Loopback TCP is not uid-gated, but the App key *is*
+  (keystore, uid + mode `0o077`). So a different local uid could get write-tier GitHub *actions*
+  injected without ever reading the key — the relay would be a weaker boundary than the keystore
+  in front of it. **Fix: uid-gate the loopback relay to same-uid peers**, for parity with the
+  keystore's uid discipline. (Implementation note: it's a TCP front, so this is a
+  `/proc/net/tcp` peer-uid check, not `SO_PEERCRED`; confirm feasibility during build.)
+- **Shared-session blast radius is worse than "bounded."** If two connectors share one relay
+  (deliberate co-pointing on the standalone path; or a co-resident process), the second inherits
+  the approved write tier. The write token is **installation-wide, floored only to `agent/**` by
+  the parser** — issue binding is audit-only (see above) — so the second connector can write
+  `agent/**` on **any repo the installation covers**, and its writes are **laundered under the
+  session's issue attribution**, poisoning the audit trail. The default thin-launcher path removes
+  the deliberate-co-pointing vector (one relay per sandbox, ephemeral); the uid-gate narrows the
+  co-resident vector to same-uid (who already holds the key). The standalone path documents the
+  residual.
+
+**Two build-time must-dos** (requirements, not open questions):
+
+- **Prober must prove the rein leg is live — today it does not.** The shipped positive control
+  only TCP-*connects* to nono's own proxy; it never confirms a request reached *rein*, so it
+  **cannot detect a dead/mis-provisioned rein listener** (the current claim in
+  `design-nono-pivot.md` that it can is an overclaim to correct). Fix: the probe must make an
+  **end-to-end round-trip** through nono→rein to a rein-served endpoint, fail closed on a bad
+  config, and the prober's scope must include verifying the user's **`deny_credentials`** (now the
+  user's profile) — because a forgotten route fails closed *only* if the agent holds no independent
+  credential. Caveat: verify runs *after* launch, so it bounds — not eliminates — a
+  launch→probe window on the standalone path; the default path closes it by owning the launch.
+- **Approval must fail closed at declare time, not session start.** The prompt fires at
+  `declare`, not at start, so a session that starts attached and then loses its terminal (SSH
+  drop, window close, backgrounding) has nowhere to prompt. Requirements: re-evaluate channel
+  reachability **at declare time**; a dead-tty **EOF is a denial** (fall back to read tier — which
+  still satisfies "the helper always returns a credential"), never a hang, never auto-approve;
+  prefer the **tmux popup** (it survives detach; the foreground terminal does not).
+
+**Open empirical must-verify.** nono's behavior when `upstream_proxy` is set-but-unreachable, and
+`block:false + allow_domain(github)` with no upstream_proxy, is documented nowhere in-repo or in
+the nono skill. It changes only the *degradation mode* (agent can't work vs. works un-brokered),
+not the credential boundary, but it is load-bearing for the fail-closed story — measure it, don't
+assert it.
 
 ## Tradeoffs and options considered
 
@@ -221,7 +277,7 @@ The design space we explored, and why we landed where we did. A record, not a re
 | **Merge policy** | **Agent-merge default** · **human-merge-only** | **Agent-merge default; human-merge opt-in** | Agent-merge is genuinely useful. Human-merge is hard to enforce cleanly — GitHub bundles merge into `pull_requests:write` — so blocking it needs a server-side ruleset; that makes human-merge-only an opt-in that only works on rulesets-capable repos (public / Pro-private). |
 | **Commit signing** | Forward the **developer's** signing key · a **rein/bot signing identity** | **rein/bot identity** (scoping mechanics still open design) | Forwarding a signing *agent* socket is safe (the key isn't extractable — the agent protocol signs but never reveals it), but signing as the *developer* breaks non-impersonation. |
 | **Issue binding** | Hard **per-issue write boundary** · **per-issue ceiling + attribution + audit** | **Ceiling + audit, not a hard boundary** | GitHub has no issue-scoped tokens, so the parser never enforced "this token can only write issue N's branch" anyway. rein's honest claim is a per-issue *ceiling* plus attribution plus audit. |
-| **Shape** | **Wrapper** — rein owns install / profile / launch · **plug-in** — the user owns the sandbox, rein brokers | **Plug-in** (a thin wrapper stays optional) | Every finding dragged the wrapper deeper into sandbox ownership (registry packs, fast-moving profiles, per-backend shape). The plug-in leaves that with the user; rein stands behind the credential boundary alone and *verifies* the sandbox with the prober. |
+| **Shape** | **Wrapper** — rein owns install / profile / launch · **plug-in, user launches** — rein fully out of the launch path · **plug-in, thin launch** — rein sheds *config* but execs the user's sandbox | **Plug-in with a thin launch as default** (`rein run` over the user's profile); standalone `rein session start` for BYO-launch | The axis is *config* ownership, not launch ownership. Handing the user the profile sheds the registry-pack/fast-moving-profile pain; keeping a thin launch preserves one-relay-per-sandbox (the guarantee the pure BYO-launch path can't make). |
 
 ## Decisions requested
 
@@ -229,7 +285,7 @@ Each with a recommended default:
 
 | # | Decision | Recommend |
 |---|---|---|
-| 1 | Adopt **plug-in over wrapper** as rein's shape | **Yes** — keep a thin `rein run` wrapper as an optional convenience if we want turnkey too |
+| 1 | Adopt **plug-in** as rein's shape — shed sandbox *config* (profile-gen/install/pack/doctor); keep a **thin `rein run` launcher over the user's profile as the default** (owns the launch → one-relay-per-sandbox); `rein session start` standalone for BYO-launch | **Yes** |
 | 2 | **Keep the parser** as the universal branch floor (de-risked by `#136`); **do not adopt rulesets** for the branch floor — they'd cost the App `administration:write` and are Pro-gated for private repos; keep the App admin-free; audit from the parser tap + GitHub's record | **Yes** |
 | 3 | **Merge:** agent-merge default, human-merge-only opt-in | **Yes** |
 | 4 | **Backends:** support srt (containment) + nono (ease); rein stays agnostic | **Yes** |
