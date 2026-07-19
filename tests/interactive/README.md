@@ -66,7 +66,6 @@ one (a new dir + a new `golden.txt`). Each row links to the journey's own README
 | [multi_repo](journeys/multi_repo/) | REAL cross-repo work across a 2-repo ceiling in ONE run | COVERED |
 | [sandbox_gh_read_staleness](journeys/sandbox_gh_read_staleness/) | the #95 regression guard: cross-run gh-read staleness | COVERED |
 | [tmux_popup_approval](journeys/tmux_popup_approval/) | the DEFAULT approval surface inside `$TMUX` — a real popup (#37) | COVERED |
-| [sandbox_filesystem](journeys/sandbox_filesystem/) | the sandbox filesystem boundary from INSIDE (#59/#63/#64) | COVERED |
 | [credential_boundary](journeys/credential_boundary/) | the credential hide, proven by an INDEPENDENT `bagel` scanner | COVERED |
 | [app_not_installed](journeys/app_not_installed/) | misconfig: App not installed on a session repo (#68) | COVERED |
 | [init_autodetect](journeys/init_autodetect/) | `rein init` repo-prompt default autodetected from cwd `origin` (#69/#78) | COVERED |
@@ -171,8 +170,14 @@ the throwaway clean.
 - `journeys/<name>/` — the 18 journeys (index above); each holds `journey.py`,
   `golden.txt` (+ `session.txt` for `realagent_write`), and its own `README.md`.
 - `test_write_approval.py`, `test_init_interactive.py`, `test_confirm_shows_title.py`,
-  `test_scope_expansion.py`, `test_git_hardening.py`, `test_agent_contract.py` — the
-  plain-test invariants beside the journeys.
+  `test_scope_expansion.py` — the plain-test invariants beside the journeys.
+- RETIRED at the nono cutover (P3): `sandbox_filesystem` journey, `test_git_hardening.py`,
+  `test_agent_contract.py`. The srt deny-read/allow-back fs model and the `.git`
+  bind-mount host-exec escape they narrated are gone under nono (Landlock default-deny +
+  `deny_credentials`, no bind mounts). The nono `TestLiveContainment` probe
+  (`run-journeys.sh --sandbox` → [B]) now covers cred-hiding + fs containment as a
+  pass/fail invariant. (The agent-contract briefing itself is not yet wired into
+  run_nono — see the P3 cutover notes.)
 - `test_golden_shape.py` — stack-free lint: every journey has a golden and
   `normalize_for_compare` is idempotent on it. Runs in the sweep and standalone.
 - `realagent_e2e.py` — the real-agent sandbox-startup check (NOT a `test_*.py`;

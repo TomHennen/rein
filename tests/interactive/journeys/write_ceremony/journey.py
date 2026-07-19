@@ -29,10 +29,10 @@ ISSUE_ENV = "REIN_DEMO_ISSUE"
 
 
 def ceremony_script(repo: str, issue: int, good: str, bad: str) -> str:
-    """A `bash -c` body run as the srt child. It cannot be puppeted line-by-line
-    (it is one sandboxed process), so instead each STEP emits a tagged `@PHASE..`
-    sentinel and the test asserts on those IN SEQUENCE — the run reads as
-    expect->act->expect even though the child runs once.
+    """A `bash -c` body run as the nono-sandboxed child. It cannot be puppeted
+    line-by-line (it is one sandboxed process), so instead each STEP emits a
+    tagged `@PHASE..` sentinel and the test asserts on those IN SEQUENCE — the run
+    reads as expect->act->expect even though the child runs once.
 
     Commands go through `run` (reinharness.sandbox_preamble): it echoes each one
     as `SBX| $ <command>` and then tags its output, so the transcript interleaves
@@ -86,13 +86,11 @@ def _rc(child_match) -> int:
     return int(child_match.group(1))
 
 
-def run_ceremony(env, repo, issue, title, sandbox="srt"):
+def run_ceremony(env, repo, issue, title):
     """Drive the live run; return (transcript_text, rcs, prompts, landed, branches).
 
-    `sandbox` selects the backend: "srt" (default) or "nono" (REIN_SANDBOX=nono,
-    the pivot). The in-sandbox ceremony (declare -> approve -> push) is identical
-    across backends; only the host-side launch banner differs — which is why each
-    backend keeps its OWN golden (a sibling journey dir per backend)."""
+    Runs on the default (nono) sandbox — `spawn_rein_run` invokes bare
+    `rein run -- …`, which is nono since the P3 cutover."""
     good = f"agent/{issue}/{H.unique_branch('cerem')}"
     bad = H.unique_branch("cerem-nonconvention")
     branches = [good, bad]
@@ -106,8 +104,6 @@ def run_ceremony(env, repo, issue, title, sandbox="srt"):
     # operator's live tmux). The golden is the inline prompt, so this is a no-op on
     # the transcript and pure robustness.
     extra_env = {"REIN_SESSION_FILE": session, "REIN_APPROVAL": "tty"}
-    if sandbox == "nono":
-        extra_env["REIN_SANDBOX"] = "nono"
     run = H.spawn_rein_run(
         ["bash", "-c", script], workdir=wd, env=env,
         extra_env=extra_env,
@@ -161,7 +157,7 @@ def run_ceremony(env, repo, issue, title, sandbox="srt"):
     return run.text(), rcs, prompts, landed, branches
 
 
-def main(sandbox="srt", golden=GOLDEN) -> int:
+def main(golden=GOLDEN) -> int:
     env = H.rein_env()
     repo = H.resolve_throwaway_repo(env)  # rein-init way first; #40
     H.build_binaries(env)
@@ -181,12 +177,12 @@ def main(sandbox="srt", golden=GOLDEN) -> int:
             env,
         )
 
-    print(f"journey: write ceremony ({sandbox}) on {repo}, issue #{issue} "
+    print(f"journey: write ceremony on {repo}, issue #{issue} "
           f"({'created' if ours else 'supplied'})", flush=True)
 
     branches: list[str] = []
     try:
-        text, rcs, prompts, landed, branches = run_ceremony(env, repo, issue, title, sandbox=sandbox)
+        text, rcs, prompts, landed, branches = run_ceremony(env, repo, issue, title)
 
         # 1) The ceremony itself must hold — independent of the golden.
         good = next(b for b in branches if b.startswith("agent/"))
@@ -240,7 +236,7 @@ def main(sandbox="srt", golden=GOLDEN) -> int:
         # Show the NORMALIZED diff (meaningful change, not noise), and drop the
         # RAW fresh transcript to a scratch path so the human can eyeball reality
         # and, if intended, adopt it with REIN_UPDATE_GOLDEN=1.
-        scratch = os.path.join(tempfile.gettempdir(), f"write_ceremony_{sandbox}.fresh.txt")
+        scratch = os.path.join(tempfile.gettempdir(), "write_ceremony.fresh.txt")
         with open(scratch, "w") as f:
             f.write(raw)
         print(f"[golden DRIFT] fresh run != {golden} (normalized) — re-review:", flush=True)
