@@ -83,26 +83,30 @@ prerequisite is absent — `credential_boundary` (bagel), `tmux_popup_approval` 
 pyte), `realagent_write` (claude / tmux / pyte), `init_then_run` (no configured App); a
 skip is not a pass. Details in each dir's README.
 
-**nono status (after the P3 srt→nono cutover).** The goldens were regenerated on the
-nono default. GREEN on nono: `write_ceremony`, `multi_repo`, `git_author`,
-`tmux_popup_approval`, `direct_mode`, `expansion_404`, `app_not_installed`,
-`init_autodetect`, `init_steady_state`, `session_commands`. Known-RED on nono — each
-exposes an UNFINISHED run_nono/installer item (a Tom decision before merge, NOT a
-cutover-correctness bug), tracked in the P3 cutover report:
-- `gh_write` — run_nono sets no `GH_CONFIG_DIR`; nono correctly denies host `~/.config/gh`
-  (oauth token), so `gh` hits EACCES and won't start when the developer has run
-  `gh auth login`. Needs a gh config-dir overlay (the gh twin of #94's `CLAUDE_CONFIG_DIR`).
-- `push_upstream`, and plausibly `scope_expansion` — run_nono never wired the
-  `internal/agentenv` contract vars (`REIN_UPSTREAM_INTENT_FILE`,
-  `REIN_EPHEMERAL_CLONE_DIR`, `REIN_REPO_WORKTREES`) into the profile `set_vars`. The push
-  lands; the upstream-recording / mid-run-clone plumbing does not.
-- `init_then_run`, `onboarding` — `rein init` never installs nono: `internal/nono.Install`
-  (digest-pinned, and `pinnedDigests` IS populated for 0.68.0) has NO caller; `init.go`
-  only runs `nonoDoctorChecks` as a soft-block preflight. So a fresh `git clone` +
-  `rein init` + `rein run` fails closed on any box where nono is not already placed at
-  `~/.config/rein/nono/bin/nono` by hand. Wiring `Install` into `rein init` is the fix.
+**nono status (after the P3 srt→nono cutover, then the P3-gaps fixes).** The goldens
+were regenerated on the nono default. GREEN on nono: `write_ceremony`, `multi_repo`,
+`git_author`, `tmux_popup_approval`, `direct_mode`, `expansion_404`, `app_not_installed`,
+`init_autodetect`, `init_steady_state`, `session_commands`, and — since the P3-gaps
+branch — `gh_write`, `init_then_run`, `onboarding`:
+- `gh_write` — FIXED (gap 2): run_nono now gives gh a per-run writable `GH_CONFIG_DIR`
+  overlay (the gh twin of #94's `CLAUDE_CONFIG_DIR`) with a placeholder hosts.yml, so gh
+  starts and real writes land (403 before declare, 201 after, `gh pr create` succeeds);
+  host `~/.config/gh` stays denied.
+- `init_then_run`, `onboarding` — FIXED (gap 1): `rein init` now wires `internal/nono.Install`
+  to install + digest-verify the pinned nono at `~/.config/rein/nono/bin/nono`, so a fresh
+  `git clone` + `rein init` + `rein run` works. (`onboarding` also had a stale cutover
+  assertion, `sandbox: srt present`, updated to `nono present`.)
+
+Still Known-RED on nono — each an UNFINISHED item OUTSIDE the P3-gaps scope (a Tom
+decision before merge, NOT a cutover-correctness bug), tracked in the P3 cutover report:
+- `push_upstream`, and `scope_expansion` — run_nono never wired the `internal/agentenv`
+  contract vars (`REIN_UPSTREAM_INTENT_FILE`, `REIN_EPHEMERAL_CLONE_DIR`, `REIN_REPO_WORKTREES`)
+  into the profile `set_vars`. The push lands; the upstream-recording / mid-run-clone
+  plumbing does not. (Distinct from the P3-gaps gap 3, which briefs the agent *contract
+  text* — these are the machine-readable env vars.)
 - `sandbox_gh_read_staleness` — harness artifact: the journey's nono state root under `/tmp`
-  overlaps nono's own `/tmp` state grant. Adapt the harness (state root off `/tmp`) or note.
+  overlaps nono's own `/tmp` state grant (`Refusing to grant '/tmp' … overlaps protected
+  nono state root`). Adapt the harness (state root off `/tmp`) or note.
 ENV-BLOCKED (no live claude TUI in this environment, not a nono defect): `realagent_write`,
 `claude_resume`. SKIP as before: `credential_boundary` (bagel).
 
