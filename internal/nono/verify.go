@@ -409,6 +409,11 @@ func (f tmuxFixture) probeSession() string {
 
 // readDirs are the read-only grants the send-keys probe needs to exec the
 // dynamically linked tmux inside the sandbox. Only when the fixture is usable.
+// NOTE: this makes the probe sandbox's fs read surface broader than a production
+// agent profile's (extra /usr, /lib). It does not weaken the cred/egress
+// channels (they test network + $HOME creds, not /usr /lib — confirmed live: the
+// 5 cred files stay unreadable with these grants active), but the probe profile
+// does diverge from production in a fixture-staged run.
 func (f tmuxFixture) readDirs() []string {
 	if f.usable {
 		return []string{"/usr", "/lib"}
