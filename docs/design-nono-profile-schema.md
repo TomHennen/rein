@@ -18,8 +18,7 @@ Three confidence levels are used throughout, and the distinction matters:
   `nono run --profile <file> -- echo ok` (exit 0). **Caveat:** `echo ok` proves the
   field *shape is accepted, the profile validates, and nono applies the sandbox*. It
   does **not** exercise the dial to rein's upstream proxy, CA trust under real TLS, or
-  AF_UNIX mediation under load — those are runtime concerns proven elsewhere, not claims
-  of this doc.
+  AF_UNIX mediation under load — those are runtime concerns, not claims of this doc.
 
 ## The shape
 

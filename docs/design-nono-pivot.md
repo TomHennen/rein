@@ -177,9 +177,12 @@ dir-wide read grant shouldn't drag other files in with it.
 | `rein CA` | rein CA PEM present + non-empty | warn (minted lazily) |
 | `loopback proxy port` | a 127.0.0.1 TCP port is bindable | warn |
 
-The `Check`/`Status` types are the neutral `internal/sandboxutil` ones (extracted so
-`internal/nono` never imported `internal/srt`). The launch path hard-gates the same
-rows and fails closed — never a silent drop to a weaker mode.
+Landlock/seccomp host support isn't a separate doctor row: the launch-gate containment
+probe (§3e) fails closed if the sandbox isn't actually enforcing, which subsumes a
+static host-capability check. The `Check`/`Status` types are the neutral
+`internal/sandboxutil` ones (extracted so `internal/nono` never imported
+`internal/srt`). The launch path hard-gates the same rows and fails closed — never a
+silent drop to a weaker mode.
 
 ---
 
@@ -258,8 +261,9 @@ must never *drive* an approval.
 - **Token-leak boundary:** rein injects downstream of the sandbox, so even a
   direct-to-port connection yields authenticated *actions*, never the token *value* —
   provided (a) no inject host reflects the `Authorization` header back (all inject hosts
-  are real github, none echo auth) and (b) `ExtraDomains` are never injected (enforced
-  in `Build`). No reflection oracle ⇒ no token exfil.
+  are real github, none echo auth — asserted, not separately confirmed) and (b)
+  `ExtraDomains` are never injected (enforced in `Build`). No reflection oracle ⇒ no
+  token exfil.
 
 ### 3b. CA trust via env (fail-closed)
 
@@ -287,9 +291,9 @@ bundle over the system trust path) isn't available. CA trust is **env/config bas
   and nono's mediation. Overriding local config is exactly *how* an agent would try the
   direct-github path — which is blocked (§3c).
 
-*Caveat:* CA trust is proven for git; a non-git tool (node) reading rein's CA under
-Landlock — including whether the CA file needs an explicit read grant — is verified less
-thoroughly (§8).
+*Caveat:* the spike proved CA trust for git only. A non-git tool (node/python) reading
+rein's CA under Landlock — including whether the CA file needs an explicit read grant —
+was not separately spiked; verify for both git and a non-git tool (§8).
 
 ### 3c. Host routing (exact hosts → rein, CDN → direct)
 
@@ -475,7 +479,7 @@ fs. The `realagent_write`/`claude_resume` journeys depend on it.
 
 | Env var | Verdict |
 |---|---|
-| `REIN_SANDBOX_ALLOW_READ` / `REIN_SANDBOX_SHOW_HOME` | **deleted** — srt deny-read/allow-back mount semantics; nono uses `deny_credentials` + Landlock allow-read |
+| `REIN_SANDBOX_ALLOW_READ` / `REIN_SANDBOX_SHOW_HOME` | **deleted** — srt deny-read/allow-back mount semantics; nono uses `deny_credentials` + Landlock allow-read. If an escape-hatch is wanted later, add a NEW var under nono semantics rather than carrying the srt one |
 | `REIN_SANDBOX_ALLOW_UNHARDENED_GIT` + `githard.go` | **deleted** — guarded srt's `.git` **bind-mount** threat; under nono there's no bind-mount. See the `.git`-hooks residual in §8 |
 | `REIN_ALLOW_DOMAINS` | **kept** — operator egress opt-in, substrate-agnostic; the resolver moved to `internal/sandboxutil` (feeds `allow_domain` + `ExtraDomains`, never inject) |
 | `REIN_DISABLE_CLAUDE_MCP`, `REIN_REPO_WORKTREES`, `REIN_EPHEMERAL_CLONE_DIR`, `REIN_UPSTREAM_INTENT_FILE`, agent-contract | **kept** — not srt-specific; helpers moved to `internal/agentenv` |
@@ -588,7 +592,7 @@ briefed under nono.
   (srt) for another.
 - **CA trust untested beyond git (§3b):** proven for git only; a non-git tool
   (node/python) reading rein's CA under Landlock — including whether the CA file needs an
-  explicit read grant — is verified less thoroughly.
+  explicit read grant — was not separately spiked, so it remains a confirm-item.
 - **Full composed profile:** the end-to-end spike proof used a no-auth rein hop, open UDP,
   no declare host, and an untightened profile — the *proven* composition was not the
   *production* one. The production profile (nono→rein tunnel + UDP policy + declare host +
@@ -597,4 +601,3 @@ briefed under nono.
 - **nono is a new trust root.** nono TLS-terminates nothing rein cares about (rein does
   the github TLS), but it is now the sandbox and the tunnel. "Stronger sandbox than srt"
   is asserted, not measured — the prober is how we substantiate and monitor it.
-```
