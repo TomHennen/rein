@@ -1596,6 +1596,9 @@ _NORMALIZE_RULES = [
     # per-run proxy socket + run id
     (r"/run/user/\d+/rein/run-[A-Za-z0-9_-]+/proxy\.sock", "<PROXY_SOCK>"),
     (r"run-[A-Za-z0-9_-]{16,}", "run-<RUNID>"),
+    # nono's loopback proxy listens on an OS-assigned ephemeral port (rein run
+    # --nono banner: "loopback proxy: 127.0.0.1:<port>"), different every run.
+    (r"127\.0\.0\.1:\d+", "127.0.0.1:<PORT>"),
     # scratch dirs (the trailing char class excludes '/', so a suffix like
     # /session.yaml is preserved: <TMP>/session.yaml)
     (r"/tmp/rein-[A-Za-z0-9_.-]+", "<TMP>"),
