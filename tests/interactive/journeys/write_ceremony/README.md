@@ -1,7 +1,9 @@
 # write_ceremony — the #35 write ceremony (COVERED)
 
 Agent declares an issue → human confirms on the terminal → a verified push to
-`agent/<n>/<nonce>` lands. One real `rein run`, split into the two views whose gap
+`agent/<n>/<nonce>` lands. Runs on the default (nono) sandbox since the P3 cutover
+(the separate `write_ceremony_nono` variant was folded back in here). One real
+`rein run`, split into the two views whose gap
 **is** the security argument: the **agent** in-sandbox (pre-declaration push denied
 → `rein declare <n>` → verified push succeeds → a non-convention ref rejected) and
 the **human** on the tty (the Form A prompt carrying the *fetched*

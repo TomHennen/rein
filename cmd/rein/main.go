@@ -42,60 +42,69 @@ import (
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
+	"github.com/TomHennen/rein/internal/nono"
 	"github.com/TomHennen/rein/internal/runscope"
 	"github.com/TomHennen/rein/internal/session"
-	"github.com/TomHennen/rein/internal/srt"
 	"github.com/TomHennen/rein/internal/tokencache"
 	"github.com/TomHennen/rein/internal/ui/grant"
 )
 
-// dispatchRun routes `rein run`. CP4 flips the default: sandboxed (srt) mode is
-// now the DEFAULT (where srt is healthy — runSandboxed hard-gates preflight and
-// fails closed, never silently dropping to unsandboxed on a real repo). Direct
-// mode moves behind an explicit --direct/--no-sandbox flag with a loud banner
+// dispatchRun routes `rein run`. Sandboxed (nono) mode is the DEFAULT: runNono
+// digest-verifies the managed nono binary and fails closed (→ `rein init`) if it
+// is absent/mismatched, never silently dropping to unsandboxed on a real repo.
+// Direct mode is behind an explicit --direct/--no-sandbox flag with a loud banner
 // (the reduced-protection, throwaway-only path). The mode flag, if present, must
 // come BEFORE the "--" separator:
 //
-//	rein run -- <cmd>              # sandboxed (default)
+//	rein run -- <cmd>              # sandboxed (default: nono)
 //	rein run --sandbox -- <cmd>    # sandboxed (explicit; alias for the default)
+//	rein run --nono -- <cmd>       # sandboxed (explicit; alias for the default)
 //	rein run --direct -- <cmd>     # DIRECT/unsandboxed (explicit opt-in + banner)
 //	rein run --no-sandbox -- <cmd> # alias for --direct
+//
+// --sandbox and --nono are kept as no-op aliases for the default (nono is now the
+// only sandbox backend).
 func dispatchRun(argv []string) (int, error) {
 	mode, cmdline, err := parseRunMode(argv)
 	if err != nil {
 		return 2, err
 	}
-	if mode == modeDirect {
+	switch mode {
+	case modeDirect:
 		// Banner only AFTER the command shape validated (parseRunMode returns a
 		// usage error first), so a usage error never prints the scary warning.
 		printDirectModeBanner(os.Stderr)
 		return runWrapped(append([]string{"--"}, cmdline...))
+	default:
+		// Sandboxed (default + --sandbox + --nono). runNono digest-verifies the
+		// managed nono binary and fails closed (→ `rein init`) if it is
+		// absent/mismatched — it does NOT fall back to unsandboxed mode.
+		return runNono(cmdline)
 	}
-	// Sandboxed (default + --sandbox). runSandboxed runs preflight and fails
-	// closed (with a `rein doctor` pointer) if srt is unhealthy — it does NOT
-	// fall back to unsandboxed mode on its own (design §2-3; CP3 fallback rule).
-	return runSandboxed(cmdline)
 }
 
-// runMode is the sandbox-vs-direct decision for `rein run`.
+// runMode is the sandbox-backend decision for `rein run`.
 type runMode int
 
 const (
-	modeSandbox runMode = iota
+	// modeNono is the default sandboxed mode (nono is the sole sandbox backend).
+	modeNono runMode = iota
 	modeDirect
 )
 
 // parseRunMode decides the run mode from the leading flag and validates the
 // command shape, returning the mode and the cmdline (the argv AFTER "--"). The
-// default (no recognized mode flag) is modeSandbox — the CP4 flip. A usage error
-// is returned for a bad command shape BEFORE any side effect, so dispatchRun can
-// reject it without printing the direct-mode banner.
+// default (no flag) is modeNono. A usage error is returned for a bad command
+// shape BEFORE any side effect, so dispatchRun can reject it without printing the
+// direct-mode banner.
 func parseRunMode(argv []string) (runMode, []string, error) {
-	mode := modeSandbox
+	mode := modeNono
 	rest := argv
 	if len(argv) > 0 {
 		switch argv[0] {
-		case "--sandbox":
+		case "--sandbox", "--nono":
+			// No-op aliases: nono is the only sandbox backend.
+			mode = modeNono
 			rest = argv[1:]
 		case "--direct", "--no-sandbox":
 			mode = modeDirect
@@ -116,7 +125,7 @@ func parseRunMode(argv []string) (runMode, []string, error) {
 func printDirectModeBanner(w io.Writer) {
 	fmt.Fprintln(w, "===============================================================")
 	fmt.Fprintln(w, "rein: WARNING — DIRECT (UNSANDBOXED) MODE")
-	fmt.Fprintln(w, "  The agent runs OUTSIDE the srt sandbox. It shares your user")
+	fmt.Fprintln(w, "  The agent runs OUTSIDE the nono sandbox. It shares your user")
 	fmt.Fprintln(w, "  account: it CAN read your ambient credentials (gh login, SSH")
 	fmt.Fprintln(w, "  keys, ~/.netrc, keyrings) and the rein-brokered token is only")
 	fmt.Fprintln(w, "  hidden by process boundaries, not a sandbox. Use this ONLY on a")
@@ -138,6 +147,12 @@ const (
 )
 
 func main() {
+	// Co-located-broker hardening (design §8): remove the operator's ambient GitHub
+	// tokens from rein's OWN process env before doing anything. Under nono (no PID
+	// namespace) the agent shares rein's uid and could read /proc/<rein-pid>/environ;
+	// rein mints via the App key and never consumes these, so it exposes none.
+	scrubAmbientTokensFromSelf()
+
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
@@ -199,11 +214,19 @@ func main() {
 			fmt.Fprintf(os.Stderr, "rein declare: %v\n", err)
 		}
 		os.Exit(code)
-	case "__sandbox-probe":
-		// Hidden subcommand: runs INSIDE srt during VerifyConfigApplied to
-		// prove the deny-read + seccomp protections took effect. Exits with a
-		// srt.Probe* code the parent interprets. Not user-facing.
-		os.Exit(srt.RunProbe(os.Args[2:]))
+	case "__nono-probe":
+		// Hidden subcommand: runs INSIDE `nono run` during
+		// nono.VerifyContainment. It measures the containment channels and
+		// writes an Observations JSON the host-side gate classifies. Not
+		// user-facing.
+		os.Exit(nono.RunContainmentProbe(os.Args[2:]))
+	case "__nono-ptrace-attach":
+		// Hidden subcommand: the fork-safe ptrace attempt. RunContainmentProbe
+		// forks THIS (via os.Executable) so a seccomp RET_KILL on ptrace cannot
+		// take the whole probe down before it writes observations. It only
+		// attempts PTRACE_ATTACH against the given pid and encodes the outcome
+		// in its exit code. Not user-facing.
+		os.Exit(nono.RunPtraceAttachProbe(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -227,7 +250,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  rein session show                         (standing scope ceiling + live runs' expansions)")
 	fmt.Fprintln(os.Stderr, "  rein session add-repo <owner/name>        (validated widening of the standing ceiling)")
 	fmt.Fprintln(os.Stderr, "  rein declare <issue-number> [--repo owner/name]  (declare the issue this run's work is for)")
-	fmt.Fprintln(os.Stderr, "  rein run -- <cmd> [args...]                (sandboxed by default)")
+	fmt.Fprintln(os.Stderr, "  rein run -- <cmd> [args...]                (sandboxed via nono by default)")
 	fmt.Fprintln(os.Stderr, "  rein run --direct -- <cmd> [args...]       (unsandboxed; throwaway repos only)")
 }
 

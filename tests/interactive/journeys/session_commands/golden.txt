@@ -1,5 +1,5 @@
 $ rein session show
-session: sess_journey_sesscmds   (/tmp/rein-journey-sesscmds-k3isdo42/session.yaml)
+session: sess_journey_sesscmds   (/tmp/rein-journey-sesscmds-_zii58xb/session.yaml)
   role:      implement
   repos:     TomHennen/agentcreds-validation-a  [App installed]
   issue:     agent-declared at runtime (confirmed per run; #35 model)
@@ -17,7 +17,7 @@ Takes effect on the NEXT `rein run`. A live run keeps its launch-time scope —
 inside a run, the agent requests expansion with `rein declare <n> --repo <owner/name>`.
 
 $ rein session show
-session: sess_journey_sesscmds   (/tmp/rein-journey-sesscmds-k3isdo42/session.yaml)
+session: sess_journey_sesscmds   (/tmp/rein-journey-sesscmds-_zii58xb/session.yaml)
   role:      implement
   repos:     TomHennen/agentcreds-validation-a  [App installed]
              TomHennen/agentcreds-validation-b  [App installed]

@@ -193,22 +193,17 @@ func runWrapped(argv []string) (int, error) {
 	env = setEnv(env, "REIN_RUN_ID", runID)
 	env = setEnv(env, "REIN_RUN_PID", strconv.Itoa(os.Getpid()))
 
-	// Scrub ambient GitHub tokens from the wrapped child. The agent must
-	// use only rein-brokered credentials, never a long-lived token the
-	// developer happens to have in their shell. Safe: git ignores these
-	// (it authenticates via the credential helper), and gh ops go through
-	// the rein-gh shim, which mints + sets its OWN GH_TOKEN, overriding
-	// any inherited value. This closes the easiest Shape B bypass — an
-	// agent reading the ambient token. It does NOT remove gh's stored
-	// login (keyring); a determined same-UID agent can still reach that,
-	// which is what the Phase 1 sandbox is for (issue #7).
-	var scrubbed []string
-	for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"} {
-		if os.Getenv(name) != "" {
-			scrubbed = append(scrubbed, name)
-		}
+	// Ambient GitHub tokens were already removed from rein's own process at startup
+	// (scrubAmbientTokensFromSelf, §8), so they are absent from this child env too.
+	// The agent must use only rein-brokered credentials, never a long-lived token the
+	// developer happens to have in their shell. Belt-and-suspenders: unset again (a
+	// no-op) and report what was removed. This does NOT remove gh's stored login
+	// (keyring); a determined same-UID agent can still reach that — that is what the
+	// sandbox is for (issue #7).
+	for _, name := range ambientGitHubTokenNames {
 		env = unsetEnv(env, name)
 	}
+	scrubbed := ambientTokenNamesRemoved
 
 	cmd := exec.Command(cmdline[0], cmdline[1:]...)
 	cmd.Env = env
@@ -650,6 +645,45 @@ func writeRunGitConfig(path, reinBin string) error {
 
 // setEnv replaces (or appends) the named env var in env. Returns the
 // new slice.
+// ambientGitHubTokenNames are the env vars carrying a GitHub token. rein mints its
+// own credentials via the App key and never consumes these, so it removes them from
+// its OWN process env at startup (scrubAmbientTokensFromSelf) — see §8.
+var ambientGitHubTokenNames = []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}
+
+// Captured at startup by scrubAmbientTokensFromSelf, BEFORE the env-unset: the names
+// (for the child-scrub reassurance message) and values (for the fail-closed launch
+// self-check). The values live in rein's heap only — ptrace-protected, never back in
+// env/argv — which is the whole co-located-broker discipline (§8).
+var (
+	ambientTokenNamesRemoved  []string
+	ambientTokenValuesRemoved []string
+)
+
+// scrubAmbientTokensFromSelf removes the operator's ambient GitHub tokens from rein's
+// OWN process env at startup (§8 co-located-broker hardening): nono has no PID
+// namespace, so the agent could read /proc/<rein-pid>/environ if nono's environ block
+// ever regressed — rein must expose no real credential there. rein mints via the App
+// key and never reads these, so removal is safe. Idempotent; call once, early in main.
+func scrubAmbientTokensFromSelf() {
+	if ambientTokenNamesRemoved != nil || ambientTokenValuesRemoved != nil {
+		return
+	}
+	ambientTokenNamesRemoved = []string{}
+	ambientTokenValuesRemoved = []string{}
+	for _, name := range ambientGitHubTokenNames {
+		if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+			ambientTokenNamesRemoved = append(ambientTokenNamesRemoved, name)
+			ambientTokenValuesRemoved = append(ambientTokenValuesRemoved, v)
+		}
+		os.Unsetenv(name)
+	}
+}
+
+// ambientTokenValues returns the ambient GitHub token values removed from rein's
+// process at startup, for the co-located-broker launch self-check (§8): these must
+// not survive into the sandbox child's argv or env (agent-readable via /proc).
+func ambientTokenValues() []string { return ambientTokenValuesRemoved }
+
 func setEnv(env []string, name, value string) []string {
 	prefix := name + "="
 	for i, kv := range env {

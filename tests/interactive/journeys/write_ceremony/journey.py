@@ -29,10 +29,10 @@ ISSUE_ENV = "REIN_DEMO_ISSUE"
 
 
 def ceremony_script(repo: str, issue: int, good: str, bad: str) -> str:
-    """A `bash -c` body run as the srt child. It cannot be puppeted line-by-line
-    (it is one sandboxed process), so instead each STEP emits a tagged `@PHASE..`
-    sentinel and the test asserts on those IN SEQUENCE — the run reads as
-    expect->act->expect even though the child runs once.
+    """A `bash -c` body run as the nono-sandboxed child. It cannot be puppeted
+    line-by-line (it is one sandboxed process), so instead each STEP emits a
+    tagged `@PHASE..` sentinel and the test asserts on those IN SEQUENCE — the run
+    reads as expect->act->expect even though the child runs once.
 
     Commands go through `run` (reinharness.sandbox_preamble): it echoes each one
     as `SBX| $ <command>` and then tags its output, so the transcript interleaves
@@ -87,7 +87,10 @@ def _rc(child_match) -> int:
 
 
 def run_ceremony(env, repo, issue, title):
-    """Drive the live run; return (transcript_text, rcs, prompts, landed, branches)."""
+    """Drive the live run; return (transcript_text, rcs, prompts, landed, branches).
+
+    Runs on the default (nono) sandbox — `spawn_rein_run` invokes bare
+    `rein run -- …`, which is nono since the P3 cutover."""
     good = f"agent/{issue}/{H.unique_branch('cerem')}"
     bad = H.unique_branch("cerem-nonconvention")
     branches = [good, bad]
@@ -95,9 +98,15 @@ def run_ceremony(env, repo, issue, title):
     wd = H.make_workdir()
     script = ceremony_script(repo, issue, good, bad)
     session = _pinned_session(repo)
+    # REIN_APPROVAL=tty forces the inline /dev/tty Form A prompt pexpect drives —
+    # and, when the journey is run from inside a tmux session, keeps the host-side
+    # approval OFF the tmux-popup surface (which would otherwise open a popup in the
+    # operator's live tmux). The golden is the inline prompt, so this is a no-op on
+    # the transcript and pure robustness.
+    extra_env = {"REIN_SESSION_FILE": session, "REIN_APPROVAL": "tty"}
     run = H.spawn_rein_run(
         ["bash", "-c", script], workdir=wd, env=env,
-        extra_env={"REIN_SESSION_FILE": session},
+        extra_env=extra_env,
     )
 
     rcs: dict[int, int] = {}
@@ -148,7 +157,7 @@ def run_ceremony(env, repo, issue, title):
     return run.text(), rcs, prompts, landed, branches
 
 
-def main() -> int:
+def main(golden=GOLDEN) -> int:
     env = H.rein_env()
     repo = H.resolve_throwaway_repo(env)  # rein-init way first; #40
     H.build_binaries(env)
@@ -216,13 +225,13 @@ def main() -> int:
             print(H.normalize_for_compare(raw), flush=True)
 
         if os.getenv("REIN_UPDATE_GOLDEN"):
-            p = H.update_golden(GOLDEN, raw)  # store RAW
+            p = H.update_golden(golden, raw)  # store RAW
             print(f"[golden UPDATED] {p} (raw)", flush=True)
             return 0
 
-        ok, diff = H.compare_golden(GOLDEN, raw)  # normalizes BOTH sides
+        ok, diff = H.compare_golden(golden, raw)  # normalizes BOTH sides
         if ok:
-            print(f"[golden OK] fresh run matches {GOLDEN} (normalized)", flush=True)
+            print(f"[golden OK] fresh run matches {golden} (normalized)", flush=True)
             return 0
         # Show the NORMALIZED diff (meaningful change, not noise), and drop the
         # RAW fresh transcript to a scratch path so the human can eyeball reality
@@ -230,7 +239,7 @@ def main() -> int:
         scratch = os.path.join(tempfile.gettempdir(), "write_ceremony.fresh.txt")
         with open(scratch, "w") as f:
             f.write(raw)
-        print(f"[golden DRIFT] fresh run != {GOLDEN} (normalized) — re-review:", flush=True)
+        print(f"[golden DRIFT] fresh run != {golden} (normalized) — re-review:", flush=True)
         print(diff, flush=True)
         print(f"raw fresh transcript written to {scratch}", flush=True)
         print("(if the change is intended: REIN_UPDATE_GOLDEN=1 to adopt the new RAW golden)", flush=True)

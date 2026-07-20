@@ -49,16 +49,16 @@ import (
 )
 
 // EnvWorktrees is the per-run override / addition to the session's `worktrees:`
-// map: a colon-separated list of `owner/repo=/abs/path` entries (the same
-// PATH-style separator convention as REIN_SANDBOX_ALLOW_READ). An entry here
+// map: a colon-separated (PATH-style) list of `owner/repo=/abs/path` entries.
+// An entry here
 // REPLACES a same-repo entry from the session file, so a developer with two
 // checkouts can point one run at the other without editing the session.
 const EnvWorktrees = "REIN_WORKTREES"
 
 // The AGENT-visible names for these bindings (REIN_REPO_WORKTREES) and for the
-// ephemeral clone dir (REIN_EPHEMERAL_CLONE_DIR) live in internal/srt, which
-// owns the sandbox environment. This package renders the VALUE (AgentEnvValue);
-// srt sets the variable.
+// ephemeral clone dir (REIN_EPHEMERAL_CLONE_DIR) live in internal/agentenv, the
+// substrate-neutral env contract. This package renders the VALUE
+// (AgentEnvValue); the sandbox launcher (run_nono) sets the variable.
 
 // Binding is one validated local checkout to bind into the sandbox.
 type Binding struct {
@@ -352,9 +352,8 @@ func Resolve(p Params) (Result, error) {
 	}
 
 	// (2f) No mapped path may nest inside another (or duplicate it): overlapping
-	// writable binds mean one repo's tree lives inside another's, which srt would
-	// happily bind twice and git would see as a nested repo. srt.Build checks
-	// widening-vs-DENY, never widening-vs-widening, so this check is ours.
+	// writable grants mean one repo's tree lives inside another's, which git would
+	// see as a nested repo. This overlap check is ours to enforce.
 	for i := range res.Bindings {
 		for j := range res.Bindings {
 			if i == j {
@@ -538,8 +537,8 @@ func matchScope(repo string, sessionRepos []string) string {
 	return ""
 }
 
-// pathWithin reports whether child equals parent or is nested under it (same
-// semantics as srt.pathWithin; both are cleaned, comparison is segment-aware).
+// pathWithin reports whether child equals parent or is nested under it (both are
+// cleaned, comparison is segment-aware).
 func pathWithin(child, parent string) bool {
 	child = filepath.Clean(child)
 	parent = filepath.Clean(parent)

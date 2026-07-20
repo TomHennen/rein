@@ -4,8 +4,8 @@
 // The problem it solves: a sandboxed agent that runs `git commit` reads the
 // developer's host ~/.gitconfig by default, so its commits author as the
 // DEVELOPER (verified: user.name="Tom Hennen", user.email=…@gmail.com) — plain
-// impersonation. rein instead stamps GIT_AUTHOR_*/GIT_COMMITTER_* env vars (set
-// by internal/srt.BuildEnv) with an identity that (a) marks the human behind
+// impersonation. rein instead stamps the author/committer identity (injected by
+// run_nono as GIT_CONFIG_* in the nono profile) with an identity that (a) marks the human behind
 // the agent without claiming to BE them, and (b) links the commit to rein's
 // GitHub App so the author matches the pusher.
 //

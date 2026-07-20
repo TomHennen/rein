@@ -41,6 +41,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 cd "$REPO_ROOT"
 
+# Journeys assume they run OUTSIDE tmux ($TMUX unset -> inline /dev/tty approval);
+# the popup journey makes its OWN dedicated `tmux -L <unique>` server. If this
+# script is launched from inside the operator's tmux, a leaked $TMUX routes every
+# journey's approval popup into the operator's LIVE session (a real incident).
+# Clear it defensively so no journey can ever reach the operator's tmux.
+unset TMUX TMUX_PANE
+
 RUN_SANDBOX=0
 for arg in "$@"; do
   case "$arg" in
@@ -110,11 +117,12 @@ echo
 # [B] SANDBOX-HOLDS — the live sandbox invariants (opt-in: --sandbox)
 # ==========================================================================
 # Distinct from golden drift: these do NOT compare a transcript, they assert the
-# sandbox still ENFORCES its filesystem boundary — the same claims the
-# sandbox_filesystem journey narrates, but as pass/fail invariants (a hidden path
-# stays hidden, the .git host-exec escape stays closed, $HOME stays ephemeral, the
-# contract still reaches the agent). Run on demand because they are slow (each
-# spins a real srt sandbox).
+# nono sandbox still ENFORCES containment (credentials unreadable, arbitrary
+# loopback/direct egress denied, the approval channel isolated) as pass/fail
+# invariants. Run on demand because they are slow (each spins a real nono
+# sandbox). This is the §3e containment prober the design uses to keep trusting
+# nono across version bumps — it replaced the old srt deny-read/.git-hardening
+# suites at the P3 cutover.
 sbx_fail=0
 sbx_summary=()
 
@@ -132,28 +140,22 @@ run_suite() {  # run_suite "<label>" "<workdir>" <cmd...>
 if [ "$RUN_SANDBOX" -eq 1 ]; then
   echo "########## [B] SANDBOX-HOLDS: live sandbox invariants ##########"
 
-  # Gated Go E2E: deny-read + home-deny + home-write-semantics under real srt.
-  run_suite "srt deny/home E2E (Go: internal/srt -run E2E)" "$REPO_ROOT" \
-    env REIN_SANDBOX_E2E=1 go test ./internal/srt/ -run E2E -count=1
-
-  # Gated Go E2E: a working tree UNDER an allow-back stays writable (cmd/rein).
-  run_suite "sandbox_home work-tree-under-allow-back E2E (Go: cmd/rein -run E2E)" "$REPO_ROOT" \
-    env REIN_SANDBOX_E2E=1 go test ./cmd/rein/ -run E2E -count=1
-
-  # Interactive (run as modules from the REPO ROOT so the tests.interactive package
-  # resolves): the .git host-exec escape is CLOSED (live srt, no tty needed).
-  run_suite ".git hardening (interactive: test_git_hardening.py)" "$REPO_ROOT" \
-    python3 -m unittest -v tests.interactive.test_git_hardening
-
-  # Interactive: the injected contract reaches a REAL claude (needs claude on PATH;
-  # skip gracefully if absent — LLM phrasing is not golden material, so this is an
-  # invariant check, not a transcript compare).
-  if command -v claude >/dev/null 2>&1; then
-    run_suite "agent contract read-back (interactive, real claude: test_agent_contract.py)" "$REPO_ROOT" \
-      python3 -m unittest -v tests.interactive.test_agent_contract
+  # Live nono containment probe (the §3e launch gate, end to end through a real
+  # `nono run`): credentials unreadable, arbitrary loopback + direct external TCP
+  # denied, direct-github blocked, the approval channel (tty + tmux socket +
+  # send-keys) isolated, UDP reported.
+  #
+  # nono-presence guard (avoids the #68 skip-as-PASS footgun): TestLiveContainment
+  # t.Skip()s when the managed nono binary is absent, which `go test` reports as
+  # exit 0 → run_suite would record a misleading PASS for a probe that never ran.
+  # So gate on the binary first and record an explicit SKIP instead.
+  managed_nono="${XDG_CONFIG_HOME:-$HOME/.config}/rein/nono/bin/nono"
+  if [ -x "$managed_nono" ]; then
+    run_suite "nono live containment (Go: internal/nono -run TestLiveContainment)" "$REPO_ROOT" \
+      go test ./internal/nono/ -run TestLiveContainment -count=1
   else
-    sbx_summary+=("SKIP  agent contract read-back (no 'claude' on PATH — real-agent test skipped)")
-    echo "=== agent contract read-back: SKIPPED (no 'claude' on PATH) ==="
+    sbx_summary+=("SKIP  nono live containment (managed nono absent at $managed_nono — probe did NOT run; place the pinned binary)")
+    echo "=== nono live containment: SKIPPED (managed nono absent — probe did NOT run) ==="
     echo
   fi
 

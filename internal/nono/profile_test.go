@@ -1,0 +1,399 @@
+package nono
+
+import (
+	"flag"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/TomHennen/rein/internal/proxy"
+)
+
+var update = flag.Bool("update", false, "regenerate golden files")
+
+// goldenParams are the fixed inputs behind testdata/profile.golden.json. Keep
+// them deterministic — the golden is human-reviewed; drift = red = re-review.
+func goldenParams() Params {
+	return Params{
+		ListenAddr:  "127.0.0.1:47821",
+		CACertPath:  "/home/user/.config/rein/ca/rein-ca.pem",
+		Name:        "rein-sandbox",
+		Description: "rein credential-broker sandbox profile (generated).",
+	}
+}
+
+// TestBuild_ClaudeConfigDir pins the #94 nono replacement: when ClaudeConfigDir
+// is set, the profile carries CLAUDE_CONFIG_DIR=<overlay> in set_vars; when
+// empty, the var is absent (golden-stable); a relative path fails closed. The
+// host ~/.claude is never a filesystem grant — it stays hidden by default-deny.
+func TestBuild_ClaudeConfigDir(t *testing.T) {
+	const overlay = "/home/user/.config/rein-sandbox-home/.claude"
+
+	t.Run("set", func(t *testing.T) {
+		p := goldenParams()
+		p.ClaudeConfigDir = overlay
+		pr := mustBuild(t, p)
+		if got := pr.Environment.SetVars["CLAUDE_CONFIG_DIR"]; got != overlay {
+			t.Errorf("set_vars[CLAUDE_CONFIG_DIR] = %q, want the rein overlay %q", got, overlay)
+		}
+		// The overlay must NOT be the host ~/.claude, and host claude must never be
+		// granted read — it is hidden by nono's default-deny fs, not listed here.
+		for _, f := range pr.Filesystem.ReadFile {
+			if strings.Contains(f, "/.claude") && !strings.Contains(f, "rein-sandbox-home") {
+				t.Errorf("filesystem.read_file leaks a host claude path: %q", f)
+			}
+		}
+		if strings.HasSuffix(pr.Environment.SetVars["CLAUDE_CONFIG_DIR"], "/.claude") &&
+			!strings.Contains(pr.Environment.SetVars["CLAUDE_CONFIG_DIR"], "rein-sandbox-home") {
+			t.Errorf("CLAUDE_CONFIG_DIR points at a host-looking ~/.claude, not the rein overlay: %q", pr.Environment.SetVars["CLAUDE_CONFIG_DIR"])
+		}
+	})
+
+	t.Run("unset", func(t *testing.T) {
+		pr := mustBuild(t, goldenParams())
+		if v, ok := pr.Environment.SetVars["CLAUDE_CONFIG_DIR"]; ok {
+			t.Errorf("CLAUDE_CONFIG_DIR must be absent when ClaudeConfigDir is empty; got %q", v)
+		}
+	})
+
+	t.Run("relative-fails-closed", func(t *testing.T) {
+		p := goldenParams()
+		p.ClaudeConfigDir = "relative/overlay"
+		if _, err := Build(p); err == nil {
+			t.Error("Build accepted a relative ClaudeConfigDir; it must fail closed (the path is granted --allow and set as CLAUDE_CONFIG_DIR)")
+		}
+	})
+}
+
+// TestBuild_GhConfigDir mirrors TestBuild_ClaudeConfigDir for the gh overlay
+// (gap 2): set -> GH_CONFIG_DIR in set_vars; empty -> absent (golden-stable); a
+// relative path fails closed. Host ~/.config/gh is never a filesystem grant.
+func TestBuild_GhConfigDir(t *testing.T) {
+	const overlay = "/tmp/rein-gh-xyz"
+
+	t.Run("set", func(t *testing.T) {
+		p := goldenParams()
+		p.GhConfigDir = overlay
+		pr := mustBuild(t, p)
+		if got := pr.Environment.SetVars["GH_CONFIG_DIR"]; got != overlay {
+			t.Errorf("set_vars[GH_CONFIG_DIR] = %q, want the rein overlay %q", got, overlay)
+		}
+		for _, f := range pr.Filesystem.ReadFile {
+			if strings.Contains(f, "/.config/gh") {
+				t.Errorf("filesystem.read_file leaks a host gh path: %q", f)
+			}
+		}
+	})
+
+	t.Run("unset", func(t *testing.T) {
+		pr := mustBuild(t, goldenParams())
+		if v, ok := pr.Environment.SetVars["GH_CONFIG_DIR"]; ok {
+			t.Errorf("GH_CONFIG_DIR must be absent when GhConfigDir is empty; got %q", v)
+		}
+	})
+
+	t.Run("relative-fails-closed", func(t *testing.T) {
+		p := goldenParams()
+		p.GhConfigDir = "relative/gh"
+		if _, err := Build(p); err == nil {
+			t.Error("Build accepted a relative GhConfigDir; it must fail closed (granted --allow and set as GH_CONFIG_DIR)")
+		}
+	})
+}
+
+func mustBuild(t *testing.T, p Params) Profile {
+	t.Helper()
+	pr, err := Build(p)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	return pr
+}
+
+func TestGolden(t *testing.T) {
+	pr := mustBuild(t, goldenParams())
+	got, err := pr.MarshalIndent()
+	if err != nil {
+		t.Fatalf("MarshalIndent: %v", err)
+	}
+	golden := filepath.Join("testdata", "profile.golden.json")
+	if *update {
+		if err := os.MkdirAll("testdata", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(golden, got, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("wrote %s", golden)
+		return
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatalf("read golden (run `go test -run TestGolden -update`): %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("golden mismatch; run `go test ./internal/nono -run TestGolden -update` to regenerate\n--- got ---\n%s", got)
+	}
+}
+
+// --- Security invariant structural assertions ---
+
+func TestInvariant_GitHubHostsRouteToRein(t *testing.T) {
+	pr := mustBuild(t, goldenParams())
+	if pr.Network.UpstreamProxy != "127.0.0.1:47821" {
+		t.Errorf("upstream_proxy = %q, want the rein listener", pr.Network.UpstreamProxy)
+	}
+	allow := toSet(pr.Network.AllowDomain)
+	bypass := toSet(pr.Network.UpstreamBypass)
+	for _, h := range proxy.InjectHosts {
+		if !allow[lower(h)] {
+			t.Errorf("inject host %q not in allow_domain", h)
+		}
+		if bypass[lower(h)] {
+			t.Errorf("inject host %q in upstream_bypass (would skip rein)", h)
+		}
+	}
+	for _, h := range proxy.LocalHosts {
+		if bypass[lower(h)] {
+			t.Errorf("declare host %q in upstream_bypass (would not reach rein)", h)
+		}
+	}
+}
+
+func TestInvariant_CDNHostsBypass(t *testing.T) {
+	pr := mustBuild(t, goldenParams())
+	bypass := toSet(pr.Network.UpstreamBypass)
+	allow := toSet(pr.Network.AllowDomain)
+	for _, h := range proxy.CDNHosts {
+		if !bypass[lower(h)] {
+			t.Errorf("CDN host %q not in upstream_bypass (token could be injected onto CDN)", h)
+		}
+		if !allow[lower(h)] {
+			t.Errorf("CDN host %q not in allow_domain", h)
+		}
+	}
+	// upstream_bypass must be EXACTLY the CDN hosts (verbatim) — no extras.
+	if len(pr.Network.UpstreamBypass) != len(proxy.CDNHosts) {
+		t.Errorf("upstream_bypass = %v, want exactly the %d CDN hosts", pr.Network.UpstreamBypass, len(proxy.CDNHosts))
+	}
+}
+
+// TestInvariant_DenyCredentialsEffective: rein no longer hand-lists deny_credentials
+// (it is inherited via extends claude-code). Assert the profile extends a
+// credential-denying base and that Validate deems deny_credentials effective. The
+// real resolution is proven by the nono-gated TestNonoResolvesInheritedHardening.
+func TestInvariant_DenyCredentialsEffective(t *testing.T) {
+	pr := mustBuild(t, goldenParams())
+	if pr.Extends != "claude-code" {
+		t.Errorf("extends = %q, want claude-code (deny_credentials + hardening inherited)", pr.Extends)
+	}
+	if pr.Groups != nil {
+		t.Errorf("groups = %v, want nil (no broker-specific group delta; all inherited)", pr.Groups)
+	}
+	if !pr.deniesCredentials() {
+		t.Error("deniesCredentials() = false; deny_credentials must be effective via extends")
+	}
+}
+
+func TestInvariant_AfUnixMediationPathname(t *testing.T) {
+	pr := mustBuild(t, goldenParams())
+	if pr.Linux.AfUnixMediation != "pathname" {
+		t.Errorf("af_unix_mediation = %q, want pathname", pr.Linux.AfUnixMediation)
+	}
+	// Approval-channel isolation: default is NO unix socket allowlist (the agent
+	// must not be able to connect the host tmux/approval socket).
+	if len(pr.Filesystem.UnixSocket) != 0 {
+		t.Errorf("unix_socket = %v, want empty by default", pr.Filesystem.UnixSocket)
+	}
+}
+
+func TestInvariant_CATrust(t *testing.T) {
+	pr := mustBuild(t, goldenParams())
+	ca := "/home/user/.config/rein/ca/rein-ca.pem"
+	if len(pr.Filesystem.ReadFile) != 1 || pr.Filesystem.ReadFile[0] != ca {
+		t.Errorf("filesystem.read_file = %v, want [%q]", pr.Filesystem.ReadFile, ca)
+	}
+	for _, k := range caEnvVars {
+		if pr.Environment.SetVars[k] != ca {
+			t.Errorf("set_vars[%q] = %q, want %q", k, pr.Environment.SetVars[k], ca)
+		}
+	}
+}
+
+func TestExtraDomains_AllowOnly_NotBypassed(t *testing.T) {
+	p := goldenParams()
+	p.ExtraDomains = []string{"api.anthropic.com"}
+	pr := mustBuild(t, p)
+	if !toSet(pr.Network.AllowDomain)["api.anthropic.com"] {
+		t.Errorf("extra domain not in allow_domain")
+	}
+	if toSet(pr.Network.UpstreamBypass)["api.anthropic.com"] {
+		t.Errorf("extra domain must NOT be in upstream_bypass (routes through rein per schema doc)")
+	}
+}
+
+func TestGitConfigWiring(t *testing.T) {
+	p := goldenParams()
+	p.ExtraGitConfig = []GitConfig{{Key: "http.version", Value: "HTTP/1.1"}}
+	pr := mustBuild(t, p)
+	sv := pr.Environment.SetVars
+	// 3 baseline entries (proxyAuthMethod, postBuffer, core.excludesFile) + 1 extra.
+	if sv["GIT_CONFIG_COUNT"] != "4" {
+		t.Errorf("GIT_CONFIG_COUNT = %q, want 4", sv["GIT_CONFIG_COUNT"])
+	}
+	if sv["GIT_CONFIG_KEY_0"] != "http.proxyAuthMethod" || sv["GIT_CONFIG_VALUE_0"] != "basic" {
+		t.Errorf("baseline proxyAuthMethod pair wrong: %q=%q", sv["GIT_CONFIG_KEY_0"], sv["GIT_CONFIG_VALUE_0"])
+	}
+	if sv["GIT_CONFIG_KEY_2"] != "core.excludesFile" || sv["GIT_CONFIG_VALUE_2"] != "/dev/null" {
+		t.Errorf("baseline excludesFile pair wrong: %q=%q", sv["GIT_CONFIG_KEY_2"], sv["GIT_CONFIG_VALUE_2"])
+	}
+	// The extra config lands AFTER the baseline entries (index 3).
+	if sv["GIT_CONFIG_KEY_3"] != "http.version" {
+		t.Errorf("extra git config not appended: %q", sv["GIT_CONFIG_KEY_3"])
+	}
+}
+
+// --- Fail-closed assertions ---
+
+func TestFailClosed(t *testing.T) {
+	cases := []struct {
+		name  string
+		mut   func(*Params)
+		wantS string
+	}{
+		{"empty listen addr", func(p *Params) { p.ListenAddr = "" }, "ListenAddr is empty"},
+		{"listen addr with scheme", func(p *Params) { p.ListenAddr = "http://127.0.0.1:47821" }, "scheme"},
+		{"listen addr no port", func(p *Params) { p.ListenAddr = "127.0.0.1" }, "host:port"},
+		{"empty ca path", func(p *Params) { p.CACertPath = "" }, "CACertPath is empty"},
+		{"relative ca path", func(p *Params) { p.CACertPath = "ca/rein-ca.pem" }, "must be absolute"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := goldenParams()
+			c.mut(&p)
+			_, err := Build(p)
+			if err == nil {
+				t.Fatalf("Build succeeded; want error containing %q", c.wantS)
+			}
+			if !strings.Contains(err.Error(), c.wantS) {
+				t.Errorf("error = %q, want substring %q", err, c.wantS)
+			}
+		})
+	}
+}
+
+// TestValidate_RejectsTampered proves Validate (the post-build fail-closed gate)
+// catches a profile a caller mutated into an insecure state.
+func TestValidate_RejectsTampered(t *testing.T) {
+	mut := []struct {
+		name string
+		mut  func(*Profile)
+	}{
+		{"drop af_unix_mediation", func(pr *Profile) { pr.Linux.AfUnixMediation = "" }},
+		{"strip credential-denying base", func(pr *Profile) { pr.Extends = ""; pr.Groups = nil }},
+		{"base rein does not recognize as credential-denying", func(pr *Profile) { pr.Extends = "node-dev"; pr.Groups = nil }},
+		{"deny_credentials explicitly excluded", func(pr *Profile) { pr.Groups = &Groups{Exclude: []string{denyCredentials}} }},
+		{"inject host bypassed", func(pr *Profile) {
+			pr.Network.UpstreamBypass = append(pr.Network.UpstreamBypass, proxy.InjectHosts[0])
+		}},
+		{"wildcard shadows inject host in bypass", func(pr *Profile) {
+			pr.Network.UpstreamBypass = append(pr.Network.UpstreamBypass, "*.github.com")
+		}},
+		{"extra host in bypass", func(pr *Profile) {
+			pr.Network.UpstreamBypass = append(pr.Network.UpstreamBypass, "api.anthropic.com")
+		}},
+		{"upstream_proxy repointed to url", func(pr *Profile) {
+			pr.Network.UpstreamProxy = "http://attacker:1234"
+		}},
+		{"CDN not bypassed", func(pr *Profile) { pr.Network.UpstreamBypass = nil }},
+		{"block true", func(pr *Profile) { pr.Network.Block = true }},
+		{"no CA env", func(pr *Profile) { delete(pr.Environment.SetVars, caEnvVars[0]) }},
+		{"no CA read grant", func(pr *Profile) { pr.Filesystem.ReadFile = nil }},
+	}
+	for _, m := range mut {
+		t.Run(m.name, func(t *testing.T) {
+			pr := mustBuild(t, goldenParams())
+			m.mut(&pr)
+			if err := pr.Validate(); err == nil {
+				t.Errorf("Validate accepted a tampered profile (%s)", m.name)
+			}
+		})
+	}
+}
+
+// TestNonoValidate runs the real nono binary against the generated profile.
+// Skipped when nono is absent so CI without nono still passes.
+func TestNonoValidate(t *testing.T) {
+	bin := nonoBin()
+	if bin == "" {
+		t.Skip("nono binary not found; skipping real-binary validation")
+	}
+	pr := mustBuild(t, goldenParams())
+	b, err := pr.MarshalIndent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(t.TempDir(), "profile.json")
+	if err := os.WriteFile(f, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "profile", "validate", f)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("nono profile validate failed: %v\n%s", err, out)
+	}
+	t.Logf("nono profile validate: %s", out)
+}
+
+// TestNonoResolvesInheritedHardening proves the whole point of Change 1 against the
+// REAL binary: `nono profile show` on the generated profile resolves the claude-code
+// hardening (deny_credentials + representative groups) that rein no longer lists
+// literally, AND the broker delta (upstream_proxy + af_unix_mediation Pathname)
+// composes on top. This is the permanent form of the "verify against real nono" step.
+func TestNonoResolvesInheritedHardening(t *testing.T) {
+	bin := nonoBin()
+	if bin == "" {
+		t.Skip("nono binary not found; skipping real-binary resolution check")
+	}
+	pr := mustBuild(t, goldenParams())
+	b, err := pr.MarshalIndent()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(t.TempDir(), "profile.json")
+	if err := os.WriteFile(f, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(bin, "profile", "show", f).CombinedOutput()
+	if err != nil {
+		t.Fatalf("nono profile show failed: %v\n%s", err, out)
+	}
+	s := string(out)
+	// Inherited hardening rein no longer lists — must appear in the resolved output.
+	for _, want := range []string{"deny_credentials", "dangerous_commands", "git_config", "unlink_protection"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("resolved profile missing inherited group %q (extends claude-code not applied?)\n%s", want, s)
+		}
+	}
+	// Broker delta must compose on top of the inherited base.
+	if !strings.Contains(s, "127.0.0.1:47821") {
+		t.Errorf("resolved profile missing rein upstream_proxy\n%s", s)
+	}
+	if !strings.Contains(strings.ToLower(s), "pathname") {
+		t.Errorf("resolved profile missing af_unix_mediation Pathname\n%s", s)
+	}
+}
+
+func nonoBin() string {
+	if p, err := exec.LookPath("nono"); err == nil {
+		return p
+	}
+	home, _ := os.UserHomeDir()
+	cand := filepath.Join(home, ".local", "bin", "nono")
+	if _, err := os.Stat(cand); err == nil {
+		return cand
+	}
+	return ""
+}

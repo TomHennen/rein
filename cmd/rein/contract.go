@@ -28,9 +28,9 @@ import (
 )
 
 // EnvDisableAgentContract turns the injection OFF. Named to match the existing
-// opt-out (REIN_DISABLE_CLAUDE_MCP); truthy values per srt.DisableClaudeMCPFromEnv
-// semantics ("1", "true", "yes", "on"). When set, the banner says so LOUDLY —
-// a silently un-briefed agent is exactly the failure this feature exists to fix.
+// opt-out (REIN_DISABLE_CLAUDE_MCP); truthy values are "1", "true", "yes", "on".
+// When set, the banner says so LOUDLY — a silently un-briefed agent is exactly
+// the failure this feature exists to fix.
 const EnvDisableAgentContract = "REIN_DISABLE_AGENT_CONTRACT"
 
 // contractParams are the run facts the contract states. Everything here is
@@ -41,10 +41,10 @@ type contractParams struct {
 	// path that survives the run; when WorkTreeEphemeral is set it is itself a
 	// throwaway (see below).
 	WorkTree string
-	// HomeEphemeral is true when $HOME is hidden behind srt's deny-read tmpfs
-	// (the #59 default). False under the REIN_SANDBOX_SHOW_HOME kill switch, in
-	// which case $HOME is a real, persistent home and claiming otherwise would
-	// be a LIE to the agent — so the $HOME clauses are omitted entirely.
+	// HomeEphemeral is true when $HOME is hidden in-sandbox (under nono's
+	// default-deny filesystem, always). If a future mode leaves $HOME readable,
+	// this must be false so the contract omits the $HOME clauses rather than
+	// telling the agent a LIE.
 	HomeEphemeral bool
 	// WorkTreeEphemeral is true when the developer's real cwd checkout could NOT
 	// be safely bound (a submodule superproject or a linked worktree — its `.git`
@@ -183,4 +183,18 @@ func injectContract(cmdline []string, contract string) (argv []string, injected 
 	out = append(out, cmdline[0], "--append-system-prompt", contract)
 	out = append(out, cmdline[1:]...)
 	return out, true
+}
+
+// contractStatus renders the ONE banner line saying how (or whether) the agent
+// was briefed with the contract above: injected into claude's system prompt,
+// printed to output, or DISABLED via the kill switch.
+func contractStatus(off, injected bool) string {
+	switch {
+	case off:
+		return "  WARNING: agent contract DISABLED (" + EnvDisableAgentContract + ") — the agent was NOT told that $HOME is\n    ephemeral, that credentials are absent, or how to declare its issue. It will find out by failing."
+	case injected:
+		return "  agent contract injected via --append-system-prompt (claude): $HOME is ephemeral, no creds, declare-then-push."
+	default:
+		return "  agent contract PRINTED to the agent's output (this agent has no system-prompt channel, so it may or\n    may not reach the model's context; the REIN_IN_SANDBOX_* env vars carry the same facts machine-readably)."
+	}
 }

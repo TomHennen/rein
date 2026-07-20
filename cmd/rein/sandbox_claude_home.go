@@ -1,9 +1,9 @@
 // Rein-owned persistent CLAUDE_CONFIG_DIR overlay for sandboxed claude runs
-// (issue #94). Host ~/.claude and ~/.claude.json are DEFAULT-DENIED in-sandbox
-// (credentialDenyReadPaths); claude is instead repointed at this rein-owned
-// overlay via CLAUDE_CONFIG_DIR (internal/srt/env.go). The overlay is bound
-// read-WRITE via ExtraAllowWrite and PERSISTS across runs, so claude sessions
-// resume — while the host's real ~/.claude cross-project history stays hidden.
+// (issue #94). Host ~/.claude and ~/.claude.json are hidden in-sandbox by nono's
+// default-deny filesystem (nothing grants them); claude is instead repointed at
+// this rein-owned overlay via the profile's CLAUDE_CONFIG_DIR set_var. The
+// overlay is granted writable via a nono --allow and PERSISTS across runs, so
+// claude sessions resume — while the host's real ~/.claude history stays hidden.
 //
 // Everything here runs HOST-SIDE, before the in-sandbox deny is applied. rein
 // seeds ONLY .credentials.json (copied fresh from the host every launch — the

@@ -66,7 +66,6 @@ one (a new dir + a new `golden.txt`). Each row links to the journey's own README
 | [multi_repo](journeys/multi_repo/) | REAL cross-repo work across a 2-repo ceiling in ONE run | COVERED |
 | [sandbox_gh_read_staleness](journeys/sandbox_gh_read_staleness/) | the #95 regression guard: cross-run gh-read staleness | COVERED |
 | [tmux_popup_approval](journeys/tmux_popup_approval/) | the DEFAULT approval surface inside `$TMUX` — a real popup (#37) | COVERED |
-| [sandbox_filesystem](journeys/sandbox_filesystem/) | the sandbox filesystem boundary from INSIDE (#59/#63/#64) | COVERED |
 | [credential_boundary](journeys/credential_boundary/) | the credential hide, proven by an INDEPENDENT `bagel` scanner | COVERED |
 | [app_not_installed](journeys/app_not_installed/) | misconfig: App not installed on a session repo (#68) | COVERED |
 | [init_autodetect](journeys/init_autodetect/) | `rein init` repo-prompt default autodetected from cwd `origin` (#69/#78) | COVERED |
@@ -83,6 +82,45 @@ demo yet), **UNDRIVEABLE** (needs a browser). Some journeys **SKIP (exit 3)** wh
 prerequisite is absent — `credential_boundary` (bagel), `tmux_popup_approval` (tmux /
 pyte), `realagent_write` (claude / tmux / pyte), `init_then_run` (no configured App); a
 skip is not a pass. Details in each dir's README.
+
+**nono status (after the P3 srt→nono cutover, then the P3-gaps fixes).** The goldens
+were regenerated on the nono default. GREEN on nono: `write_ceremony`, `multi_repo`,
+`git_author`, `tmux_popup_approval`, `direct_mode`, `expansion_404`, `app_not_installed`,
+`init_autodetect`, `init_steady_state`, `session_commands`, and — since the P3-gaps
+branch — `gh_write`, `init_then_run`, `onboarding`:
+- `gh_write` — FIXED (gap 2): run_nono now gives gh a per-run writable `GH_CONFIG_DIR`
+  overlay (the gh twin of #94's `CLAUDE_CONFIG_DIR`) with a placeholder hosts.yml, so gh
+  starts and real writes land (403 before declare, 201 after, `gh pr create` succeeds);
+  host `~/.config/gh` stays denied.
+- `init_then_run`, `onboarding` — FIXED (gap 1): `rein init` now wires `internal/nono.Install`
+  to install + digest-verify the pinned nono at `~/.config/rein/nono/bin/nono`, so a fresh
+  `git clone` + `rein init` + `rein run` works. (`onboarding` also had a stale cutover
+  assertion, `sandbox: srt present`, updated to `nono present`.)
+
+Still Known-RED on nono — each an UNFINISHED item OUTSIDE the P3-gaps scope (a Tom
+decision before merge, NOT a cutover-correctness bug), tracked in the P3 cutover report:
+- `push_upstream`, and `scope_expansion` — run_nono never wired the `internal/agentenv`
+  contract vars (`REIN_UPSTREAM_INTENT_FILE`, `REIN_EPHEMERAL_CLONE_DIR`, `REIN_REPO_WORKTREES`)
+  into the profile `set_vars`. The push lands; the upstream-recording / mid-run-clone
+  plumbing does not. (Distinct from the P3-gaps gap 3, which briefs the agent *contract
+  text* — these are the machine-readable env vars.)
+- `sandbox_gh_read_staleness` — harness artifact: the journey's nono state root under `/tmp`
+  overlaps nono's own `/tmp` state grant (`Refusing to grant '/tmp' … overlaps protected
+  nono state root`). Adapt the harness (state root off `/tmp`) or note.
+ENV-BLOCKED (no live claude TUI in this environment, not a nono defect): `realagent_write`,
+`claude_resume`. SKIP as before: `credential_boundary` (bagel).
+
+**SECURITY RESIDUAL surfaced by retiring `test_git_hardening.py` (Tom decision).** srt
+ro-bound `<tree>/.git/hooks` + `.git/config` to stop an agent planting a git hook that runs
+AS THE DEVELOPER on the host at their next git op (#64). run_nono grants the working tree
+AND every mapped checkout fully writable via nono `--allow` — including `.git` — with no
+read-only carve-out. Under Landlock there is NO "deny under an allowed parent" (the same
+limit that blocked the tmux-socket deny, design §3e), so srt's mechanism cannot be ported
+as-is. So the `.git`-hooks host-RCE threat SURVIVES under nono for mapped/real checkouts,
+and the containment probe does NOT cover write-confinement. This is an accepted-or-mitigate
+DESIGN decision (like the UDP residual §3d), not a cutover bug — but the cutover deleted the
+srt hardening + its test against the design's own "confirm before deleting" gate (§5), so it
+must be decided before nono runs on non-throwaway checkouts.
 
 **Not yet a journey** (no dir): the interactive `rein init` half is covered by the
 plain `test_init_interactive.py` (8 live specs) — App *creation* is **UNDRIVEABLE**
@@ -168,11 +206,17 @@ the throwaway clean.
   tmux pane + the real popup), the real-agent API (`split_at_agent_launch`,
   `write_agent_session`), and the pyte layer (`RenderedScreen`, `wait_for_screen`; #100).
 - `itest_base.py` — `ReinTestCase` (one-time build, env + throwaway repo, cleanup).
-- `journeys/<name>/` — the 18 journeys (index above); each holds `journey.py`,
+- `journeys/<name>/` — the 20 journeys (index above); each holds `journey.py`,
   `golden.txt` (+ `session.txt` for `realagent_write`), and its own `README.md`.
 - `test_write_approval.py`, `test_init_interactive.py`, `test_confirm_shows_title.py`,
-  `test_scope_expansion.py`, `test_git_hardening.py`, `test_agent_contract.py` — the
-  plain-test invariants beside the journeys.
+  `test_scope_expansion.py` — the plain-test invariants beside the journeys.
+- RETIRED at the nono cutover (P3): `sandbox_filesystem` journey, `test_git_hardening.py`,
+  `test_agent_contract.py`. The srt deny-read/allow-back fs model and the `.git`
+  bind-mount host-exec escape they narrated are gone under nono (Landlock default-deny +
+  `deny_credentials`, no bind mounts). The nono `TestLiveContainment` probe
+  (`run-journeys.sh --sandbox` → [B]) now covers cred-hiding + fs containment as a
+  pass/fail invariant. (The agent-contract briefing itself is not yet wired into
+  run_nono — see the P3 cutover notes.)
 - `test_golden_shape.py` — stack-free lint: every journey has a golden and
   `normalize_for_compare` is idempotent on it. Runs in the sweep and standalone.
 - `realagent_e2e.py` — the real-agent sandbox-startup check (NOT a `test_*.py`;

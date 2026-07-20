@@ -1559,6 +1559,15 @@ _NORMALIZE_RULES = [
     # bare digits that no issue rule would otherwise touch).
     (r"client_id=[A-Za-z0-9_]+", "client_id=<CLIENT_ID>"),
     (r"installation_id=\d+", "installation_id=<INSTALL_ID>"),
+    # the GitHub App SLUG + its bot user-id are per-operator (whoever ran `rein
+    # init`): one dev's App is `rein-primary-<hash>`, another's is
+    # `agentcreds-validation-beef`. Normalize every context the slug appears in so
+    # a golden recorded by one operator matches another's run (the harness's
+    # operator-portability goal). BEFORE the hash rule so the raw slug is masked
+    # whole rather than half-eaten into `<APP>-<HASH>`.
+    (r"\d+\+[A-Za-z0-9._-]+\[bot\]", "<APP_BOT>[bot]"),
+    (r"/apps/[A-Za-z0-9._-]+", "/apps/<APP>"),
+    (r"\bApp [A-Za-z0-9._-]+ is not installed", "App <APP> is not installed"),
     # scaffolded dev-session id carries a per-run random hex suffix
     # (sess_dev_init_<hex8> from `rein init`). Fixed-id sessions used by other
     # journeys (sess_journey_ceremony, sess_itest_pinned) do NOT match.
@@ -1596,6 +1605,9 @@ _NORMALIZE_RULES = [
     # per-run proxy socket + run id
     (r"/run/user/\d+/rein/run-[A-Za-z0-9_-]+/proxy\.sock", "<PROXY_SOCK>"),
     (r"run-[A-Za-z0-9_-]{16,}", "run-<RUNID>"),
+    # nono's loopback proxy listens on an OS-assigned ephemeral port (rein run
+    # --nono banner: "loopback proxy: 127.0.0.1:<port>"), different every run.
+    (r"127\.0\.0\.1:\d+", "127.0.0.1:<PORT>"),
     # scratch dirs (the trailing char class excludes '/', so a suffix like
     # /session.yaml is preserved: <TMP>/session.yaml)
     (r"/tmp/rein-[A-Za-z0-9_.-]+", "<TMP>"),

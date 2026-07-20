@@ -1,0 +1,52 @@
+{
+  "$schema": "https://nono.sh/schema/profile.json",
+  "extends": "claude-code",
+  "meta": {
+    "name": "rein-sandbox",
+    "description": "rein credential-broker sandbox profile (generated)."
+  },
+  "network": {
+    "block": false,
+    "allow_domain": [
+      "github.com",
+      "api.github.com",
+      "uploads.github.com",
+      "codeload.github.com",
+      "objects.githubusercontent.com",
+      "raw.githubusercontent.com",
+      "declare.rein.internal"
+    ],
+    "upstream_proxy": "127.0.0.1:47821",
+    "upstream_bypass": [
+      "codeload.github.com",
+      "objects.githubusercontent.com",
+      "raw.githubusercontent.com"
+    ]
+  },
+  "linux": {
+    "af_unix_mediation": "pathname"
+  },
+  "filesystem": {
+    "read_file": [
+      "/home/user/.config/rein/ca/rein-ca.pem"
+    ],
+    "unix_socket": []
+  },
+  "environment": {
+    "set_vars": {
+      "CURL_CA_BUNDLE": "/home/user/.config/rein/ca/rein-ca.pem",
+      "GIT_CONFIG_COUNT": "3",
+      "GIT_CONFIG_GLOBAL": "/dev/null",
+      "GIT_CONFIG_KEY_0": "http.proxyAuthMethod",
+      "GIT_CONFIG_KEY_1": "http.postBuffer",
+      "GIT_CONFIG_KEY_2": "core.excludesFile",
+      "GIT_CONFIG_SYSTEM": "/dev/null",
+      "GIT_CONFIG_VALUE_0": "basic",
+      "GIT_CONFIG_VALUE_1": "524288000",
+      "GIT_CONFIG_VALUE_2": "/dev/null",
+      "GIT_SSL_CAINFO": "/home/user/.config/rein/ca/rein-ca.pem",
+      "NODE_EXTRA_CA_CERTS": "/home/user/.config/rein/ca/rein-ca.pem",
+      "SSL_CERT_FILE": "/home/user/.config/rein/ca/rein-ca.pem"
+    }
+  }
+}

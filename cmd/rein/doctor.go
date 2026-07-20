@@ -37,8 +37,9 @@ import (
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
+	"github.com/TomHennen/rein/internal/nono"
+	"github.com/TomHennen/rein/internal/sandboxutil"
 	"github.com/TomHennen/rein/internal/session"
-	"github.com/TomHennen/rein/internal/srt"
 	"github.com/TomHennen/rein/internal/tokencache"
 )
 
@@ -80,10 +81,10 @@ func runDoctor(args []string) error {
 		checkApprovalCache,
 		checkGhShimCache,
 	}
-	// Sandbox (srt) preflight: same checks `rein run --sandbox` hard-gates on,
-	// surfaced here read-only. A [fail] here means sandboxed mode will refuse to
-	// launch — doctor is where the operator learns why before they hit it.
-	checks = append(checks, sandboxDoctorChecks()...)
+	// nono preflight: same rows `rein run` hard-gates on (design pivot §2.3). A
+	// [fail] here means the sandboxed default will refuse to launch — doctor is
+	// where the operator learns why before they hit it.
+	checks = append(checks, nonoDoctorChecks()...)
 
 	results := runDoctorChecks(checks)
 	printDoctorTable(results)
@@ -452,26 +453,35 @@ func checkApprovalCache() checkResult {
 	return checkResult{"approval cache", statusOK, fmt.Sprintf("%d run(s) on disk (%d live, %d approved); see `rein approval status`", len(list), live, approved)}
 }
 
-// sandboxDoctorChecks runs the srt sandbox preflight and maps each result into
-// a doctor checkResult. These are the exact checks `rein run --sandbox`
-// hard-gates on (srt present + pinned version, seccomp availability, bwrap
-// userns health, system CA bundle), so a green doctor here means sandboxed
-// mode will launch.
-func sandboxDoctorChecks() []func() checkResult {
-	// Lazy like every other doctor check: srt.Preflight (which shells out to
-	// bwrap) runs when the FIRST sandbox check executes in runDoctor's loop, not
-	// at slice-build time. A sync.Once shares the single Preflight result across
-	// the per-row closures. The row NAMES are Preflight's stable output set;
-	// keep this list in sync if Preflight gains a check (a missing name would
-	// render as a fail row rather than silently vanish).
+// statusToDoctor maps a sandboxutil.Status (the neutral preflight verdict shared
+// by every backend) into doctor's three-value checkStatus.
+func statusToDoctor(s sandboxutil.Status) checkStatus {
+	switch s {
+	case sandboxutil.StatusOK:
+		return statusOK
+	case sandboxutil.StatusWarn:
+		return statusWarn
+	default:
+		return statusFail
+	}
+}
+
+// nonoDoctorChecks runs the nono sandbox preflight and maps each result into a
+// doctor checkResult. Lazy sync.Once shape: nono.Preflight (which shells out to
+// nono for the validate rows) runs when the FIRST nono check executes in
+// runDoctor's loop, not at slice-build time, and the single result is shared
+// across the per-row closures. Keep the row NAMES in sync with nono.Preflight's
+// stable output set (a missing name renders as a fail row rather than silently
+// vanishing). nono.Status is a sandboxutil alias, so statusToDoctor maps it.
+func nonoDoctorChecks() []func() checkResult {
 	var (
 		once   sync.Once
-		byName map[string]srt.Check
+		byName map[string]nono.Check
 	)
 	load := func() {
 		once.Do(func() {
-			byName = map[string]srt.Check{}
-			for _, c := range srt.Preflight(srt.DefaultEnv()) {
+			byName = map[string]nono.Check{}
+			for _, c := range nono.Preflight(nono.DefaultEnv()) {
 				byName[c.Name] = c
 			}
 		})
@@ -481,25 +491,14 @@ func sandboxDoctorChecks() []func() checkResult {
 			load()
 			c, ok := byName[name]
 			if !ok {
-				return checkResult{"sandbox: " + name, statusFail, "preflight did not report this check"}
+				return checkResult{name, statusFail, "preflight did not report this check"}
 			}
-			return checkResult{"sandbox: " + c.Name, srtStatusToDoctor(c.Status), c.Message}
+			return checkResult{c.Name, statusToDoctor(c.Status), c.Message}
 		}
 	}
 	return []func() checkResult{
-		mk("srt present"), mk("srt version"), mk("seccomp"), mk("bwrap userns"),
-		mk("system CA bundle"),
-	}
-}
-
-func srtStatusToDoctor(s srt.Status) checkStatus {
-	switch s {
-	case srt.StatusOK:
-		return statusOK
-	case srt.StatusWarn:
-		return statusWarn
-	default:
-		return statusFail
+		mk("nono present"), mk("nono profile validate"), mk("rein CA"),
+		mk("loopback proxy port"), mk("nono af_unix_mediation"),
 	}
 }
 

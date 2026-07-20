@@ -1,11 +1,11 @@
 $ rein init --yes --no-alias --no-symlink --skip-mint-check  (state.json: audit_done, install-id cached)
 rein init: setting up local scaffolding
-  state dir:  /tmp/rein-itest-home-hk5w8m99/.local/state/rein
-  config dir: /tmp/rein-itest-home-hk5w8m99/.config/rein
+  state dir:  /tmp/rein-itest-home-eied7inw/.local/state/rein
+  config dir: /tmp/rein-itest-home-eied7inw/.config/rein
   machine:    demo-box (label for this machine's App name)
   setup:      state.json: audit_done (steady state from manifest flow)
   app:        client_id=Iv23liDEMOclientID installation_id=12345
-  shim:       3 binaries under /tmp/rein-itest-home-hk5w8m99/.local/state/rein/shim
+  shim:       3 binaries under /tmp/rein-itest-home-eied7inw/.local/state/rein/shim
   symlink:    skipped (--no-symlink)
   mint check: skipped (--skip-mint-check)
   session:    not scaffolded (pass --repo owner/name to scaffold)
@@ -14,18 +14,25 @@ rein init: setting up local scaffolding
     install the App on the repos you want it to broker tokens for.
     visit this URL in your browser:
       https://github.com/apps/rein-demo-primary/installations/new
+    (no local browser detected; open the link above on any machine — no ssh -L needed)
 
 rein init: done.
 Next:
-  - /tmp/rein-itest-home-hk5w8m99/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
+  - /tmp/rein-itest-home-eied7inw/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
   - run `rein run -- claude` (or another agent) to launch with rein in effect
   - (optional) enable the `claude` alias with `rein init --alias`
   - run `rein doctor` to verify everything is wired up
 
+WARNING: sandbox stack is UNHEALTHY
+  [fail] nono present: nono not installed at /tmp/rein-itest-home-eied7inw/.config/rein/nono/bin/nono; install the pinned runtime (nono 0.68.0)
+  sandboxed `rein run` will NOT work until you fix this. Run `rein doctor --fix`
+  for the consolidated remediation (the sandbox steps are privileged/external and
+  are shown, never run); see also the Prerequisites in README.md
+
 $ rein init --yes --no-alias --no-symlink --skip-mint-check  (state.json: audit_done, install-id UNCACHED)
 rein init: setting up local scaffolding
-  state dir:  /tmp/rein-itest-home-3zpllhno/.local/state/rein
-  config dir: /tmp/rein-itest-home-3zpllhno/.config/rein
+  state dir:  /tmp/rein-itest-home-mz6s_cs9/.local/state/rein
+  config dir: /tmp/rein-itest-home-mz6s_cs9/.config/rein
   machine:    demo-box (label for this machine's App name)
   setup:      state.json: audit_done (steady state from manifest flow)
 
@@ -33,12 +40,12 @@ App registered (rein-demo-primary) but not yet installed on a repo; visit https:
 
 $ rein init --yes --no-alias --no-symlink --skip-mint-check  (state path + STALE REIN_APP_PRIVATE_KEY_PATH)
 rein init: setting up local scaffolding
-  state dir:  /tmp/rein-itest-home-1p6c_gef/.local/state/rein
-  config dir: /tmp/rein-itest-home-1p6c_gef/.config/rein
+  state dir:  /tmp/rein-itest-home-83vjtemi/.local/state/rein
+  config dir: /tmp/rein-itest-home-83vjtemi/.config/rein
   machine:    demo-box (label for this machine's App name)
   setup:      state.json: audit_done (steady state from manifest flow)
   app:        client_id=Iv23liDEMOclientID installation_id=12345
-  shim:       3 binaries under /tmp/rein-itest-home-1p6c_gef/.local/state/rein/shim
+  shim:       3 binaries under /tmp/rein-itest-home-83vjtemi/.local/state/rein/shim
   symlink:    skipped (--no-symlink)
   mint check: skipped (--skip-mint-check)
   session:    not scaffolded (pass --repo owner/name to scaffold)
@@ -47,10 +54,17 @@ rein init: setting up local scaffolding
     install the App on the repos you want it to broker tokens for.
     visit this URL in your browser:
       https://github.com/apps/rein-demo-primary/installations/new
+    (no local browser detected; open the link above on any machine — no ssh -L needed)
 
 rein init: done.
 Next:
-  - /tmp/rein-itest-home-1p6c_gef/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
+  - /tmp/rein-itest-home-83vjtemi/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
   - run `rein run -- claude` (or another agent) to launch with rein in effect
   - (optional) enable the `claude` alias with `rein init --alias`
   - run `rein doctor` to verify everything is wired up
+
+WARNING: sandbox stack is UNHEALTHY
+  [fail] nono present: nono not installed at /tmp/rein-itest-home-83vjtemi/.config/rein/nono/bin/nono; install the pinned runtime (nono 0.68.0)
+  sandboxed `rein run` will NOT work until you fix this. Run `rein doctor --fix`
+  for the consolidated remediation (the sandbox steps are privileged/external and
+  are shown, never run); see also the Prerequisites in README.md

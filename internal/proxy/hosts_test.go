@@ -3,9 +3,9 @@ package proxy
 import "testing"
 
 // TestInjectAndCDNHostsMatchClassifier is the drift guard between the exported
-// host lists (consumed by internal/srt to build the srt allowlist + mitmProxy
-// domains) and classifyHost (the runtime injection decision). If someone adds a
-// host to one but not the other, the sandbox allowlist and the injector would
+// host lists (consumed by internal/nono to build the profile's allow_domain +
+// upstream_bypass) and classifyHost (the runtime injection decision). If someone
+// adds a host to one but not the other, the sandbox allowlist and the injector would
 // disagree — a token could leak or an op could silently bypass injection.
 func TestInjectAndCDNHostsMatchClassifier(t *testing.T) {
 	for _, h := range InjectHosts {
