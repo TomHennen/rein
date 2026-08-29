@@ -406,6 +406,24 @@ closes that gap.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-08-29 — **The CP4.5 "api.anthropic.com ALONE" default went STALE and
+  broke `rein run -- claude` outright.** claude 2.1.251's startup preflight
+  fetches BOTH `api.anthropic.com/api/hello` and
+  `platform.claude.com/v1/oauth/hello` and `exit(1)`s unless both return 200
+  (no skip flag exists in the binary); srt 403s the un-allowed CONNECT, so the
+  agent died at launch with "Unable to connect to Anthropic services". The
+  2026-07-05 CP4.5 finding below was measured on a then-current headless
+  `claude -p` and is now history, not policy — **an agent-endpoint default is a
+  moving target and must carry the version it was measured on.** Fix:
+  `DefaultExtraAllowedDomains = {api.anthropic.com, platform.claude.com}`.
+  SECURITY NOTE (Tom decided, this date): `platform.claude.com` is the OAuth
+  TOKEN host, not the inference endpoint, so the default now grants every
+  sandboxed agent egress to the host that exchanges the refresh token it can
+  already read from `~/.claude/.credentials.json` — accepted as the same trust
+  domain as the API host; the underlying exposure is issue #134. Telemetry /
+  sentry / MCP hosts stay excluded. Verified live in-sandbox: default-only run
+  reaches `platform.claude.com` (200) and interactive `claude` starts.
+
 - 2026-07-11 — **#35 IMPLEMENTED (declaration-first issue scoping, both
   modes).** Design of record `docs/35-design-proposal.md` built section by
   section: `rein declare <n>` (direct CLI path + the

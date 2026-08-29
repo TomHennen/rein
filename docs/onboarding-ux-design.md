@@ -50,7 +50,8 @@ A short guided flow, in order. Every prompt has an **Enter-accepts default**, so
    with a loud "sandboxed runs won't work until this is fixed").
 2. **Which agent(s) do you use?** `claude` (default) / aider / codex / other.
    Drives **two** things: which alias(es) to install (step 5) and the CP4.5
-   egress default (e.g. `claude` → pre-allow `api.anthropic.com`).
+   egress default (e.g. `claude` → pre-allow the hosts its startup preflight
+   requires: `api.anthropic.com` + `platform.claude.com`).
 3. **Name this machine** `[<hostname>]`. Becomes the App label (§4). Default is
    the hostname *when distinctive*; on a generic hostname (`ubuntu`,
    `localhost`) prompt more insistently since the default won't distinguish

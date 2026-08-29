@@ -15,17 +15,19 @@ import (
 // The GitHub credential-hiding CP1-4 built is therefore unaffected — extra hosts
 // carry no injected credential.
 //
-// Currently: Claude Code's API endpoint. Determined EMPIRICALLY (CP4.5): a
-// headless `claude -p` — even with `*.anthropic.com` allowed — contacts ONLY
-// api.anthropic.com (two connections, no other host attempted). Telemetry
-// (statsig), error reporting (sentry), and the MCP endpoints (claude.ai) are
-// best-effort and NOT required for the agent to run, so they are deliberately
-// EXCLUDED to keep the default egress/exfil surface minimal. Claude
-// authenticates from ~/.claude/.credentials.json (a file readable in-sandbox),
-// not via egress to an auth host, so no extra domain is needed for auth.
-// Additions (npm, PyPI, other agents) are opt-in per session via allow_domains
-// or machine-wide via REIN_ALLOW_DOMAINS.
-var DefaultExtraAllowedDomains = []string{"api.anthropic.com"}
+// Currently: the two hosts Claude Code's startup preflight requires. Measured on
+// claude 2.1.251 (2026-08-29): it fetches BOTH api.anthropic.com/api/hello and
+// platform.claude.com/v1/oauth/hello and exits 1 unless both return 200, with no
+// skip flag — so the CP4.5 "api.anthropic.com ALONE" finding (measured 2026-07 on
+// `claude -p`) no longer starts the agent. platform.claude.com is the OAuth TOKEN
+// host: this default grants egress to the host that exchanges the refresh token
+// the agent can already read from ~/.claude/.credentials.json (issue #134); Tom
+// approved it as the same trust domain as the API host. Telemetry (statsig),
+// error reporting (sentry), and the MCP endpoints (claude.ai) stay EXCLUDED —
+// best-effort, not required — to keep the exfil surface minimal. Additions (npm,
+// PyPI, other agents) are opt-in per session via allow_domains or machine-wide
+// via REIN_ALLOW_DOMAINS.
+var DefaultExtraAllowedDomains = []string{"api.anthropic.com", "platform.claude.com"}
 
 // EnvAllowDomains is the machine-wide extra-egress override: a comma-separated
 // list of hosts merged into the allowlist (union) on every sandboxed run.

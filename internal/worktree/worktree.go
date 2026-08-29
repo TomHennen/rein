@@ -143,6 +143,11 @@ type Result struct {
 	// autodetection succeeded and it is in scope. Empty otherwise.
 	WorkTreeRepo string
 
+	// WorkTreeRepoOutOfScope is the repo the working tree is a checkout of when
+	// it was detected but is NOT in the session ceiling — the one case where the
+	// caller can name a concrete remedy. Empty otherwise.
+	WorkTreeRepoOutOfScope string
+
 	// Warnings are non-fatal human-facing notes (an undetectable or
 	// out-of-scope working tree; a mapped path that is redundant because it
 	// sits inside the working tree). Printed at launch; never silent.
@@ -401,6 +406,7 @@ func (p Params) detectWorkTree(gitOf func(string) (GitInfo, error), res *Result)
 	}
 	match := matchScope(canon, p.SessionRepos)
 	if match == "" {
+		res.WorkTreeRepoOutOfScope = canon
 		return []string{fmt.Sprintf("working tree %s is a checkout of %s, which is NOT in this session's scope (%s) — the agent can edit it but cannot push it", p.WorkTree, canon, strings.Join(p.SessionRepos, ", "))}
 	}
 	res.WorkTreeRepo = match

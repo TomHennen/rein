@@ -148,9 +148,11 @@ environment (§4.2), and the proxy's CA certificate to trust (§5.4).
 > through rein's injecting proxy; the 3 CDN hosts over direct srt TLS
 > (see the §4.3 correction); and an operator-widened extra-egress set —
 > session `allow_domains:`, `REIN_ALLOW_DOMAINS`, and a built-in
-> `api.anthropic.com` default — added in CP4.5 so a real agent can
-> reach its own API endpoint at all (decided and reviewed in
-> `PLAN-1.md` Notes, 2026-07-05 CP4.5 entries). Every non-proxy route
+> default (`api.anthropic.com` + `platform.claude.com`) — added in
+> CP4.5 so a real agent can reach its own API endpoint at all (decided
+> and reviewed in `PLAN-1.md` Notes, 2026-07-05 CP4.5 entries; the
+> second host added 2026-08-29 for claude 2.1.251's startup preflight).
+> Every non-proxy route
 > is egress-only and never injected (`srt.Build` appends extras to
 > `allowedDomains` only, never `mitmProxy.domains`; `Validate` rejects
 > wildcard/CDN injectors and inject-host/extra overlaps), so the claim

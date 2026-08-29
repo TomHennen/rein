@@ -286,6 +286,11 @@ func runSandboxed(cmdline []string) (int, error) {
 	for _, w := range wt.Warnings {
 		fmt.Fprintf(os.Stderr, "rein: worktrees: %s\n", w)
 	}
+	// Naming the problem without the fix is the usability bug: say how the repo
+	// can join, right where the launch says it cannot push.
+	if wt.WorkTreeRepoOutOfScope != "" {
+		fmt.Fprint(os.Stderr, scopeRemedies(wt.WorkTreeRepoOutOfScope))
+	}
 	worktreeWrites := make([]string, 0, len(wt.Bindings))
 	for _, b := range wt.Bindings {
 		worktreeWrites = append(worktreeWrites, b.Path)

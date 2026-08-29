@@ -227,6 +227,9 @@ func runWrapped(argv []string) (int, error) {
 	if len(scrubbed) > 0 {
 		fmt.Fprintf(os.Stderr, "  scrubbed from child env: %s (agent uses rein-brokered creds only)\n", strings.Join(scrubbed, ", "))
 	}
+	if cwd, cerr := os.Getwd(); cerr == nil {
+		fmt.Fprint(os.Stderr, cwdScopeNotice(sess, cwd))
+	}
 	fmt.Fprintln(os.Stderr)
 	sess.WarnIgnoredIssue(os.Stderr)
 	fmt.Fprintln(os.Stderr, "  Writes are LOCKED until the agent declares its issue:  rein declare <n>")

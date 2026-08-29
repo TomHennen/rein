@@ -94,9 +94,16 @@ func cwdScopeNotice(sess session.Session, cwd string) string {
 	if repo == "" || sess.Contains(repo) {
 		return ""
 	}
-	return fmt.Sprintf("  NOTE: this directory is %s, which is NOT in this session's scope.\n"+
-		"        The agent can request it mid-run:  rein declare <n> --repo %s  (you approve)\n"+
-		"        Or add it to the session now:      rein session add-repo %s\n", repo, repo, repo)
+	return fmt.Sprintf("  NOTE: this directory is %s, which is NOT in this session's scope.\n", repo) +
+		scopeRemedies(repo)
+}
+
+// scopeRemedies renders the two ways an out-of-scope repo can join, for any
+// launch-time notice that names one. Nothing here grants anything: both paths
+// still require the human (an approval, or an explicit durable widening).
+func scopeRemedies(repo string) string {
+	return fmt.Sprintf("        The agent can request it mid-run:  rein declare <n> --repo %s  (you approve)\n"+
+		"        Or add it to the session now:      rein session add-repo %s\n", repo, repo)
 }
 
 // noSessionHint augments the cold "no session" failure with the repo the
