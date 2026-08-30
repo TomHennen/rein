@@ -406,6 +406,27 @@ closes that gap.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-08-30 — **#153: srt's OWN default write paths punched through the $HOME
+  deny — the sandbox was writing the developer's real home, and it persisted.**
+  srt merges `getDefaultWritePaths()` (`~/.claude/debug`, `~/.npm/_logs`,
+  `/tmp/claude`) into allowWrite unconditionally, and its denyRead loop RE-BINDS
+  those host dirs on top of the tmpfs it just laid over `$HOME`
+  (`linux-sandbox-utils.js` "Re-bound write path wiped by denyRead tmpfs"). Proven
+  live: a file written in-sandbox to `~/.claude/debug` was on the host after the
+  run, and the agent could repoint `~/.claude/debug/latest` — the symlink the
+  HOST's claude writes through — at any path it liked (agent-controlled path ->
+  host-side write, the #64/#76 class). Fixed by deny-writing those paths back
+  (`srtDefaultHomeWriteDenies`); srt emits such a denyWrite precisely because a
+  write bind re-exposed the dest (the `hiddenByTmpfs` check), so the deny lands
+  read-only on top. Residual, NOT chased: those dirs stay READABLE in-sandbox.
+  **Why no test caught it:** `TestHomeWriteSemantics_E2E` already asserted the
+  evaporation half — but only for a path it created directly in `$HOME`, which the
+  tmpfs covers. It never probed a path srt re-binds, so it passed while this leaked;
+  the containment harness (#136B) still `die`s on `TODO(#141)`. The test now probes
+  an srt-default write path too (verified: it FAILS with the fix reverted). Lesson
+  for the harness: "a sandbox write did not persist on the host" must be swept over
+  the paths the SUBSTRATE chooses, not only the ones rein chose.
+
 - 2026-08-29 — **The CP4.5 "api.anthropic.com ALONE" default went STALE and
   broke `rein run -- claude` outright.** claude 2.1.251's startup preflight
   fetches BOTH `api.anthropic.com/api/hello` and

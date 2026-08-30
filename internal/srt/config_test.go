@@ -579,6 +579,80 @@ func TestValidateAllowReadContradictions(t *testing.T) {
 	}
 }
 
+// TestBuildDeniesSrtDefaultHomeWritePaths (#153): srt merges its OWN
+// getDefaultWritePaths() into allowWrite and re-binds those host dirs on top of
+// the $HOME deny tmpfs, so ~/.claude/debug and ~/.npm/_logs came back WRITABLE
+// (agent writes persisted on the host). Build must deny-write the ones that
+// exist — and must not list absent ones, since a denyWrite ro-bind of a missing
+// source fails the bwrap launch.
+func TestBuildDeniesSrtDefaultHomeWritePaths(t *testing.T) {
+	home := t.TempDir()
+	work := filepath.Join(home, "work")
+	debug := filepath.Join(home, ".claude", "debug")
+	for _, d := range []string{work, debug} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// ~/.npm/_logs deliberately NOT created — it must be skipped, not listed.
+
+	cfg, err := Build(Params{
+		SocketPath:   "/run/user/1000/rein/run-x/proxy.sock",
+		WorkingTree:  work,
+		DenyReadHome: home,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	dw := map[string]bool{}
+	for _, d := range cfg.Filesystem.DenyWrite {
+		dw[d] = true
+	}
+	if !dw[debug] {
+		t.Errorf("denyWrite missing the srt default write path %q; got %v", debug, cfg.Filesystem.DenyWrite)
+	}
+	if absent := filepath.Join(home, ".npm", "_logs"); dw[absent] {
+		t.Errorf("denyWrite lists %q, which does not exist — bwrap fails the launch on a missing bind source", absent)
+	}
+
+	// No $HOME deny => srt's defaults are not punching through anything rein set
+	// up, so nothing is added (and Validate would reject a dangling entry).
+	plain, err := Build(Params{
+		SocketPath:  "/run/user/1000/rein/run-x/proxy.sock",
+		WorkingTree: work,
+	})
+	if err != nil {
+		t.Fatalf("Build without home deny: %v", err)
+	}
+	for _, d := range plain.Filesystem.DenyWrite {
+		if d == debug {
+			t.Errorf("denyWrite %q added without a $HOME deny; got %v", debug, plain.Filesystem.DenyWrite)
+		}
+	}
+}
+
+// TestValidateAcceptsDenyWriteUnderDenyRead: the #153 denies sit under the $HOME
+// denyRead, not under an allowWrite. srt still emits them (a re-binding write
+// path re-exposed the dest), so Validate must not reject them as no-ops.
+func TestValidateAcceptsDenyWriteUnderDenyRead(t *testing.T) {
+	c, err := Build(Params{
+		SocketPath:   "/run/user/1000/rein/run-x/proxy.sock",
+		WorkingTree:  "/home/dev/work/repo",
+		DenyReadHome: "/home/dev",
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	c.Filesystem.DenyWrite = []string{"/home/dev/.claude/debug"}
+	if err := c.Validate(); err != nil {
+		t.Errorf("Validate rejected a denyWrite under a denyRead path (the #153 shape): %v", err)
+	}
+	c.Filesystem.DenyWrite = []string{"/elsewhere/nothing"}
+	if err := c.Validate(); err == nil {
+		t.Error("Validate accepted a denyWrite under neither allowWrite nor denyRead — srt would drop it silently")
+	}
+}
+
 func deepCopy(t *testing.T, c Config) Config {
 	t.Helper()
 	b, err := json.Marshal(c)

@@ -1,4 +1,4 @@
-$ rein run --direct -- bash -c <direct-ceremony> /tmp/rein-itest-hvw6j44p
+$ rein run --direct -- bash -c <direct-ceremony> /tmp/rein-itest-87_1xpbz
 ===============================================================
 rein: WARNING — DIRECT (UNSANDBOXED) MODE
   The agent runs OUTSIDE the srt sandbox. It shares your user
@@ -8,9 +8,9 @@ rein: WARNING — DIRECT (UNSANDBOXED) MODE
   THROWAWAY repo. For real work, drop --direct to run sandboxed.
 ===============================================================
 rein: launching wrapped process with:
-  session: sess_journey_directmode (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-6sm9lra1/session.yaml]
+  session: sess_journey_directmode (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-6f_637ue/session.yaml]
   PATH-front shim dir: /home/admin/.local/state/rein/shim
-  per-process git config: /tmp/rein-run-3910132142/gitconfig
+  per-process git config: /tmp/rein-run-3926644364/gitconfig
   (your real ~/.gitconfig is layered in via include.path)
   NOTE: this directory is TomHennen/rein, which is NOT in this session's scope.
         The agent can request it mid-run:  rein declare <n> --repo TomHennen/rein  (you approve)
@@ -38,18 +38,18 @@ emit "@PHASE1_START  push BEFORE declare (expect: helper placeholder -> git auth
 echo "direct phase 1" >> probe-1.txt
 run git add -A
 run git commit -q -m "direct ceremony: pre-declaration write attempt"
-run git push --progress origin HEAD:refs/heads/agent/394/direct-20260829-202920-a4da1b
+run git push --progress origin HEAD:refs/heads/agent/419/direct-20260830-161518-475143
 emit "@PHASE1_RC=$?"
 
-emit "@PHASE2_START  rein declare 394 (blocks for the human on THIS terminal)"
-run rein declare 394
+emit "@PHASE2_START  rein declare 419 (blocks for the human on THIS terminal)"
+run rein declare 419
 emit "@PHASE2_RC=$?"
 
-emit "@PHASE3_START  push agent/394/<nonce> (expect: lands)"
-run git push --progress origin HEAD:refs/heads/agent/394/direct-20260829-202920-a4da1b
+emit "@PHASE3_START  push agent/419/<nonce> (expect: lands)"
+run git push --progress origin HEAD:refs/heads/agent/419/direct-20260830-161518-475143
 emit "@PHASE3_RC=$?"
 emit "@SCRIPT_DONE"
- /tmp/rein-itest-hvw6j44p
+ /tmp/rein-itest-87_1xpbz
 ---
 SBX| $ git clone https://github.com/TomHennen/agentcreds-validation-a repo
 SBX| Cloning into 'repo'...
@@ -57,7 +57,7 @@ SBX| @CLONE_OK  (reads flow with no declaration — direct mode, no sandbox)
 SBX| @PHASE1_START  push BEFORE declare (expect: helper placeholder -> git auth fails)
 SBX| $ git add -A
 SBX| $ git commit -q -m direct ceremony: pre-declaration write attempt
-SBX| $ git push --progress origin HEAD:refs/heads/agent/394/direct-20260829-202920-a4da1b
+SBX| $ git push --progress origin HEAD:refs/heads/agent/419/direct-20260830-161518-475143
 SBX|
 SBX| rein: no issue declared for this run — writes are locked.
 SBX|   Run: rein declare <n>   (the issue number this work is for)
@@ -66,23 +66,23 @@ SBX|
 SBX| remote: Invalid username or token. Password authentication is not supported for Git operations.
 SBX| fatal: Authentication failed for 'https://github.com/TomHennen/agentcreds-validation-a/'
 SBX| @PHASE1_RC=128
-SBX| @PHASE2_START  rein declare 394 (blocks for the human on THIS terminal)
-SBX| $ rein declare 394
+SBX| @PHASE2_START  rein declare 419 (blocks for the human on THIS terminal)
+SBX| $ rein declare 419
 
 === rein: agent declares work on an issue ===
-   issue:    #394 "rein journey: direct-mode walkthrough (safe to close)"  [open]
+   issue:    #419 "rein journey: direct-mode walkthrough (safe to close)"  [open]
              in TomHennen/agentcreds-validation-a
    session:  sess_journey_directmode (role=implement, repos=[TomHennen/agentcreds-validation-a])
    approving covers ALL writes for this run (git push, gh, API).
 
-To approve, type the issue number (394) and press enter.
+To approve, type the issue number (419) and press enter.
 To deny, press Ctrl-C or type anything else.
-> 394
+> 419
   [approved]
-SBX| issue #394 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/394/<nonce>)
+SBX| issue #419 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/419/<nonce>)
 SBX| @PHASE2_RC=0
-SBX| @PHASE3_START  push agent/394/<nonce> (expect: lands)
-SBX| $ git push --progress origin HEAD:refs/heads/agent/394/direct-20260829-202920-a4da1b
+SBX| @PHASE3_START  push agent/419/<nonce> (expect: lands)
+SBX| $ git push --progress origin HEAD:refs/heads/agent/419/direct-20260830-161518-475143
 SBX| Enumerating objects: 4, done.
 SBX| Counting objects: 100% (4/4), done.
 SBX| Delta compression using up to 8 threads
@@ -90,11 +90,11 @@ SBX| Compressing objects: 100% (2/2), done.
 SBX| Writing objects: 100% (3/3), 313 bytes | 313.00 KiB/s, done.
 SBX| Total 3 (delta 1), reused 0 (delta 0), pack-reused 0
 SBX| remote:
-SBX| remote: Create a pull request for 'agent/394/direct-20260829-202920-a4da1b' on GitHub by visiting:
-SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/394/direct-20260829-202920-a4da1b
+SBX| remote: Create a pull request for 'agent/419/direct-20260830-161518-475143' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/419/direct-20260830-161518-475143
 SBX| remote:
 SBX| To https://github.com/TomHennen/agentcreds-validation-a
-SBX|  * [new branch]      HEAD -> agent/394/direct-20260829-202920-a4da1b
+SBX|  * [new branch]      HEAD -> agent/419/direct-20260830-161518-475143
 SBX| @PHASE3_RC=0
 SBX| @SCRIPT_DONE
 rein: revoked 1 of 1 write token(s) on exit

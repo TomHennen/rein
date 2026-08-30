@@ -256,14 +256,24 @@ func buildReinForProbe(t *testing.T) string {
 //	    ...and does NOT reach the host (checked after the run) — evaporating;
 //	(3) a write to an ALLOWED-BACK path FAILS with EROFS  — allowRead is a
 //	    read-only bind, so these writes ERROR rather than evaporate.
+//	(4) a write to an srt DEFAULT write path under hidden $HOME (~/.claude/debug)
+//	    FAILS and does not reach the host — the #153 regression.
 //
 // (2) is why rein does NOT make hidden-$HOME writes error (issue #63): the deny
 // tmpfs is what keeps ordinary tooling alive on a cold cache. A read-only $HOME
 // hard-fails `go build` at build-cache init ("failed to initialize build cache
 // ... read-only file system") — measured on this box — whereas under the tmpfs
-// it simply rebuilds. srt cannot express it anyway: a denyWrite entry for a dir
-// already in denyRead is SKIPPED ("Skipping denyWrite bind already hidden by
-// denyRead tmpfs", linux-sandbox-utils.js), so denyWrite does not stack.
+// it simply rebuilds.
+//
+// (4) is why (2) is NOT the whole story, and why this test grew a fourth case:
+// srt merges getDefaultWritePaths() into allowWrite and RE-BINDS those host dirs
+// on top of the deny tmpfs, so ~/.claude/debug and ~/.npm/_logs were writable —
+// and persisted — while (2) passed on a path srt does not re-bind. The old note
+// here ("a denyWrite for a dir already in denyRead is SKIPPED, so denyWrite does
+// not stack") was too broad and is what made that invisible: srt skips such an
+// entry ONLY when nothing re-exposed the dest, and a re-binding write path is
+// exactly such a re-exposure (linux-sandbox-utils.js, the hiddenByTmpfs check).
+// rein leans on that exception in srtDefaultHomeWriteDenies.
 //
 // Run: REIN_SANDBOX_E2E=1 go test ./internal/srt/ -run E2E -v
 func TestHomeWriteSemantics_E2E(t *testing.T) {
@@ -306,6 +316,22 @@ func TestHomeWriteSemantics_E2E(t *testing.T) {
 	}
 	defer os.Remove(ephemeral)
 
+	// (4) An srt DEFAULT write path under hidden $HOME. srt re-binds these host
+	// dirs over the deny tmpfs, so they are the ONE shape (2) cannot catch (#153).
+	// Created here when the box lacks it, since the deny is existence-gated.
+	srtDefault := filepath.Join(home, ".claude", "debug")
+	if _, serr := os.Stat(srtDefault); os.IsNotExist(serr) {
+		if err := os.MkdirAll(srtDefault, 0o700); err != nil {
+			t.Fatalf("create %s: %v", srtDefault, err)
+		}
+		defer os.RemoveAll(srtDefault)
+	}
+	srtDefaultProbe := filepath.Join(srtDefault, ".rein-e2e-srt-default-write")
+	if err := os.Remove(srtDefaultProbe); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	defer os.Remove(srtDefaultProbe)
+
 	workTree := t.TempDir()
 	cfg, err := Build(Params{
 		SocketPath:   filepath.Join(t.TempDir(), "proxy.sock"),
@@ -336,8 +362,10 @@ func TestHomeWriteSemantics_E2E(t *testing.T) {
 		[ "$REIN_IN_SANDBOX" = 1 ] || exit 26
 		[ "$REIN_IN_SANDBOX_WORKTREE" = %[5]q ] || exit 27
 		[ "$REIN_IN_SANDBOX_HOME" = ephemeral ] || exit 28
+		# (5) an srt DEFAULT write path under hidden $HOME must NOT be writable.
+		echo nope > %[6]q 2>/dev/null && exit 29
 		exit 0
-	`, hidden, ephemeral, filepath.Join(allowDir, "readable"), filepath.Join(allowDir, "written"), workTree)
+	`, hidden, ephemeral, filepath.Join(allowDir, "readable"), filepath.Join(allowDir, "written"), workTree, srtDefaultProbe)
 
 	cmd := exec.Command(srtPath, "-s", settings, "--", "/bin/sh", "-c", script)
 	cmd.Env = BuildEnv(EnvParams{
@@ -368,6 +396,12 @@ func TestHomeWriteSemantics_E2E(t *testing.T) {
 		t.Errorf("a write to the ALLOWED-BACK dir SUCCEEDED — allowRead is supposed to be a READ-ONLY bind. "+
 			"If it is writable now, the banner's 'writes to allowed-back paths ERROR' clause is wrong, and "+
 			"an agent could mutate the developer's real ~/.claude, ~/.cargo, ~/go. output: %s", strings.TrimSpace(string(out)))
+	case 29:
+		t.Errorf("a write to the srt DEFAULT write path %s SUCCEEDED in-sandbox — srt re-binds its "+
+			"getDefaultWritePaths() entries over rein's $HOME deny tmpfs, and rein's denyWrite for them "+
+			"(srtDefaultHomeWriteDenies) is not taking effect. The agent can write the developer's real "+
+			"~/.claude/debug, those writes PERSIST after the run, and it can repoint the `latest` symlink "+
+			"the host's claude writes through. See #153. output: %s", srtDefault, strings.TrimSpace(string(out)))
 	case 26, 27, 28:
 		t.Errorf("an agent-visible fact did NOT reach the sandboxed child (exit %d: %s). srt is filtering the "+
 			"REIN_IN_SANDBOX_* env vars out, so rein's ONLY channel for telling the AGENT that $HOME is "+
@@ -385,5 +419,16 @@ func TestHomeWriteSemantics_E2E(t *testing.T) {
 		t.Fatalf("stat %s: %v", ephemeral, err)
 	} else {
 		t.Log("on host after run: the in-sandbox $HOME write is GONE (evaporated with the tmpfs)")
+	}
+
+	// #153: the srt-default write path must not have reached the host either. The
+	// in-sandbox write already failed above; this catches the case where it fails
+	// for a DIFFERENT reason while the host bind is still live.
+	if _, err := os.Stat(srtDefaultProbe); err == nil {
+		t.Errorf("the in-sandbox write to the srt default write path %s REACHED THE HOST — a sandboxed "+
+			"agent is writing into the developer's real home directory, and those writes persist (#153)",
+			srtDefaultProbe)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat %s: %v", srtDefaultProbe, err)
 	}
 }
