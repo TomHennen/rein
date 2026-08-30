@@ -73,7 +73,7 @@ from the section. See `testdata/observations.sample.json`:
 
 `reachable` is the **in-sandbox** result (host connectable / file readable / env
 present). The harness produces this file by mapping sandbox-probe's native report
-(host run vs sandbox run) into it — **that mapping is the current stub** (see
+(host run vs sandbox run) into it — the mapping lives in `cmd/classify` (see
 below).
 
 ## Running
@@ -98,32 +98,44 @@ SANDBOX_PROBE=/path/to/sandbox-probe REIN_BIN=/path/to/rein \
 `run.sh` **hard-fails** if sandbox-probe or the rein binary is absent — it never
 fabricates results.
 
-## What is stubbed (TODO before this is a live CI gate)
+## How to run (wired end-to-end, #141)
 
-Honest scope: the **oracle + CLI + schema are complete and unit-tested**
-(`oracle_test.go`, config built via `srt.Build`). The end-to-end wiring is
-skeleton with explicit `TODO(#141)` markers in `run.sh` (tracking issue for the
-remaining wiring):
+```sh
+go install github.com/controlplaneio/sandbox-probe@latest   # once per box
+go build -o bin/ ./cmd/...
+tests/containment/run.sh                    # compare to the committed golden
+REIN_UPDATE_GOLDEN=1 tests/containment/run.sh   # adopt a new golden
+```
 
-1. **Fetch/pin sandbox-probe.** Its license is Apache-2.0 (same as rein — no
-   incompatibility, and importing would be fine license-wise; see Posture above),
-   so hard-constraint #4 is satisfied whether we shell out or ever import. Not
-   vendored; `run.sh` expects it on `PATH` or `$SANDBOX_PROBE`. Confirm its real
-   subcommands/flags (the `report --format json` call is a placeholder) and pin
-   a version.
-2. **sandbox-probe → normalized mapping.** The single piece we can't write until
-   we see sandbox-probe's actual output shape. Deliberately not guessed into
-   code (would be faking a schema).
-3. **Real in-sandbox launch.** Must run the probe through `rein run --` so it
-   inherits the exact scrubbed env/seccomp/binds — not a bespoke launcher.
-4. **Emitted-settings capture.** The oracle needs the `settings.json` rein wrote
-   for that run; rein must expose it (or the harness captures it from the run).
-5. **Socket-placement / seccomp / caps / TTY channels.** Stubbed until we see
-   which sandbox-probe surfaces; the mitm-socket-placement invariant (CP2) is
-   rein-specific and will need a small custom probe.
-6. **Golden wiring.** Emit the classified report as a checked-in golden wired
-   into a `tests/interactive/` journey so drift = red = re-review (an srt bump
-   reopening a channel flips a row red).
+`run.sh` (1) runs `sandbox-probe scan --fast` on the host, (2) captures the
+emitted settings.json via `REIN_SRT_SETTINGS_COPY` and derives probe TARGETS
+from it (`classify -targets`: allowlists, deny paths, srt's own default write
+paths — the substrate-chosen set that leaked in #153), (3) runs sandbox-probe
+plus the target probes through the REAL `rein run --sandbox` launch, (4) checks
+write PERSISTENCE host-side, (5) classifies everything against that run's own
+settings.json, and (6) compares the normalized report to
+`golden-report.txt` (drift = exit 4; any leak = exit 3/1).
+
+Probe semantics, decided the hard way:
+
+- **Reads are CONTENT-level, not name-level.** A denied dir is probed through a
+  host-sampled file inside it, and dir readability means "a real file readable
+  within depth 3" — the deny tmpfs legitimately lists allow-back scaffolding and
+  tombstones (#150), so a non-empty listing is not a leak.
+- **Token placement is probed only where there is observable evidence**: the
+  api.github.com rate-limit heuristic (anonymous = 60; the injected read token
+  raises it). Other inject hosts are skipped rather than guessed; their token
+  placement stays covered by the proxy unit tests.
+- **GH_TOKEN in-sandbox is rein's deliberate stub**, not a secret; only a
+  non-stub value counts as present.
+- **The ephemeral clone dir is skipped** in the write sweep (discarded by rein
+  after the run by design, and per-run).
+- **The golden is a normalized, sorted SET** (temp paths, $HOME, pids, socket
+  hashes and the srt-mux herd collapsed) and is PER-BOX, like the journey
+  goldens; `_out/report.txt` keeps the raw ordered report.
+
+Remaining (tracked in #141): the mitm-socket-placement custom probe, and wiring
+this into a journey / CI once srt runs anywhere in CI (#93).
 
 ## Limits (state loudly, per the design note)
 

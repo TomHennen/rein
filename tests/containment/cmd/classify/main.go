@@ -19,11 +19,13 @@ import (
 func main() {
 	settingsPath := flag.String("settings", "", "path to rein's emitted srt settings.json")
 	obsPath := flag.String("observations", "", "path to the normalized observations JSON (see README)")
+	probeReportPath := flag.String("probe-report", "", "optional sandbox-probe report from the IN-SANDBOX run, mapped and merged")
+	emitTargetsFlag := flag.Bool("targets", false, "emit the config-derived probe targets as JSON and exit")
 	jsonOut := flag.Bool("json", false, "emit the classified results as JSON instead of text")
 	flag.Parse()
 
-	if *settingsPath == "" || *obsPath == "" {
-		fmt.Fprintln(os.Stderr, "usage: classify -settings settings.json -observations obs.json [-json]")
+	if *settingsPath == "" || (*obsPath == "" && !*emitTargetsFlag) {
+		fmt.Fprintln(os.Stderr, "usage: classify -settings settings.json (-targets | -observations obs.json [-probe-report report.json]) [-json]")
 		os.Exit(2)
 	}
 
@@ -32,10 +34,25 @@ func main() {
 		fmt.Fprintf(os.Stderr, "classify: load settings: %v\n", err)
 		os.Exit(2)
 	}
+	if *emitTargetsFlag {
+		if err := emitTargets(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "classify: emit targets: %v\n", err)
+			os.Exit(2)
+		}
+		return
+	}
 	obs, err := loadObservations(*obsPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "classify: load observations: %v\n", err)
 		os.Exit(2)
+	}
+	if *probeReportPath != "" {
+		mapped, err := mapProbeReport(*probeReportPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "classify: map probe report: %v\n", err)
+			os.Exit(2)
+		}
+		obs = append(obs, mapped...)
 	}
 
 	results := containment.NewOracle(cfg).ClassifyAll(obs)
@@ -76,6 +93,7 @@ func loadObservations(path string) ([]containment.Observation, error) {
 		Network []containment.Observation `json:"network"`
 		Files   []containment.Observation `json:"files"`
 		Env     []containment.Observation `json:"env"`
+		Writes  []containment.Observation `json:"writes"`
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, err
@@ -92,6 +110,10 @@ func loadObservations(path string) ([]containment.Observation, error) {
 	}
 	for _, o := range doc.Env {
 		o.Kind = containment.KindEnv
+		out = append(out, o)
+	}
+	for _, o := range doc.Writes {
+		o.Kind = containment.KindWrite
 		out = append(out, o)
 	}
 	return out, nil

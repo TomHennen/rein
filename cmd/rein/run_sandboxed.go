@@ -756,6 +756,12 @@ func runSandboxed(cmdline []string) (int, error) {
 	if err := os.WriteFile(settingsPath, settingsData, 0o600); err != nil {
 		return 1, fmt.Errorf("write settings: %w", err)
 	}
+	// Copy for the containment harness (#141) — runTmp is removed on exit.
+	if dump := os.Getenv("REIN_SRT_SETTINGS_COPY"); dump != "" {
+		if err := os.WriteFile(dump, settingsData, 0o600); err != nil {
+			return 1, fmt.Errorf("copy settings to %s: %w", dump, err)
+		}
+	}
 
 	// (11b) THE SANDBOX CONTRACT (#63). Everything the banner says goes to the
 	// HUMAN's terminal; the agent sees none of it. Brief the AGENT itself: claude

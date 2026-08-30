@@ -406,6 +406,24 @@ closes that gap.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-08-30 — **#141 DONE: the containment harness runs end-to-end.**
+  sandbox-probe v1.1.0 installed (`scan --fast`, JSON `findings[]` — the old
+  `report --format json` placeholder was wrong); rein grew
+  `REIN_SRT_SETTINGS_COPY` (settings.json capture) and
+  `srt.DefaultHomeWritePaths`; the oracle grew the **write channel** (#153:
+  persistence judged HOST-side, most-specific allowWrite/denyWrite rule wins);
+  `classify` grew `-targets` (config-derived probe targets — nothing
+  hand-maintained) and `-probe-report` (maps sandbox-probe's
+  connectivity/readable-paths/sockets findings). First real run verdicts: all
+  judged rows OK — the #153 denies hold, token injection CONFIRMED by the
+  api.github.com rate-limit heuristic, egress/env/read boundaries hold; 40
+  unknown rows for triage (mostly host /tmp+/run socket NAMES visible
+  in-sandbox — content-level containment intact). Golden proven deterministic
+  (adopt then fresh compare = PASS) and leak path proven to fail closed (a
+  synthetic #153 write => exit 3). False-positive lessons are encoded in
+  run.sh/targets.go: name-level dir listings are NOT leaks (#150 again), probe
+  only where evidence is observable, GH_TOKEN is a deliberate stub.
+
 - 2026-08-30 — **Out-of-scope working tree now GATES the launch (Tom's ruling,
   #152 review).** The old behavior warned and launched anyway — a run that could
   edit the tree but never push it. `rein run` (both modes) now detects the

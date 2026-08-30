@@ -32,6 +32,7 @@ const (
 	KindNetwork Kind = "network" // egress reachability + token injection
 	KindFile    Kind = "file"    // sensitive-path readability
 	KindEnv     Kind = "env"     // sensitive env-var presence
+	KindWrite   Kind = "write"   // in-sandbox write PERSISTED on the host (#153)
 )
 
 // Observation is one normalized finding from the differential probe, describing
@@ -42,7 +43,8 @@ type Observation struct {
 	Target string `json:"target"` // host, absolute path, or env-var name
 
 	// Reachable is the in-sandbox result: host connectable / file readable /
-	// env var present. This is the security-relevant bit.
+	// env var present / write persisted on the HOST after the run (KindWrite).
+	// This is the security-relevant bit.
 	Reachable bool `json:"reachable"`
 
 	// TokenInjected (network only): a rein credential was observed on the
@@ -99,6 +101,8 @@ type Oracle struct {
 	cdnHosts       map[string]bool // reachable but must be un-injected
 	denyRead       []string        // sensitive paths that must be unreadable
 	allowRead      []string        // read-only re-binds inside a deny region
+	allowWrite     []string        // writable binds — the only places a write may persist
+	denyWrite      []string        // ro pins inside writable binds (hooks/config, #153 denies)
 	sensitiveEnv   map[string]bool
 }
 
@@ -120,6 +124,12 @@ func NewOracle(cfg srt.Config) *Oracle {
 	for _, a := range cfg.Filesystem.AllowRead {
 		o.allowRead = append(o.allowRead, filepath.Clean(a))
 	}
+	for _, w := range cfg.Filesystem.AllowWrite {
+		o.allowWrite = append(o.allowWrite, filepath.Clean(w))
+	}
+	for _, w := range cfg.Filesystem.DenyWrite {
+		o.denyWrite = append(o.denyWrite, filepath.Clean(w))
+	}
 	return o
 }
 
@@ -132,6 +142,8 @@ func (o *Oracle) Classify(obs Observation) Result {
 		return o.classifyFile(obs)
 	case KindEnv:
 		return o.classifyEnv(obs)
+	case KindWrite:
+		return o.classifyWrite(obs)
 	default:
 		return Result{obs, VerdictUnknown, "unrecognized observation kind"}
 	}
@@ -212,6 +224,34 @@ func (o *Oracle) classifyFile(obs Observation) Result {
 			return Result{obs, VerdictUnknown, "readable path not covered by denyRead/allowRead — triage whether it should be denied"}
 		}
 		return Result{obs, VerdictUnknown, "unreadable path not covered by denyRead/allowRead"}
+	}
+}
+
+// classifyWrite judges write PERSISTENCE (#153): Reachable means the in-sandbox
+// write was still on the host after the run. The most-specific covering rule
+// decides intent — a denyWrite pin beats the allowWrite it nests in.
+func (o *Oracle) classifyWrite(obs Observation) Result {
+	p := filepath.Clean(obs.Target)
+	_, allowLen := deepestMatch(p, o.allowWrite)
+	denyEntry, denyLen := deepestMatch(p, o.denyWrite)
+
+	switch {
+	case denyLen > allowLen:
+		if obs.Reachable {
+			return Result{obs, VerdictLeak, "write persisted under denyWrite pin " + denyEntry}
+		}
+		return Result{obs, VerdictOK, "write correctly blocked by denyWrite pin"}
+	case allowLen > 0:
+		if obs.Reachable {
+			return Result{obs, VerdictOK, "write persisted inside a writable bind (expected)"}
+		}
+		return Result{obs, VerdictRegression, "write inside a writable bind did NOT persist (broken bind)"}
+	default:
+		// Outside every writable bind: the deny tmpfs must have swallowed it.
+		if obs.Reachable {
+			return Result{obs, VerdictLeak, "in-sandbox write persisted on the host outside every writable bind (#153 class)"}
+		}
+		return Result{obs, VerdictOK, "write outside writable binds evaporated (deny tmpfs)"}
 	}
 }
 
