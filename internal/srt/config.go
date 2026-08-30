@@ -346,12 +346,7 @@ func Build(p Params) (Config, error) {
 	allowWrite = append(allowWrite, extraWrite...)
 	allowWrite = append(allowWrite, gitPins...)
 
-	// srt's OWN default write paths punch through rein's $HOME deny (#153): srt
-	// always merges getDefaultWritePaths() into allowWrite, and its denyRead loop
-	// re-binds those host dirs on top of the tmpfs it just laid down. So the
-	// developer's real ~/.claude/debug and ~/.npm/_logs were bound READ-WRITE —
-	// agent writes persisted on the host, and the agent could repoint the `latest`
-	// symlink the host's claude writes through. Deny-write them back.
+	// Deny back srt's own default write paths under $HOME (#153).
 	denyWrite := append(gitDeny, srtDefaultHomeWriteDenies(homeDeny)...)
 
 	denyRead := make([]string, 0, len(p.DenyReadCredStores)+len(p.RuntimeDenyRead)+2)
@@ -393,26 +388,18 @@ func Build(p Params) (Config, error) {
 }
 
 // srtDefaultHomeWritePaths are the $HOME-relative entries of srt's
-// getDefaultWritePaths() (sandbox-utils.js, verified 0.0.63). srt merges that
-// list into allowWrite unconditionally — rein cannot opt out through the config
-// — and its denyRead loop re-binds each one over the $HOME tmpfs, so without a
-// denyWrite these HOST directories are writable from inside the sandbox (#153).
-// /tmp/claude is on srt's list too but is deliberately NOT here: rein already
-// points the child's TMPDIR at a per-run dir, and it is outside the $HOME story.
+// getDefaultWritePaths() (verified 0.0.63). srt merges them into allowWrite
+// unconditionally and re-binds them over the $HOME deny tmpfs, so without a
+// denyWrite these HOST dirs are writable in-sandbox (#153). /tmp/claude is
+// excluded: rein already points TMPDIR at a per-run dir.
 var srtDefaultHomeWritePaths = []string{
 	filepath.Join(".claude", "debug"),
 	filepath.Join(".npm", "_logs"),
 }
 
-// srtDefaultHomeWriteDenies returns the denyWrite entries that neutralize
-// srtDefaultHomeWritePaths under home. Empty when home is empty (no $HOME deny,
-// so srt's defaults are not punching through anything rein set up).
-//
-// Only paths that EXIST are returned: a denyWrite ro-bind of a missing source is
-// a bwrap launch failure, so listing an absent path would fail-closed on any box
-// that happens not to have it. The existence check races a concurrent delete;
-// that loses the deny for one run and surfaces as a loud launch error, never as a
-// silent hole.
+// srtDefaultHomeWriteDenies returns the denyWrite entries neutralizing
+// srtDefaultHomeWritePaths under home; empty when home is empty (no $HOME deny).
+// Existence-gated: a denyWrite of a missing source fails the bwrap launch.
 func srtDefaultHomeWriteDenies(home string) []string {
 	if home == "" {
 		return nil
@@ -567,19 +554,10 @@ func (c Config) Validate() error {
 			}
 		}
 	}
-	// denyWrite entries are ro-binds layered on top of the write binds; each must
-	// be absolute (pathWithin comparisons and srt's own bind must be
-	// apples-to-apples) and must sit under a region srt actually write-binds,
-	// or the entry is a silent no-op. Two such regions exist:
-	//
-	//   - an allowWrite path (the pinned checkouts' hooks/config), and
-	//   - a denyRead path — srt re-binds its OWN default write paths on top of a
-	//     denyRead tmpfs, and emits a denyWrite whose dest was re-exposed that way
-	//     ("Skipping denyWrite bind already hidden by denyRead tmpfs" fires only
-	//     when NOTHING re-exposed it). That is the #153 case: ~/.claude/debug under
-	//     the ~/.claude deny.
-	//
-	// Anything under neither is dropped on the floor by srt. Fail closed.
+	// A denyWrite must be absolute and sit under an allowWrite (hooks/config
+	// pins) or a denyRead (the #153 srt-default-path denies, which srt still
+	// emits because its own write bind re-exposed the dest); anything under
+	// neither is silently dropped by srt. Fail closed.
 	for _, dw := range c.Filesystem.DenyWrite {
 		if !filepath.IsAbs(dw) {
 			return fmt.Errorf("srt: denyWrite entry %q must be absolute", dw)

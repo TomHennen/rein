@@ -108,6 +108,27 @@ func runSandboxed(cmdline []string) (int, error) {
 	}
 	config.WarnPartialAppEnv(os.Stderr)
 
+	// Working tree (the srt writable bind): cwd, or REIN_SANDBOX_WORKDIR.
+	// Symlink-resolved BEFORE any use (banner, ForbiddenDirs, srt config — audit
+	// D6, #44); srt.Build re-resolves as the enforcement backstop. Resolved here,
+	// before the App config, so the scope gate below can update sess first.
+	workTree := os.Getenv("REIN_SANDBOX_WORKDIR")
+	if workTree == "" {
+		workTree, err = os.Getwd()
+		if err != nil {
+			return 1, fmt.Errorf("resolve working tree: %w", err)
+		}
+	}
+	if workTree, err = filepath.Abs(workTree); err != nil {
+		return 1, err
+	}
+	if workTree, err = proxy.ResolveAbs(workTree); err != nil {
+		return 1, fmt.Errorf("resolve working tree symlinks: %w", err)
+	}
+	if err := ensureWorkTreeInScope(&sess, sessSource, workTree, ttyYesNo); err != nil {
+		return 1, err
+	}
+
 	// (3) App config + eager install-id resolve (fail loud here, not inside the
 	// sandbox's first git op). Then build the mint closures.
 	appCfg, ks, appSource, err := config.ResolveApp()
@@ -170,27 +191,7 @@ func runSandboxed(cmdline []string) (int, error) {
 		return 1, fmt.Errorf("generate run id: %w", err)
 	}
 
-	// (5) Working tree + writable dirs (the srt bind-mounts). Default to the cwd;
-	// REIN_SANDBOX_WORKDIR overrides. The socket must live OUTSIDE all of these.
-	workTree := os.Getenv("REIN_SANDBOX_WORKDIR")
-	if workTree == "" {
-		workTree, err = os.Getwd()
-		if err != nil {
-			return 1, fmt.Errorf("resolve working tree: %w", err)
-		}
-	}
-	workTree, err = filepath.Abs(workTree)
-	if err != nil {
-		return 1, err
-	}
-	// Symlink-resolve the working tree BEFORE it is used anywhere (banner,
-	// ForbiddenDirs, srt config): a symlinked REIN_SANDBOX_WORKDIR pointing
-	// into a denied path must be seen in resolved form by every check (audit
-	// finding D6, #44). srt.Build re-resolves as the enforcement backstop.
-	workTree, err = proxy.ResolveAbs(workTree)
-	if err != nil {
-		return 1, fmt.Errorf("resolve working tree symlinks: %w", err)
-	}
+	// (5) Writable dirs beyond the working tree (resolved at step 2).
 
 	// (6) Per-run runtime dir for the proxy socket — user-writable, NOT under the
 	// working tree, and itself denyRead'd in-sandbox (defense-in-depth). Prefer
@@ -285,11 +286,6 @@ func runSandboxed(cmdline []string) (int, error) {
 	}
 	for _, w := range wt.Warnings {
 		fmt.Fprintf(os.Stderr, "rein: worktrees: %s\n", w)
-	}
-	// Naming the problem without the fix is the usability bug: say how the repo
-	// can join, right where the launch says it cannot push.
-	if wt.WorkTreeRepoOutOfScope != "" {
-		fmt.Fprint(os.Stderr, scopeRemedies(wt.WorkTreeRepoOutOfScope))
 	}
 	worktreeWrites := make([]string, 0, len(wt.Bindings))
 	for _, b := range wt.Bindings {

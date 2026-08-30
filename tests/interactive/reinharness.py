@@ -904,12 +904,9 @@ class ReinRun:
             if any(m.lower() in low for m in ready_markers):
                 ready = True
                 break
-            # claude's FOLDER-TRUST dialog is plumbing, not a finding: it fires for
-            # any directory the overlay has no trust record for, which is every
-            # directory after the overlay is reset. Answer it and keep waiting for
-            # ready. Only this one is auto-answered — a theme/login dialog still
-            # falls through to the caller as `dialog`, because that one means the
-            # overlay carries no onboarding state (#151) and is a real finding.
+            # Auto-answer ONLY the folder-trust dialog (plumbing); a theme/login
+            # dialog still reaches the caller as `dialog` — that one is a finding
+            # (missing onboarding state, #151).
             if not trust_answered and CLAUDE_TRUST_DIALOG_RE.search(text):
                 self._answer_trust_dialog(scr)
                 trust_answered = True
@@ -920,13 +917,8 @@ class ReinRun:
         return ready, dialog, exited
 
     def _answer_trust_dialog(self, scr) -> None:
-        """Move the caret onto `Yes, I trust this folder`, then confirm.
-
-        NEVER a bare Enter: claude 2.1.251 highlights `No, exit` first, so confirming
-        the default QUITS the agent — which surfaces as the unfalsifiable "claude never
-        became ready". Down wraps in claude's list, so this reaches the option from
-        wherever the caret starts.
-        """
+        """Select `Yes, I trust this folder`, then confirm. NEVER a bare Enter:
+        2.1.251 highlights `No, exit`, so the default QUITS the agent."""
         import pexpect as _px
 
         for _ in range(4):
@@ -1054,14 +1046,9 @@ CLAUDE_READY_MARKERS = [
 
 
 def claude_tui_is_live(screen: str) -> bool:
-    """Is claude's interactive TUI up on this rendered screen?
-
-    ONE definition, shared by every caller: claude's chrome is WORDING and it moves
-    (2.1.251 dropped "? for shortcuts", "esc to interrupt" and the `╭`/`│` box art that
-    journeys keyed on, so every one of those markers went silently stale and a live TUI
-    read as "never appeared"). Matched case-insensitively on the RENDER, never the byte
-    stream (#100).
-    """
+    """Is claude's TUI up on this rendered screen? The ONE shared definition —
+    claude's chrome wording moves, and per-journey marker tuples go stale silently
+    (2.1.251 dropped every marker realagent_write keyed on)."""
     low = screen.lower()
     return any(m.lower() in low for m in CLAUDE_READY_MARKERS)
 # Startup-dialog markers (trust/theme/onboarding/login) — distinct from an MCP
@@ -2458,47 +2445,24 @@ CLAUDE_TRUST_OPTION_RE = re.compile(r"(?i)trust this folder")
 
 
 def accept_bypass_permissions_disclaimer(*, env: dict | None = None) -> bool:
-    """Pre-accept claude's BYPASS-PERMISSIONS disclaimer in rein's overlay config.
+    """Pre-accept claude's bypass-permissions disclaimer in the throwaway overlay.
 
-    A second blocking dialog, distinct from folder-trust and reachable only because a
-    journey launches `claude --dangerously-skip-permissions`: "WARNING: Claude Code
-    running in Bypass Permissions mode … ❯ No, exit / Yes, I accept". Same trap as
-    trust — `No, exit` is highlighted — and it blocks the session forever unanswered.
-    claude's own remedy is `bypassPermissionsModeAccepted` in the global config ("Run
-    `claude --dangerously-skip-permissions` once interactively" is how a human sets it).
-
-    The LIVE gate is `skipDangerousModePermissionPrompt` in the overlay's settings.json
-    — claude's own schema documents it as "whether the user has accepted the bypass
-    permissions mode dialog" (`bypassPermissionsModeAccepted` in .claude.json is the
-    legacy half that only feeds a migration, and setting it ALONE does not suppress the
-    dialog — measured). Both are written.
-
-    **This is the ONE helper that authors a permission-bypass setting, and it is called
-    by exactly one journey — the one that already launches with
-    --dangerously-skip-permissions.** It is the harness standing in for the human who
-    clicks "Yes, I accept" for that launch, in a THROWAWAY overlay.
-
-    It must never be called by claude_resume, which asserts that no such setting exists
-    in the overlay (`@OVERLAY_FORCES_SKIPDANGEROUS`: rein must never author a permission
-    bypass). That claim currently also survives ordering — claude_resume wipes the
-    overlay before it runs — but do not rely on the wipe: keep this call out of it.
+    The live gate is settings.json `skipDangerousModePermissionPrompt` (the
+    .claude.json key alone does not suppress the dialog — measured); both are set.
+    The ONE helper that authors a permission-bypass setting: called only by the
+    journey that already launches --dangerously-skip-permissions, and NEVER by
+    claude_resume, whose @OVERLAY_FORCES_SKIPDANGEROUS claim asserts none exists.
     """
     ok = _merge_overlay_config({"bypassPermissionsModeAccepted": True}, env=env)
     return _merge_overlay_settings({"skipDangerousModePermissionPrompt": True}, env=env) and ok
 
 
 def pretrust_workspace(path: str, *, env: dict | None = None) -> bool:
-    """Pre-accept claude's folder-trust dialog for `path`, in rein's overlay config.
-
-    claude's OWN documented escape hatch: "set projects[<path>].hasTrustDialogAccepted:
-    true in <config>". Setting it beats driving the dialog, which is a moving,
-    re-mounting TUI surface — 2.1.251 highlights `No, exit`, and answering it races the
-    re-mount (the caret resets), so a driven answer is flaky by construction.
-
-    Test-layer setup only: it writes rein's SANDBOX overlay (throwaway, wiped by
-    journeys), never the developer's real ~/.claude. Returns False when the overlay
-    config cannot be written — callers keep dismiss_claude_trust_dialog as the fallback.
-    """
+    """Pre-accept claude's folder-trust dialog for `path` in the throwaway overlay
+    (claude's documented projects[<path>].hasTrustDialogAccepted). Beats driving the
+    dialog, which re-mounts mid-startup and resets its caret onto `No, exit`.
+    False when the overlay cannot be written; dismiss_claude_trust_dialog is the
+    fallback."""
     return _merge_overlay_config(
         {"projects": {os.path.realpath(path): {"hasTrustDialogAccepted": True}}}, env=env)
 
@@ -2601,10 +2565,8 @@ def dismiss_claude_trust_dialog(pane: TmuxPaneSession, *, timeout: float = 45.0)
             return False
         seen["dialog"] = True
 
-    # Answer until the dialog is actually GONE, not once. claude paints this dialog
-    # while it is still starting and re-mounts it afterwards — the re-mount RESETS the
-    # caret to `No, exit`, so a single select-and-confirm can land on a component that
-    # is about to be replaced, leaving the dialog up with nobody answering it again.
+    # Answer until the dialog is GONE, not once: it re-mounts during startup and
+    # the re-mount resets the caret to `No, exit`.
     deadline = time.time() + max(timeout, 10.0)
     while time.time() < deadline:
         if not CLAUDE_TRUST_DIALOG_RE.search(pane.pane_text()):
@@ -2624,13 +2586,8 @@ def _trust_option_is_selected(scr: str) -> bool:
 
 
 def _select_trust_option(pane: TmuxPaneSession, *, moves: int = 4) -> bool:
-    """Walk the caret onto the trust option before confirming.
-
-    Direction-agnostic and order-agnostic on purpose: claude has already moved this
-    option (2.1.251 puts `No, exit` first and highlights it), so anything that hard-codes
-    a position will rot the same way. Sends Down until the caret lands, which wraps in
-    claude's list, so the option is reached from wherever the caret starts.
-    """
+    """Walk the caret onto the trust option (Down wraps, so position-agnostic —
+    claude has moved this option before and will again)."""
     for _ in range(moves):
         if _trust_option_is_selected(pane.pane_text()):
             return True

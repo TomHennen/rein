@@ -104,12 +104,8 @@ def overlay_dir(env: dict) -> str:
     return os.path.join(base, "rein-sandbox-home")
 
 
-# The onboarding keys claude writes into the overlay's .claude.json once its
-# first-run flow completes. The wipe must NOT take these with it (#151): claude
-# 2.1.251 answers a virgin overlay with the theme picker and then a LOGIN screen
-# that wants a browser OAuth round-trip, which no journey (and no sandbox) can
-# complete — so wiping them leaves every later interactive run stuck on a wizard.
-# rein deliberately authors no claude config, so this is the test layer's job.
+# Onboarding keys the wipe must preserve (#151): a virgin overlay puts every later
+# interactive run on a wizard whose login step needs a browser OAuth round-trip.
 ONBOARDING_KEYS = ("theme", "hasCompletedOnboarding", "lastOnboardingVersion")
 
 
@@ -299,11 +295,9 @@ def main() -> int:
              f"RESUME: run 2 (`claude -c`, a separate rein run) must recall {MAGIC_WORD!r} "
              f"from run 1 via the persistent overlay — it is not in run 2's prompt, so "
              f"recalling it proves the overlay session persisted"),
-            # NOT an empty-listing assertion (#150): rein's own deny of the
-            # ~/.claude.json SYMLINK lands a /dev/null tombstone at its resolved
-            # target ~/.claude/claude.json, INSIDE the denied dir, so the listing
-            # is legitimately non-empty. What the claim actually is: nothing there
-            # is readable, and nothing there is writable.
+            # Not an empty-listing assertion (#150): rein's deny of the
+            # ~/.claude.json symlink lands a tombstone INSIDE the denied dir.
+            # The claim is: nothing readable, nothing writable.
             ("@HOST_CLAUDE_SENSITIVE_READABLE=[]" in probe_text,
              "HIDING: no sensitive entry under the developer's real ~/.claude may be "
              "READABLE in-sandbox (history, config, credentials, settings, per-project "

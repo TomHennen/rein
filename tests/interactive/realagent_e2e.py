@@ -62,7 +62,10 @@ class RealAgentEndToEnd(ReinTestCase):
         # gets the hardened bind with no opt-in and no dialog.
         run = H.spawn_claude_interactive(
             env=self.env,
-            extra_env={"REIN_SANDBOX_ALLOW_UNHARDENED_GIT": "1"},
+            extra_env={"REIN_SANDBOX_ALLOW_UNHARDENED_GIT": "1",
+                       # The rein repo is deliberately the worktree and is not
+                       # App-covered; this test never pushes.
+                       "REIN_ALLOW_UNSCOPED_WORKTREE": "1"},
             timeout=90,
         )
         try:

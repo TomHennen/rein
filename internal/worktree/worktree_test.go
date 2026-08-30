@@ -345,11 +345,6 @@ func TestResolveWorkTreeWarnsButDoesNotBlock(t *testing.T) {
 	if !strings.Contains(strings.Join(res.Warnings, " "), "NOT in this session's scope") {
 		t.Errorf("want an out-of-scope warning; got %v", res.Warnings)
 	}
-	// The detected-but-out-of-scope repo is reported so the launch can name a
-	// concrete remedy (`rein session add-repo owner/c`) next to the warning.
-	if res.WorkTreeRepoOutOfScope != "owner/c" {
-		t.Errorf("want the out-of-scope repo reported for the remedy hint, got %q", res.WorkTreeRepoOutOfScope)
-	}
 }
 
 // TestGitRemoteOriginReadsRealRepo exercises the REAL git path (no fake), so a

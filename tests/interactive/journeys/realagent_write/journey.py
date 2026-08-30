@@ -54,12 +54,8 @@ def launch_echo(issue: int) -> str:
     return f"--dangerously-skip-permissions {task_for(issue)}"
 
 
-# Is claude's TUI LIVE on the pane's render? Painted for the whole session, INCLUDING
-# while a tool call (the `rein declare`) blocks — exactly the moment the popup is up and
-# we need to prove there is something real underneath it. Defined ONCE in the harness:
-# claude's chrome is WORDING and it moves, and a per-journey copy is how this journey
-# came to assert on markers 2.1.251 no longer prints (a live TUI read as "never
-# appeared").
+# The ONE shared "TUI is live" definition — a per-journey marker tuple is how this
+# journey came to assert on chrome 2.1.251 no longer prints.
 claude_tui_is_live = H.claude_tui_is_live
 
 
@@ -211,14 +207,9 @@ def run_agent(env: dict, repo: str, issue: int, workdir: str) -> dict:
     # The tmux SERVER is started with rein_env(), so the pane's shell — and the rein it
     # launches — inherit REIN_APP_* (to mint) and HOME/XDG_STATE_HOME (so the helper.log
     # this journey reads back is the one the run writes).
-    # Pre-accept claude's folder-trust dialog for this run's checkout, the way claude
-    # itself documents (projects[<path>].hasTrustDialogAccepted). Driving that dialog is
-    # flaky by construction — it re-mounts and resets its caret onto `No, exit` — and it
-    # is claude's UX, not rein's story. dismiss_claude_trust_dialog below stays as the
-    # fallback for a claude that asks anyway.
+    # Pre-accept both blocking dialogs (folder trust; the bypass disclaimer this
+    # journey's own launch flag triggers). dismiss_claude_trust_dialog is the fallback.
     H.pretrust_workspace(workdir, env=env)
-    # …and the SECOND blocking dialog this journey's own launch flag triggers: the
-    # bypass-permissions disclaimer (`❯ No, exit` / `Yes, I accept`).
     H.accept_bypass_permissions_disclaimer(env=env)
 
     with H.tmux_pane_session(env=env) as pane:

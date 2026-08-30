@@ -126,6 +126,18 @@ func runWrapped(argv []string) (int, error) {
 	// than from the per-git-op credential helper, which would spam stderr.
 	config.WarnPartialAppEnv(os.Stderr)
 
+	// Same working-tree resolution as the sandbox path (REIN_SANDBOX_WORKDIR
+	// wins over cwd), so both modes gate the same directory.
+	gateDir := os.Getenv("REIN_SANDBOX_WORKDIR")
+	if gateDir == "" {
+		gateDir, _ = os.Getwd()
+	}
+	if gateDir != "" {
+		if err := ensureWorkTreeInScope(&sess, sessSource, gateDir, ttyYesNo); err != nil {
+			return 1, err
+		}
+	}
+
 	// Eagerly verify that the App's installation COVERS every session repo,
 	// BEFORE the child starts, so a 404 (App not installed / repo not in the
 	// installation) fails loud here instead of degrading to a TM-G8 placeholder
@@ -226,9 +238,6 @@ func runWrapped(argv []string) (int, error) {
 	fmt.Fprintln(os.Stderr, "  (your real ~/.gitconfig is layered in via include.path)")
 	if len(scrubbed) > 0 {
 		fmt.Fprintf(os.Stderr, "  scrubbed from child env: %s (agent uses rein-brokered creds only)\n", strings.Join(scrubbed, ", "))
-	}
-	if cwd, cerr := os.Getwd(); cerr == nil {
-		fmt.Fprint(os.Stderr, cwdScopeNotice(sess, cwd))
 	}
 	fmt.Fprintln(os.Stderr)
 	sess.WarnIgnoredIssue(os.Stderr)

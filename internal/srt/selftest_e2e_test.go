@@ -265,15 +265,9 @@ func buildReinForProbe(t *testing.T) string {
 // ... read-only file system") — measured on this box — whereas under the tmpfs
 // it simply rebuilds.
 //
-// (4) is why (2) is NOT the whole story, and why this test grew a fourth case:
-// srt merges getDefaultWritePaths() into allowWrite and RE-BINDS those host dirs
-// on top of the deny tmpfs, so ~/.claude/debug and ~/.npm/_logs were writable —
-// and persisted — while (2) passed on a path srt does not re-bind. The old note
-// here ("a denyWrite for a dir already in denyRead is SKIPPED, so denyWrite does
-// not stack") was too broad and is what made that invisible: srt skips such an
-// entry ONLY when nothing re-exposed the dest, and a re-binding write path is
-// exactly such a re-exposure (linux-sandbox-utils.js, the hiddenByTmpfs check).
-// rein leans on that exception in srtDefaultHomeWriteDenies.
+// (4) exists because (2) passed while #153 leaked: srt re-binds its own default
+// write paths over the deny tmpfs, so only a path srt re-binds can catch that
+// class. Full mechanism: PLAN-1 2026-08-30 and issue #153.
 //
 // Run: REIN_SANDBOX_E2E=1 go test ./internal/srt/ -run E2E -v
 func TestHomeWriteSemantics_E2E(t *testing.T) {

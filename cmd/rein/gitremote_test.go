@@ -29,10 +29,10 @@ func TestRepoFromRemoteURL(t *testing.T) {
 	}
 }
 
-// TestCwdScopeNotice: the launch-time out-of-scope notice names the repo AND
-// both remedies. It was defined-but-called-from-nowhere until this test's PR,
-// so the test also keeps it wired.
-func TestCwdScopeNotice(t *testing.T) {
+// TestEnsureWorkTreeInScope: an out-of-scope working tree refuses the launch
+// (with both remedies) unless the human accepts the add; in-scope and
+// non-checkout dirs pass silently.
+func TestEnsureWorkTreeInScope(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -47,20 +47,24 @@ func TestCwdScopeNotice(t *testing.T) {
 			t.Fatalf("git %v: %v (%s)", args, err, out)
 		}
 	}
+	no := func(string) bool { return false }
 
 	sess := session.Session{ID: "s", Role: "implement", Repos: []string{"owner/in"}}
-	got := cwdScopeNotice(sess, dir)
-	for _, want := range []string{"owner/out", "rein declare <n> --repo owner/out", "rein session add-repo owner/out"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("notice missing %q:\n%s", want, got)
+	err := ensureWorkTreeInScope(&sess, "file:/nonexistent", dir, no)
+	if err == nil {
+		t.Fatal("out-of-scope working tree + declined prompt must refuse the launch")
+	}
+	for _, want := range []string{"owner/out", "rein session add-repo owner/out"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal missing %q:\n%s", want, err)
 		}
 	}
 
 	inScope := session.Session{ID: "s", Role: "implement", Repos: []string{"owner/out"}}
-	if n := cwdScopeNotice(inScope, dir); n != "" {
-		t.Errorf("an in-scope cwd must say nothing, got %q", n)
+	if err := ensureWorkTreeInScope(&inScope, "", dir, no); err != nil {
+		t.Errorf("in-scope working tree must pass: %v", err)
 	}
-	if n := cwdScopeNotice(sess, t.TempDir()); n != "" {
-		t.Errorf("a non-checkout cwd must say nothing, got %q", n)
+	if err := ensureWorkTreeInScope(&sess, "", t.TempDir(), no); err != nil {
+		t.Errorf("non-checkout working tree must pass: %v", err)
 	}
 }

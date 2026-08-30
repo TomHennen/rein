@@ -1,5 +1,5 @@
 # leg 1 — MISCONFIG: session names the UNCOVERED repo TomHennen/definitely-not-installed
-$ rein run --direct -- echo REIN_INNER_COMMAND_RAN /tmp/rein-itest-eykmw6jo
+$ rein run --direct -- echo REIN_INNER_COMMAND_RAN /tmp/rein-itest-pv164rif
 ===============================================================
 rein: WARNING — DIRECT (UNSANDBOXED) MODE
   The agent runs OUTSIDE the srt sandbox. It shares your user
@@ -11,7 +11,7 @@ rein: WARNING — DIRECT (UNSANDBOXED) MODE
 rein run: App rein-primary-735a3bbe20 is not installed on TomHennen/definitely-not-installed; install it (or add the repo to the installation) at https://github.com/apps/rein-primary-735a3bbe20/installations/new, then re-run
 
 # leg 2 — CONTROL: session names the COVERED throwaway TomHennen/agentcreds-validation-a
-$ rein run --direct -- echo REIN_INNER_COMMAND_RAN /tmp/rein-itest-ngaw7i4n
+$ rein run --direct -- echo REIN_INNER_COMMAND_RAN /tmp/rein-itest-zlixlf7k
 ===============================================================
 rein: WARNING — DIRECT (UNSANDBOXED) MODE
   The agent runs OUTSIDE the srt sandbox. It shares your user
@@ -21,18 +21,15 @@ rein: WARNING — DIRECT (UNSANDBOXED) MODE
   THROWAWAY repo. For real work, drop --direct to run sandboxed.
 ===============================================================
 rein: launching wrapped process with:
-  session: sess_journey_control (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-fy5unip0/session.yaml]
+  session: sess_journey_control (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-mlltmv2n/session.yaml]
   PATH-front shim dir: /home/admin/.local/state/rein/shim
-  per-process git config: /tmp/rein-run-2570927557/gitconfig
+  per-process git config: /tmp/rein-run-1734679021/gitconfig
   (your real ~/.gitconfig is layered in via include.path)
-  NOTE: this directory is TomHennen/rein, which is NOT in this session's scope.
-        The agent can request it mid-run:  rein declare <n> --repo TomHennen/rein  (you approve)
-        Or add it to the session now:      rein session add-repo TomHennen/rein
 
   Writes are LOCKED until the agent declares its issue:  rein declare <n>
   then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal
   (or a tmux popup); approving covers all writes for this run.
 
-rein: running: echo REIN_INNER_COMMAND_RAN /tmp/rein-itest-ngaw7i4n
+rein: running: echo REIN_INNER_COMMAND_RAN /tmp/rein-itest-zlixlf7k
 ---
-REIN_INNER_COMMAND_RAN /tmp/rein-itest-ngaw7i4n
+REIN_INNER_COMMAND_RAN /tmp/rein-itest-zlixlf7k

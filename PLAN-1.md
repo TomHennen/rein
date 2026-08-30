@@ -406,6 +406,18 @@ closes that gap.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-08-30 — **Out-of-scope working tree now GATES the launch (Tom's ruling,
+  #152 review).** The old behavior warned and launched anyway — a run that could
+  edit the tree but never push it. `rein run` (both modes) now detects the
+  working tree's repo (REIN_SANDBOX_WORKDIR, else cwd) and, when it is outside
+  the session ceiling, offers to add it on /dev/tty (`addRepoValidated`: owner
+  rule + install coverage, same as `session add-repo`) or refuses the launch
+  with the remedy. Non-tty refuses (fail closed). The mid-run `declare --repo`
+  expansion path is unchanged for repos beyond the working tree.
+  `REIN_ALLOW_UNSCOPED_WORKTREE=1` is the loud operator opt-out for edit-only
+  use (needed at minimum by the two real-claude tests, which deliberately bind
+  the rein repo itself — a repo the App does not cover — and never push).
+
 - 2026-08-30 — **#153: srt's OWN default write paths punched through the $HOME
   deny — the sandbox was writing the developer's real home, and it persisted.**
   srt merges `getDefaultWritePaths()` (`~/.claude/debug`, `~/.npm/_logs`,

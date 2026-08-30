@@ -123,6 +123,9 @@ def main() -> int:
                     argv=["run", "--direct", "--", "bash", "-c", script, wd],
                     answers=[(H.PROMPT_HINT, str(issue))],
                     label="rein run --direct -- bash -c <direct-ceremony> " + wd,
+                    # Launch from the scratch dir, not the rein checkout: an
+                    # out-of-scope working tree now gates the launch (offer/exit).
+                    cwd=wd,
                     timeout=180,
                 ),
             ],
