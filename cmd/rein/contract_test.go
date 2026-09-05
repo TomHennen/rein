@@ -19,9 +19,10 @@ import (
 // contract that teaches different words than the errors use is worse than none.
 func TestBuildAgentContract_StatesTheEnforcedRules(t *testing.T) {
 	got := buildAgentContract(contractParams{
-		WorkTree:      "/work/repo",
-		HomeEphemeral: true,
-		ExtraDomains:  []string{"api.anthropic.com", "registry.npmjs.org"},
+		WorkTree:        "/work/repo",
+		HomeEphemeral:   true,
+		ExtraDomains:    []string{"api.anthropic.com", "registry.npmjs.org"},
+		SessionFilePath: "/home/dev/.config/rein/dev-session.yaml",
 	})
 
 	for _, want := range []string{
@@ -35,6 +36,10 @@ func TestBuildAgentContract_StatesTheEnforcedRules(t *testing.T) {
 		"agent/<n>/<nonce>",  // exact #35 branch convention
 		"One issue per push", // exact #35 push rule
 		"api.anthropic.com, registry.npmjs.org",
+		// egress self-help: the recipe + the real session path + the restart caveat
+		"CANNOT open a blocked host yourself",
+		"/home/dev/.config/rein/dev-session.yaml",
+		"restart rein",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("contract missing %q; the agent would not know this rule.\n--- contract ---\n%s", want, got)

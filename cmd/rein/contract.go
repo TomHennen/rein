@@ -59,6 +59,10 @@ type contractParams struct {
 	WorkTreeRepo string
 	// ExtraDomains are the operator's extra egress hosts (beyond GitHub).
 	ExtraDomains []string
+	// SessionFilePath is the host path of the session file, named in the
+	// egress self-help line so the agent can hand the human an exact fix.
+	// Empty when the session came from the env fallback (no file).
+	SessionFilePath string
 }
 
 // buildAgentContract renders the contract. Terse and factual on purpose: this
@@ -124,6 +128,15 @@ func buildAgentContract(p contractParams) string {
 		b.WriteString("- Egress is restricted to GitHub.\n")
 	}
 	b.WriteString("- Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.\n")
+	// Self-help: the agent cannot widen egress itself (the allowlist is fixed
+	// at launch), so tell it the exact human-run fix rather than let it retry
+	// or disable checksum verification.
+	b.WriteString("- You CANNOT open a blocked host yourself. To reach one, ask the human to add it\n")
+	if p.SessionFilePath != "" {
+		fmt.Fprintf(&b, "  to `allow_domains:` (or set `egress_preset: dev` for package registries) in\n  %s, then restart rein. It applies to the NEXT run, not this one.\n", p.SessionFilePath)
+	} else {
+		b.WriteString("  to the session's `allow_domains:` (or set `egress_preset: dev` for package\n  registries), then restart rein. It applies to the NEXT run, not this one.\n")
+	}
 
 	return b.String()
 }

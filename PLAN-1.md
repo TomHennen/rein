@@ -406,6 +406,16 @@ closes that gap.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-09-05 — **Egress self-help in the agent contract (Tom's ask + #160
+  rein-doctor idea).** The in-sandbox agent had no sanctioned way to learn how
+  to reach a blocked host, and could not do it itself (allowlist fixed at
+  launch). The injected contract's NETWORK section now tells it: you CANNOT open
+  a host yourself; ask the human to add it to allow_domains (or egress_preset:
+  dev) in <the real session file path>, then restart — it applies to the NEXT
+  run. Names the actual session path so the agent hands the human an exact fix.
+  13 journey goldens regenerated for the new contract text (deterministic:
+  the session path normalizes to <TMP>/session.yaml).
+
 - 2026-09-05 — **#163: "dev" egress preset (open-egress substitute).** srt 0.0.63
   can't express true allow-all (schema rejects a bare "*"; see #163 finding), so
   a named preset is the pragmatic answer: session `egress_preset: dev` (or
