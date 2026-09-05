@@ -370,8 +370,11 @@ func TestObtainIssueApproval_PreferPopup_DeclinedDoesNotFallToTTY(t *testing.T) 
 	if spy.called {
 		t.Error("must NOT fall back to inline /dev/tty after the human declined the popup (would corrupt a TUI)")
 	}
-	if !strings.Contains(stderr.String(), "rein approval grant --run-id") {
-		t.Errorf("expected helpful deny stderr after the popup was declined\n%s", stderr.String())
+	// The old multi-line "grant in another terminal" block painted over a
+	// full-screen agent TUI (#115); a declined/unanswered popup now denies
+	// with ONE line and no /dev/tty fallback.
+	if !strings.Contains(stderr.String(), "not confirmed (popup closed unanswered)") {
+		t.Errorf("expected the one-line quiet denial after the popup was declined\n%s", stderr.String())
 	}
 }
 
@@ -688,4 +691,57 @@ type promptFunc func(context.Context, prompt.Request) (prompt.Result, error)
 
 func (f promptFunc) Confirm(ctx context.Context, req prompt.Request) (prompt.Result, error) {
 	return f(ctx, req)
+}
+
+// TestObtainIssueApproval_PopupTimeoutDoesNotFallToTTY pins the 2026-09-05
+// fix: an EXPIRED popup (human stepped away) is launched-but-unanswered, so
+// the caller denies quietly — never the inline prompt or the multi-line
+// stderr block, both of which paint over a full-screen agent TUI (#115).
+func TestObtainIssueApproval_PopupTimeoutDoesNotFallToTTY(t *testing.T) {
+	t.Setenv("TMUX", "/some/socket")
+	sess := sampleSession()
+	stderr := &bytes.Buffer{}
+	tmux := func(ctx context.Context, command []string) error {
+		<-ctx.Done() // popup sits unanswered until the deadline fires
+		return ctx.Err()
+	}
+	spy := &spyPrompter{inner: matchingPrompter{Answer: 73}}
+	cfg := Config{
+		StateDir:      t.TempDir(),
+		RunID:         testRunID,
+		TTL:           time.Hour,
+		PromptTimeout: time.Second,
+		PopupTimeout:  20 * time.Millisecond,
+		Stderr:        stderr,
+		Prompter:      spy,
+		TmuxRunner:    tmux,
+		PreferPopup:   true,
+		Logger:        discardLogger(),
+	}
+	if ObtainIssueApproval(context.Background(), req73(sess), cfg) {
+		t.Fatal("an expired popup must deny")
+	}
+	if spy.called {
+		t.Error("must NOT fall back to inline /dev/tty after the popup timed out (would corrupt a TUI)")
+	}
+	if got := stderr.String(); strings.Count(got, "\n") > 1 || !strings.Contains(got, "not confirmed") {
+		t.Errorf("want a single quiet denial line, got:\n%s", got)
+	}
+}
+
+// TestPopupContext_DefaultHasNoDeadline: with no PopupTimeout and no env
+// override, the popup waits indefinitely (until answered or the run ends).
+func TestPopupContext_DefaultHasNoDeadline(t *testing.T) {
+	t.Setenv("REIN_POPUP_TIMEOUT", "")
+	ctx, cancel := popupContext(context.Background(), Config{})
+	defer cancel()
+	if _, ok := ctx.Deadline(); ok {
+		t.Error("default popup context must have NO deadline (Tom: 'I might walk away for a day')")
+	}
+	t.Setenv("REIN_POPUP_TIMEOUT", "90s")
+	ctx2, cancel2 := popupContext(context.Background(), Config{})
+	defer cancel2()
+	if _, ok := ctx2.Deadline(); !ok {
+		t.Error("REIN_POPUP_TIMEOUT must bound the popup context")
+	}
 }
