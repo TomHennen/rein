@@ -438,18 +438,22 @@ func (p *Proxy) serveInject(conn net.Conn, req *http.Request, sni string, class 
 			// #164: an out-of-scope READ relays ANONYMOUSLY — strip any client
 			// Authorization, inject nothing. Public repos serve; private ones
 			// 404 (no token, no access), so the scope ceiling still gates every
-			// CREDENTIAL and every WRITE — only anonymous public reads pass. This
-			// is where "let the agent read any public repo" lives; it adds no
-			// exfil channel (github.com is already reachable) and leaks no token.
+			// CREDENTIAL and every WRITE — only anonymous public reads pass. It
+			// adds no exfil channel (github.com is already reachable) and leaks
+			// no token. It DOES widen the agent's INPUT surface to arbitrary
+			// public-repo content (untrusted input / prompt-injection) — accepted
+			// by design (issue #164).
+			// One audit record for this event: relay writes it with the
+			// status, matching the inject/refused-write paths (no pre-relay
+			// double-record).
 			p.logger.Printf("out-of-scope read relayed anonymously: sni=%q repo=%q", sni, repo)
-			p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Tier: tier.String(), Decision: "read-anon-out-of-scope"})
 			req.Header.Del("Authorization")
 			if !isGraphQL {
 				if !p.handleExpectContinue(conn, req) {
 					return false
 				}
 			}
-			return p.relay(conn, req, sni, "", "read-anon-oos", tier.String(), 0, nil)
+			return p.relay(conn, req, sni, "", "read-anon-out-of-scope", tier.String(), 0, nil)
 		}
 		// An out-of-scope WRITE (or an unapproved one): refuse. Answer locally —
 		// do NOT forward upstream (fail closed), never with a token. On the REST

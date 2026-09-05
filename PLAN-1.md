@@ -414,7 +414,10 @@ closes that gap.
   private 404 (no token, no access), so the scope ceiling still gates every
   CREDENTIAL and every WRITE; only anonymous public reads pass. Adds no exfil
   channel (github.com already reachable), leaks no token (unit-pinned: no
-  Authorization upstream). Out-of-scope WRITES stay refused, and on api.github.com
+  Authorization upstream). NEW INPUT SURFACE (by design, disclose it): the
+  agent can now fetch ARBITRARY public-repo content, where before it was
+  confined to in-scope repos — an untrusted-input / prompt-injection surface
+  the operator accepts by running an agent at all. Out-of-scope WRITES stay refused, and on api.github.com
   answer with JSON {message: rein:...} so gh sees a policy decision. This is the
   PROXY (sandboxed) path only — hard-constraint #2 (direct-mode helper always
   returns a credential) is untouched; direct mode still refuses out-of-scope
