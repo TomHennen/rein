@@ -406,6 +406,15 @@ closes that gap.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-09-05 — **#165: security-status read perms (Dependabot alerts, code
+  scanning).** Both returned "Resource not accessible by integration" — the App
+  lacks security_events:read + vulnerability_alerts:read. Threaded the #158
+  pattern with ONE `SecurityRead` flag (the two perms are a pair): launch probe
+  reads the grant (RepoInstallation), caches it in state.json, the gh READ tier
+  (MintGhReadOnlyToken) requests both only when granted. Manifest requests them
+  for future inits; env opt-in REIN_APP_SECURITY_READ=1. Existing App needs the
+  human to add both perms + accept the update (like #158).
+
 - 2026-09-05 — **Popup no longer times out at 90s or cascades to the inline
   prompt (#115).** Tom stepped away from a rein'd claude; the Form A popup
   fired, the old 90s deadline expired, `attemptPopup` MISCLASSIFIED the timeout

@@ -38,6 +38,11 @@ type Config struct {
 	// permission, which would break ALL writes, not just workflow pushes.
 	WorkflowsWrite bool
 
+	// SecurityRead: the installation granted security_events:read +
+	// vulnerability_alerts:read, so the gh READ tier may request them (code
+	// scanning + Dependabot alerts). Never requested when false (#165).
+	SecurityRead bool
+
 	// InstallationID is the numeric installation ID this client mints for.
 	InstallationID int64
 
@@ -167,12 +172,17 @@ func (c *Client) MintWriteToken(ctx context.Context) (token string, expiresAt ti
 // read-only capability, not full implement-role write capability.
 // Mirrors the principle behind the git read/write split in CP3.
 func (c *Client) MintGhReadOnlyToken(ctx context.Context) (token string, expiresAt time.Time, err error) {
-	return c.mint(ctx, &githubauth.InstallationPermissions{
+	perms := &githubauth.InstallationPermissions{
 		Contents:     githubauth.Ptr("read"),
 		Issues:       githubauth.Ptr("read"),
 		PullRequests: githubauth.Ptr("read"),
 		Metadata:     githubauth.Ptr("read"),
-	})
+	}
+	if c.cfg.SecurityRead {
+		perms.SecurityEvents = githubauth.Ptr("read")
+		perms.VulnerabilityAlerts = githubauth.Ptr("read")
+	}
+	return c.mint(ctx, perms)
 }
 
 // MintGhSessionToken returns an installation token shaped for the design's

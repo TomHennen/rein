@@ -79,6 +79,11 @@ func NewAppClient(clientID string, ks keystore.Keystore, roleName, apiBase strin
 type Installation struct {
 	ID             int64
 	WorkflowsWrite bool
+
+	// SecurityRead: the installation granted BOTH security_events:read and
+	// vulnerability_alerts:read (code-scanning + Dependabot alerts). Gated
+	// together — they are the security-status read pair (#165).
+	SecurityRead bool
 }
 
 // RepoInstallationID returns just the id (the pre-existing probe surface).
@@ -144,7 +149,9 @@ func (c *AppClient) RepoInstallation(ctx context.Context, owner, repo string) (I
 	var out struct {
 		ID          int64 `json:"id"`
 		Permissions struct {
-			Workflows string `json:"workflows"`
+			Workflows           string `json:"workflows"`
+			SecurityEvents      string `json:"security_events"`
+			VulnerabilityAlerts string `json:"vulnerability_alerts"`
 		} `json:"permissions"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
@@ -153,7 +160,11 @@ func (c *AppClient) RepoInstallation(ctx context.Context, owner, repo string) (I
 	if out.ID == 0 {
 		return Installation{}, fmt.Errorf("installation lookup for %s/%s returned id 0", owner, repo)
 	}
-	return Installation{ID: out.ID, WorkflowsWrite: out.Permissions.Workflows == "write"}, nil
+	return Installation{
+		ID:             out.ID,
+		WorkflowsWrite: out.Permissions.Workflows == "write",
+		SecurityRead:   out.Permissions.SecurityEvents == "read" && out.Permissions.VulnerabilityAlerts == "read",
+	}, nil
 }
 
 // AppSlug mints an App JWT and calls GET {apiBase}/app, returning the App's

@@ -175,6 +175,7 @@ type fakeProber struct {
 
 	// workflowsWrite is what RepoInstallation reports for the grant.
 	workflowsWrite bool
+	securityRead   bool
 }
 
 func (f *fakeProber) RepoInstallationID(ctx context.Context, owner, repo string) (int64, error) {
@@ -183,7 +184,7 @@ func (f *fakeProber) RepoInstallationID(ctx context.Context, owner, repo string)
 
 func (f *fakeProber) RepoInstallation(ctx context.Context, owner, repo string) (githubapp.Installation, error) {
 	id, err := f.repoFn(ctx, owner, repo)
-	return githubapp.Installation{ID: id, WorkflowsWrite: f.workflowsWrite}, err
+	return githubapp.Installation{ID: id, WorkflowsWrite: f.workflowsWrite, SecurityRead: f.securityRead}, err
 }
 
 func (f *fakeProber) AppSlug(ctx context.Context) (string, error) {

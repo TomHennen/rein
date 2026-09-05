@@ -46,11 +46,13 @@ func TestBuildManifest_Primary(t *testing.T) {
 		t.Errorf("default_events should be empty []string{}, got %v", m.DefaultEvents)
 	}
 	want := map[string]string{
-		"contents":      "write",
-		"issues":        "write",
-		"pull_requests": "write",
-		"workflows":     "write",
-		"metadata":      "read",
+		"contents":             "write",
+		"issues":               "write",
+		"pull_requests":        "write",
+		"workflows":            "write",
+		"security_events":      "read",
+		"vulnerability_alerts": "read",
+		"metadata":             "read",
 	}
 	for k, v := range want {
 		if got := m.DefaultPermissions[k]; got != v {

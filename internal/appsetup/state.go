@@ -48,7 +48,11 @@ type AppRecord struct {
 	// WorkflowsWrite records whether the installation granted workflows:write
 	// (refreshed at each launch's coverage probe). Write mints request the
 	// permission only when true, so an ungranted install keeps working.
-	WorkflowsWrite bool      `json:"workflows_write,omitempty"`
+	WorkflowsWrite bool `json:"workflows_write,omitempty"`
+
+	// SecurityRead records whether the installation granted the security-status
+	// read pair (security_events + vulnerability_alerts), refreshed at launch.
+	SecurityRead   bool      `json:"security_read,omitempty"`
 	KeyFingerprint string    `json:"key_fingerprint,omitempty"`
 	HTMLURL        string    `json:"html_url,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
