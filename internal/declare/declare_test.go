@@ -39,11 +39,11 @@ func deps(t *testing.T, answer string) (Deps, *prompt.StubPrompter) {
 			return metaFor(repo, n), nil
 		},
 		Grant: grant.Config{
-			TTL:           time.Hour,
-			PromptTimeout: time.Second,
-			Prompter:      stub,
-			Stderr:        io.Discard,
-			TmuxRunner:    func(ctx context.Context, cmd []string) error { return errors.New("no tmux in tests") },
+			TTL:             time.Hour,
+			ApprovalTimeout: time.Second,
+			Prompter:        stub,
+			Stderr:          io.Discard,
+			TmuxRunner:      func(ctx context.Context, cmd []string) error { return errors.New("no tmux in tests") },
 		},
 		Logger: log.New(io.Discard, "", 0),
 	}

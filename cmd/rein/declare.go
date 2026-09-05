@@ -136,13 +136,12 @@ func declareDirect(number int, repoFlag, runID string) (int, error) {
 	oldSig := approvals.SignatureOf(sess)
 
 	gcfg := grant.Config{
-		TTL:           approvalTTL,
-		PromptTimeout: 60 * time.Second,
-		PreferPopup:   grant.PopupPreferenceFromEnv(),
-		StateDir:      stateDir,
-		RunID:         runID,
-		RunPID:        envInt("REIN_RUN_PID"),
-		SessionFile:   sessionFile,
+		TTL:         approvalTTL,
+		PreferPopup: grant.PopupPreferenceFromEnv(),
+		StateDir:    stateDir,
+		RunID:       runID,
+		RunPID:      envInt("REIN_RUN_PID"),
+		SessionFile: sessionFile,
 		// Direct mode: the credential helper reloads the session file every
 		// git op, so an in-prompt persist must re-sign this run's approval
 		// (below, and — for the out-of-process grant surface — via the

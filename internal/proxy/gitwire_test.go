@@ -249,11 +249,11 @@ func TestGitWire_ConfirmedPushSucceedsOverDotGitURL(t *testing.T) {
 			return issuemeta.Meta{Number: n, Repo: repo, Title: "wire title", State: "open"}, nil
 		},
 		Grant: grant.Config{
-			TTL:           time.Hour,
-			PromptTimeout: time.Second,
-			Prompter:      &prompt.StubPrompter{Response: "73"},
-			Stderr:        io.Discard,
-			TmuxRunner:    func(context.Context, []string) error { return errors.New("no tmux") },
+			TTL:             time.Hour,
+			ApprovalTimeout: time.Second,
+			Prompter:        &prompt.StubPrompter{Response: "73"},
+			Stderr:          io.Discard,
+			TmuxRunner:      func(context.Context, []string) error { return errors.New("no tmux") },
 		},
 	}, 73, "")
 	if !out.Confirmed {

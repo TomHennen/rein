@@ -714,12 +714,11 @@ func runApproval(args []string) error {
 		defer closeLog()
 		logger.Printf("approval grant: run-id=%s", runID)
 		cfg := grant.Config{
-			StateDir:      stateDir,
-			RunID:         runID,
-			RunPID:        envInt("REIN_RUN_PID"),
-			TTL:           approvalTTL,
-			PromptTimeout: 60 * time.Second,
-			Logger:        logger,
+			StateDir: stateDir,
+			RunID:    runID,
+			RunPID:   envInt("REIN_RUN_PID"),
+			TTL:      approvalTTL,
+			Logger:   logger,
 		}
 		if err := grant.Grant(context.Background(), cfg); err != nil {
 			return err
@@ -745,7 +744,7 @@ func runApproval(args []string) error {
 		if err != nil {
 			return err
 		}
-		cfg := grant.Config{StateDir: stateDir, RunID: runID, PromptTimeout: 10 * time.Minute, Logger: logger}
+		cfg := grant.Config{StateDir: stateDir, RunID: runID, Logger: logger}
 		if err := grant.AcknowledgeInstallNotice(context.Background(), cfg, n); err != nil {
 			// No tty (not in a popup): print it plainly instead.
 			grant.WriteInstallNotice(os.Stdout, n)

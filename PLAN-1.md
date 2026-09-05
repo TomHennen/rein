@@ -406,6 +406,22 @@ closes that gap.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-09-05 — **Popup no longer times out at 90s or cascades to the inline
+  prompt (#115).** Tom stepped away from a rein'd claude; the Form A popup
+  fired, the old 90s deadline expired, `attemptPopup` MISCLASSIFIED the timeout
+  as "surface unavailable" (`runErr==nil` fell through to `launched=false`), and
+  the caller cascaded to the inline `/dev/tty` prompt — which painted over the
+  agent's full-screen TUI. Two fixes: (1) an expired popup is now
+  launched-but-unanswered (`ctxPopup.Err()==DeadlineExceeded => return
+  false, true`), so the caller DENIES quietly (one stderr line, no `/dev/tty`,
+  no multi-line "grant elsewhere" block that also corrupts the TUI); the agent
+  hears the denial via the declare outcome and re-runs the idempotent declare.
+  (2) There is now ONE approval timeout (popup and inline prompt are the same
+  human, same decision — Tom's review), default UNBOUNDED: an unanswered surface
+  grants nothing, a LATE answer still records the approval. `REIN_APPROVAL_TIMEOUT`
+  (or `Config.ApprovalTimeout`) bounds it. Live-verified: Form A stayed up past
+  150s (old code died at 90s) and a late answer confirmed.
+
 - 2026-09-05 — **workflows:write granted to the App (Tom's decision), threaded
   conditionally.** GitHub rejects any push touching `.github/workflows/**` from
   a credential without the `workflows` permission (hit live in wrangle: no

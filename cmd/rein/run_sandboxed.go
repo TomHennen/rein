@@ -921,13 +921,12 @@ func buildDeclarationHooks(env declareEnv) *proxy.DeclarationHooks {
 		},
 		Declare: func(issue int, repoArg string) proxy.DeclareOutcome {
 			gcfg := grant.Config{
-				TTL:           approvalTTL,
-				PromptTimeout: 60 * time.Second,
-				PreferPopup:   grant.PopupPreferenceFromEnv(),
-				StateDir:      env.stateDir,
-				RunID:         env.runID,
-				SessionFile:   env.sessionFile,
-				Logger:        env.logger,
+				TTL:         approvalTTL,
+				PreferPopup: grant.PopupPreferenceFromEnv(),
+				StateDir:    env.stateDir,
+				RunID:       env.runID,
+				SessionFile: env.sessionFile,
+				Logger:      env.logger,
 			}
 			out := declare.Run(context.Background(), declare.Deps{
 				StateDir:   env.stateDir,

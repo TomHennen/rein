@@ -108,8 +108,11 @@ type Config struct {
 	// ONLY — it is NOT a re-prompt trigger. The run lifetime is the bound.
 	TTL time.Duration
 
-	// PromptTimeout caps the wait inside the /dev/tty prompt.
-	PromptTimeout time.Duration
+	// ApprovalTimeout bounds how long an approval surface (popup OR inline
+	// prompt — same human, same decision) waits unanswered. <= 0 (default)
+	// means no deadline; REIN_APPROVAL_TIMEOUT overrides. An unanswered
+	// surface grants nothing, and a late answer still records the approval.
+	ApprovalTimeout time.Duration
 
 	// Stderr is where the helpful-deny message goes. Defaults to
 	// os.Stderr; tests override with a buffer.
@@ -325,11 +328,15 @@ func ObtainIssueApproval(ctx context.Context, req IssueRequest, cfg Config) bool
 		if approved, launched := attemptPopup(ctx, cfg, sig, req.Issue); approved {
 			return true
 		} else if launched {
-			// The human saw the popup and closed it without approving. Do
-			// NOT fall back to the inline /dev/tty prompt — that collision is
-			// exactly what PreferPopup exists to avoid. Deny helpfully.
-			cfg.Logger.Printf("grant: popup declined; not falling back to /dev/tty")
-			return denyHelpful(req, cfg)
+			// The popup ran and was closed or expired unanswered. Do NOT
+			// fall back to the inline /dev/tty prompt, and do NOT print the
+			// multi-line helpful block — both paint over a full-screen agent
+			// TUI (#115). One line; the agent hears the denial through the
+			// declare outcome and can re-run the (idempotent) declare.
+			cfg.Logger.Printf("grant: popup unanswered/declined; denying without /dev/tty fallback")
+			fmt.Fprintf(cfg.Stderr, "rein: issue #%d not confirmed (popup closed unanswered) — the agent can re-run `rein declare %d`\n",
+				req.Issue.Number, req.Issue.Number)
+			return false
 		}
 		cfg.Logger.Printf("grant: popup preferred but unavailable; trying inline /dev/tty")
 	}
@@ -390,7 +397,7 @@ func formARequest(req IssueRequest, expansion bool, cfg Config) prompt.Request {
 		Expansion:  expansion,
 		AddRepo:    addRepo,
 		AskPersist: addRepo != "" && cfg.SessionFile != "",
-		Timeout:    cfg.PromptTimeout,
+		Timeout:    approvalTimeout(cfg),
 	}
 }
 
@@ -465,7 +472,7 @@ func attemptPopup(ctx context.Context, cfg Config, sig string, issue approvals.C
 	}
 	reinCmd := resolveReinCmd()
 	cfg.Logger.Printf("grant: launching tmux popup (%s approval grant --run-id %s)", reinCmd, cfg.RunID)
-	ctxPopup, cancel := context.WithTimeout(ctx, 90*time.Second)
+	ctxPopup, cancel := popupContext(ctx, cfg)
 	defer cancel()
 	runErr := cfg.TmuxRunner(ctxPopup, []string{reinCmd, "approval", "grant", "--run-id", cfg.RunID})
 	if runErr != nil {
@@ -476,11 +483,38 @@ func attemptPopup(ctx context.Context, cfg Config, sig string, issue approvals.C
 		cfg.Logger.Printf("grant: issue #%d CONFIRMED via tmux popup", issue.Number)
 		return true, true
 	}
+	if errors.Is(ctxPopup.Err(), context.DeadlineExceeded) {
+		// The popup RAN and expired with nobody at the keyboard: a
+		// launched-but-unanswered outcome, NOT "surface unavailable" — the
+		// caller must deny quietly, never cascade to the inline prompt.
+		cfg.Logger.Printf("grant: tmux popup timed out unanswered (%s)", approvalTimeout(cfg))
+		return false, true
+	}
 	if runErr == nil {
 		cfg.Logger.Printf("grant: tmux popup closed without confirming")
 		return false, true
 	}
 	return false, false
+}
+
+// approvalTimeout resolves cfg.ApprovalTimeout, else REIN_APPROVAL_TIMEOUT,
+// else 0 (no deadline).
+func approvalTimeout(cfg Config) time.Duration {
+	if cfg.ApprovalTimeout > 0 {
+		return cfg.ApprovalTimeout
+	}
+	if d, err := time.ParseDuration(os.Getenv("REIN_APPROVAL_TIMEOUT")); err == nil && d > 0 {
+		return d
+	}
+	return 0
+}
+
+// popupContext bounds the popup by approvalTimeout (0 = no deadline).
+func popupContext(ctx context.Context, cfg Config) (context.Context, context.CancelFunc) {
+	if t := approvalTimeout(cfg); t > 0 {
+		return context.WithTimeout(ctx, t)
+	}
+	return context.WithCancel(ctx)
 }
 
 // denyHelpful emits the "grant in another terminal" message and denies.

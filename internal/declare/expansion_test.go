@@ -38,11 +38,11 @@ func expansionDeps(t *testing.T, answer string) (*Deps, *prompt.StubPrompter, *i
 		InstallURL: "https://github.com/apps/rein/installations/new",
 		AppName:    "rein-test-app",
 		Grant: grant.Config{
-			TTL:           time.Hour,
-			PromptTimeout: time.Second,
-			Prompter:      stub,
-			Stderr:        io.Discard,
-			TmuxRunner:    func(ctx context.Context, cmd []string) error { return errors.New("no tmux") },
+			TTL:             time.Hour,
+			ApprovalTimeout: time.Second,
+			Prompter:        stub,
+			Stderr:          io.Discard,
+			TmuxRunner:      func(ctx context.Context, cmd []string) error { return errors.New("no tmux") },
 		},
 		Logger: log.New(io.Discard, "", 0),
 	}
