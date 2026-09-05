@@ -1,0 +1,86 @@
+
+[ok        ] env     ANTHROPIC_API_KEY — sensitive env var correctly scrubbed
+[ok        ] env     AWS_ACCESS_KEY_ID — sensitive env var correctly scrubbed
+[ok        ] env     AWS_SECRET_ACCESS_KEY — sensitive env var correctly scrubbed
+[ok        ] env     AWS_SESSION_TOKEN — sensitive env var correctly scrubbed
+[ok        ] env     DBUS_SESSION_BUS_ADDRESS — sensitive env var correctly scrubbed
+[ok        ] env     GH_TOKEN — sensitive env var correctly scrubbed
+[ok        ] env     GITHUB_TOKEN — sensitive env var correctly scrubbed
+[ok        ] env     GPG_AGENT_INFO — sensitive env var correctly scrubbed
+[ok        ] env     SSH_AUTH_SOCK — sensitive env var correctly scrubbed
+[ok        ] file    /run/user/1000 — sensitive path correctly unreadable
+[ok        ] file    /run/user/1000/rein/run-<RUNID> — sensitive path correctly unreadable
+[ok        ] file    <HOME>/.bash_history — sensitive path correctly unreadable
+[ok        ] file    <HOME>/.cargo/credentials — sensitive path correctly unreadable
+[ok        ] file    <HOME>/.cargo/credentials.toml — sensitive path correctly unreadable
+[ok        ] file    <HOME>/.claude.json — sensitive path correctly unreadable
+[ok        ] file    <HOME>/.claude/.credentials.json — sensitive path correctly unreadable
+[ok        ] file    <HOME>/.config/gh/config.yml — sensitive path correctly unreadable
+[ok        ] file    <HOME>/.config/git/ignore — sensitive path correctly unreadable
+[ok        ] file    <HOME>/.config/rein-credentials/app.pem — sensitive path correctly unreadable
+[ok        ] file    <HOME>/.config/rein/audit.pem — sensitive path correctly unreadable
+[ok        ] file    <HOME>/.git-credentials — sensitive path correctly unreadable
+[ok        ] file    <HOME>/.gitconfig — sensitive path correctly unreadable
+[ok        ] file    <HOME>/.gnupg — sensitive path correctly unreadable
+[ok        ] file    <HOME>/.local/bin — path re-exposed read-only via allowRead <HOME>/.local/bin
+[ok        ] file    <HOME>/.local/share/keyrings — sensitive path correctly unreadable
+[ok        ] file    <HOME>/.local/share/kwalletd — sensitive path correctly unreadable
+[ok        ] file    <HOME>/.local/state/rein/gh-env.sh — sensitive path correctly unreadable
+[ok        ] file    <HOME>/.netrc — sensitive path correctly unreadable
+[ok        ] file    <HOME>/.npm-global/bin — path re-exposed read-only via allowRead <HOME>/.npm-global/bin
+[ok        ] file    <HOME>/.npm-global/lib/node_modules — path re-exposed read-only via allowRead <HOME>/.npm-global/lib/node_modules
+[ok        ] file    <HOME>/.ssh/authorized_keys — sensitive path correctly unreadable
+[ok        ] file    <HOME>/go — path re-exposed read-only via allowRead <HOME>/go
+[ok        ] network api.anthropic.com — expected-open egress reachable
+[ok        ] network api.github.com — expected-open egress reachable
+[ok        ] network codeload.github.com — expected-open egress reachable
+[ok        ] network example.com — denied host correctly unreachable
+[ok        ] network objects.githubusercontent.com — expected-open egress reachable
+[ok        ] network platform.claude.com — expected-open egress reachable
+[ok        ] network raw.githubusercontent.com — expected-open egress reachable
+[ok        ] write   <HOME>/.claude/debug/.rein-containment-write-probe — write correctly blocked by denyWrite pin
+[ok        ] write   <HOME>/.config/rein-sandbox-home/.claude/.rein-containment-write-probe — write persisted inside a writable bind (expected)
+[ok        ] write   <HOME>/.npm/_logs/.rein-containment-write-probe — write correctly blocked by denyWrite pin
+[ok        ] write   <HOME>/.rein-containment-write-probe — write outside writable binds evaporated (deny tmpfs)
+[ok        ] write   <WORKTREE>/.rein-containment-write-probe — write persisted inside a writable bind (expected)
+[unknown   ] file    /etc/group — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /etc/hostname — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /etc/hosts — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /etc/passwd — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /etc/resolv.conf — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /etc/ssh/sshd_config — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /proc/<PID>/cgroup — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /proc/self/cgroup — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /proc/self/mountinfo — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /proc/self/status — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/dbus/system_bus_socket — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/docker.sock — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/lxd-installer.socket — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/snapd-snap.socket — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/snapd.socket — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/systemd/fsck.progress — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/systemd/inaccessible/sock — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/systemd/io.systemd.ManagedOOM — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/systemd/io.systemd.sysext — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/systemd/journal/dev-log — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/systemd/journal/io.systemd.journal — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/systemd/journal/socket — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/systemd/journal/stdout — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/systemd/journal/syslog — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/systemd/notify — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/systemd/private — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/systemd/resolve/io.systemd.Resolve — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/systemd/resolve/io.systemd.Resolve.Monitor — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/systemd/userdb/io.systemd.DynamicUser — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/udev/control — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /run/uuidd/request — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /tmp/cc-daemon-1000/<HEX>/control.sock — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /tmp/cc-daemon-1000/<HEX>/pty/<HEX>.sock — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /tmp/cc-daemon-1000/<HEX>/rv/<HEX>.sock — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /tmp/cc-daemon-1000/<HEX>/spare/<HEX>.claim.sock — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /tmp/cc-daemon-1000/<HEX>/spare/<HEX>.pty.sock — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /tmp/claude-http-<HEX>.sock — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /tmp/srt-mux-<N>.sock — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /tmp/tmux-1000/default — readable path not covered by denyRead/allowRead — triage whether it should be denied
+[unknown   ] file    /var/spool/postfix/dev/log — readable path not covered by denyRead/allowRead — triage whether it should be denied
+summary: <normalized — counts vary with the host socket herd>

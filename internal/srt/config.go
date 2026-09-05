@@ -397,6 +397,17 @@ var srtDefaultHomeWritePaths = []string{
 	filepath.Join(".npm", "_logs"),
 }
 
+// DefaultHomeWritePaths returns srt's own $HOME-relative default write paths
+// resolved under home — the substrate-chosen set the containment harness must
+// sweep (#153: rein's config never names them, which is how they leaked).
+func DefaultHomeWritePaths(home string) []string {
+	out := make([]string, 0, len(srtDefaultHomeWritePaths))
+	for _, rel := range srtDefaultHomeWritePaths {
+		out = append(out, filepath.Join(home, rel))
+	}
+	return out
+}
+
 // srtDefaultHomeWriteDenies returns the denyWrite entries neutralizing
 // srtDefaultHomeWritePaths under home; empty when home is empty (no $HOME deny).
 // Existence-gated: a denyWrite of a missing source fails the bwrap launch.

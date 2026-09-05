@@ -26,3 +26,6 @@ __pycache__/
 
 # Stray clones from manual rein-run tests
 /clone
+
+# containment harness run artifacts (tests/containment/run.sh)
+tests/containment/_out/

@@ -1,6 +1,7 @@
 package containment
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -179,5 +180,46 @@ func TestOracle_ManagedHostsAreExpectedOpen(t *testing.T) {
 		if !o.injectDomains[normHost(h)] {
 			t.Errorf("inject host %q missing from injectDomains oracle set", h)
 		}
+	}
+}
+
+// TestOracle_Write pins the #153 channel: a write persisting on the host is OK
+// only inside a writable bind (and never under a denyWrite pin).
+func TestOracle_Write(t *testing.T) {
+	root := t.TempDir()
+	work := filepath.Join(root, "repo")
+	gitdir := filepath.Join(work, ".git")
+	if err := os.MkdirAll(gitdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := srt.Build(srt.Params{
+		SocketPath:      filepath.Join(root, "run", "rein.sock"),
+		WorkingTree:     work,
+		WritableGitDirs: []string{gitdir},
+		DenyReadHome:    filepath.Join(root, "home"),
+	})
+	if err != nil {
+		t.Fatalf("srt.Build: %v", err)
+	}
+	o := NewOracle(cfg)
+	cases := []struct {
+		name string
+		obs  Observation
+		want Verdict
+	}{
+		{"persisted in working tree", Observation{Kind: KindWrite, Target: filepath.Join(work, "out.txt"), Reachable: true}, VerdictOK},
+		{"working-tree write lost", Observation{Kind: KindWrite, Target: filepath.Join(work, "out.txt"), Reachable: false}, VerdictRegression},
+		{"persisted under hidden $HOME is a LEAK", Observation{Kind: KindWrite, Target: filepath.Join(root, "home", ".claude", "debug", "x"), Reachable: true}, VerdictLeak},
+		{"hidden $HOME write evaporated", Observation{Kind: KindWrite, Target: filepath.Join(root, "home", ".claude", "debug", "x"), Reachable: false}, VerdictOK},
+		{"persisted under hooks pin is a LEAK", Observation{Kind: KindWrite, Target: filepath.Join(gitdir, "hooks", "pre-commit"), Reachable: true}, VerdictLeak},
+		{"hooks pin write blocked is OK", Observation{Kind: KindWrite, Target: filepath.Join(gitdir, "hooks", "pre-commit"), Reachable: false}, VerdictOK},
+		{"persisted anywhere else is a LEAK", Observation{Kind: KindWrite, Target: "/etc/cron.d/x", Reachable: true}, VerdictLeak},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := o.Classify(c.obs).Verdict; got != c.want {
+				t.Errorf("%s: got %s, want %s", c.name, got, c.want)
+			}
+		})
 	}
 }
