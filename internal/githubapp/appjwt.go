@@ -73,8 +73,22 @@ func NewAppClient(clientID string, ks keystore.Keystore, roleName, apiBase strin
 	return &AppClient{clientID: clientID, ks: ks, roleName: roleName, apiBase: apiBase}, nil
 }
 
-// RepoInstallationID mints an App JWT and calls
-// GET {apiBase}/repos/{owner}/{repo}/installation, returning installation.id.
+// Installation is what rein needs from a repo's installation: its id, and
+// whether the installation was granted workflows:write (gates whether write
+// mints may request it — see githubapp.Config.WorkflowsWrite).
+type Installation struct {
+	ID             int64
+	WorkflowsWrite bool
+}
+
+// RepoInstallationID returns just the id (the pre-existing probe surface).
+func (c *AppClient) RepoInstallationID(ctx context.Context, owner, repo string) (int64, error) {
+	inst, err := c.RepoInstallation(ctx, owner, repo)
+	return inst.ID, err
+}
+
+// RepoInstallation mints an App JWT and calls
+// GET {apiBase}/repos/{owner}/{repo}/installation.
 //
 //   - 404            -> ErrAppNotInstalled.
 //   - other non-200  -> a descriptive error including status + truncated body.
@@ -82,25 +96,25 @@ func NewAppClient(clientID string, ks keystore.Keystore, roleName, apiBase strin
 //
 // Per the GitHub docs ("Get a repository installation for the authenticated
 // app"), this endpoint requires JWT auth and returns the Installation object.
-func (c *AppClient) RepoInstallationID(ctx context.Context, owner, repo string) (int64, error) {
+func (c *AppClient) RepoInstallation(ctx context.Context, owner, repo string) (Installation, error) {
 	keyPEM, err := c.ks.Get(c.roleName)
 	if err != nil {
-		return 0, fmt.Errorf("read private key from keystore[%s]: %w", c.roleName, err)
+		return Installation{}, fmt.Errorf("read private key from keystore[%s]: %w", c.roleName, err)
 	}
 
 	appSrc, err := githubauth.NewApplicationTokenSource(c.clientID, keyPEM)
 	if err != nil {
-		return 0, fmt.Errorf("build app token source: %w", err)
+		return Installation{}, fmt.Errorf("build app token source: %w", err)
 	}
 	tok, err := appSrc.Token()
 	if err != nil {
-		return 0, fmt.Errorf("mint app jwt: %w", err)
+		return Installation{}, fmt.Errorf("mint app jwt: %w", err)
 	}
 
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/installation", c.apiBase, owner, repo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return 0, fmt.Errorf("build installation request: %w", err)
+		return Installation{}, fmt.Errorf("build installation request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -108,35 +122,38 @@ func (c *AppClient) RepoInstallationID(ctx context.Context, owner, repo string) 
 
 	resp, err := c.client().Do(req)
 	if err != nil {
-		return 0, fmt.Errorf("lookup installation for %s/%s: %w", owner, repo, err)
+		return Installation{}, fmt.Errorf("lookup installation for %s/%s: %w", owner, repo, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return 0, fmt.Errorf("read installation response: %w", err)
+		return Installation{}, fmt.Errorf("read installation response: %w", err)
 	}
 
 	if resp.StatusCode == http.StatusNotFound {
-		return 0, ErrAppNotInstalled
+		return Installation{}, ErrAppNotInstalled
 	}
 	if resp.StatusCode != http.StatusOK {
 		excerpt := string(body)
 		if len(excerpt) > 512 {
 			excerpt = excerpt[:512] + "...(truncated)"
 		}
-		return 0, fmt.Errorf("installation lookup for %s/%s returned HTTP %d: %s", owner, repo, resp.StatusCode, excerpt)
+		return Installation{}, fmt.Errorf("installation lookup for %s/%s returned HTTP %d: %s", owner, repo, resp.StatusCode, excerpt)
 	}
 
 	var out struct {
-		ID int64 `json:"id"`
+		ID          int64 `json:"id"`
+		Permissions struct {
+			Workflows string `json:"workflows"`
+		} `json:"permissions"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
-		return 0, fmt.Errorf("parse installation response: %w", err)
+		return Installation{}, fmt.Errorf("parse installation response: %w", err)
 	}
 	if out.ID == 0 {
-		return 0, fmt.Errorf("installation lookup for %s/%s returned id 0", owner, repo)
+		return Installation{}, fmt.Errorf("installation lookup for %s/%s returned id 0", owner, repo)
 	}
-	return out.ID, nil
+	return Installation{ID: out.ID, WorkflowsWrite: out.Permissions.Workflows == "write"}, nil
 }
 
 // AppSlug mints an App JWT and calls GET {apiBase}/app, returning the App's

@@ -49,6 +49,7 @@ func TestBuildManifest_Primary(t *testing.T) {
 		"contents":      "write",
 		"issues":        "write",
 		"pull_requests": "write",
+		"workflows":     "write",
 		"metadata":      "read",
 	}
 	for k, v := range want {
