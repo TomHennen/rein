@@ -43,15 +43,15 @@ func sampleIssue(n int) approvals.ConfirmedIssue {
 func defaultCfg(t *testing.T, p prompt.Prompter, stderr io.Writer, tmux TmuxRunner) Config {
 	t.Helper()
 	return Config{
-		StateDir:      t.TempDir(),
-		RunID:         testRunID,
-		RunPID:        os.Getpid(),
-		TTL:           4 * time.Hour,
-		PromptTimeout: time.Second,
-		Stderr:        stderr,
-		Prompter:      p,
-		TmuxRunner:    tmux,
-		Logger:        discardLogger(),
+		StateDir:        t.TempDir(),
+		RunID:           testRunID,
+		RunPID:          os.Getpid(),
+		TTL:             4 * time.Hour,
+		ApprovalTimeout: time.Second,
+		Stderr:          stderr,
+		Prompter:        p,
+		TmuxRunner:      tmux,
+		Logger:          discardLogger(),
 	}
 }
 
@@ -256,14 +256,14 @@ func TestObtainIssueApproval_PopupApproved(t *testing.T) {
 		return approvals.AppendConfirmedIssue(stateDir, testRunID, approvals.SignatureOf(sess), sess.ID, sampleIssue(73), time.Hour)
 	}
 	cfg := Config{
-		StateDir:      stateDir,
-		RunID:         testRunID,
-		TTL:           time.Hour,
-		PromptTimeout: time.Second,
-		Stderr:        &bytes.Buffer{},
-		Prompter:      noTTYPrompter{},
-		TmuxRunner:    tmux,
-		Logger:        discardLogger(),
+		StateDir:        stateDir,
+		RunID:           testRunID,
+		TTL:             time.Hour,
+		ApprovalTimeout: time.Second,
+		Stderr:          &bytes.Buffer{},
+		Prompter:        noTTYPrompter{},
+		TmuxRunner:      tmux,
+		Logger:          discardLogger(),
 	}
 	if !ObtainIssueApproval(context.Background(), req73(sess), cfg) {
 		t.Error("expected confirmed when popup appended the issue")
@@ -282,14 +282,14 @@ func TestObtainIssueApproval_PopupClosedWithoutApproval(t *testing.T) {
 	stderr := &bytes.Buffer{}
 	tmux := func(ctx context.Context, command []string) error { return nil }
 	cfg := Config{
-		StateDir:      t.TempDir(),
-		RunID:         testRunID,
-		TTL:           time.Hour,
-		PromptTimeout: time.Second,
-		Stderr:        stderr,
-		Prompter:      noTTYPrompter{},
-		TmuxRunner:    tmux,
-		Logger:        discardLogger(),
+		StateDir:        t.TempDir(),
+		RunID:           testRunID,
+		TTL:             time.Hour,
+		ApprovalTimeout: time.Second,
+		Stderr:          stderr,
+		Prompter:        noTTYPrompter{},
+		TmuxRunner:      tmux,
+		Logger:          discardLogger(),
 	}
 	if ObtainIssueApproval(context.Background(), req73(sess), cfg) {
 		t.Error("popup closed without record should deny")
@@ -326,15 +326,15 @@ func TestObtainIssueApproval_PreferPopup_PopupFirstApproved(t *testing.T) {
 	}
 	spy := &spyPrompter{inner: matchingPrompter{Answer: 73}}
 	cfg := Config{
-		StateDir:      stateDir,
-		RunID:         testRunID,
-		TTL:           time.Hour,
-		PromptTimeout: time.Second,
-		Stderr:        &bytes.Buffer{},
-		Prompter:      spy,
-		TmuxRunner:    tmux,
-		PreferPopup:   true,
-		Logger:        discardLogger(),
+		StateDir:        stateDir,
+		RunID:           testRunID,
+		TTL:             time.Hour,
+		ApprovalTimeout: time.Second,
+		Stderr:          &bytes.Buffer{},
+		Prompter:        spy,
+		TmuxRunner:      tmux,
+		PreferPopup:     true,
+		Logger:          discardLogger(),
 	}
 	if !ObtainIssueApproval(context.Background(), req73(sess), cfg) {
 		t.Fatal("expected confirmation via popup-first path")
@@ -354,15 +354,15 @@ func TestObtainIssueApproval_PreferPopup_DeclinedDoesNotFallToTTY(t *testing.T) 
 	tmux := func(ctx context.Context, command []string) error { return nil } // closed, no record
 	spy := &spyPrompter{inner: matchingPrompter{Answer: 73}}                 // would approve if (wrongly) consulted
 	cfg := Config{
-		StateDir:      t.TempDir(),
-		RunID:         testRunID,
-		TTL:           time.Hour,
-		PromptTimeout: time.Second,
-		Stderr:        stderr,
-		Prompter:      spy,
-		TmuxRunner:    tmux,
-		PreferPopup:   true,
-		Logger:        discardLogger(),
+		StateDir:        t.TempDir(),
+		RunID:           testRunID,
+		TTL:             time.Hour,
+		ApprovalTimeout: time.Second,
+		Stderr:          stderr,
+		Prompter:        spy,
+		TmuxRunner:      tmux,
+		PreferPopup:     true,
+		Logger:          discardLogger(),
 	}
 	if ObtainIssueApproval(context.Background(), req73(sess), cfg) {
 		t.Fatal("a declined popup must deny, not fall through to an auto-approving tty")
@@ -384,15 +384,15 @@ func TestObtainIssueApproval_PreferPopup_PopupUnavailableFallsToTTY(t *testing.T
 	tmux := func(ctx context.Context, command []string) error { return errors.New("tmux too old for display-popup") }
 	spy := &spyPrompter{inner: matchingPrompter{Answer: 73}}
 	cfg := Config{
-		StateDir:      t.TempDir(),
-		RunID:         testRunID,
-		TTL:           time.Hour,
-		PromptTimeout: time.Second,
-		Stderr:        &bytes.Buffer{},
-		Prompter:      spy,
-		TmuxRunner:    tmux,
-		PreferPopup:   true,
-		Logger:        discardLogger(),
+		StateDir:        t.TempDir(),
+		RunID:           testRunID,
+		TTL:             time.Hour,
+		ApprovalTimeout: time.Second,
+		Stderr:          &bytes.Buffer{},
+		Prompter:        spy,
+		TmuxRunner:      tmux,
+		PreferPopup:     true,
+		Logger:          discardLogger(),
 	}
 	if !ObtainIssueApproval(context.Background(), req73(sess), cfg) {
 		t.Fatal("expected fallback to inline /dev/tty when the popup can't launch")
@@ -434,13 +434,13 @@ func TestObtainIssueApproval_NoCrossRunReuse(t *testing.T) {
 	seedConfirmed(t, stateDir, "A", sess, sampleIssue(73))
 
 	cfgB := Config{
-		StateDir:      stateDir,
-		RunID:         "B",
-		TTL:           time.Hour,
-		PromptTimeout: time.Second,
-		Stderr:        &bytes.Buffer{},
-		Prompter:      noTTYPrompter{}, // no auto-approve
-		Logger:        discardLogger(),
+		StateDir:        stateDir,
+		RunID:           "B",
+		TTL:             time.Hour,
+		ApprovalTimeout: time.Second,
+		Stderr:          &bytes.Buffer{},
+		Prompter:        noTTYPrompter{}, // no auto-approve
+		Logger:          discardLogger(),
 	}
 	if ObtainIssueApproval(context.Background(), req73(sess), cfgB) {
 		t.Fatal("run B must NOT be satisfied by run A's confirmed set")
@@ -462,13 +462,13 @@ func TestObtainIssueApproval_MidRunScopeEdit(t *testing.T) {
 	expanded.Repos = []string{"owner/repo", "owner/extra"} // scope grew mid-run
 
 	cfg := Config{
-		StateDir:      stateDir,
-		RunID:         testRunID,
-		TTL:           time.Hour,
-		PromptTimeout: time.Second,
-		Stderr:        &bytes.Buffer{},
-		Prompter:      noTTYPrompter{}, // no auto-approve, so we observe the miss
-		Logger:        discardLogger(),
+		StateDir:        stateDir,
+		RunID:           testRunID,
+		TTL:             time.Hour,
+		ApprovalTimeout: time.Second,
+		Stderr:          &bytes.Buffer{},
+		Prompter:        noTTYPrompter{}, // no auto-approve, so we observe the miss
+		Logger:          discardLogger(),
 	}
 	if ObtainIssueApproval(context.Background(), req73(expanded), cfg) {
 		t.Fatal("expanded-scope session must NOT be covered by the pre-expansion record (issue set included)")
@@ -480,13 +480,13 @@ func TestObtainIssueApproval_NoRunIDFailsClosed(t *testing.T) {
 	sess := sampleSession()
 	stderr := &bytes.Buffer{}
 	cfg := Config{
-		StateDir:      t.TempDir(),
-		RunID:         "", // outside any rein run
-		TTL:           time.Hour,
-		PromptTimeout: time.Second,
-		Stderr:        stderr,
-		Prompter:      matchingPrompter{Answer: 73}, // would approve if (wrongly) consulted
-		Logger:        discardLogger(),
+		StateDir:        t.TempDir(),
+		RunID:           "", // outside any rein run
+		TTL:             time.Hour,
+		ApprovalTimeout: time.Second,
+		Stderr:          stderr,
+		Prompter:        matchingPrompter{Answer: 73}, // would approve if (wrongly) consulted
+		Logger:          discardLogger(),
 	}
 	if ObtainIssueApproval(context.Background(), req73(sess), cfg) {
 		t.Fatal("no run id must fail closed — a declare cannot be keyed to a run")
@@ -510,13 +510,13 @@ func TestGrant_RendersPendingIssueFromSnapshot(t *testing.T) {
 
 	stub := &prompt.StubPrompter{Response: "42"}
 	cfg := Config{
-		StateDir:      stateDir,
-		RunID:         "X",
-		TTL:           time.Hour,
-		PromptTimeout: time.Second,
-		Stderr:        &bytes.Buffer{},
-		Prompter:      stub,
-		Logger:        discardLogger(),
+		StateDir:        stateDir,
+		RunID:           "X",
+		TTL:             time.Hour,
+		ApprovalTimeout: time.Second,
+		Stderr:          &bytes.Buffer{},
+		Prompter:        stub,
+		Logger:          discardLogger(),
 	}
 	if err := Grant(context.Background(), cfg); err != nil {
 		t.Fatalf("Grant should confirm using snapshot: %v", err)
@@ -545,11 +545,11 @@ func TestGrant_NothingPending(t *testing.T) {
 		t.Fatalf("seed snapshot: %v", err)
 	}
 	cfg := Config{
-		StateDir:      stateDir,
-		RunID:         testRunID,
-		PromptTimeout: time.Second,
-		Prompter:      matchingPrompter{Answer: 1},
-		Logger:        discardLogger(),
+		StateDir:        stateDir,
+		RunID:           testRunID,
+		ApprovalTimeout: time.Second,
+		Prompter:        matchingPrompter{Answer: 1},
+		Logger:          discardLogger(),
 	}
 	err := Grant(context.Background(), cfg)
 	if err == nil {
@@ -562,11 +562,11 @@ func TestGrant_NothingPending(t *testing.T) {
 
 func TestGrant_MissingSnapshot(t *testing.T) {
 	cfg := Config{
-		StateDir:      t.TempDir(),
-		RunID:         "absent",
-		PromptTimeout: time.Second,
-		Prompter:      matchingPrompter{Answer: 1},
-		Logger:        discardLogger(),
+		StateDir:        t.TempDir(),
+		RunID:           "absent",
+		ApprovalTimeout: time.Second,
+		Prompter:        matchingPrompter{Answer: 1},
+		Logger:          discardLogger(),
 	}
 	err := Grant(context.Background(), cfg)
 	if err == nil {
@@ -592,12 +592,12 @@ func TestGrant_Deny(t *testing.T) {
 		t.Fatalf("seed snapshot: %v", err)
 	}
 	cfg := Config{
-		StateDir:      stateDir,
-		RunID:         testRunID,
-		PromptTimeout: time.Second,
-		Stderr:        &bytes.Buffer{},
-		Prompter:      matchingPrompter{Answer: 9}, // wrong answer
-		Logger:        discardLogger(),
+		StateDir:        stateDir,
+		RunID:           testRunID,
+		ApprovalTimeout: time.Second,
+		Stderr:          &bytes.Buffer{},
+		Prompter:        matchingPrompter{Answer: 9}, // wrong answer
+		Logger:          discardLogger(),
 	}
 	if err := Grant(context.Background(), cfg); err == nil {
 		t.Error("Grant should error on wrong answer")
@@ -617,12 +617,12 @@ func TestGrant_IdempotentWhenAlreadyConfirmed(t *testing.T) {
 	seedConfirmed(t, stateDir, testRunID, sess, sampleIssue(73))
 	stub := &prompt.StubPrompter{Response: "wrong"}
 	cfg := Config{
-		StateDir:      stateDir,
-		RunID:         testRunID,
-		PromptTimeout: time.Second,
-		Stderr:        &bytes.Buffer{},
-		Prompter:      stub,
-		Logger:        discardLogger(),
+		StateDir:        stateDir,
+		RunID:           testRunID,
+		ApprovalTimeout: time.Second,
+		Stderr:          &bytes.Buffer{},
+		Prompter:        stub,
+		Logger:          discardLogger(),
 	}
 	if err := Grant(context.Background(), cfg); err != nil {
 		t.Fatalf("already-confirmed grant must succeed without prompting: %v", err)
@@ -707,16 +707,15 @@ func TestObtainIssueApproval_PopupTimeoutDoesNotFallToTTY(t *testing.T) {
 	}
 	spy := &spyPrompter{inner: matchingPrompter{Answer: 73}}
 	cfg := Config{
-		StateDir:      t.TempDir(),
-		RunID:         testRunID,
-		TTL:           time.Hour,
-		PromptTimeout: time.Second,
-		PopupTimeout:  20 * time.Millisecond,
-		Stderr:        stderr,
-		Prompter:      spy,
-		TmuxRunner:    tmux,
-		PreferPopup:   true,
-		Logger:        discardLogger(),
+		StateDir:        t.TempDir(),
+		RunID:           testRunID,
+		TTL:             time.Hour,
+		ApprovalTimeout: 20 * time.Millisecond,
+		Stderr:          stderr,
+		Prompter:        spy,
+		TmuxRunner:      tmux,
+		PreferPopup:     true,
+		Logger:          discardLogger(),
 	}
 	if ObtainIssueApproval(context.Background(), req73(sess), cfg) {
 		t.Fatal("an expired popup must deny")
@@ -729,19 +728,19 @@ func TestObtainIssueApproval_PopupTimeoutDoesNotFallToTTY(t *testing.T) {
 	}
 }
 
-// TestPopupContext_DefaultHasNoDeadline: with no PopupTimeout and no env
+// TestPopupContext_DefaultHasNoDeadline: with no ApprovalTimeout and no env
 // override, the popup waits indefinitely (until answered or the run ends).
 func TestPopupContext_DefaultHasNoDeadline(t *testing.T) {
-	t.Setenv("REIN_POPUP_TIMEOUT", "")
+	t.Setenv("REIN_APPROVAL_TIMEOUT", "")
 	ctx, cancel := popupContext(context.Background(), Config{})
 	defer cancel()
 	if _, ok := ctx.Deadline(); ok {
 		t.Error("default popup context must have NO deadline (Tom: 'I might walk away for a day')")
 	}
-	t.Setenv("REIN_POPUP_TIMEOUT", "90s")
+	t.Setenv("REIN_APPROVAL_TIMEOUT", "90s")
 	ctx2, cancel2 := popupContext(context.Background(), Config{})
 	defer cancel2()
 	if _, ok := ctx2.Deadline(); !ok {
-		t.Error("REIN_POPUP_TIMEOUT must bound the popup context")
+		t.Error("REIN_APPROVAL_TIMEOUT must bound the popup context")
 	}
 }

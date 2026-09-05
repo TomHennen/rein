@@ -108,20 +108,11 @@ type Config struct {
 	// ONLY — it is NOT a re-prompt trigger. The run lifetime is the bound.
 	TTL time.Duration
 
-	// PromptTimeout caps the wait inside the /dev/tty prompt.
-	PromptTimeout time.Duration
-
-	// PopupTimeout bounds how long the tmux popup waits unanswered. <= 0
-	// (the default) means NO wall-clock deadline: the popup waits until
-	// answered or the run ends (Tom, 2026-09-05 — "I might walk away for a
-	// day"; an unanswered popup grants nothing, and a LATE answer writes
-	// the approval record, so the agent's next write proceeds even though
-	// its own declare call gave up long before). REIN_POPUP_TIMEOUT
-	// overrides. A timed-out popup reads as launched-but-unanswered, NEVER
-	// as "surface unavailable" — the old 90s timeout was misclassified as
-	// launch failure and cascaded to the inline prompt over the agent's
-	// TUI (#115's exact failure).
-	PopupTimeout time.Duration
+	// ApprovalTimeout bounds how long an approval surface (popup OR inline
+	// prompt — same human, same decision) waits unanswered. <= 0 (default)
+	// means no deadline; REIN_APPROVAL_TIMEOUT overrides. An unanswered
+	// surface grants nothing, and a late answer still records the approval.
+	ApprovalTimeout time.Duration
 
 	// Stderr is where the helpful-deny message goes. Defaults to
 	// os.Stderr; tests override with a buffer.
@@ -406,7 +397,7 @@ func formARequest(req IssueRequest, expansion bool, cfg Config) prompt.Request {
 		Expansion:  expansion,
 		AddRepo:    addRepo,
 		AskPersist: addRepo != "" && cfg.SessionFile != "",
-		Timeout:    cfg.PromptTimeout,
+		Timeout:    approvalTimeout(cfg),
 	}
 }
 
@@ -496,7 +487,7 @@ func attemptPopup(ctx context.Context, cfg Config, sig string, issue approvals.C
 		// The popup RAN and expired with nobody at the keyboard: a
 		// launched-but-unanswered outcome, NOT "surface unavailable" — the
 		// caller must deny quietly, never cascade to the inline prompt.
-		cfg.Logger.Printf("grant: tmux popup timed out unanswered (%s)", cfg.PopupTimeout)
+		cfg.Logger.Printf("grant: tmux popup timed out unanswered (%s)", approvalTimeout(cfg))
 		return false, true
 	}
 	if runErr == nil {
@@ -506,19 +497,24 @@ func attemptPopup(ctx context.Context, cfg Config, sig string, issue approvals.C
 	return false, false
 }
 
-// popupContext applies the popup deadline: cfg.PopupTimeout, else
-// REIN_POPUP_TIMEOUT, else none (wait until answered or the run ends).
+// approvalTimeout resolves cfg.ApprovalTimeout, else REIN_APPROVAL_TIMEOUT,
+// else 0 (no deadline).
+func approvalTimeout(cfg Config) time.Duration {
+	if cfg.ApprovalTimeout > 0 {
+		return cfg.ApprovalTimeout
+	}
+	if d, err := time.ParseDuration(os.Getenv("REIN_APPROVAL_TIMEOUT")); err == nil && d > 0 {
+		return d
+	}
+	return 0
+}
+
+// popupContext bounds the popup by approvalTimeout (0 = no deadline).
 func popupContext(ctx context.Context, cfg Config) (context.Context, context.CancelFunc) {
-	timeout := cfg.PopupTimeout
-	if timeout <= 0 {
-		if d, err := time.ParseDuration(os.Getenv("REIN_POPUP_TIMEOUT")); err == nil && d > 0 {
-			timeout = d
-		}
+	if t := approvalTimeout(cfg); t > 0 {
+		return context.WithTimeout(ctx, t)
 	}
-	if timeout <= 0 {
-		return context.WithCancel(ctx)
-	}
-	return context.WithTimeout(ctx, timeout)
+	return context.WithCancel(ctx)
 }
 
 // denyHelpful emits the "grant in another terminal" message and denies.

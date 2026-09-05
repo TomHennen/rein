@@ -416,11 +416,11 @@ closes that gap.
   false, true`), so the caller DENIES quietly (one stderr line, no `/dev/tty`,
   no multi-line "grant elsewhere" block that also corrupts the TUI); the agent
   hears the denial via the declare outcome and re-runs the idempotent declare.
-  (2) The default popup wait is now UNBOUNDED — Tom "might walk away for a day",
-  an unanswered popup grants nothing, and a LATE answer still writes the
-  approval record so the next write proceeds. `REIN_POPUP_TIMEOUT` (or
-  `Config.PopupTimeout`) sets a bound for anyone who wants one. Live-verified:
-  Form A stayed up past 150s (old code died at 90s) and a late answer confirmed.
+  (2) There is now ONE approval timeout (popup and inline prompt are the same
+  human, same decision — Tom's review), default UNBOUNDED: an unanswered surface
+  grants nothing, a LATE answer still records the approval. `REIN_APPROVAL_TIMEOUT`
+  (or `Config.ApprovalTimeout`) bounds it. Live-verified: Form A stayed up past
+  150s (old code died at 90s) and a late answer confirmed.
 
 - 2026-09-05 — **workflows:write granted to the App (Tom's decision), threaded
   conditionally.** GitHub rejects any push touching `.github/workflows/**` from
