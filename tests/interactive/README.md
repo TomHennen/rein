@@ -69,6 +69,7 @@ one (a new dir + a new `golden.txt`). Each row links to the journey's own README
 | [egress_preset](journeys/egress_preset/) | the `dev` egress preset opens package registries (pypi) but not other hosts (#163) | COVERED |
 | [tmux_popup_approval](journeys/tmux_popup_approval/) | the DEFAULT approval surface inside `$TMUX` — a real popup (#37) | COVERED |
 | [sandbox_filesystem](journeys/sandbox_filesystem/) | the sandbox filesystem boundary from INSIDE (#59/#63/#64) | COVERED |
+| [public_read](journeys/public_read/) | an out-of-scope PUBLIC repo relays ANONYMOUSLY; private 404s; in-scope still authed (#164) | COVERED |
 | [credential_boundary](journeys/credential_boundary/) | the credential hide, proven by an INDEPENDENT `bagel` scanner | COVERED |
 | [app_not_installed](journeys/app_not_installed/) | misconfig: App not installed on a session repo (#68) | COVERED |
 | [init_autodetect](journeys/init_autodetect/) | `rein init` repo-prompt default autodetected from cwd `origin` (#69/#78) | COVERED |
