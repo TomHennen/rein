@@ -73,20 +73,25 @@ func ShowInstallNotice(ctx context.Context, cfg Config, n InstallNotice) {
 
 	// Persist the notice for the out-of-process surface, exactly as a
 	// declare persists its PendingIssue: the popup renders from disk and
-	// never fetches. Best-effort — a snapshot failure only costs us the
-	// popup, not the notice.
+	// never fetches. The snapshot may not EXIST yet — a run whose first
+	// declare hits the not-installed branch never reached the grant path
+	// that writes it — so start from empty rather than skip: skipping
+	// guaranteed the popup's `approval notice` found nothing, exited 1,
+	// and the notice fell back inline over the agent's TUI (2026-09-05).
 	if cfg.RunID != "" {
-		if rc, err := approvals.ReadRunContext(cfg.StateDir, cfg.RunID); err == nil {
-			rc.PendingNotice = &approvals.PendingNotice{
-				Repo:       n.Repo,
-				Issue:      n.Issue,
-				InstallURL: n.InstallURL,
-				AppName:    n.AppName,
-				WrittenAt:  time.Now(),
-			}
-			if err := approvals.WriteRunContext(cfg.StateDir, cfg.RunID, rc); err != nil {
-				cfg.Logger.Printf("notice: run-context snapshot write failed: %v", err)
-			}
+		rc, err := approvals.ReadRunContext(cfg.StateDir, cfg.RunID)
+		if err != nil {
+			rc = approvals.RunContext{SessionFile: cfg.SessionFile}
+		}
+		rc.PendingNotice = &approvals.PendingNotice{
+			Repo:       n.Repo,
+			Issue:      n.Issue,
+			InstallURL: n.InstallURL,
+			AppName:    n.AppName,
+			WrittenAt:  time.Now(),
+		}
+		if err := approvals.WriteRunContext(cfg.StateDir, cfg.RunID, rc); err != nil {
+			cfg.Logger.Printf("notice: run-context snapshot write failed: %v", err)
 		}
 	}
 
