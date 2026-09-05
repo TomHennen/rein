@@ -26,6 +26,7 @@ var CDNHosts = []string{
 	"codeload.github.com",
 	"objects.githubusercontent.com",
 	"raw.githubusercontent.com",
+	"results-receiver.actions.githubusercontent.com", // Actions job logs (read)
 }
 
 // DeclareHost is the LOCAL-ONLY virtual host the in-sandbox
@@ -68,7 +69,8 @@ func classifyHost(host string) hostClass {
 		return classInjectBearer
 	case "github.com":
 		return classInjectBasic
-	case "objects.githubusercontent.com", "codeload.github.com", "raw.githubusercontent.com":
+	case "objects.githubusercontent.com", "codeload.github.com", "raw.githubusercontent.com",
+		"results-receiver.actions.githubusercontent.com":
 		return classPassthrough
 	case DeclareHost:
 		return classLocalDeclare

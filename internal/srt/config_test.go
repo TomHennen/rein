@@ -34,15 +34,16 @@ func TestBuildGoldenShape(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	// allowedDomains = exactly the 3 inject + 3 CDN hosts + the local
+	// allowedDomains = exactly the 3 inject + 4 CDN hosts + the local
 	// declare virtual host (issue #35).
 	wantAllowed := map[string]bool{
 		"github.com": true, "api.github.com": true, "uploads.github.com": true,
 		"codeload.github.com": true, "objects.githubusercontent.com": true, "raw.githubusercontent.com": true,
-		"declare.rein.internal": true,
+		"results-receiver.actions.githubusercontent.com": true,
+		"declare.rein.internal":                          true,
 	}
 	if len(rt.Network.AllowedDomains) != len(wantAllowed) {
-		t.Errorf("allowedDomains = %v, want 7 (3 inject + 3 cdn + declare host)", rt.Network.AllowedDomains)
+		t.Errorf("allowedDomains = %v, want %d (3 inject + 4 cdn + declare host)", rt.Network.AllowedDomains, len(wantAllowed))
 	}
 	for _, d := range rt.Network.AllowedDomains {
 		if !wantAllowed[d] {
