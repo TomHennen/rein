@@ -155,7 +155,9 @@ func TestHostInjectsEndToEnd(t *testing.T) {
 	}
 }
 
-func TestHostScopeRefusal(t *testing.T) {
+// TestHostScopeRead: an out-of-scope READ relays ANONYMOUSLY end-to-end (#164) —
+// it reaches upstream (public repos serve) but carries NO injected token.
+func TestHostScopeRead(t *testing.T) {
 	h, up := startHost(t, Config{
 		SessionID: "s",
 		InScope:   func(repo string) bool { return strings.HasPrefix(strings.ToLower(repo), "allowed/") },
@@ -166,11 +168,11 @@ func TestHostScopeRefusal(t *testing.T) {
 		t.Fatalf("GET: %v", err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("out-of-scope read status = %d, want relayed (200)", resp.StatusCode)
 	}
 	if up.lastAuth() != "" {
-		t.Errorf("out-of-scope request reached upstream (auth=%q)", up.lastAuth())
+		t.Errorf("anonymous out-of-scope read carried a token upstream (auth=%q)", up.lastAuth())
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -512,21 +513,56 @@ func TestRedirectNotFollowed(t *testing.T) {
 	}
 }
 
-func TestRefusedScopeLocal403(t *testing.T) {
+// TestOutOfScopeReadRelaysAnonymously (#164): an out-of-scope READ is relayed
+// to GitHub ANONYMOUSLY (public repos serve; private 404). The load-bearing
+// assertion is that NO token reaches upstream on that anonymous read — the
+// scope ceiling still gates every credential.
+func TestOutOfScopeReadRelaysAnonymously(t *testing.T) {
 	h := newHarness(t, harnessOpts{repos: []string{"allowed/repo"}})
 	c := h.httpClient(false)
-	resp, body := doGET(t, c, "https://github.com/other/repo.git/info/refs?service=git-upload-pack")
+	resp, _ := doGET(t, c, "https://github.com/other/repo.git/info/refs?service=git-upload-pack")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("out-of-scope read status = %d, want it relayed (200)", resp.StatusCode)
+	}
+	if h.gh.count() != 1 {
+		t.Fatalf("out-of-scope read must reach upstream (anonymously); upstream saw %d", h.gh.count())
+	}
+	if got := h.gh.last().Auth; got != "" {
+		t.Errorf("anonymous out-of-scope read carried Authorization %q — must be tokenless", got)
+	}
+}
+
+// TestOutOfScopeWriteRefusedJSON (#164): an out-of-scope WRITE stays refused,
+// never reaches upstream, leaks no token, and — on the REST host — answers with
+// JSON so gh sees a policy decision rather than a malformed response.
+func TestOutOfScopeWriteRefusedJSON(t *testing.T) {
+	h := newHarness(t, harnessOpts{repos: []string{"allowed/repo"}})
+	c := h.httpClient(false)
+	req, _ := http.NewRequest("POST", "https://api.github.com/repos/other/repo/issues", strings.NewReader(`{"title":"x"}`))
+	req.Host = "api.github.com"
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", resp.StatusCode)
+		t.Fatalf("out-of-scope write status = %d, want 403", resp.StatusCode)
 	}
 	if h.gh.count() != 0 {
-		t.Fatalf("out-of-scope request reached upstream")
+		t.Fatalf("out-of-scope write reached upstream")
 	}
-	if strings.Contains(body, h.readTok) || strings.Contains(body, h.writeTok) {
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("REST refusal Content-Type = %q, want application/json (machine-readable)", ct)
+	}
+	var j struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &j); err != nil || !strings.HasPrefix(j.Message, "rein:") {
+		t.Errorf("refusal body not JSON {message: rein:...}: %q (%v)", body, err)
+	}
+	if strings.Contains(string(body), h.readTok) || strings.Contains(string(body), h.writeTok) {
 		t.Errorf("refusal body leaked a token")
-	}
-	if !strings.HasPrefix(body, "rein:") {
-		t.Errorf("body = %q, want rein: explanation", body)
 	}
 }
 
@@ -847,9 +883,12 @@ func TestAuditLogContentNoToken(t *testing.T) {
 
 	// Inject path (in scope).
 	doGET(t, c, "https://api.github.com/repos/allowed/repo/pulls")
-	// Refused path (out of scope).
-	resp, _ := doGET(t, c, "https://github.com/other/repo.git/info/refs?service=git-upload-pack")
-	resp.Body.Close()
+	// Refused path: an out-of-scope WRITE (reads now relay anonymously, #164).
+	wreq, _ := http.NewRequest("POST", "https://api.github.com/repos/other/repo/issues", strings.NewReader(`{"title":"x"}`))
+	wreq.Host = "api.github.com"
+	if wresp, err := c.Do(wreq); err == nil {
+		wresp.Body.Close()
+	}
 
 	log := buf.String()
 	if !strings.Contains(log, "decision=inject") {
