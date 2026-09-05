@@ -87,6 +87,10 @@ type Installation struct {
 }
 
 // RepoInstallationID returns just the id (the pre-existing probe surface).
+// grantsRead reports whether a GitHub permission level satisfies a READ need:
+// "read" or the strictly-stronger "write" both do; "" / "none" do not.
+func grantsRead(level string) bool { return level == "read" || level == "write" }
+
 func (c *AppClient) RepoInstallationID(ctx context.Context, owner, repo string) (int64, error) {
 	inst, err := c.RepoInstallation(ctx, owner, repo)
 	return inst.ID, err
@@ -163,7 +167,11 @@ func (c *AppClient) RepoInstallation(ctx context.Context, owner, repo string) (I
 	return Installation{
 		ID:             out.ID,
 		WorkflowsWrite: out.Permissions.Workflows == "write",
-		SecurityRead:   out.Permissions.SecurityEvents == "read" && out.Permissions.VulnerabilityAlerts == "read",
+		// read-or-WRITE satisfies the read need: requesting read when the
+		// install holds write is a valid subset. Requiring exactly "read"
+		// would silently disable the feature when the operator picks GitHub's
+		// "Read and write" level (reported as "write").
+		SecurityRead: grantsRead(out.Permissions.SecurityEvents) && grantsRead(out.Permissions.VulnerabilityAlerts),
 	}, nil
 }
 

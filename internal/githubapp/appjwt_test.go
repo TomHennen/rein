@@ -158,3 +158,39 @@ func TestRepoInstallation_WorkflowsGrant(t *testing.T) {
 		}
 	}
 }
+
+// TestRepoInstallation_SecurityGrant pins the security-read parse (#165): BOTH
+// security_events AND vulnerability_alerts must be granted, and read-OR-write
+// counts (a "Read and write" grant must not silently disable the feature).
+func TestRepoInstallation_SecurityGrant(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want bool
+	}{
+		{`{"id":7,"permissions":{"security_events":"read","vulnerability_alerts":"read"}}`, true},
+		{`{"id":7,"permissions":{"security_events":"write","vulnerability_alerts":"read"}}`, true}, // read-write satisfies read
+		{`{"id":7,"permissions":{"security_events":"read","vulnerability_alerts":"write"}}`, true},
+		{`{"id":7,"permissions":{"security_events":"write","vulnerability_alerts":"write"}}`, true},
+		{`{"id":7,"permissions":{"security_events":"read"}}`, false}, // only one granted
+		{`{"id":7,"permissions":{"vulnerability_alerts":"read"}}`, false},
+		{`{"id":7,"permissions":{"contents":"write"}}`, false},
+		{`{"id":7}`, false},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		c, err := NewAppClient("Iv23li-x", appKeystore(t), "primary", srv.URL)
+		if err != nil {
+			t.Fatalf("NewAppClient: %v", err)
+		}
+		inst, err := c.RepoInstallation(context.Background(), "owner", "repo")
+		srv.Close()
+		if err != nil {
+			t.Fatalf("RepoInstallation(%s): %v", tc.body, err)
+		}
+		if inst.SecurityRead != tc.want {
+			t.Errorf("body %s => SecurityRead=%v, want %v", tc.body, inst.SecurityRead, tc.want)
+		}
+	}
+}
