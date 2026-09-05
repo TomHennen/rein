@@ -75,6 +75,13 @@ type Session struct {
 	// Optional and empty by default (Sandboxed mode only; ignored in direct mode).
 	AllowDomains []string `yaml:"allow_domains,omitempty"`
 
+	// EgressPreset opts into a named egress bundle (srt.EgressPreset) instead of
+	// listing hosts — e.g. "dev" for the package registries + advisory hosts a
+	// dependency-fetching agent needs. Merged into the extra-egress allowlist
+	// (union with AllowDomains). REIN_EGRESS_PRESET sets it machine-wide. An
+	// unknown name fails the launch closed. Sandboxed only.
+	EgressPreset string `yaml:"egress_preset,omitempty"`
+
 	// Worktrees maps a session repo ("owner/name") to the ABSOLUTE path of the
 	// developer's EXISTING local checkout of it (issue #64). Each mapped
 	// checkout is bind-mounted READ-WRITE into the sandbox at launch, so the

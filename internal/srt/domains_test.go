@@ -129,3 +129,36 @@ func TestResolveExtraDomainsGitHubHostDedupesNotErrors(t *testing.T) {
 		t.Errorf("github.com should be present: %v", got)
 	}
 }
+
+// TestEgressPresetDevBuildsClean: every host in the "dev" preset survives the
+// full Build+Validate path — i.e. each is a legal srt domain and NONE covers a
+// GitHub inject/CDN host (which Validate rejects). A bad preset entry would fail
+// EVERY sandboxed launch that opts into it, so pin it here.
+func TestEgressPresetDevBuildsClean(t *testing.T) {
+	hosts, err := EgressPreset("dev")
+	if err != nil || len(hosts) == 0 {
+		t.Fatalf("EgressPreset(dev) = %v, %v", hosts, err)
+	}
+	resolved, _, err := ResolveExtraAllowedDomains(hosts, "")
+	if err != nil {
+		t.Fatalf("preset failed domain resolution: %v", err)
+	}
+	if _, err := Build(Params{
+		SocketPath:          "/run/user/1000/rein/run-x/proxy.sock",
+		WorkingTree:         "/home/dev/work/repo",
+		ExtraAllowedDomains: resolved,
+	}); err != nil {
+		t.Fatalf("preset failed Build/Validate (a host covers a GitHub inject/CDN host?): %v", err)
+	}
+}
+
+// TestEgressPresetUnknownFailsClosed: an unknown preset name is an error, not a
+// silent no-op.
+func TestEgressPresetUnknownFailsClosed(t *testing.T) {
+	if _, err := EgressPreset("bogus"); err == nil {
+		t.Error("unknown preset name must fail closed")
+	}
+	if h, err := EgressPreset(""); err != nil || h != nil {
+		t.Errorf("empty preset must be a clean no-op, got %v, %v", h, err)
+	}
+}

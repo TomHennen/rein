@@ -26,6 +26,42 @@ var DefaultExtraAllowedDomains = []string{"api.anthropic.com", "platform.claude.
 // list of hosts merged into the allowlist (union) on every sandboxed run.
 const EnvAllowDomains = "REIN_ALLOW_DOMAINS"
 
+// EnvEgressPreset selects a named egress preset machine-wide (session
+// egress_preset equivalent). See EgressPreset.
+const EnvEgressPreset = "REIN_EGRESS_PRESET"
+
+// egressPresets are curated egress bundles a session opts into by NAME instead
+// of listing hosts. srt 0.0.63 cannot express true allow-all (its schema
+// rejects a bare "*"; see issue #163), so "dev" is the pragmatic substitute:
+// the package registries + advisory hosts a dependency-fetching agent needs, as
+// srt-legal *.suffix wildcards. NONE cover a GitHub inject/CDN host (Validate
+// would reject such an overlap). Still egress-only, NEVER injected — a broad
+// allowlist is an exfiltration surface, so the caller warns loudly.
+var egressPresets = map[string][]string{
+	"dev": {
+		"*.golang.org", "vuln.go.dev", "osv.dev", // Go modules + advisories
+		"*.npmjs.org",                                  // npm
+		"pypi.org", "*.pypi.org", "*.pythonhosted.org", // PyPI
+		"crates.io", "*.crates.io", // Rust
+		"rubygems.org", "*.rubygems.org", // Ruby
+	},
+}
+
+// EgressPreset returns the hosts for a named preset. "" yields no hosts and no
+// error (no preset selected). An unknown name is an error — fail closed rather
+// than silently apply nothing when the operator asked for a preset.
+func EgressPreset(name string) ([]string, error) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return nil, nil
+	}
+	hosts, ok := egressPresets[name]
+	if !ok {
+		return nil, fmt.Errorf("unknown egress preset %q (known: dev)", name)
+	}
+	return append([]string(nil), hosts...), nil
+}
+
 // largeExtraSetThreshold is the count of CUSTOM (non-default) extra domains above
 // which ResolveExtraAllowedDomains warns about the egress-exfiltration surface.
 // Kept small so a broad allowlist is always called out loudly.
