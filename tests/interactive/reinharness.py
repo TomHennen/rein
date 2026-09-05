@@ -889,7 +889,7 @@ class ReinRun:
 
         dialog_markers = dialog_markers or []
         scr = self.screen()
-        ready = dialog = exited = False
+        ready = dialog = exited = trust_answered = False
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
@@ -899,13 +899,38 @@ class ReinRun:
             except _px.EOF:
                 exited = True
                 break
-            low = scr.text().lower()
+            text = scr.text()
+            low = text.lower()
             if any(m.lower() in low for m in ready_markers):
                 ready = True
                 break
+            # Auto-answer ONLY the folder-trust dialog (plumbing); a theme/login
+            # dialog still reaches the caller as `dialog` — that one is a finding
+            # (missing onboarding state, #151).
+            if not trust_answered and CLAUDE_TRUST_DIALOG_RE.search(text):
+                self._answer_trust_dialog(scr)
+                trust_answered = True
+                dialog = True
+                continue
             if any(m.lower() in low for m in dialog_markers):
                 dialog = True
         return ready, dialog, exited
+
+    def _answer_trust_dialog(self, scr) -> None:
+        """Select `Yes, I trust this folder`, then confirm. NEVER a bare Enter:
+        2.1.251 highlights `No, exit`, so the default QUITS the agent."""
+        import pexpect as _px
+
+        for _ in range(4):
+            if _trust_option_is_selected(scr.text()):
+                break
+            self.child.send("\x1b[B")  # Down
+            for _ in range(3):
+                try:
+                    scr.feed(self.child.read_nonblocking(size=4096, timeout=1))
+                except (_px.TIMEOUT, _px.EOF):
+                    break
+        self.child.send("\r")
 
     def send_and_collect(self, line: str, settle: float = 12.0, timeout: float = 10.0) -> str:
         """Send a line to the TUI, let it settle, drain the reply into the
@@ -1012,7 +1037,20 @@ def make_workdir() -> str:
 # Strong, prompt-specific ready signals only. The generic "esc to" is
 # deliberately excluded — it can appear in a startup dialog ("esc to go back")
 # and would false-ready before the input box is live.
-CLAUDE_READY_MARKERS = ["? for shortcuts", 'try "', "how can i help"]
+CLAUDE_READY_MARKERS = [
+    "? for shortcuts", 'try "', "how can i help",
+    # 2.1.251's surface: the footer mode line, and the hint the input box carries
+    # under --dangerously-skip-permissions (which never prints "? for shortcuts").
+    "auto mode on", "shift+tab to cycle", "esc to interrupt",
+]
+
+
+def claude_tui_is_live(screen: str) -> bool:
+    """Is claude's TUI up on this rendered screen? The ONE shared definition —
+    claude's chrome wording moves, and per-journey marker tuples go stale silently
+    (2.1.251 dropped every marker realagent_write keyed on)."""
+    low = screen.lower()
+    return any(m.lower() in low for m in CLAUDE_READY_MARKERS)
 # Startup-dialog markers (trust/theme/onboarding/login) — distinct from an MCP
 # hang; surfaced so a dialog is never misread as a hang.
 CLAUDE_DIALOG_MARKERS = [
@@ -2396,10 +2434,76 @@ def tmux_pane_session(*, env: dict | None = None, width: int = 200, height: int 
 
 
 # claude's folder-trust dialog, as it renders ("Quick safety check: Is this a project
-# you created or one you trust?" / "❯ 1. Yes, I trust this folder").
+# you created or one you trust?" / "Yes, I trust this folder").
 CLAUDE_TRUST_DIALOG_RE = re.compile(
     r"(?i)(quick safety check|trust this folder|project you created or one you trust)"
 )
+
+# The TRUST option line within that dialog. Matches the option only — the question
+# ("…or one you trust?") does not contain this phrase.
+CLAUDE_TRUST_OPTION_RE = re.compile(r"(?i)trust this folder")
+
+
+def accept_bypass_permissions_disclaimer(*, env: dict | None = None) -> bool:
+    """Pre-accept claude's bypass-permissions disclaimer in the throwaway overlay.
+
+    The live gate is settings.json `skipDangerousModePermissionPrompt` (the
+    .claude.json key alone does not suppress the dialog — measured); both are set.
+    The ONE helper that authors a permission-bypass setting: called only by the
+    journey that already launches --dangerously-skip-permissions, and NEVER by
+    claude_resume, whose @OVERLAY_FORCES_SKIPDANGEROUS claim asserts none exists.
+    """
+    ok = _merge_overlay_config({"bypassPermissionsModeAccepted": True}, env=env)
+    return _merge_overlay_settings({"skipDangerousModePermissionPrompt": True}, env=env) and ok
+
+
+def pretrust_workspace(path: str, *, env: dict | None = None) -> bool:
+    """Pre-accept claude's folder-trust dialog for `path` in the throwaway overlay
+    (claude's documented projects[<path>].hasTrustDialogAccepted). Beats driving the
+    dialog, which re-mounts mid-startup and resets its caret onto `No, exit`.
+    False when the overlay cannot be written; dismiss_claude_trust_dialog is the
+    fallback."""
+    return _merge_overlay_config(
+        {"projects": {os.path.realpath(path): {"hasTrustDialogAccepted": True}}}, env=env)
+
+
+def _merge_overlay_config(patch: dict, *, env: dict | None = None) -> bool:
+    """Deep-merge `patch` into rein's SANDBOX overlay .claude.json (throwaway, wiped by
+    journeys — never the developer's real ~/.claude). False if it cannot be written."""
+    return _merge_overlay_json(".claude.json", patch, env=env)
+
+
+def _merge_overlay_settings(patch: dict, *, env: dict | None = None) -> bool:
+    """Deep-merge `patch` into the overlay's settings.json (claude's `userSettings`)."""
+    return _merge_overlay_json("settings.json", patch, env=env)
+
+
+def _merge_overlay_json(name: str, patch: dict, *, env: dict | None = None) -> bool:
+    base = (env or os.environ).get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config")
+    cfg = os.path.join(base, "rein-sandbox-home", ".claude", name)
+
+    def merge(dst: dict, src: dict) -> dict:
+        for k, v in src.items():
+            if isinstance(v, dict) and isinstance(dst.get(k), dict):
+                merge(dst[k], v)
+            else:
+                dst[k] = v
+        return dst
+
+    try:
+        os.makedirs(os.path.dirname(cfg), mode=0o700, exist_ok=True)
+        try:
+            with open(cfg) as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            data = {}
+        with open(cfg, "w") as fh:
+            json.dump(merge(data, patch), fh)
+        os.chmod(cfg, 0o600)
+        return True
+    except OSError:
+        return False
 
 
 def dismiss_claude_trust_dialog(pane: TmuxPaneSession, *, timeout: float = 45.0) -> bool:
@@ -2419,8 +2523,12 @@ def dismiss_claude_trust_dialog(pane: TmuxPaneSession, *, timeout: float = 45.0)
     startup if at all), and it never appears in the golden's narrative.
 
     Detected on the pane's RENDER (`until_pane`, which also drains the client), never
-    in the raw byte soup: a dialog is a redrawing surface. Enter takes the highlighted
-    default, `1. Yes, I trust this folder`.
+    in the raw byte soup: a dialog is a redrawing surface.
+
+    NEVER just press Enter. claude 2.1.251 renders the options as `❯ No, exit` /
+    `Yes, I trust this folder` — the destructive one is highlighted — so a bare Enter
+    QUITS claude and the journey then reports the unfalsifiable "TUI never appeared".
+    Move the caret onto the trust option first, and confirm only then.
 
     The wait ends as soon as EITHER the dialog paints (dismiss it) OR claude's main TUI
     is up without it (nothing to dismiss — carry straight on). So a claude that stops
@@ -2456,5 +2564,33 @@ def dismiss_claude_trust_dialog(pane: TmuxPaneSession, *, timeout: float = 45.0)
         if not CLAUDE_TRUST_DIALOG_RE.search(pane.pane_text()):
             return False
         seen["dialog"] = True
-    pane.send_pane("Enter")
+
+    # Answer until the dialog is GONE, not once: it re-mounts during startup and
+    # the re-mount resets the caret to `No, exit`.
+    deadline = time.time() + max(timeout, 10.0)
+    while time.time() < deadline:
+        if not CLAUDE_TRUST_DIALOG_RE.search(pane.pane_text()):
+            return True
+        _select_trust_option(pane)
+        pane.send_pane("Enter")
+        pane.until_pane(lambda scr: not CLAUDE_TRUST_DIALOG_RE.search(scr), timeout=4)
     return True
+
+
+def _trust_option_is_selected(scr: str) -> bool:
+    """Is the caret on the `Yes, I trust this folder` line of the rendered dialog?"""
+    for line in scr.splitlines():
+        if CLAUDE_TRUST_OPTION_RE.search(line):
+            return line.lstrip().startswith("❯")
+    return False
+
+
+def _select_trust_option(pane: TmuxPaneSession, *, moves: int = 4) -> bool:
+    """Walk the caret onto the trust option (Down wraps, so position-agnostic —
+    claude has moved this option before and will again)."""
+    for _ in range(moves):
+        if _trust_option_is_selected(pane.pane_text()):
+            return True
+        pane.send_pane("Down")
+        pane.until_pane(_trust_option_is_selected, timeout=2)
+    return _trust_option_is_selected(pane.pane_text())

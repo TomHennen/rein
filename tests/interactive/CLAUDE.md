@@ -172,15 +172,28 @@ the golden — it used to be, as a `MILESTONE| ` block, which was assertions mas
 as a transcript. It is printed as run **outcomes** and heads the session artifact as
 context. If you want to assert it, assert it (1); don't narrate it into an artifact.
 
-**claude's folder-trust dialog is PLUMBING, not ceremony.** It fires only because
-rein's sandbox gives claude an ephemeral `$HOME` (no persisted trust), and it blocks
-the session forever if unanswered — there is no way to disable it for an *interactive*
-session (only `-p`/non-TTY skips it). So `H.dismiss_claude_trust_dialog(pane)` answers
-it on the pane's RENDER and returns; **no invariant asserts it fired** and it is **not
-a step in the golden's narrative**. It is claude's UX, not rein's story: asserting on
-it would make the journey hostage to a third-party dialog, and a future claude that
-stops asking must not turn a healthy run red. The journey works either way (the helper
-stops waiting as soon as the dialog OR claude's live TUI is on the pane).
+**claude's folder-trust dialog is PLUMBING, not ceremony.** It fires because rein's
+sandbox gives claude an ephemeral `$HOME` (no persisted trust), and it blocks the
+session forever if unanswered. **Pre-accept it — don't drive it:**
+`H.pretrust_workspace(workdir, env=env)` writes
+`projects[<path>].hasTrustDialogAccepted` into rein's throwaway overlay, which is
+claude's OWN documented escape hatch, and the dialog then never fires.
+`H.dismiss_claude_trust_dialog(pane)` remains the fallback for a claude that asks
+anyway. **No invariant asserts it fired** and it is **not a step in the golden's
+narrative**: it is claude's UX, not rein's story.
+
+Why pre-accept beats driving, learned on 2.1.251: the dialog **re-mounts** while claude
+finishes starting, and the re-mount **resets the caret onto `No, exit`** — which is the
+highlighted default, so a bare Enter QUITS the agent. Select-then-confirm races the
+re-mount, and every one of those failures surfaces as the unfalsifiable "claude's TUI
+never appeared in the pane".
+
+**Never key a TUI assertion on claude's chrome without a shared definition.** The same
+2.1.251 dropped `? for shortcuts`, `esc to interrupt` and the `╭`/`│` box art, so a
+journey holding its own `CLAUDE_TUI_MARKERS` tuple asserted on strings that no longer
+exist and read a perfectly live TUI as absent. There is now ONE definition —
+`H.claude_tui_is_live(screen)`, over `H.CLAUDE_READY_MARKERS` — and journeys use it.
+Add a marker there when claude's wording moves; do not re-copy the tuple.
 
 Driving a real agent alongside a second pty has one hard requirement:
 **`drain_children`**. A pty's buffer is ~64KB and a TUI repaints constantly, so if you
@@ -408,8 +421,13 @@ in `reinharness.py`, so a new journey is mostly wiring:
 - `write_agent_session` — the real agent's session artifact (written to the journey's
   own `session.txt`): committed and human-readable, never compared (not `golden.txt`).
 - `drain_children` — the real-agent drain rule (see above).
-- `dismiss_claude_trust_dialog(pane)` — claude's folder-trust dialog, as PLUMBING
+- `pretrust_workspace(path, env=…)` — pre-accept claude's folder-trust dialog for a
+  path (claude's documented `hasTrustDialogAccepted`, written to rein's throwaway
+  overlay). Preferred over driving the dialog.
+- `dismiss_claude_trust_dialog(pane)` — the fallback when it fires anyway, as PLUMBING
   (dismissed, never asserted, never in the narrative).
+- `claude_tui_is_live(screen)` / `CLAUDE_READY_MARKERS` — the ONE definition of "claude's
+  TUI is up". Journeys must not keep private marker tuples (they go stale silently).
 - `resolve_throwaway_repo` — the repo, resolved the rein-init way (see below).
 - `spawn_rein_run` / `ReinRun` — the pty wrapper, transcript, prompt matchers.
 - `RenderedScreen` / `screen_for_child` / `render_stream` / `wait_for_screen` /

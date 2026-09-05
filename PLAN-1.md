@@ -406,6 +406,57 @@ closes that gap.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-08-30 — **Out-of-scope working tree now GATES the launch (Tom's ruling,
+  #152 review).** The old behavior warned and launched anyway — a run that could
+  edit the tree but never push it. `rein run` (both modes) now detects the
+  working tree's repo (REIN_SANDBOX_WORKDIR, else cwd) and, when it is outside
+  the session ceiling, offers to add it on /dev/tty (`addRepoValidated`: owner
+  rule + install coverage, same as `session add-repo`) or refuses the launch
+  with the remedy. Non-tty refuses (fail closed). The mid-run `declare --repo`
+  expansion path is unchanged for repos beyond the working tree.
+  `REIN_ALLOW_UNSCOPED_WORKTREE=1` is the loud operator opt-out for edit-only
+  use (needed at minimum by the two real-claude tests, which deliberately bind
+  the rein repo itself — a repo the App does not cover — and never push).
+
+- 2026-08-30 — **#153: srt's OWN default write paths punched through the $HOME
+  deny — the sandbox was writing the developer's real home, and it persisted.**
+  srt merges `getDefaultWritePaths()` (`~/.claude/debug`, `~/.npm/_logs`,
+  `/tmp/claude`) into allowWrite unconditionally, and its denyRead loop RE-BINDS
+  those host dirs on top of the tmpfs it just laid over `$HOME`
+  (`linux-sandbox-utils.js` "Re-bound write path wiped by denyRead tmpfs"). Proven
+  live: a file written in-sandbox to `~/.claude/debug` was on the host after the
+  run, and the agent could repoint `~/.claude/debug/latest` — the symlink the
+  HOST's claude writes through — at any path it liked (agent-controlled path ->
+  host-side write, the #64/#76 class). Fixed by deny-writing those paths back
+  (`srtDefaultHomeWriteDenies`); srt emits such a denyWrite precisely because a
+  write bind re-exposed the dest (the `hiddenByTmpfs` check), so the deny lands
+  read-only on top. Residual, NOT chased: those dirs stay READABLE in-sandbox.
+  **Why no test caught it:** `TestHomeWriteSemantics_E2E` already asserted the
+  evaporation half — but only for a path it created directly in `$HOME`, which the
+  tmpfs covers. It never probed a path srt re-binds, so it passed while this leaked;
+  the containment harness (#136B) still `die`s on `TODO(#141)`. The test now probes
+  an srt-default write path too (verified: it FAILS with the fix reverted). Lesson
+  for the harness: "a sandbox write did not persist on the host" must be swept over
+  the paths the SUBSTRATE chooses, not only the ones rein chose.
+
+- 2026-08-29 — **The CP4.5 "api.anthropic.com ALONE" default went STALE and
+  broke `rein run -- claude` outright.** claude 2.1.251's startup preflight
+  fetches BOTH `api.anthropic.com/api/hello` and
+  `platform.claude.com/v1/oauth/hello` and `exit(1)`s unless both return 200
+  (no skip flag exists in the binary); srt 403s the un-allowed CONNECT, so the
+  agent died at launch with "Unable to connect to Anthropic services". The
+  2026-07-05 CP4.5 finding below was measured on a then-current headless
+  `claude -p` and is now history, not policy — **an agent-endpoint default is a
+  moving target and must carry the version it was measured on.** Fix:
+  `DefaultExtraAllowedDomains = {api.anthropic.com, platform.claude.com}`.
+  SECURITY NOTE (Tom decided, this date): `platform.claude.com` is the OAuth
+  TOKEN host, not the inference endpoint, so the default now grants every
+  sandboxed agent egress to the host that exchanges the refresh token it can
+  already read from `~/.claude/.credentials.json` — accepted as the same trust
+  domain as the API host; the underlying exposure is issue #134. Telemetry /
+  sentry / MCP hosts stay excluded. Verified live in-sandbox: default-only run
+  reaches `platform.claude.com` (200) and interactive `claude` starts.
+
 - 2026-07-11 — **#35 IMPLEMENTED (declaration-first issue scoping, both
   modes).** Design of record `docs/35-design-proposal.md` built section by
   section: `rein declare <n>` (direct CLI path + the

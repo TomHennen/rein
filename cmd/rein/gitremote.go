@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/TomHennen/rein/internal/brokercore"
-	"github.com/TomHennen/rein/internal/session"
 )
 
 // detectRepoTimeout bounds the `git` call — a wedged filesystem or a
@@ -78,25 +77,6 @@ func repoFromRemoteURL(raw string) string {
 		return ""
 	}
 	return repo
-}
-
-// cwdScopeNotice returns the launch-time line `rein run` prints when the
-// repo you are STANDING IN is not in the session's ceiling (mocks §3: make
-// the cwd's repo the default everywhere a repo must be named — here that
-// means saying so, not silently launching a session that cannot touch it).
-//
-// It grants nothing and changes nothing: the repo joins the run's scope
-// only through the agent's `rein declare --repo` and the human's approval,
-// or through an explicit `rein session add-repo`. Empty string when there is
-// nothing worth saying (not in a GitHub checkout, or the repo IS in scope).
-func cwdScopeNotice(sess session.Session, cwd string) string {
-	repo := detectRepoFromGit(cwd)
-	if repo == "" || sess.Contains(repo) {
-		return ""
-	}
-	return fmt.Sprintf("  NOTE: this directory is %s, which is NOT in this session's scope.\n"+
-		"        The agent can request it mid-run:  rein declare <n> --repo %s  (you approve)\n"+
-		"        Or add it to the session now:      rein session add-repo %s\n", repo, repo, repo)
 }
 
 // noSessionHint augments the cold "no session" failure with the repo the

@@ -44,6 +44,8 @@ class AgentContract(ReinTestCase):
                 "you push to? (3) do you have any credentials?",
             ],
             env=self.env,
+            # cwd is the rein repo (not App-covered); this test never pushes.
+            extra_env={"REIN_ALLOW_UNSCOPED_WORKTREE": "1"},
             timeout=180,
         )
         run.wait(timeout=180)

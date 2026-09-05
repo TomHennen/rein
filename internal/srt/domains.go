@@ -15,17 +15,12 @@ import (
 // The GitHub credential-hiding CP1-4 built is therefore unaffected — extra hosts
 // carry no injected credential.
 //
-// Currently: Claude Code's API endpoint. Determined EMPIRICALLY (CP4.5): a
-// headless `claude -p` — even with `*.anthropic.com` allowed — contacts ONLY
-// api.anthropic.com (two connections, no other host attempted). Telemetry
-// (statsig), error reporting (sentry), and the MCP endpoints (claude.ai) are
-// best-effort and NOT required for the agent to run, so they are deliberately
-// EXCLUDED to keep the default egress/exfil surface minimal. Claude
-// authenticates from ~/.claude/.credentials.json (a file readable in-sandbox),
-// not via egress to an auth host, so no extra domain is needed for auth.
-// Additions (npm, PyPI, other agents) are opt-in per session via allow_domains
-// or machine-wide via REIN_ALLOW_DOMAINS.
-var DefaultExtraAllowedDomains = []string{"api.anthropic.com"}
+// Currently: both hosts claude's startup preflight hard-requires (measured on
+// 2.1.251; a version-dependent moving target — see PLAN-1 2026-08-29).
+// platform.claude.com is the OAuth token host, accepted as the same trust domain
+// as the API host (#134). Telemetry/sentry/MCP hosts stay excluded; further
+// additions are opt-in via allow_domains or REIN_ALLOW_DOMAINS.
+var DefaultExtraAllowedDomains = []string{"api.anthropic.com", "platform.claude.com"}
 
 // EnvAllowDomains is the machine-wide extra-egress override: a comma-separated
 // list of hosts merged into the allowlist (union) on every sandboxed run.

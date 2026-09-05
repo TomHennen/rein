@@ -186,10 +186,11 @@ To run the agent *without* the alias for one invocation: `\claude` (bash/zsh) or
 ### Allowing extra network egress (npm, PyPI, MCP, …)
 
 By default the sandbox blocks **all** network egress except two things: GitHub
-(brokered through rein's proxy) and the wrapped agent's **own API**
-(`api.anthropic.com` for `claude`, allowed automatically so `rein run -- claude`
-works out of the box). Anything else — the npm registry, PyPI, a remote MCP
-server — is unreachable until you allow its host explicitly.
+(brokered through rein's proxy) and the hosts the wrapped agent needs to start
+(for `claude`: `api.anthropic.com` and `platform.claude.com` — its startup
+preflight requires both, so they are allowed automatically and `rein run --
+claude` works out of the box). Anything else — the npm registry, PyPI, a remote
+MCP server — is unreachable until you allow its host explicitly.
 
 Add hosts to the **`allow_domains`** allowlist, either per session or
 machine-wide:

@@ -21,6 +21,7 @@ regenerated under REIN_UPDATE_GOLDEN=1.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -63,7 +64,10 @@ def probe_script() -> str:
 emit "@CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR"
 emit "@HOST_CLAUDE_ENTRIES=[$(ls -A ~/.claude 2>/dev/null | sort | tr '\\n' ' ')]"
 emit "@HOST_HISTORY_JSONL_READABLE=$(test -r ~/.claude/history.jsonl && echo YES-LEAK || echo no)"
-emit "@HOST_CLAUDE_JSON_READABLE=$(test -s ~/.claude.json && echo YES-LEAK || echo no)"
+emit "@HOST_CLAUDE_JSON_READABLE=$(test -s ~/.claude/claude.json -a -r ~/.claude/claude.json && echo YES-LEAK || echo no)"
+emit "@HOST_CLAUDE_SENSITIVE_READABLE=[$(for f in history.jsonl claude.json .credentials.json settings.json projects sessions todos shell-snapshots; do test -s ~/.claude/"$f" -a -r ~/.claude/"$f" && printf '%s ' "$f"; done)]"
+emit "@HOST_CLAUDE_WRITABLE=[$(for e in $(ls -A ~/.claude 2>/dev/null | sort); do p=~/.claude/"$e"; if test -d "$p"; then (touch "$p/.rein-write-probe" 2>/dev/null && rm -f "$p/.rein-write-probe" && printf '%s ' "$e"); elif test ! -c "$p" && test -w "$p"; then printf '%s ' "$e"; fi; done)]"
+emit "@HOST_NPM_LOGS_WRITABLE=$(touch ~/.npm/_logs/.rein-write-probe 2>/dev/null && rm -f ~/.npm/_logs/.rein-write-probe && echo YES-PERSISTS || echo no)"
 emit "@OVERLAY_CREDS_SEEDED=$(test -s "$CLAUDE_CONFIG_DIR/.credentials.json" && echo yes || echo no)"
 emit "@OVERLAY_FORCES_SKIPDANGEROUS=$(grep -rqs skipDangerousModePermissionPrompt "$CLAUDE_CONFIG_DIR" && echo YES-BYPASS || echo no)"
 """
@@ -98,6 +102,36 @@ def overlay_dir(env: dict) -> str:
     both WITHIN this journey."""
     base = env.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
     return os.path.join(base, "rein-sandbox-home")
+
+
+# Onboarding keys the wipe must preserve (#151): a virgin overlay puts every later
+# interactive run on a wizard whose login step needs a browser OAuth round-trip.
+ONBOARDING_KEYS = ("theme", "hasCompletedOnboarding", "lastOnboardingVersion")
+
+
+def reset_overlay_preserving_onboarding(env: dict) -> dict:
+    """Wipe the overlay for determinism, but carry the onboarding keys across.
+
+    Returns the preserved keys (empty when the box has none yet, e.g. a first
+    run — that box still hits the wizard, which is #151's open half)."""
+    parent = overlay_dir(env)
+    cfg = os.path.join(parent, ".claude", ".claude.json")
+    kept: dict = {}
+    try:
+        with open(cfg) as fh:
+            data = json.load(fh)
+        kept = {k: data[k] for k in ONBOARDING_KEYS if k in data}
+    except (OSError, ValueError):
+        kept = {}
+
+    shutil.rmtree(parent, ignore_errors=True)
+    if kept:
+        claude_dir = os.path.join(parent, ".claude")
+        os.makedirs(claude_dir, mode=0o700, exist_ok=True)
+        with open(cfg, "w") as fh:
+            json.dump(kept, fh)
+        os.chmod(cfg, 0o600)
+    return kept
 
 
 def host_logged_in() -> bool:
@@ -206,8 +240,13 @@ def main() -> int:
           f"CLAUDE_CONFIG_DIR overlay)", flush=True)
 
     # Start from a clean overlay so the run is deterministic and isolated from prior
-    # box state (resume is still proven WITHIN this journey: run 1 → run 2).
-    shutil.rmtree(overlay_dir(env), ignore_errors=True)
+    # box state (resume is still proven WITHIN this journey: run 1 → run 2). Onboarding
+    # state is the one thing carried across — see reset_overlay_preserving_onboarding.
+    kept = reset_overlay_preserving_onboarding(env)
+    if not kept:
+        print("note: the overlay had no onboarding state to preserve — an INTERACTIVE "
+              "claude in-sandbox will hit the first-run wizard (#151). Headless (-p), "
+              "which this journey drives, is unaffected.", flush=True)
 
     workdir = None
     try:
@@ -256,14 +295,32 @@ def main() -> int:
              f"RESUME: run 2 (`claude -c`, a separate rein run) must recall {MAGIC_WORD!r} "
              f"from run 1 via the persistent overlay — it is not in run 2's prompt, so "
              f"recalling it proves the overlay session persisted"),
-            ("@HOST_CLAUDE_ENTRIES=[]" in probe_text,
-             "HIDING: the host's real ~/.claude must read as EMPTY in-sandbox (its "
-             "cross-project history is denied)"),
+            # Not an empty-listing assertion (#150): rein's deny of the
+            # ~/.claude.json symlink lands a tombstone INSIDE the denied dir.
+            # The claim is: nothing readable, nothing writable.
+            ("@HOST_CLAUDE_SENSITIVE_READABLE=[]" in probe_text,
+             "HIDING: no sensitive entry under the developer's real ~/.claude may be "
+             "READABLE in-sandbox (history, config, credentials, settings, per-project "
+             "state) — the listing may be non-empty, the CONTENT may not be reachable"),
+            ("@HOST_CLAUDE_WRITABLE=[]" in probe_text,
+             "CONTAINMENT (#153): nothing under the developer's real ~/.claude may be "
+             "WRITABLE in-sandbox. srt re-binds its own getDefaultWritePaths() over "
+             "rein's $HOME deny, so ~/.claude/debug came back writable — agent writes "
+             "persisted on the host and could repoint the `latest` symlink the host's "
+             "claude writes through"),
+            ("@HOST_NPM_LOGS_WRITABLE=no" in probe_text,
+             "CONTAINMENT (#153): the host's ~/.npm/_logs is the other srt default "
+             "write path under $HOME and must not be writable in-sandbox either"),
             ("@HOST_HISTORY_JSONL_READABLE=no" in probe_text,
              "HIDING: the developer's ~/.claude/history.jsonl must NOT be readable "
              "in-sandbox"),
             ("@HOST_CLAUDE_JSON_READABLE=no" in probe_text,
-             "HIDING: the host's ~/.claude.json must NOT be readable in-sandbox"),
+             "HIDING: the host's global claude config must NOT be readable in-sandbox "
+             "(claude 2.1.x relocated it to ~/.claude/claude.json; ~/.claude.json is "
+             "now just a symlink to it). Readability is tested as READABLE AND "
+             "NON-EMPTY on purpose: rein's deny renders as a /dev/null tombstone at "
+             "that path, which is world-rw by mode and yields nothing — mode bits "
+             "would report a leak that does not exist (#150)"),
             ("@OVERLAY_CREDS_SEEDED=yes" in probe_text,
              "AUTH: rein must have seeded .credentials.json into the overlay "
              "(CLAUDE_CONFIG_DIR) so claude authenticates"),
@@ -290,8 +347,10 @@ def main() -> int:
         print("--- outcomes (asserted; not in the golden) ---", flush=True)
         print(f"  RESUME: run 2 recalled {MAGIC_WORD!r} from run 1's overlay session "
               f"(two separate `rein run` invocations)", flush=True)
-        print("  HIDING: host ~/.claude read as EMPTY in-sandbox; history.jsonl + "
-              "~/.claude.json not readable", flush=True)
+        print("  HIDING: nothing sensitive under host ~/.claude is readable in-sandbox "
+              "(history.jsonl + the relocated claude.json included)", flush=True)
+        print("  CONTAINMENT: nothing under host ~/.claude or ~/.npm/_logs is writable "
+              "in-sandbox (#153: srt's default write paths are denied back)", flush=True)
         print("  AUTH: overlay .credentials.json seeded; claude authenticated in-sandbox",
               flush=True)
 

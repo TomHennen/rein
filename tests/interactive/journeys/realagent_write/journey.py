@@ -54,11 +54,9 @@ def launch_echo(issue: int) -> str:
     return f"--dangerously-skip-permissions {task_for(issue)}"
 
 
-# Markers that claude's TUI is LIVE on the pane's render. Any one is enough: the input
-# box's border and the shortcut/interrupt hints are painted for the whole session,
-# INCLUDING while a tool call (the `rein declare`) blocks — which is exactly the moment
-# the popup is up and we need to prove there is something real underneath it.
-CLAUDE_TUI_MARKERS = ("? for shortcuts", "esc to interrupt", "╭", "│")
+# The ONE shared "TUI is live" definition — a per-journey marker tuple is how this
+# journey came to assert on chrome 2.1.251 no longer prints.
+claude_tui_is_live = H.claude_tui_is_live
 
 
 # --------------------------------------------------------------------------
@@ -209,6 +207,11 @@ def run_agent(env: dict, repo: str, issue: int, workdir: str) -> dict:
     # The tmux SERVER is started with rein_env(), so the pane's shell — and the rein it
     # launches — inherit REIN_APP_* (to mint) and HOME/XDG_STATE_HOME (so the helper.log
     # this journey reads back is the one the run writes).
+    # Pre-accept both blocking dialogs (folder trust; the bypass disclaimer this
+    # journey's own launch flag triggers). dismiss_claude_trust_dialog is the fallback.
+    H.pretrust_workspace(workdir, env=env)
+    H.accept_bypass_permissions_disclaimer(env=env)
+
     with H.tmux_pane_session(env=env) as pane:
         try:
             # A developer types the command in their pane. $TMUX comes FROM TMUX.
@@ -227,7 +230,7 @@ def run_agent(env: dict, repo: str, issue: int, workdir: str) -> dict:
             # FRAME 1 — claude's TUI, live in the pane. (until_pane re-captures on a
             # ~50ms poll and drains the client on every iteration.)
             if not pane.until_pane(
-                lambda scr: any(m in scr for m in CLAUDE_TUI_MARKERS), timeout=120
+                lambda scr: claude_tui_is_live(scr), timeout=120
             ):
                 raise RuntimeError("claude's TUI never appeared in the pane")
             note("claude's TUI is live in the pane")
@@ -457,8 +460,8 @@ def main() -> int:
         #   OVERLAYS, it does not PRINT" — and once the popup closed the TUI REPAINTED.
         forma_absent_from_pane = (H.PROMPT_HINT not in pane_while_popup
                                   and H.PROMPT_BANNER not in pane_while_popup)
-        tui_live_under_popup = any(m in pane_while_popup for m in CLAUDE_TUI_MARKERS)
-        tui_repainted = (any(m in pane_after_popup for m in CLAUDE_TUI_MARKERS)
+        tui_live_under_popup = claude_tui_is_live(pane_while_popup)
+        tui_repainted = (claude_tui_is_live(pane_after_popup)
                          and H.PROMPT_HINT not in pane_after_popup)
         invariants = [
             # NB: NO "the folder-trust dialog must fire" invariant. It is claude's

@@ -159,19 +159,36 @@ func sessionAddRepo(repo string) error {
 	if err != nil {
 		return fmt.Errorf("load session: %w", err)
 	}
+	updated, err := addRepoValidated(sess, source, repo)
+	if errors.Is(err, session.ErrRepoAlreadyInSession) {
+		fmt.Printf("rein: %s is already in the session. Nothing to do.\n", repo)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Println("rein: added. Session repos are now:")
+	for _, r := range updated.Repos {
+		fmt.Printf("  - %s\n", r)
+	}
+	fmt.Println("Takes effect on the NEXT `rein run`. A live run keeps its launch-time scope —")
+	fmt.Println("inside a run, the agent requests expansion with `rein declare <n> --repo <owner/name>`.")
+	return nil
+}
+
+// addRepoValidated is sessionAddRepo's core, shared with the launch-time scope
+// gate: owner rule + install coverage, then a comment-preserving file write.
+// Fails closed on any verification error; nothing is written on failure.
+func addRepoValidated(sess session.Session, source, repo string) (session.Session, error) {
 	path := session.SourceFilePath(source)
 	if path == "" {
-		return fmt.Errorf("this session has no file to add to (it came from the env fallback).\n      Run `rein init` to write a session file first")
+		return session.Session{}, fmt.Errorf("this session has no file to add to (it came from the env fallback).\n      Run `rein init` to write a session file first")
 	}
 
 	// (1) Structural: owner/name shape + the single-owner rule. No network.
 	norm, err := session.CheckAddRepo(sess, repo)
-	if errors.Is(err, session.ErrRepoAlreadyInSession) {
-		fmt.Printf("rein: %s is already in the session. Nothing to do.\n", norm)
-		return nil
-	}
 	if err != nil {
-		return fmt.Errorf("rein: %w", err)
+		return session.Session{}, err
 	}
 
 	fmt.Printf("rein: checking %s...\n", norm)
@@ -183,7 +200,7 @@ func sessionAddRepo(repo string) error {
 	// written in either case.
 	appCfg, ks, _, err := config.ResolveApp()
 	if err != nil {
-		return fmt.Errorf("resolve App config: %w (run `rein init` / `rein doctor`)", err)
+		return session.Session{}, fmt.Errorf("resolve App config: %w (run `rein init` / `rein doctor`)", err)
 	}
 	appName, installURL := appInstallHints(appCfg)
 	owner, name, _ := strings.Cut(norm, "/")
@@ -196,9 +213,9 @@ func sessionAddRepo(repo string) error {
 		if app == "" {
 			app = "rein's GitHub App"
 		}
-		return fmt.Errorf("rein: App %s is not installed on %s.\n      Install it at %s\n      then re-run this command. (Nothing was changed.)", app, norm, installURL)
+		return session.Session{}, fmt.Errorf("rein: App %s is not installed on %s.\n      Install it at %s\n      then re-run this command. (Nothing was changed.)", app, norm, installURL)
 	case perr != nil:
-		return fmt.Errorf("rein: could not verify that the App covers %s (%v); retry. (Nothing was changed.)", norm, perr)
+		return session.Session{}, fmt.Errorf("rein: could not verify that the App covers %s (%v); retry. (Nothing was changed.)", norm, perr)
 	}
 	app := appName
 	if app == "" {
@@ -208,20 +225,10 @@ func sessionAddRepo(repo string) error {
 
 	// (3) Write.
 	updated, err := session.AddRepoToFile(path, norm)
-	if errors.Is(err, session.ErrRepoAlreadyInSession) {
-		fmt.Printf("rein: %s is already in the session. Nothing to do.\n", norm)
-		return nil
-	}
 	if err != nil {
-		return fmt.Errorf("write session: %w", err)
+		return session.Session{}, fmt.Errorf("write session: %w", err)
 	}
-	fmt.Println("rein: added. Session repos are now:")
-	for _, r := range updated.Repos {
-		fmt.Printf("  - %s\n", r)
-	}
-	fmt.Println("Takes effect on the NEXT `rein run`. A live run keeps its launch-time scope —")
-	fmt.Println("inside a run, the agent requests expansion with `rein declare <n> --repo <owner/name>`.")
-	return nil
+	return updated, nil
 }
 
 // probeCoverage annotates each repo with its install-coverage status for

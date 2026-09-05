@@ -346,6 +346,9 @@ func Build(p Params) (Config, error) {
 	allowWrite = append(allowWrite, extraWrite...)
 	allowWrite = append(allowWrite, gitPins...)
 
+	// Deny back srt's own default write paths under $HOME (#153).
+	denyWrite := append(gitDeny, srtDefaultHomeWriteDenies(homeDeny)...)
+
 	denyRead := make([]string, 0, len(p.DenyReadCredStores)+len(p.RuntimeDenyRead)+2)
 	denyRead = append(denyRead, cleanAll(p.DenyReadCredStores)...)
 	denyRead = append(denyRead, cleanAll(p.RuntimeDenyRead)...)
@@ -375,13 +378,40 @@ func Build(p Params) (Config, error) {
 			DenyRead:   denyRead,
 			AllowRead:  dedupeSorted(allowRead),
 			AllowWrite: allowWrite,
-			DenyWrite:  dedupeSorted(gitDeny),
+			DenyWrite:  dedupeSorted(denyWrite),
 		},
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// srtDefaultHomeWritePaths are the $HOME-relative entries of srt's
+// getDefaultWritePaths() (verified 0.0.63). srt merges them into allowWrite
+// unconditionally and re-binds them over the $HOME deny tmpfs, so without a
+// denyWrite these HOST dirs are writable in-sandbox (#153). /tmp/claude is
+// excluded: rein already points TMPDIR at a per-run dir.
+var srtDefaultHomeWritePaths = []string{
+	filepath.Join(".claude", "debug"),
+	filepath.Join(".npm", "_logs"),
+}
+
+// srtDefaultHomeWriteDenies returns the denyWrite entries neutralizing
+// srtDefaultHomeWritePaths under home; empty when home is empty (no $HOME deny).
+// Existence-gated: a denyWrite of a missing source fails the bwrap launch.
+func srtDefaultHomeWriteDenies(home string) []string {
+	if home == "" {
+		return nil
+	}
+	out := make([]string, 0, len(srtDefaultHomeWritePaths))
+	for _, rel := range srtDefaultHomeWritePaths {
+		p := filepath.Join(home, rel)
+		if _, err := os.Lstat(p); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // Validate is the fail-closed sanity check on an emitted Config. It catches the
@@ -524,11 +554,10 @@ func (c Config) Validate() error {
 			}
 		}
 	}
-	// denyWrite entries (the pinned checkouts' hooks/config) are ro-binds layered
-	// on top of the write binds; each must be absolute (pathWithin comparisons and
-	// srt's own bind must be apples-to-apples) and must sit UNDER an allowWrite
-	// path — a denyWithinAllow that is not within any allowWrite is a no-op that
-	// silently drops the hook/config protection. Fail closed.
+	// A denyWrite must be absolute and sit under an allowWrite (hooks/config
+	// pins) or a denyRead (the #153 srt-default-path denies, which srt still
+	// emits because its own write bind re-exposed the dest); anything under
+	// neither is silently dropped by srt. Fail closed.
 	for _, dw := range c.Filesystem.DenyWrite {
 		if !filepath.IsAbs(dw) {
 			return fmt.Errorf("srt: denyWrite entry %q must be absolute", dw)
@@ -540,8 +569,16 @@ func (c Config) Validate() error {
 				break
 			}
 		}
+		for _, dr := range c.Filesystem.DenyRead {
+			if within {
+				break
+			}
+			if pathWithin(filepath.Clean(dw), dr) {
+				within = true
+			}
+		}
 		if !within {
-			return fmt.Errorf("srt: denyWrite %q is not under any allowWrite path (it would be a no-op, silently dropping the hooks/config protection)", dw)
+			return fmt.Errorf("srt: denyWrite %q is under neither an allowWrite nor a denyRead path (srt would drop it: the hooks/config protection or the #153 srt-default-write-path deny would silently vanish)", dw)
 		}
 	}
 	return nil

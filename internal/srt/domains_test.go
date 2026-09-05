@@ -15,18 +15,22 @@ func contains(hay []string, needle string) bool {
 }
 
 // TestResolveExtraDomainsDefaultAlwaysPresent: with no custom sources, the
-// built-in default (the wrapped agent's API endpoint) is present and is the
-// only entry — no telemetry/MCP hosts sneak in.
+// built-in default is exactly the hosts claude's startup preflight requires —
+// no telemetry/MCP hosts sneak in.
 func TestResolveExtraDomainsDefaultAlwaysPresent(t *testing.T) {
 	got, warns, err := ResolveExtraAllowedDomains(nil, "")
 	if err != nil {
 		t.Fatalf("ResolveExtraAllowedDomains: %v", err)
 	}
-	if !contains(got, "api.anthropic.com") {
-		t.Errorf("default api.anthropic.com missing: %v", got)
+	for _, want := range []string{"api.anthropic.com", "platform.claude.com"} {
+		if !contains(got, want) {
+			t.Errorf("default %q missing: %v", want, got)
+		}
 	}
-	if len(got) != 1 {
-		t.Errorf("default set should be exactly the agent endpoint, got %v", got)
+	// Literal 2, NOT len(DefaultExtraAllowedDomains): the point of this check is
+	// that a telemetry/MCP host appended to the default list trips a test.
+	if len(got) != 2 {
+		t.Errorf("default set should be exactly the two preflight endpoints, got %v", got)
 	}
 	if len(warns) != 0 {
 		t.Errorf("no warnings expected for the bare default, got %v", warns)
@@ -57,8 +61,9 @@ func TestResolveExtraDomainsUnionAndDedupe(t *testing.T) {
 			t.Errorf("duplicate domain %q in merged set %v", d, got)
 		}
 	}
-	if len(got) != 4 {
-		t.Errorf("expected 4 unique domains, got %d: %v", len(got), got)
+	// 2 defaults + pypi + npmjs + pythonhosted, spelled out (see above).
+	if len(got) != 5 {
+		t.Errorf("expected 5 unique domains, got %d: %v", len(got), got)
 	}
 }
 
