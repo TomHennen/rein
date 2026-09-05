@@ -127,6 +127,7 @@ func manifestPermissions(r Role) map[string]string {
 			"contents":      "write",
 			"issues":        "write",
 			"pull_requests": "write",
+			"workflows":     "write",
 			"metadata":      "read",
 		}
 	case RoleAudit:

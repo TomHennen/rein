@@ -127,3 +127,34 @@ func TestNewAppClient_Validates(t *testing.T) {
 		t.Errorf("apiBase default = %q, want %q", c.apiBase, DefaultAPIBase)
 	}
 }
+
+// TestRepoInstallation_WorkflowsGrant pins the permissions parse: only an
+// explicit workflows:write on the installation flips the flag.
+func TestRepoInstallation_WorkflowsGrant(t *testing.T) {
+	for _, tc := range []struct {
+		body string
+		want bool
+	}{
+		{`{"id": 7, "permissions": {"workflows": "write"}}`, true},
+		{`{"id": 7, "permissions": {"workflows": "read"}}`, false},
+		{`{"id": 7, "permissions": {"contents": "write"}}`, false},
+		{`{"id": 7}`, false},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(tc.body))
+		}))
+		c, err := NewAppClient("Iv23li-x", appKeystore(t), "primary", srv.URL)
+		if err != nil {
+			t.Fatalf("NewAppClient: %v", err)
+		}
+		inst, err := c.RepoInstallation(context.Background(), "owner", "repo")
+		srv.Close()
+		if err != nil {
+			t.Fatalf("RepoInstallation(%s): %v", tc.body, err)
+		}
+		if inst.ID != 7 || inst.WorkflowsWrite != tc.want {
+			t.Errorf("body %s => id=%d workflows=%v, want id=7 workflows=%v", tc.body, inst.ID, inst.WorkflowsWrite, tc.want)
+		}
+	}
+}

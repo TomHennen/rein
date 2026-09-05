@@ -406,6 +406,23 @@ closes that gap.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-09-05 — **workflows:write granted to the App (Tom's decision), threaded
+  conditionally.** GitHub rejects any push touching `.github/workflows/**` from
+  a credential without the `workflows` permission (hit live in wrangle: no
+  convergence commit could ever land from the sandbox). Tom weighed the
+  supply-chain surface (an approved write run can now modify CI) against
+  usability and chose to grant. Mechanism: the launch coverage probe now also
+  reads the installation's granted permissions (`RepoInstallation`), caches
+  `workflows_write` in state.json, and the two write-tier mints request
+  `workflows: write` ONLY when granted — an ungranted installation keeps
+  today's exact behavior instead of failing every write (mints requesting an
+  ungranted permission are refused). Manifest adds it for future inits; env
+  path opts in via `REIN_APP_WORKFLOWS_WRITE=1`. Existing installs need the
+  human to add the permission on the App AND accept the update on the
+  installation. Follow-up idea (not built): per-run gating — down-scope
+  workflows out of the mint unless the human approved a louder "this run may
+  modify CI" prompt; the per-mint subsetting makes that a small change.
+
 - 2026-08-30 — **#141 DONE: the containment harness runs end-to-end.**
   sandbox-probe v1.1.0 installed (`scan --fast`, JSON `findings[]` — the old
   `report --format json` placeholder was wrong); rein grew

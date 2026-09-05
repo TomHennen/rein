@@ -308,6 +308,7 @@ func runWrapped(argv []string) (int, error) {
 // component for a saving too small to measure.
 type installProber interface {
 	RepoInstallationID(ctx context.Context, owner, repo string) (int64, error)
+	RepoInstallation(ctx context.Context, owner, repo string) (githubapp.Installation, error)
 	AppSlug(ctx context.Context) (string, error)
 }
 
@@ -438,6 +439,7 @@ func resolveAndCacheInstallID(ctx context.Context, sess session.Session, newProb
 	var (
 		resolvedID   int64  // first successfully resolved id this launch
 		resolvedRepo string // repo that resolved it (for the mismatch error)
+		resolvedWF   bool   // that installation's workflows:write grant
 		lastErr      error  // last transient lookup error (for the all-failed message)
 	)
 	for _, r := range sess.Repos {
@@ -447,7 +449,8 @@ func resolveAndCacheInstallID(ctx context.Context, sess session.Session, newProb
 			return fmt.Errorf("session repo %q is not owner/name", r)
 		}
 
-		id, err := prober.RepoInstallationID(ctx, owner, repo)
+		inst, err := prober.RepoInstallation(ctx, owner, repo)
+		id := inst.ID
 		if err != nil {
 			if errors.Is(err, githubapp.ErrAppNotInstalled) {
 				// 404 is definitive: the App is not installed on this repo (or
@@ -467,7 +470,7 @@ func resolveAndCacheInstallID(ctx context.Context, sess session.Session, newProb
 		}
 
 		if resolvedID == 0 {
-			resolvedID, resolvedRepo = id, owner+"/"+repo
+			resolvedID, resolvedRepo, resolvedWF = id, owner+"/"+repo, inst.WorkflowsWrite
 		} else if id != resolvedID {
 			// Same owner ⇒ same installation is the invariant; two ids means
 			// the state is inconsistent in a way mints cannot serve. Fail loud.
@@ -502,9 +505,11 @@ func resolveAndCacheInstallID(ctx context.Context, sess session.Session, newProb
 	}
 
 	// State path: a changed id is a refresh, not an error (uninstall/reinstall
-	// rotates it). Rewrite state.json only when it actually changed.
-	if resolvedID != knownID {
+	// rotates it); same for the workflows grant (the operator toggled the App
+	// permission). Rewrite state.json only when something actually changed.
+	if resolvedID != knownID || s.Primary.WorkflowsWrite != resolvedWF {
 		s.Primary.InstallationID = resolvedID
+		s.Primary.WorkflowsWrite = resolvedWF
 		if err := appsetup.WriteState(configDir, s); err != nil {
 			return fmt.Errorf("cache installation id: %w", err)
 		}

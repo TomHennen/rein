@@ -172,10 +172,18 @@ type fakeProber struct {
 	slug      string
 	slugErr   error
 	slugCalls int
+
+	// workflowsWrite is what RepoInstallation reports for the grant.
+	workflowsWrite bool
 }
 
 func (f *fakeProber) RepoInstallationID(ctx context.Context, owner, repo string) (int64, error) {
 	return f.repoFn(ctx, owner, repo)
+}
+
+func (f *fakeProber) RepoInstallation(ctx context.Context, owner, repo string) (githubapp.Installation, error) {
+	id, err := f.repoFn(ctx, owner, repo)
+	return githubapp.Installation{ID: id, WorkflowsWrite: f.workflowsWrite}, err
 }
 
 func (f *fakeProber) AppSlug(ctx context.Context) (string, error) {

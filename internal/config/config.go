@@ -89,6 +89,10 @@ func LoadAppConfig() (githubapp.Config, keystore.Keystore, error) {
 		ClientID:       os.Getenv("REIN_APP_CLIENT_ID"),
 		InstallationID: installationID,
 		RepoNames:      []string{repoName},
+		// Env path carries no probed state; opt in explicitly when the
+		// installation has the grant (mints requesting an ungranted
+		// permission fail, breaking ALL writes).
+		WorkflowsWrite: os.Getenv("REIN_APP_WORKFLOWS_WRITE") == "1",
 	}
 	ks := keystore.NewSingleFileKeystore(AppKeystoreRole, os.Getenv("REIN_APP_PRIVATE_KEY_PATH"))
 	return cfg, ks, nil
@@ -143,6 +147,7 @@ func ResolveApp() (githubapp.Config, keystore.Keystore, AppSource, error) {
 			cfg := githubapp.Config{
 				ClientID:       s.Primary.ClientID,
 				InstallationID: s.Primary.InstallationID, // may be 0 (uncached)
+				WorkflowsWrite: s.Primary.WorkflowsWrite,
 				// RepoNames intentionally empty; callers set them from the session.
 			}
 			ks := keystore.NewFileKeystore(configDir)

@@ -31,6 +31,13 @@ type Config struct {
 	// §4.2.4 recommends Client ID for new apps.
 	ClientID string
 
+	// WorkflowsWrite: the installation granted workflows:write, so write-tier
+	// mints may request it (pushes touching .github/workflows/** need it —
+	// GitHub rejects them from any credential without the permission). Never
+	// requested when false: GitHub refuses a mint asking for an ungranted
+	// permission, which would break ALL writes, not just workflow pushes.
+	WorkflowsWrite bool
+
 	// InstallationID is the numeric installation ID this client mints for.
 	InstallationID int64
 
@@ -140,10 +147,14 @@ func (c *Client) MintReadOnlyToken(ctx context.Context) (token string, expiresAt
 // whatever GitHub returns. Single-use semantics are enforced by the
 // broker (never cache write tokens; mint per push).
 func (c *Client) MintWriteToken(ctx context.Context) (token string, expiresAt time.Time, err error) {
-	return c.mint(ctx, &githubauth.InstallationPermissions{
+	perms := &githubauth.InstallationPermissions{
 		Contents: githubauth.Ptr("write"),
 		Metadata: githubauth.Ptr("read"),
-	})
+	}
+	if c.cfg.WorkflowsWrite {
+		perms.Workflows = githubauth.Ptr("write")
+	}
+	return c.mint(ctx, perms)
 }
 
 // MintGhReadOnlyToken returns a read-only installation token shaped for
@@ -193,12 +204,16 @@ func (c *Client) MintGhReadOnlyToken(ctx context.Context) (token string, expires
 // "gh process lifetime + revoke RTT" — typically sub-second, far below
 // the 5-min target.
 func (c *Client) MintGhSessionToken(ctx context.Context) (token string, expiresAt time.Time, err error) {
-	return c.mint(ctx, &githubauth.InstallationPermissions{
+	perms := &githubauth.InstallationPermissions{
 		Contents:     githubauth.Ptr("write"),
 		Issues:       githubauth.Ptr("write"),
 		PullRequests: githubauth.Ptr("write"),
 		Metadata:     githubauth.Ptr("read"),
-	})
+	}
+	if c.cfg.WorkflowsWrite {
+		perms.Workflows = githubauth.Ptr("write")
+	}
+	return c.mint(ctx, perms)
 }
 
 // RevokeToken calls DELETE /installation/token authenticated as the supplied

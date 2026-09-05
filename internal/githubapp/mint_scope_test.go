@@ -28,6 +28,9 @@ func TestMint_RequestBodyPinsScopeCeiling(t *testing.T) {
 		name      string
 		mint      func(*Client, context.Context) (string, time.Time, error)
 		wantPerms map[string]string
+		// workflowsWrite: the installation granted workflows:write, so the
+		// WRITE tiers must request it (and read tiers still must not).
+		workflowsWrite bool
 		// readTier marks a read-only TIER: the tier-split invariant says such
 		// a token must carry NO "write" permission on ANY resource, so a
 		// token cached/exfiltrated on the read path grants read-only
@@ -73,6 +76,38 @@ func TestMint_RequestBodyPinsScopeCeiling(t *testing.T) {
 				"metadata":      "read",
 			},
 		},
+		{
+			name:           "write+workflows-granted",
+			mint:           (*Client).MintWriteToken,
+			workflowsWrite: true,
+			wantPerms: map[string]string{
+				"contents":  "write",
+				"metadata":  "read",
+				"workflows": "write",
+			},
+		},
+		{
+			name:           "gh-session+workflows-granted",
+			mint:           (*Client).MintGhSessionToken,
+			workflowsWrite: true,
+			wantPerms: map[string]string{
+				"contents":      "write",
+				"issues":        "write",
+				"pull_requests": "write",
+				"metadata":      "read",
+				"workflows":     "write",
+			},
+		},
+		{
+			name:           "read-only+workflows-granted stays read-only",
+			mint:           (*Client).MintReadOnlyToken,
+			workflowsWrite: true,
+			wantPerms: map[string]string{
+				"contents": "read",
+				"metadata": "read",
+			},
+			readTier: true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -109,7 +144,8 @@ func TestMint_RequestBodyPinsScopeCeiling(t *testing.T) {
 				InstallationID: 42,
 				// Multi-repo ceiling: the WHOLE set must reach the wire,
 				// not just the first repo (issue #10 regression class).
-				RepoNames: []string{"alpha", "beta"},
+				RepoNames:      []string{"alpha", "beta"},
+				WorkflowsWrite: tc.workflowsWrite,
 			}, ks, "primary")
 			if err != nil {
 				t.Fatalf("NewClient: %v", err)

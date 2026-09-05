@@ -40,10 +40,15 @@ type State struct {
 // (resolveAndCacheInstallID, cmd/rein/run.go) on the state path; 0 means
 // not-yet-cached.
 type AppRecord struct {
-	Slug           string    `json:"slug,omitempty"`
-	AppID          int64     `json:"app_id,omitempty"`
-	ClientID       string    `json:"client_id"`
-	InstallationID int64     `json:"installation_id,omitempty"`
+	Slug           string `json:"slug,omitempty"`
+	AppID          int64  `json:"app_id,omitempty"`
+	ClientID       string `json:"client_id"`
+	InstallationID int64  `json:"installation_id,omitempty"`
+
+	// WorkflowsWrite records whether the installation granted workflows:write
+	// (refreshed at each launch's coverage probe). Write mints request the
+	// permission only when true, so an ungranted install keeps working.
+	WorkflowsWrite bool      `json:"workflows_write,omitempty"`
 	KeyFingerprint string    `json:"key_fingerprint,omitempty"`
 	HTMLURL        string    `json:"html_url,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
