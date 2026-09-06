@@ -15,7 +15,8 @@ launched — the same terminal a real developer would type into.
 
 WHAT THE HELPERS GIVE YOU
 -------------------------
-- ``rein_env()``        — the REIN_* environment (os.environ as-is). Init-flavored
+- ``rein_env()``        — the REIN_* environment (os.environ minus the operator's
+                          $TMUX, so approvals never pop on their screen). Init-flavored
                           journeys that need the env-path App in a fresh isolated
                           home get it from ``init_app_env()`` (the real rein-init
                           App, else a synthetic one) so ``rein init`` never routes
