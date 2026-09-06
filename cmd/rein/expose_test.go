@@ -29,13 +29,13 @@ func TestParseSandboxExecArgs(t *testing.T) {
 	}
 }
 
-// TestSandboxExecArgv: no exposed ports => the agent argv is launched
-// UNCHANGED (no wrapper in the process tree); with ports, the staged binary's
-// sandbox-exec wraps it and the agent argv survives verbatim after --.
+// TestSandboxExecArgv: the staged binary's sandbox-exec ALWAYS wraps the agent
+// argv (it carries the proxy secret into the child's env, #185); the agent
+// argv survives verbatim after --, and each exposed port becomes a flag.
 func TestSandboxExecArgv(t *testing.T) {
 	agent := []string{"claude", "--append-system-prompt", "contract text", "-p", "go"}
-	if got := sandboxExecArgv("/tmp/run/rein", nil, agent); !reflect.DeepEqual(got, agent) {
-		t.Errorf("no ports: argv changed: %v", got)
+	if got := sandboxExecArgv("/tmp/run/rein", nil, agent); !reflect.DeepEqual(got, append([]string{"/tmp/run/rein", "sandbox-exec", "--"}, agent...)) {
+		t.Errorf("no ports: argv = %v", got)
 	}
 	got := sandboxExecArgv("/tmp/run/rein", []int{5173}, agent)
 	want := append([]string{"/tmp/run/rein", "sandbox-exec", "--expose", "5173", "--"}, agent...)
@@ -46,6 +46,33 @@ func TestSandboxExecArgv(t *testing.T) {
 	ports, argv, err := parseSandboxExecArgs(got[2:])
 	if err != nil || !reflect.DeepEqual(ports, []int{5173}) || !reflect.DeepEqual(argv, agent) {
 		t.Errorf("round trip: ports=%v argv=%v err=%v", ports, argv, err)
+	}
+}
+
+// TestRewriteProxyEnv: every proxy URL srt set gains the secret as userinfo,
+// nothing else is touched, and git's basic proxy auth is pre-set.
+func TestRewriteProxyEnv(t *testing.T) {
+	env := []string{
+		"HTTPS_PROXY=http://localhost:3128", "https_proxy=http://localhost:3128",
+		"HTTP_PROXY=http://localhost:3128", "ALL_PROXY=http://localhost:3128",
+		"NO_PROXY=localhost,127.0.0.1", "HOME=/home/x", "REIN_PROXY_AUTH=abc",
+	}
+	got := rewriteProxyEnv(env, "abc")
+	want := map[string]string{
+		"HTTPS_PROXY": "http://srt:abc@localhost:3128", "https_proxy": "http://srt:abc@localhost:3128",
+		"HTTP_PROXY": "http://srt:abc@localhost:3128", "ALL_PROXY": "http://srt:abc@localhost:3128",
+		"GIT_CONFIG_PARAMETERS": "'http.proxyAuthMethod=basic'",
+	}
+	seen := map[string]string{}
+	for _, kv := range got {
+		k, v, _ := strings.Cut(kv, "=")
+		seen[k] = v
+	}
+	if !reflect.DeepEqual(seen, want) {
+		t.Errorf("rewriteProxyEnv = %v, want %v", seen, want)
+	}
+	if got := rewriteProxyEnv([]string{"HOME=/home/x"}, "abc"); len(got) != 0 {
+		t.Errorf("no proxy vars => nothing to set, got %v", got)
 	}
 }
 

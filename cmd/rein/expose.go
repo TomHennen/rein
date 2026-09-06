@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/TomHennen/rein/internal/proxy"
+	"github.com/TomHennen/rein/internal/srt"
 )
 
 const (
@@ -235,12 +236,21 @@ func spliceConns(a, b net.Conn) {
 	wg.Wait()
 }
 
-// runSandboxExec is `rein sandbox-exec [--expose <port>]... -- <agent argv>`.
+// runSandboxExec is `rein sandbox-exec [--expose <port>]... -- <agent argv>`:
+// the in-sandbox launch wrapper for EVERY sandboxed run. It folds the per-run
+// proxy secret into the child's proxy URLs (#185; srt mints none for an
+// external proxy), starts the expose helpers (#179), and execs the agent.
 func runSandboxExec(args []string) int {
 	ports, argv, err := parseSandboxExecArgs(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rein sandbox-exec: %v\n", err)
 		return 2
+	}
+	if secret := os.Getenv(srt.EnvProxyAuth); secret != "" {
+		for _, kv := range rewriteProxyEnv(os.Environ(), secret) {
+			k, v, _ := strings.Cut(kv, "=")
+			_ = os.Setenv(k, v)
+		}
 	}
 	self, err := os.Executable()
 	if err != nil {
@@ -298,12 +308,50 @@ func parseSandboxExecArgs(args []string) (ports []int, argv []string, err error)
 	return nil, nil, errors.New("missing -- before the agent command")
 }
 
-// sandboxExecArgv wraps the agent argv for launch when ports are exposed;
-// otherwise the argv is returned unchanged (no wrapper in the process tree).
-func sandboxExecArgv(reinBin string, ports []int, agentArgv []string) []string {
-	if len(ports) == 0 {
-		return agentArgv
+// proxyEnvNames are the variables srt sets to its in-sandbox proxy URL, in
+// the exact spelling generateProxyEnvVars uses.
+var proxyEnvNames = []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"}
+
+// rewriteProxyEnv returns the KEY=VALUE pairs to (re)set so every proxy URL
+// in env carries the secret as userinfo (srt:<secret>@), plus git's
+// pre-emptive basic proxy auth (srt sets the same when it owns the token).
+// Pure: input env, output the changed pairs only.
+func rewriteProxyEnv(env []string, secret string) []string {
+	var out []string
+	for _, kv := range env {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || v == "" {
+			continue
+		}
+		for _, name := range proxyEnvNames {
+			if k != name {
+				continue
+			}
+			u, err := url.Parse(v)
+			if err != nil || u.Host == "" {
+				continue
+			}
+			u.User = url.UserPassword(proxy.ProxyUser, secret)
+			out = append(out, k+"="+u.String())
+		}
 	}
+	if len(out) > 0 {
+		gcp := "http.proxyAuthMethod=basic"
+		for _, kv := range env {
+			if strings.HasPrefix(kv, "GIT_CONFIG_PARAMETERS=") && !strings.Contains(kv, gcp) {
+				gcp = strings.TrimPrefix(kv, "GIT_CONFIG_PARAMETERS=") + " " + "'" + gcp + "'"
+				out = append(out, "GIT_CONFIG_PARAMETERS="+gcp)
+				return out
+			}
+		}
+		out = append(out, "GIT_CONFIG_PARAMETERS='"+gcp+"'")
+	}
+	return out
+}
+
+// sandboxExecArgv wraps the agent argv for launch through the staged
+// binary's sandbox-exec (always, since #185: the proxy secret rewrite).
+func sandboxExecArgv(reinBin string, ports []int, agentArgv []string) []string {
 	out := []string{reinBin, "sandbox-exec"}
 	for _, p := range ports {
 		out = append(out, "--expose", strconv.Itoa(p))

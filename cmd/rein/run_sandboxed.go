@@ -571,6 +571,22 @@ func runSandboxed(cmdline []string) (int, error) {
 	})
 
 	approve := buildSandboxApprove(sess, stateDir, runID, logger)
+	// #185: rein is the sandbox's egress proxy (srt's external-proxy shape).
+	// The policy below is what srt's allowlist used to be, enforced by rein;
+	// the secret gates rein's loopback listener; the nonce proves to the
+	// self-test that the sandbox reaches THIS rein.
+	proxySecret, err := newRunSecret()
+	if err != nil {
+		return 1, err
+	}
+	probeNonce, err := newRunSecret()
+	if err != nil {
+		return 1, err
+	}
+	egressPolicy, err := buildEgressPolicy(sess, extraDomains)
+	if err != nil {
+		return 1, fmt.Errorf("egress policy: %w", err)
+	}
 	host, err := runbroker.Start(runbroker.Config{
 		SessionID:     sess.ID,
 		SocketPath:    socketPath,
@@ -581,6 +597,9 @@ func runSandboxed(cmdline []string) (int, error) {
 		ScopeKey:      rscope.Key,
 		Approve:       approve,
 		ExposePorts:   sess.ExposePorts, // #179: host loopback listeners, fail closed if busy
+		Egress:        egressPolicy,
+		ProxySecret:   proxySecret,
+		ProbeNonce:    probeNonce,
 		Declaration: buildDeclarationHooks(declareEnv{
 			sess:        sess,
 			sessionFile: session.SourceFilePath(sessSource),
@@ -630,6 +649,13 @@ func runSandboxed(cmdline []string) (int, error) {
 		return 1, fmt.Errorf("start broker/proxy: %w", err)
 	}
 	defer host.Close()
+	// #185: now that rein's loopback port exists, the settings srt loads take
+	// the external-proxy shape (srt starts no proxy; rein enforces egress).
+	// The earlier Build was the structural check of the filesystem rules.
+	baseParams.ExternalProxyPort = host.ProxyPort()
+	if cfg, err = srt.Build(baseParams); err != nil {
+		return 1, fmt.Errorf("build srt config (external proxy): %w", err)
+	}
 	// Exit-time write-token revoke + ledger clear (same discipline as direct
 	// mode). Deferred so normal exit and SIGTERM-to-rein both run it.
 	defer func() { _ = approvals.ClearRun(stateDir, runID) }()
@@ -695,6 +721,7 @@ func runSandboxed(cmdline []string) (int, error) {
 		CABundlePath:        bundlePath,
 		StubGHToken:         stubGHToken,
 		ExposePorts:         exposePortsCSV(sess.ExposePorts),
+		ProxyAuth:           proxySecret,
 		GitAuthorName:       gitID.Name,
 		GitAuthorEmail:      gitID.Email,
 		GitConfigGlobalPath: managedGitConfig,
@@ -759,10 +786,14 @@ func runSandboxed(cmdline []string) (int, error) {
 		ReinBin: reinBin,
 		Env:     execEnv,
 		Timeout: verifyTimeout,
+		// #185: prove the sandbox's proxy port reaches THIS rein and that the
+		// namespace is unshared / host loopback unreachable.
+		ProbeNonce: probeNonce,
+		ProxyPort:  host.ProxyPort(),
 	}); err != nil {
 		return 1, fmt.Errorf("sandbox self-test failed: %w", err)
 	}
-	fmt.Fprintln(os.Stderr, "rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).")
+	fmt.Fprintln(os.Stderr, "rein: sandbox self-test passed (credential stores hidden; unix sockets blocked; egress answered by rein).")
 
 	// (13) Emit the real settings.json (no sentinel) and exec the agent.
 	settingsData, err := cfg.MarshalIndent()
@@ -806,9 +837,10 @@ func runSandboxed(cmdline []string) (int, error) {
 	if !contractOff {
 		agentArgv, injected = injectContract(cmdline, contract)
 	}
-	// #179: with exposed ports, launch through the staged binary's sandbox-exec
-	// so the tunnel helpers start beside the agent (after contract injection,
-	// which keys on the agent's own argv0).
+	// Launch through the staged binary's sandbox-exec (after contract
+	// injection, which keys on the agent's own argv0): it folds the proxy
+	// secret into the child's proxy URLs (#185) and starts the expose helpers
+	// (#179).
 	agentArgv = sandboxExecArgv(reinBin, sess.ExposePorts, agentArgv)
 
 	printSandboxBanner(os.Stderr, sess, sessSource, socketPath, workTree, extraDomains, cmdline, showHome, allowReadPaths,

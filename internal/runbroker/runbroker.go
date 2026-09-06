@@ -84,6 +84,13 @@ type Config struct {
 	// host loopback (#179). Listeners are bound in Start and fail it closed.
 	ExposePorts []int
 
+	// Egress, ProxySecret, and ProbeNonce switch on the #185 TCP listener
+	// (srt's external-proxy shape). All three or none; Start fails closed on a
+	// partial set. ProxyPort reports the bound port for the srt config.
+	Egress      *proxy.EgressPolicy
+	ProxySecret string
+	ProbeNonce  string
+
 	// allowAutoApprove opts in to nil-Approve auto-approval and a nil
 	// Declaration gate. Unexported on purpose: only in-package tests can
 	// set it, so a production caller can never silently get an ungated
@@ -137,6 +144,9 @@ type Host struct {
 	socketPath string
 	ca         *proxy.CA
 	ln         net.Listener
+	tcpLn      net.Listener // #185 external-proxy listener, nil in the mitm shape
+	tcpPort    int
+	tcpDone    chan struct{}
 	cancel     context.CancelFunc
 	done       chan struct{}
 	closeOnce  sync.Once
@@ -236,11 +246,18 @@ func Start(cfg Config) (*Host, error) {
 		Declaration: cfg.Declaration,
 		InScope:     cfg.InScope,
 		ExposePorts: cfg.ExposePorts,
+		Egress:      cfg.Egress,
+		ProxySecret: cfg.ProxySecret,
+		ProbeNonce:  cfg.ProbeNonce,
 		// Per-request idle signal for the expiry monitor. Cheap atomic store.
 		OnActivity: func() { h.markActivity(now()) },
 	})
 	if err != nil {
 		return nil, err
+	}
+	external := cfg.Egress != nil || cfg.ProxySecret != "" || cfg.ProbeNonce != ""
+	if external && (cfg.Egress == nil || cfg.ProxySecret == "" || cfg.ProbeNonce == "") {
+		return nil, errors.New("runbroker: Egress, ProxySecret, and ProbeNonce must all be set for the external-proxy shape")
 	}
 
 	// Placement check + socket creation (0700 dir, 0600 filesystem socket).
@@ -260,6 +277,23 @@ func Start(cfg Config) (*Host, error) {
 	h.ca = ca
 	h.ln = ln
 	h.cancel = cancel
+	h.tcpDone = make(chan struct{})
+	if external {
+		tln, port, err := proxy.ListenTCP()
+		if err != nil {
+			cancel()
+			ln.Close()
+			return nil, err
+		}
+		cfg.Egress.AddListenerPort(port) // rein's own port is never-route
+		h.tcpLn, h.tcpPort = tln, port
+		go func() {
+			defer close(h.tcpDone)
+			_ = p.ServeTCP(ctx, tln)
+		}()
+	} else {
+		close(h.tcpDone)
+	}
 	go func() {
 		defer close(h.done)
 		_ = p.Serve(ctx, ln)
@@ -292,6 +326,9 @@ func (h *Host) markMonitorDone() {
 // SocketPath is the per-run proxy socket the sandbox connects to.
 func (h *Host) SocketPath() string { return h.socketPath }
 
+// ProxyPort is the #185 loopback listener's port (0 in the mitm shape).
+func (h *Host) ProxyPort() int { return h.tcpPort }
+
 // CACertPEM is the CA certificate (no private key) for the sandbox trust
 // bundle (CP3: SSL_CERT_FILE = system roots + this).
 func (h *Host) CACertPEM() []byte { return h.ca.CertPEM() }
@@ -305,7 +342,11 @@ func (h *Host) Close() error {
 	h.closeOnce.Do(func() {
 		h.cancel()
 		h.ln.Close()
+		if h.tcpLn != nil {
+			h.tcpLn.Close()
+		}
 		<-h.done
+		<-h.tcpDone
 		<-h.monitorDone
 	})
 	return nil

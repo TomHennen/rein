@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"time"
 )
 
@@ -73,6 +74,12 @@ type VerifyParams struct {
 
 	// Timeout caps the probe spawn. A stuck sandbox must not hang the launch.
 	Timeout time.Duration
+
+	// ProbeNonce and ProxyPort switch on the #185 network checks (both
+	// required together; see probe_net.go). Zero/empty keeps the mitm-shape
+	// probe (deny-read + seccomp + tty only).
+	ProbeNonce string
+	ProxyPort  int
 }
 
 // VerifyConfigApplied launches srt with the real per-run filesystem/seccomp
@@ -122,10 +129,15 @@ func VerifyConfigApplied(vp VerifyParams) error {
 	ctx, cancel := context.WithTimeout(context.Background(), vp.Timeout)
 	defer cancel()
 
-	// srt -s <settings> -- <rein> __sandbox-probe <sentinel> <marker>
-	cmd := exec.CommandContext(ctx, vp.SrtPath,
-		"-s", settings, "--",
-		vp.ReinBin, "__sandbox-probe", sentinel, sentinelMarker)
+	// srt -s <settings> -- <rein> __sandbox-probe <sentinel> <marker> [<nonce> <rein port>]
+	args := []string{"-s", settings, "--", vp.ReinBin, "__sandbox-probe", sentinel, sentinelMarker}
+	if vp.ProbeNonce != "" || vp.ProxyPort != 0 {
+		if vp.ProbeNonce == "" || vp.ProxyPort == 0 {
+			return fmt.Errorf("srt verify: ProbeNonce and ProxyPort are required together")
+		}
+		args = append(args, vp.ProbeNonce, strconv.Itoa(vp.ProxyPort))
+	}
+	cmd := exec.CommandContext(ctx, vp.SrtPath, args...)
 	cmd.Env = vp.Env
 	// Capture output for diagnostics; the verdict is the exit code.
 	out, runErr := cmd.CombinedOutput()
@@ -144,6 +156,12 @@ func VerifyConfigApplied(vp VerifyParams) error {
 		return fmt.Errorf("srt verify: CONFIG FAIL-OPEN — the credential sentinel was READABLE inside the sandbox; srt did not apply rein's denyRead (likely null-fallback to the default config with empty denyRead). Refusing to launch (gap #3). output: %s", trim(out))
 	case ProbeControllingTTY:
 		return fmt.Errorf("srt verify: CONTROLLING-TTY PRESENT — /dev/tty was OPENABLE inside the sandbox, so the child has a controlling terminal. The write-approval channel could be reachable from in-sandbox (an in-sandbox process could inject the approval). This means srt no longer launches the child with --new-session (setsid). Refusing to launch (see rein issue #32). output: %s", trim(out))
+	case ProbeEgressNotRein:
+		return fmt.Errorf("srt verify: EGRESS IS NOT REIN — the sandbox's proxy port did not answer with this run's nonce (srt's own proxy or a stale one is in the path), so rein's egress policy would not be enforced. Refusing to launch (#185). output: %s", trim(out))
+	case ProbeNetNotUnshared:
+		return fmt.Errorf("srt verify: NETWORK NOT UNSHARED — a raw connect to a public address succeeded inside the sandbox; the agent would bypass the proxy entirely. Refusing to launch. output: %s", trim(out))
+	case ProbeLoopbackReachable:
+		return fmt.Errorf("srt verify: HOST LOOPBACK REACHABLE — a raw connect to rein's own port succeeded from inside the sandbox; the agent could reach host services directly. Refusing to launch. output: %s", trim(out))
 	case ProbeError:
 		return fmt.Errorf("srt verify: probe reported an internal error; failing closed. output: %s", trim(out))
 	default:
@@ -191,6 +209,23 @@ func RunProbe(args []string) int {
 
 	// err != nil (absent/tmpfs) or empty (/dev/null bind) => denyRead applied,
 	// and /dev/tty was unopenable => no controlling terminal.
+
+	// #185 network checks, when the launch passed a nonce + rein's port.
+	if len(args) >= 4 {
+		port, err := strconv.Atoi(args[3])
+		if err != nil || port < 1 {
+			return ProbeError
+		}
+		proxyURL := os.Getenv("HTTPS_PROXY")
+		if proxyURL == "" {
+			proxyURL = os.Getenv("https_proxy")
+		}
+		if proxyURL == "" {
+			fmt.Fprintln(os.Stderr, "probe: no HTTPS_PROXY in the sandbox environment")
+			return ProbeEgressNotRein
+		}
+		return probeNetwork(proxyURL, os.Getenv(EnvProxyAuth), args[2], port)
+	}
 	return ProbeOK
 }
 

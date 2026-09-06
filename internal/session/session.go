@@ -20,8 +20,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -88,6 +90,19 @@ type Session struct {
 	// the agent could otherwise squat a port the human associates with
 	// something else. Sandboxed only (direct mode shares the host loopback).
 	ExposePorts []int `yaml:"expose_ports,omitempty"`
+
+	// OpenEgress (#185) lets the sandboxed agent reach ANY public host on 443
+	// (research, docs, WebFetch). Loopback, private, link-local and other ports
+	// stay refused. A data-exfiltration surface by definition: the launch
+	// banner says so every run. Session file only; there is deliberately no
+	// env switch. Sandboxed only.
+	OpenEgress bool `yaml:"open_egress,omitempty"`
+
+	// AllowInternalHosts (#185) are "host:port" entries exempt from the
+	// private-range refusal (an internal build server, a LAN service). Never
+	// exempt from loopback, the host's own addresses, link-local, or metadata.
+	// Session file only.
+	AllowInternalHosts []string `yaml:"allow_internal_hosts,omitempty"`
 
 	// Worktrees maps a session repo ("owner/name") to the ABSOLUTE path of the
 	// developer's EXISTING local checkout of it (issue #64). Each mapped
@@ -254,6 +269,15 @@ func (s *Session) Validate() error {
 		}
 		if !filepath.IsAbs(path) {
 			return fmt.Errorf("session.worktrees[%s] = %q must be an absolute path", repo, path)
+		}
+	}
+	for i, h := range s.AllowInternalHosts {
+		host, portStr, err := net.SplitHostPort(strings.TrimSpace(h))
+		if err != nil || host == "" {
+			return fmt.Errorf("session.allow_internal_hosts[%d] = %q must be host:port", i, h)
+		}
+		if p, err := strconv.Atoi(portStr); err != nil || p < 1 || p > 65535 {
+			return fmt.Errorf("session.allow_internal_hosts[%d] = %q has a bad port", i, h)
 		}
 	}
 	seen := map[int]bool{}

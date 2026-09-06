@@ -66,6 +66,10 @@ type EgressPolicy struct {
 	defaultPort    int
 }
 
+// AddListenerPort marks one of rein's own loopback ports never-route. Called
+// before the policy is consulted (the listener's port is known only after bind).
+func (p *EgressPolicy) AddListenerPort(port int) { p.listenerPorts[port] = true }
+
 func (p *EgressPolicy) defPort() int {
 	if p.defaultPort != 0 {
 		return p.defaultPort
