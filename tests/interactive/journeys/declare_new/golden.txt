@@ -1,4 +1,4 @@
-$ rein run -- bash -c <sandbox declare-new script> /tmp/rein-declnew-tdiydw1q
+$ rein run -- bash -c <sandbox declare-new script> /tmp/rein-declnew-v2ey0qbd
 rein: sandbox preflight:
   [ok]   srt present: /home/admin/.npm-global/bin/srt
   [ok]   srt version: 0.0.63 (package.json; note `srt --version` misreports 1.0.0)
@@ -9,11 +9,11 @@ rein: egress preset "dev" active (11 package-registry/advisory hosts; egress_pre
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked; egress answered by rein).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_declare_new (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-jhzmiyrc/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-Xqv4lT-KYM3QXh6QtfhW5g/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-declnew-tdiydw1q  [TomHennen/agentcreds-validation-a]
+  session: sess_journey_declare_new (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-ahep23wx/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-vhlidkedBQeUWj6LAIyR_g/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-declnew-v2ey0qbd  [TomHennen/agentcreds-validation-a]
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-533150661
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-4084350584
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -24,7 +24,7 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-declnew-tdiydw1q
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-declnew-v2ey0qbd
     => work the agent must keep has to be written INTO the working tree.
     allowed back read-only: /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.local/bin, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv, /home/admin/.cache/ms-playwright
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
@@ -60,12 +60,12 @@ emit "@PHASE1_RC=$?"
 NEW_ISSUE=$(printf '%s' "$DECLARE_LAST_OUT" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
 emit "@FILED_ISSUE=#$NEW_ISSUE"
 
-emit "@PHASE2_START  push agent/$NEW_ISSUE/declnew-20260906-210806-96f61e using the number rein just returned"
-run git checkout -b "agent/$NEW_ISSUE/declnew-20260906-210806-96f61e"
+emit "@PHASE2_START  push agent/$NEW_ISSUE/declnew-20260906-210944-142ae8 using the number rein just returned"
+run git checkout -b "agent/$NEW_ISSUE/declnew-20260906-210944-142ae8"
 echo "declare_new journey: probe commit for the newly filed issue" >> declare-new-probe.txt
 run git add -A
 run git commit -q -m "declare_new journey: probe for the newly filed issue"
-run git push origin HEAD:refs/heads/agent/$NEW_ISSUE/declnew-20260906-210806-96f61e
+run git push origin HEAD:refs/heads/agent/$NEW_ISSUE/declnew-20260906-210944-142ae8
 emit "@PUSH_RC=$?"
 
 emit "@PHASE3_START  gh issue view (read) — the filed issue as seen from inside the sandbox"
@@ -76,12 +76,12 @@ emit "@PHASE4_START  rein declare --new AGAIN, answered with the WRONG word (exp
 declare_new rein declare --new 'JourneyDeclareNewDeny: must be refused by a wrong first-word answer'
 emit "@PHASE4_RC=$?"
 emit "@SCRIPT_DONE"
- /tmp/rein-declnew-tdiydw1q
+ /tmp/rein-declnew-v2ey0qbd
 ---
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/rein-declnew-tdiydw1q
+- Your work persists ONLY in the working tree: /tmp/rein-declnew-v2ey0qbd
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
@@ -139,25 +139,25 @@ To approve, type the proposed title's first word (JourneyDeclareNew) and press e
 To deny, press Ctrl-C or type anything else.
 > JourneyDeclareNew
   [approved]
-SBX| issue #546 filed and confirmed — writes are unlocked (push to agent/546/<nonce>)
+SBX| issue #549 filed and confirmed — writes are unlocked (push to agent/549/<nonce>)
 SBX| @PHASE1_RC=0
-SBX| @FILED_ISSUE=#546
-SBX| @PHASE2_START  push agent/546/declnew-20260906-210806-96f61e using the number rein just returned
-SBX| $ git checkout -b agent/546/declnew-20260906-210806-96f61e
-SBX| Switched to a new branch 'agent/546/declnew-20260906-210806-96f61e'
+SBX| @FILED_ISSUE=#549
+SBX| @PHASE2_START  push agent/549/declnew-20260906-210944-142ae8 using the number rein just returned
+SBX| $ git checkout -b agent/549/declnew-20260906-210944-142ae8
+SBX| Switched to a new branch 'agent/549/declnew-20260906-210944-142ae8'
 SBX| $ git add -A
 SBX| $ git commit -q -m declare_new journey: probe for the newly filed issue
-SBX| $ git push origin HEAD:refs/heads/agent/546/declnew-20260906-210806-96f61e
+SBX| $ git push origin HEAD:refs/heads/agent/549/declnew-20260906-210944-142ae8
 SBX| remote:
-SBX| remote: Create a pull request for 'agent/546/declnew-20260906-210806-96f61e' on GitHub by visiting:
-SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/546/declnew-20260906-210806-96f61e
+SBX| remote: Create a pull request for 'agent/549/declnew-20260906-210944-142ae8' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/549/declnew-20260906-210944-142ae8
 SBX| remote:
 SBX| To https://github.com/TomHennen/agentcreds-validation-a.git
-SBX|  * [new branch]      HEAD -> agent/546/declnew-20260906-210806-96f61e
+SBX|  * [new branch]      HEAD -> agent/549/declnew-20260906-210944-142ae8
 SBX| @PUSH_RC=0
 SBX| @PHASE3_START  gh issue view (read) — the filed issue as seen from inside the sandbox
-SBX| $ gh issue view 546 --repo TomHennen/agentcreds-validation-a --json number,title,author,url
-SBX| {"author":{"is_bot":true,"login":"app/rein-primary-735a3bbe20"},"number":546,"title":"JourneyDeclareNew: files this runs declared issue via Form A (safe to close)","url":"https://github.com/TomHennen/agentcreds-validation-a/issues/546"}
+SBX| $ gh issue view 549 --repo TomHennen/agentcreds-validation-a --json number,title,author,url
+SBX| {"author":{"is_bot":true,"login":"app/rein-primary-735a3bbe20"},"number":549,"title":"JourneyDeclareNew: files this runs declared issue via Form A (safe to close)","url":"https://github.com/TomHennen/agentcreds-validation-a/issues/549"}
 SBX| @VIEW_RC=0
 SBX| @PHASE4_START  rein declare --new AGAIN, answered with the WRONG word (expect: refused, nothing filed)
 SBX| $ rein declare --new JourneyDeclareNewDeny: must be refused by a wrong first-word answer
@@ -167,7 +167,7 @@ SBX| $ rein declare --new JourneyDeclareNewDeny: must be refused by a wrong firs
    title:    "JourneyDeclareNewDeny: must be refused by a wrong first-word answer"
    body:     (none)
              (rein appends an attribution line to the body when it files.)
-   NOTE:     this run ALREADY confirmed #546 — approve only if this
+   NOTE:     this run ALREADY confirmed #549 — approve only if this
              is genuinely separate work.
    session:  sess_journey_declare_new (role=implement, repos=[TomHennen/agentcreds-validation-a])
    approving FILES this issue under rein's bot identity and makes it
