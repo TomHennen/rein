@@ -1,0 +1,98 @@
+$ rein run -- bash -c <public-read probe> /tmp/rein-pubread-ttw_1wow
+rein: sandbox preflight:
+  [ok]   srt present: /home/admin/.npm-global/bin/srt
+  [ok]   srt version: 0.0.63 (package.json; note `srt --version` misreports 1.0.0)
+  [ok]   seccomp: apply-seccomp present (unix-socket block available)
+  [ok]   bwrap userns: unprivileged user namespace works
+  [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
+rein: verifying sandbox config applies (deny-read + seccomp self-test)…
+rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
+rein: launching SANDBOXED (srt) run:
+  session: sess_journey_public_read (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-jnn_ip3k/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-0_vBQ2mOamAjiGcEFDwyOA/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-pubread-ttw_1wow  [TomHennen/agentcreds-validation-a]
+  a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-1856977632
+    (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
+     never inside the working tree, where a nested clone can be committed into it).
+    map it under `worktrees:` to use your own checkout on the NEXT run.
+  the agent sees NO real token; git/gh are injected at the proxy.
+  credential stores, ~/.ssh, on-disk keyrings, and keyring/agent sockets are hidden.
+  $HOME is HIDDEN in-sandbox. Three different behaviors — know which one you get:
+    READS of a hidden path FAIL LOUDLY: ENOENT, or an empty listing for a dir.
+    WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
+      DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
+    WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-pubread-ttw_1wow
+    => work the agent must keep has to be written INTO the working tree.
+    allowed back read-only: /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.local/bin, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv
+    if a tool breaks on a hidden $HOME path, allow it back narrowly:
+      REIN_SANDBOX_ALLOW_READ=/abs/path[:/more] rein run --sandbox -- …
+    or (NOT recommended — exposes your whole home dir): REIN_SANDBOX_SHOW_HOME=1
+  extra egress ALLOWED (direct TLS, NOT injected, no rein token): api.anthropic.com, platform.claude.com
+  writes are LOCKED until the agent declares its issue:  rein declare <n>
+  then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.
+  to run bash WITHOUT rein for one command: `\bash` (bash/zsh) or `command bash` (fish)
+  agent contract PRINTED to the agent's output (this agent has no system-prompt channel, so it may or
+    may not reach the model's context; the REIN_IN_SANDBOX_* env vars carry the same facts machine-readably).
+rein: running: bash -c
+set +e
+emit() { printf '%s%s\n' 'SBX| ' "$*"; }
+run() {
+  printf '%s$ %s\n' 'SBX| ' "$*"
+  "$@" 2>&1 | tr '\r' '\n' | while IFS= read -r l; do printf '%s%s\n' 'SBX| ' "$l"; done
+  return ${PIPESTATUS[0]}
+}
+cd "$0"
+emit "@OOS_PUBLIC_READ  (out-of-scope PUBLIC repo relays anonymously — no token)"
+run git clone --quiet --depth 1 https://github.com/octocat/Hello-World oos-pub
+[ -d oos-pub/.git ] && emit "@CLONE_RC=0" || emit "@CLONE_RC=1"
+emit "@PUB_API=$(curl -sS -o /dev/null -w %{http_code} --max-time 20 https://api.github.com/repos/octocat/Hello-World)"
+emit "@OOS_PRIVATE_READ  (out-of-scope private/nonexistent — 404, no anonymous access)"
+emit "@PRIV_API=$(curl -sS -o /dev/null -w %{http_code} --max-time 20 https://api.github.com/repos/TomHennen/definitely-not-a-public-repo-x7)"
+emit "@IN_SCOPE_READ  (the session repo still reads authenticated — no regression)"
+emit "@SCOPE_API=$(curl -sS -o /dev/null -w %{http_code} --max-time 20 https://api.github.com/repos/TomHennen/agentcreds-validation-a)"
+ /tmp/rein-pubread-ttw_1wow
+---
+rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
+
+FILES
+- Your work persists ONLY in the working tree: /tmp/rein-pubread-ttw_1wow
+  Write anything that must outlive this run THERE. Nothing else survives.
+- $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
+  DISCARDED when the run ends. You will get no error. Do not keep work there.
+- Most of $HOME reads as empty/missing; a few paths are re-exposed READ-ONLY, where
+  writes fail with "Read-only file system". Caches work but start cold each run.
+
+CREDENTIALS
+- There are NO credentials in this environment. Tokens, keys, and credential stores
+  are hidden on purpose. Do not go looking for them, and do not ask the user for one.
+- git and gh still work anyway: a proxy OUTSIDE the sandbox injects a short-lived
+  GitHub token you never see. Just use them normally.
+
+GITHUB WRITES
+- Writes to GitHub (push, PRs, comments, any API mutation) are LOCKED until you
+  declare the issue this work is for:
+      rein declare <n>
+  That asks the human to approve, on their terminal. Reads work without it.
+- Once confirmed, push ONLY to a branch named:
+      agent/<n>/<nonce>
+  where <n> is the declared issue number and <nonce> is a short name you choose
+  (letters/digits, then letters/digits/./_/-). Any other ref is rejected.
+- One issue per push.
+
+NETWORK
+- Egress is restricted to GitHub plus: api.anthropic.com, platform.claude.com
+- Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.
+- You CANNOT open a blocked host yourself. To reach one, ask the human to run this
+  single command, then restart rein (it applies to the NEXT run, not this one):
+      rein session allow-domain <host>
+
+SBX| @OOS_PUBLIC_READ  (out-of-scope PUBLIC repo relays anonymously — no token)
+SBX| $ git clone --quiet --depth 1 https://github.com/octocat/Hello-World oos-pub
+SBX| @CLONE_RC=0
+SBX| @PUB_API=200
+SBX| @OOS_PRIVATE_READ  (out-of-scope private/nonexistent — 404, no anonymous access)
+SBX| @PRIV_API=404
+SBX| @IN_SCOPE_READ  (the session repo still reads authenticated — no regression)
+SBX| @SCOPE_API=200
