@@ -30,13 +30,20 @@ const EnvAllowDomains = "REIN_ALLOW_DOMAINS"
 // egress_preset equivalent). See EgressPreset.
 const EnvEgressPreset = "REIN_EGRESS_PRESET"
 
-// egressPresets are curated egress bundles a session opts into by NAME instead
-// of listing hosts. srt 0.0.63 cannot express true allow-all (its schema
-// rejects a bare "*"; see issue #163), so "dev" is the pragmatic substitute:
-// the package registries + advisory hosts a dependency-fetching agent needs, as
-// srt-legal *.suffix wildcards. NONE cover a GitHub inject/CDN host (Validate
-// would reject such an overlap). Still egress-only, NEVER injected — a broad
-// allowlist is an exfiltration surface, so the caller warns loudly.
+// DefaultEgressPreset applies when neither the session nor REIN_EGRESS_PRESET
+// names one. "dev" is on by default so a dependency-fetching agent works out of
+// the box; set egress_preset: none to opt out.
+const DefaultEgressPreset = "dev"
+
+// EgressPresetNone is the explicit opt-out name: no preset hosts at all.
+const EgressPresetNone = "none"
+
+// egressPresets are curated egress bundles selected by NAME instead of listing
+// hosts. srt 0.0.63 cannot express true allow-all (its schema rejects a bare
+// "*"; see issue #163), so "dev" is the pragmatic substitute: the package
+// registries + advisory hosts a dependency-fetching agent needs, as srt-legal
+// *.suffix wildcards. NONE cover a GitHub inject/CDN host (Validate would reject
+// such an overlap). Still egress-only, NEVER injected.
 var egressPresets = map[string][]string{
 	"dev": {
 		"*.golang.org", "vuln.go.dev", "osv.dev", // Go modules + advisories
@@ -47,19 +54,23 @@ var egressPresets = map[string][]string{
 	},
 }
 
-// EgressPreset returns the hosts for a named preset. "" yields no hosts and no
-// error (no preset selected). An unknown name is an error — fail closed rather
-// than silently apply nothing when the operator asked for a preset.
-func EgressPreset(name string) ([]string, error) {
+// EgressPreset returns the hosts for a named preset. "" selects
+// DefaultEgressPreset; EgressPresetNone yields no hosts. An unknown name is an
+// error — fail closed rather than silently apply nothing when the operator
+// asked for a preset. The resolved name is returned for the launch banner.
+func EgressPreset(name string) (resolved string, hosts []string, err error) {
 	name = strings.ToLower(strings.TrimSpace(name))
 	if name == "" {
-		return nil, nil
+		name = DefaultEgressPreset
 	}
-	hosts, ok := egressPresets[name]
+	if name == EgressPresetNone {
+		return name, nil, nil
+	}
+	h, ok := egressPresets[name]
 	if !ok {
-		return nil, fmt.Errorf("unknown egress preset %q (known: dev)", name)
+		return "", nil, fmt.Errorf("unknown egress preset %q (known: dev, none)", name)
 	}
-	return append([]string(nil), hosts...), nil
+	return name, append([]string(nil), h...), nil
 }
 
 // largeExtraSetThreshold is the count of CUSTOM (non-default) extra domains above
@@ -68,23 +79,27 @@ func EgressPreset(name string) ([]string, error) {
 const largeExtraSetThreshold = 8
 
 // ResolveExtraAllowedDomains merges the extra egress allowlist from all sources —
-// the built-in DefaultExtraAllowedDomains, the REIN_ALLOW_DOMAINS env value
-// (comma-separated), and the per-session allow_domains — into one lowercased,
-// deduped list. Precedence is moot: an allowlist is a UNION, and no source can
-// REMOVE a host (the default agent endpoint is always present so the wrapped
-// agent works out of the box).
+// the built-in DefaultExtraAllowedDomains, the curated presetHosts (see
+// EgressPreset), the REIN_ALLOW_DOMAINS env value (comma-separated), and the
+// per-session allow_domains — into one lowercased, deduped list. Precedence is
+// moot: an allowlist is a UNION, and no source can REMOVE a host (the default
+// agent endpoint is always present so the wrapped agent works out of the box).
 //
 // It also returns human-facing WARNINGS about the egress data-exfiltration
 // surface (CP4.5 security requirement): the sandboxed agent can send data to ANY
 // allowed host, so widening egress is the operator's explicit choice and must be
-// surfaced loudly. Each wildcard (`*.suffix`) and a large custom set produce a
-// warning; the caller prints them as a stderr banner.
+// surfaced loudly. Each operator-supplied wildcard (`*.suffix`) and a large
+// custom set produce a warning; the caller prints them as a stderr banner.
+// Preset hosts are validated like any other but do NOT warn: the preset is
+// curated and on by default, and a fixed page of warnings on every run would
+// only teach operators to ignore the ones about their own additions. The launch
+// banner names the active preset and how to turn it off instead.
 //
 // An error is returned for a MALFORMED extra domain (empty after trim, or one
 // carrying a scheme/path/space/port, or a wildcard not of the exact `*.suffix`
 // form). Fail closed rather than silently allow a bogus entry that srt would
 // reject or (worse) mis-match into a broader allow than intended.
-func ResolveExtraAllowedDomains(sessionDomains []string, envValue string) (domains, warnings []string, err error) {
+func ResolveExtraAllowedDomains(sessionDomains []string, envValue string, presetHosts []string) (domains, warnings []string, err error) {
 	custom := append(splitAndTrim(envValue), sessionDomains...)
 
 	seen := map[string]bool{}
@@ -105,10 +120,16 @@ func ResolveExtraAllowedDomains(sessionDomains []string, envValue string) (domai
 		return true, nil
 	}
 
-	// Defaults first (always present), then the custom sources (union).
+	// Defaults first (always present), then the preset, then the custom
+	// sources (union).
 	for _, d := range DefaultExtraAllowedDomains {
 		if _, e := add(d); e != nil {
 			return nil, nil, fmt.Errorf("invalid default egress domain %q: %w", d, e)
+		}
+	}
+	for _, d := range presetHosts {
+		if _, e := add(d); e != nil {
+			return nil, nil, fmt.Errorf("invalid egress preset domain %q: %w", d, e)
 		}
 	}
 	var customCount int

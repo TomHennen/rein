@@ -247,22 +247,24 @@ func runSandboxed(cmdline []string) (int, error) {
 	// they get a direct TLS tunnel to their real endpoint). Broad egress is a
 	// data-exfiltration surface, so warnings (wildcards / large sets) are printed
 	// LOUDLY. A malformed entry fails the launch closed.
-	// A named egress preset (session or env) expands into the allowlist union.
+	// The egress preset (session, else env, else the "dev" default) expands
+	// into the allowlist union; `egress_preset: none` opts out.
 	presetName := sess.EgressPreset
 	if presetName == "" {
 		presetName = os.Getenv(srt.EnvEgressPreset)
 	}
-	presetHosts, err := srt.EgressPreset(presetName)
+	presetName, presetHosts, err := srt.EgressPreset(presetName)
 	if err != nil {
 		return 1, fmt.Errorf("egress preset: %w", err)
 	}
-	sessionDomains := append(append([]string(nil), sess.AllowDomains...), presetHosts...)
-	extraDomains, egressWarnings, err := srt.ResolveExtraAllowedDomains(sessionDomains, os.Getenv(srt.EnvAllowDomains))
+	extraDomains, egressWarnings, err := srt.ResolveExtraAllowedDomains(sess.AllowDomains, os.Getenv(srt.EnvAllowDomains), presetHosts)
 	if err != nil {
 		return 1, fmt.Errorf("resolve extra allowed egress domains: %w", err)
 	}
 	if len(presetHosts) > 0 {
-		fmt.Fprintf(os.Stderr, "rein: egress preset %q active (%d package-registry/advisory hosts)\n", strings.ToLower(strings.TrimSpace(presetName)), len(presetHosts))
+		fmt.Fprintf(os.Stderr, "rein: egress preset %q active (%d package-registry/advisory hosts; egress_preset: none in the session file turns it off)\n", presetName, len(presetHosts))
+	} else {
+		fmt.Fprintf(os.Stderr, "rein: egress preset %q: no package-registry hosts allowed\n", presetName)
 	}
 	for _, wmsg := range egressWarnings {
 		fmt.Fprintf(os.Stderr, "rein: EGRESS WARNING: %s\n", wmsg)

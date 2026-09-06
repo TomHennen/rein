@@ -434,6 +434,30 @@ closes that gap.
   13 journey goldens regenerated for the new contract text (deterministic:
   the session path normalizes to <TMP>/session.yaml).
 
+- 2026-09-06 — **Journey harness leaked the operator's $TMUX into rein
+  (popup on Tom's live screen).** `run-journeys.sh` launched from inside a
+  tmux session passed $TMUX through `rein_env()`, so the journeys that drive
+  `rein declare` WITHOUT `REIN_APPROVAL=tty` (gh_write, push_upstream,
+  write_ceremony, sandbox_filesystem, realagent_write) routed Form A to a
+  `tmux popup` on the OPERATOR's attached client instead of the pexpect pty.
+  Tom saw an unexplained approval popup mid-run; the journey then failed as
+  "exactly one Form A prompt" (it saw none) while the write actually landed
+  (cleaned up by the journey's teardown). The harness comment assumed "every
+  other journey runs OUTSIDE tmux" but nothing enforced it. Fix: `rein_env()`
+  now strips TMUX/TMUX_PANE; the popup journey is unaffected (its pane shell
+  gets a fresh $TMUX from the dedicated server).
+
+- 2026-09-06 — **"dev" egress preset is now the DEFAULT (Tom's ask).** With no
+  `egress_preset` set (session or REIN_EGRESS_PRESET), rein applies "dev";
+  `egress_preset: none` is the explicit opt-out. Preset hosts are still
+  validated + merged like any other, but no longer fire the per-wildcard exfil
+  warnings: on by default, that was seven fixed warning lines every run, which
+  would only train people to ignore the warnings about their OWN additions.
+  The launch banner names the active preset and the opt-out instead; operator
+  wildcards still warn. The egress_preset journey now walks the default AND the
+  none opt-out (pypi 200 vs 000); every sandboxed golden regenerated for the
+  banner + the wider contract NETWORK line.
+
 - 2026-09-05 — **#163: "dev" egress preset (open-egress substitute).** srt 0.0.63
   can't express true allow-all (schema rejects a bare "*"; see #163 finding), so
   a named preset is the pragmatic answer: session `egress_preset: dev` (or

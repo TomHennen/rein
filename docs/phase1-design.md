@@ -161,6 +161,19 @@ environment (§4.2), and the proxy's CA certificate to trust (§5.4).
 > api.anthropic.com extra-egress route),
 > and the extra-egress set is the operator's declared exfiltration
 > surface (loud EGRESS WARNING on wildcards / large sets).
+>
+> **2026-09-06 addendum.** The extra-egress route also carries the
+> curated `dev` egress preset (package registries + advisory hosts as
+> `*.suffix` wildcards; `internal/srt/domains.go`), which is ON BY
+> DEFAULT so dependency fetches work without setup; `egress_preset:
+> none` (session) or `REIN_EGRESS_PRESET=none` opts out. Preset hosts
+> pass the same validation and the same never-injected rule, but they
+> do NOT fire the per-wildcard EGRESS WARNING: a fixed page of warnings
+> on every run would only train operators to ignore the ones about
+> their own additions. Disclosure is the launch banner naming the
+> active preset and its opt-out, plus the full host list in the
+> `extra egress ALLOWED` line and the agent contract. Operator-added
+> wildcards still warn.
 
 ### 4.1 Injection invariants
 

@@ -185,26 +185,41 @@ To run the agent *without* the alias for one invocation: `\claude` (bash/zsh) or
 
 ### Allowing extra network egress (npm, PyPI, MCP, …)
 
-By default the sandbox blocks **all** network egress except two things: GitHub
-(brokered through rein's proxy) and the hosts the wrapped agent needs to start
+By default the sandbox blocks **all** network egress except three things: GitHub
+(brokered through rein's proxy), the hosts the wrapped agent needs to start
 (for `claude`: `api.anthropic.com` and `platform.claude.com` — its startup
 preflight requires both, so they are allowed automatically and `rein run --
-claude` works out of the box). Anything else — the npm registry, PyPI, a remote
-MCP server — is unreachable until you allow its host explicitly.
+claude` works out of the box), and the **`dev` egress preset**: the package
+registries and advisory hosts a dependency-fetching agent needs (Go modules,
+npm, PyPI, crates.io, RubyGems, osv.dev). The preset is on by default so
+`go get` / `npm install` / `pip install` work without setup; the launch banner
+names it every run. Anything else — a remote MCP server, an internal host — is
+unreachable until you allow it explicitly.
 
-Add hosts to the **`allow_domains`** allowlist, either per session or
+To turn the preset off (leaving GitHub, the agent's own API, and whatever you
+list in `allow_domains`), set it to `none` in the session file, or machine-wide
+via the environment (a session file's own `egress_preset` takes precedence):
+
+```yaml
+egress_preset: none
+```
+
+```bash
+export REIN_EGRESS_PRESET=none
+```
+
+Add other hosts to the **`allow_domains`** allowlist, either per session or
 machine-wide:
 
 ```yaml
 # in your session yaml — allow just this run's extra egress
 allow_domains:
-  - registry.npmjs.org
-  - pypi.org
+  - mcp.example.com
 ```
 
 ```bash
 # or machine-wide, for every sandboxed run (comma-separated)
-export REIN_ALLOW_DOMAINS="registry.npmjs.org,pypi.org"
+export REIN_ALLOW_DOMAINS="mcp.example.com,internal.example.com"
 ```
 
 Allowed hosts get a **direct TLS tunnel to themselves** — rein injects **no**
@@ -212,7 +227,9 @@ credential on them (they are egress-only; only GitHub gets an injected token).
 Entries are bare hosts (`pypi.org`) or a strict wildcard (`*.example.com`).
 Because a sandboxed agent can send data to any allowed host, **widening egress is
 a data-exfiltration surface**: rein prints a loud `EGRESS WARNING` for each
-wildcard and for a large custom set. Keep the list minimal and deliberate.
+wildcard and for a large custom set you add (the curated preset's own wildcards
+do not warn; the banner naming the preset is the disclosure). Keep the list
+minimal and deliberate.
 
 ### MCP servers in the sandbox
 
