@@ -124,11 +124,13 @@ func manifestPermissions(r Role) map[string]string {
 	switch r {
 	case RolePrimary:
 		return map[string]string{
-			"contents":      "write",
-			"issues":        "write",
-			"pull_requests": "write",
-			"workflows":     "write",
-			"metadata":      "read",
+			"contents":             "write",
+			"issues":               "write",
+			"pull_requests":        "write",
+			"workflows":            "write",
+			"security_events":      "read",
+			"vulnerability_alerts": "read",
+			"metadata":             "read",
 		}
 	case RoleAudit:
 		return map[string]string{

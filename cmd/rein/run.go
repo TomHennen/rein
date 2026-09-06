@@ -440,6 +440,7 @@ func resolveAndCacheInstallID(ctx context.Context, sess session.Session, newProb
 		resolvedID   int64  // first successfully resolved id this launch
 		resolvedRepo string // repo that resolved it (for the mismatch error)
 		resolvedWF   bool   // that installation's workflows:write grant
+		resolvedSec  bool   // that installation's security-read grant (#165)
 		lastErr      error  // last transient lookup error (for the all-failed message)
 	)
 	for _, r := range sess.Repos {
@@ -470,7 +471,7 @@ func resolveAndCacheInstallID(ctx context.Context, sess session.Session, newProb
 		}
 
 		if resolvedID == 0 {
-			resolvedID, resolvedRepo, resolvedWF = id, owner+"/"+repo, inst.WorkflowsWrite
+			resolvedID, resolvedRepo, resolvedWF, resolvedSec = id, owner+"/"+repo, inst.WorkflowsWrite, inst.SecurityRead
 		} else if id != resolvedID {
 			// Same owner ⇒ same installation is the invariant; two ids means
 			// the state is inconsistent in a way mints cannot serve. Fail loud.
@@ -507,9 +508,10 @@ func resolveAndCacheInstallID(ctx context.Context, sess session.Session, newProb
 	// State path: a changed id is a refresh, not an error (uninstall/reinstall
 	// rotates it); same for the workflows grant (the operator toggled the App
 	// permission). Rewrite state.json only when something actually changed.
-	if resolvedID != knownID || s.Primary.WorkflowsWrite != resolvedWF {
+	if resolvedID != knownID || s.Primary.WorkflowsWrite != resolvedWF || s.Primary.SecurityRead != resolvedSec {
 		s.Primary.InstallationID = resolvedID
 		s.Primary.WorkflowsWrite = resolvedWF
+		s.Primary.SecurityRead = resolvedSec
 		if err := appsetup.WriteState(configDir, s); err != nil {
 			return fmt.Errorf("cache installation id: %w", err)
 		}

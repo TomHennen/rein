@@ -31,6 +31,7 @@ func TestMint_RequestBodyPinsScopeCeiling(t *testing.T) {
 		// workflowsWrite: the installation granted workflows:write, so the
 		// WRITE tiers must request it (and read tiers still must not).
 		workflowsWrite bool
+		securityRead   bool
 		// readTier marks a read-only TIER: the tier-split invariant says such
 		// a token must carry NO "write" permission on ANY resource, so a
 		// token cached/exfiltrated on the read path grants read-only
@@ -63,6 +64,20 @@ func TestMint_RequestBodyPinsScopeCeiling(t *testing.T) {
 				"issues":        "read",
 				"pull_requests": "read",
 				"metadata":      "read",
+			},
+			readTier: true,
+		},
+		{
+			name:         "gh-read+security-granted",
+			mint:         (*Client).MintGhReadOnlyToken,
+			securityRead: true,
+			wantPerms: map[string]string{
+				"contents":             "read",
+				"issues":               "read",
+				"pull_requests":        "read",
+				"metadata":             "read",
+				"security_events":      "read",
+				"vulnerability_alerts": "read",
 			},
 			readTier: true,
 		},
@@ -146,6 +161,7 @@ func TestMint_RequestBodyPinsScopeCeiling(t *testing.T) {
 				// not just the first repo (issue #10 regression class).
 				RepoNames:      []string{"alpha", "beta"},
 				WorkflowsWrite: tc.workflowsWrite,
+				SecurityRead:   tc.securityRead,
 			}, ks, "primary")
 			if err != nil {
 				t.Fatalf("NewClient: %v", err)

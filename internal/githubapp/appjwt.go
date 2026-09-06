@@ -79,9 +79,18 @@ func NewAppClient(clientID string, ks keystore.Keystore, roleName, apiBase strin
 type Installation struct {
 	ID             int64
 	WorkflowsWrite bool
+
+	// SecurityRead: the installation granted BOTH security_events:read and
+	// vulnerability_alerts:read (code-scanning + Dependabot alerts). Gated
+	// together — they are the security-status read pair (#165).
+	SecurityRead bool
 }
 
 // RepoInstallationID returns just the id (the pre-existing probe surface).
+// grantsRead reports whether a GitHub permission level satisfies a READ need:
+// "read" or the strictly-stronger "write" both do; "" / "none" do not.
+func grantsRead(level string) bool { return level == "read" || level == "write" }
+
 func (c *AppClient) RepoInstallationID(ctx context.Context, owner, repo string) (int64, error) {
 	inst, err := c.RepoInstallation(ctx, owner, repo)
 	return inst.ID, err
@@ -144,7 +153,9 @@ func (c *AppClient) RepoInstallation(ctx context.Context, owner, repo string) (I
 	var out struct {
 		ID          int64 `json:"id"`
 		Permissions struct {
-			Workflows string `json:"workflows"`
+			Workflows           string `json:"workflows"`
+			SecurityEvents      string `json:"security_events"`
+			VulnerabilityAlerts string `json:"vulnerability_alerts"`
 		} `json:"permissions"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
@@ -153,7 +164,15 @@ func (c *AppClient) RepoInstallation(ctx context.Context, owner, repo string) (I
 	if out.ID == 0 {
 		return Installation{}, fmt.Errorf("installation lookup for %s/%s returned id 0", owner, repo)
 	}
-	return Installation{ID: out.ID, WorkflowsWrite: out.Permissions.Workflows == "write"}, nil
+	return Installation{
+		ID:             out.ID,
+		WorkflowsWrite: out.Permissions.Workflows == "write",
+		// read-or-WRITE satisfies the read need: requesting read when the
+		// install holds write is a valid subset. Requiring exactly "read"
+		// would silently disable the feature when the operator picks GitHub's
+		// "Read and write" level (reported as "write").
+		SecurityRead: grantsRead(out.Permissions.SecurityEvents) && grantsRead(out.Permissions.VulnerabilityAlerts),
+	}, nil
 }
 
 // AppSlug mints an App JWT and calls GET {apiBase}/app, returning the App's
