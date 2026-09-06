@@ -67,6 +67,7 @@ one (a new dir + a new `golden.txt`). Each row links to the journey's own README
 | [sandbox_gh_read_staleness](journeys/sandbox_gh_read_staleness/) | the #95 regression guard: cross-run gh-read staleness | COVERED |
 | [security_read](journeys/security_read/) | the App's security-status read perms reach the sandbox (dependabot + code scanning, #165); SKIPs if the App lacks the grant | COVERED |
 | [egress_preset](journeys/egress_preset/) | the `dev` egress preset is ON BY DEFAULT: registries (pypi) reachable, other hosts not; `egress_preset: none` closes them (#163) | COVERED |
+| [open_egress](journeys/open_egress/) | `open_egress: true`: rein (now the sandbox's egress proxy, #185) lets any PUBLIC host on 443 through, while loopback/private targets forced via the proxy, other ports and plain http stay refused; banner + contract + audit say so | COVERED |
 | [expose_port](journeys/expose_port/) | `expose_ports` forwards the HOST's loopback to a server the agent starts in-sandbox: an in-sandbox http.server answers a host curl through the reverse tunnel; an undeclared port stays unreachable (#179) | COVERED |
 | [tmux_popup_approval](journeys/tmux_popup_approval/) | the DEFAULT approval surface inside `$TMUX` — a real popup (#37) | COVERED |
 | [sandbox_filesystem](journeys/sandbox_filesystem/) | the sandbox filesystem boundary from INSIDE (#59/#63/#64) | COVERED |

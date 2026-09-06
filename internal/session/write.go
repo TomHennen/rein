@@ -271,6 +271,65 @@ func AddExposePortToFile(path string, port int) (Session, error) {
 	return updated, nil
 }
 
+// SetOpenEgressInFile sets `open_egress:` (#185) in the session file, with
+// the same node-edit + re-validate discipline as the other writers.
+func SetOpenEgressInFile(path string, on bool) (Session, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return Session{}, err
+	}
+	var current Session
+	if err := yaml.Unmarshal(body, &current); err != nil {
+		return Session{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if err := current.Validate(); err != nil {
+		return Session{}, fmt.Errorf("invalid session %s: %w (fix it first)", path, err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(body, &doc); err != nil {
+		return Session{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if err := setScalarNode(&doc, "open_egress", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: strconv.FormatBool(on)}); err != nil {
+		return Session{}, fmt.Errorf("edit %s: %w", path, err)
+	}
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return Session{}, fmt.Errorf("render %s: %w", path, err)
+	}
+	var updated Session
+	if err := yaml.Unmarshal(out, &updated); err != nil {
+		return Session{}, fmt.Errorf("re-parse edited session: %w", err)
+	}
+	if err := updated.Validate(); err != nil {
+		return Session{}, fmt.Errorf("edited session would be invalid: %w (nothing written)", err)
+	}
+	if err := writeAtomic(path, out); err != nil {
+		return Session{}, err
+	}
+	return updated, nil
+}
+
+// setScalarNode sets the root mapping's `key:` to value, replacing an existing
+// entry in place (comments on the line survive) or appending one.
+func setScalarNode(doc *yaml.Node, key string, value *yaml.Node) error {
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return errors.New("not a YAML document")
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return errors.New("session file root is not a mapping")
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == key {
+			value.LineComment = root.Content[i+1].LineComment
+			root.Content[i+1] = value
+			return nil
+		}
+	}
+	root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, value)
+	return nil
+}
+
 // appendSeqNode appends item to the root mapping's `key:` sequence, creating
 // the key + sequence when absent.
 func appendSeqNode(doc *yaml.Node, key string, item *yaml.Node) error {

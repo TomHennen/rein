@@ -269,6 +269,12 @@ func runSandboxed(cmdline []string) (int, error) {
 	for _, wmsg := range egressWarnings {
 		fmt.Fprintf(os.Stderr, "rein: EGRESS WARNING: %s\n", wmsg)
 	}
+	if sess.OpenEgress {
+		printOpenEgressBanner(os.Stderr, session.SourceFilePath(sessSource))
+	}
+	if len(sess.AllowInternalHosts) > 0 {
+		fmt.Fprintf(os.Stderr, "rein: internal hosts reachable (allow_internal_hosts, private ranges only): %s\n", strings.Join(sess.AllowInternalHosts, ", "))
+	}
 
 	// (7e) The developer's EXISTING local checkouts (issue #64). The working
 	// tree's repo is AUTODETECTED from its git remote (mocks §3: "detect the
@@ -830,6 +836,7 @@ func runSandboxed(cmdline []string) (int, error) {
 		EgressPresetSummary: srt.EgressPresetSummary(presetName),
 		PlaywrightBrowsers:  playwrightBrowsersDir(home, homeDeny),
 		ExposePorts:         sess.ExposePorts,
+		OpenEgress:          sess.OpenEgress,
 	})
 	contractOff := srt.DisableClaudeMCPFromEnv(os.Getenv(EnvDisableAgentContract))
 	agentArgv := cmdline

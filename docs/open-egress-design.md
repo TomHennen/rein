@@ -2,7 +2,10 @@
 
 Successor to #163 ("allow-all not expressible on srt 0.0.63"). Issue #185.
 Design of record, revised 2026-09-06 after the security review (its seven
-must-fix items are folded in and marked "[review N]").
+must-fix items are folded in and marked "[review N]"). Implemented in the
+same PR: `internal/proxy/{egress,tcp,peercred_linux}.go`, `internal/srt`
+external-proxy shape + `probe_net.go`, `cmd/rein/{egress,expose}.go`; journeys
+`open_egress` (new) and `egress_preset` (regenerated).
 
 ## Problem
 
