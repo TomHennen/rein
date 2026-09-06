@@ -31,6 +31,11 @@
 // human but never authorizes — the number the human types is
 // GitHub-assigned and unforgeable.
 //
+// A NEW issue (issue #180) has no number yet, so the typed token is the
+// proposed title's FIRST WORD (Request.ConfirmWord). It is still typed,
+// still undeliverable by a process without the tty, and the prompt
+// displays the exact string it compares against.
+//
 // # No-tty behavior
 //
 // If /dev/tty cannot be opened, Confirm returns ErrNoTTY. The caller
@@ -108,9 +113,44 @@ type Request struct {
 	// Ignored unless AddRepo is set.
 	AskPersist bool
 
+	// NewIssue marks a FILE-A-NEW-ISSUE request (issue #180): no number
+	// exists yet, so Title/Body are the agent's PROPOSAL, IssueRepo is
+	// where it would be filed, and ConfirmWord carries the typed token.
+	NewIssue bool
+
+	// Body is the proposed body, already excerpted and sanitized for
+	// terminal display (issuemeta.BodyExcerpt). Display only.
+	Body string
+
+	// ConfirmWord, when non-empty, REPLACES the issue number as the typed
+	// approval token (issue #180: a new issue has no number yet, so the
+	// human types the proposed title's first word). Compared
+	// case-insensitively after trimming, and DISPLAYED verbatim by
+	// writePrompt — what the human is told to type is the same string
+	// Confirm compares against, so the two cannot diverge.
+	ConfirmWord string
+
 	// Timeout caps how long Confirm waits for the human. A zero value
 	// means "no timeout" — Confirm blocks until input or signal.
 	Timeout time.Duration
+}
+
+// matches reports whether the human's typed line is this request's
+// approval token: the issue number, or ConfirmWord when set.
+func (r Request) matches(line string) bool {
+	line = strings.TrimSpace(line)
+	if r.ConfirmWord != "" {
+		return strings.EqualFold(line, r.ConfirmWord)
+	}
+	return line == fmt.Sprintf("%d", r.Issue)
+}
+
+// tokenName names the expected token in the denial message.
+func (r Request) tokenName() string {
+	if r.ConfirmWord != "" {
+		return "the title's first word"
+	}
+	return "the issue number"
 }
 
 // Result is the outcome of one confirmation.
@@ -184,9 +224,8 @@ func (TTYPrompter) Confirm(ctx context.Context, req Request) (Result, error) {
 		fmt.Fprintln(tty, "  [cancelled]")
 		return Result{}, ErrCancelled
 	}
-	expected := fmt.Sprintf("%d", req.Issue)
-	if strings.TrimSpace(line) != expected {
-		fmt.Fprintln(tty, "  [denied: input did not match the issue number]")
+	if !req.matches(line) {
+		fmt.Fprintf(tty, "  [denied: input did not match %s]\n", req.tokenName())
 		return Result{}, nil
 	}
 	if req.AddRepo == "" {
@@ -233,6 +272,32 @@ func writePrompt(w io.Writer, req Request) error {
 	state := req.State
 	if state == "" {
 		state = "unknown"
+	}
+	if req.NewIssue {
+		// No number exists yet, so the token is the proposed title's first
+		// word. Everything shown here is agent-supplied and was validated +
+		// sanitized before reaching this writer.
+		body := req.Body
+		if body == "" {
+			body = "(none)"
+		}
+		_, err := fmt.Fprintf(w, "\n"+
+			"=== rein: agent is requesting to file a new issue ===\n"+
+			"   repo:     %s\n"+
+			"   title:    %q\n"+
+			"   body:     %s\n"+
+			"   session:  %s (role=%s, repos=[%s])\n"+
+			"   approving FILES this issue under rein's bot identity and makes it\n"+
+			"   this run's declared issue (all writes then flow).\n"+
+			"\n"+
+			"To approve, type the proposed title's first word (%s) and press enter.\n"+
+			"To deny, press Ctrl-C or type anything else.\n"+
+			"> ",
+			req.IssueRepo, req.Title, body,
+			req.SessionID, req.Role, strings.Join(req.Repos, ", "),
+			req.ConfirmWord,
+		)
+		return err
 	}
 	if req.AddRepo != "" {
 		_, err := fmt.Fprintf(w, "\n"+
@@ -331,8 +396,9 @@ func readLineCtx(ctx context.Context, r io.Reader) (string, error) {
 // raw string the human "types"; Approved is computed by comparing it
 // to req.Issue, same as TTYPrompter would. Or set ForceErr to override.
 type StubPrompter struct {
-	// Response is what the "human" types. Compared against the issue
-	// number; matches → approved.
+	// Response is what the "human" types. Compared against the request's
+	// approval token (the issue number, or ConfirmWord when set); matches
+	// → approved.
 	Response string
 
 	// PersistResponse is what the "human" types at the second
@@ -361,8 +427,7 @@ func (s *StubPrompter) Confirm(ctx context.Context, req Request) (Result, error)
 	if s.ForceErr != nil {
 		return Result{}, s.ForceErr
 	}
-	expected := fmt.Sprintf("%d", req.Issue)
-	if strings.TrimSpace(s.Response) != expected {
+	if !req.matches(s.Response) {
 		return Result{}, nil
 	}
 	if req.AddRepo == "" || !req.AskPersist {

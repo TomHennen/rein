@@ -76,6 +76,13 @@ const (
 	// which is the safe reading when the kill switch is on.
 	EnvInSandboxHome = "REIN_IN_SANDBOX_HOME"
 
+	// EnvInSandboxRepos is the comma-separated list of repos this run is
+	// scoped to (#180). In-sandbox there is no session FILE to read — the
+	// scope was fixed outside, at launch — so this is how `rein session
+	// show` (and any agent that looks) learns it. Non-secret: the same
+	// repo names the agent's own checkout and contract already carry.
+	EnvInSandboxRepos = "REIN_IN_SANDBOX_REPOS"
+
 	// EnvInSandboxExposePorts is the comma-separated list of in-sandbox
 	// loopback ports the human can reach from the host (#179). Absent when
 	// none are exposed.
@@ -199,6 +206,10 @@ type EnvParams struct {
 	// ExposePorts, when non-empty, is delivered as REIN_IN_SANDBOX_EXPOSE_PORTS
 	// (comma-separated). A non-secret fact about the run's tunnel (#179).
 	ExposePorts string
+
+	// Repos, when non-empty, is the comma-separated session scope delivered
+	// as REIN_IN_SANDBOX_REPOS (#180). See EnvInSandboxRepos.
+	Repos string
 
 	// ProxyAuth, when non-empty, is delivered as REIN_PROXY_AUTH: the per-run
 	// proxy secret rein's TCP listener requires (#185). srt mints none for an
@@ -373,6 +384,9 @@ func BuildEnv(p EnvParams) []string {
 	}
 	if p.ExposePorts != "" {
 		out = append(out, EnvInSandboxExposePorts+"="+p.ExposePorts)
+	}
+	if p.Repos != "" {
+		out = append(out, EnvInSandboxRepos+"="+p.Repos)
 	}
 	if p.ProxyAuth != "" {
 		out = append(out, EnvProxyAuth+"="+p.ProxyAuth)

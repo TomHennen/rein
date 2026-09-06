@@ -20,8 +20,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -58,57 +60,117 @@ const declareRequestTimeout = 5 * time.Minute
 // always be pushed.
 var issueArgPattern = regexp.MustCompile(`^[1-9][0-9]{0,9}$`)
 
+// declareArgs is one parsed `rein declare` invocation: either an
+// EXISTING issue number, or (isNew) a proposed new issue.
+type declareArgs struct {
+	number int
+	repo   string
+	isNew  bool
+	title  string // normalized by issuemeta.ValidateTitle
+	body   string // normalized by issuemeta.ValidateBody
+}
+
+const declareUsage = "usage: rein declare <issue-number> [--repo owner/name]\n" +
+	"       rein declare --new \"<title>\" [--body \"<text>\"] [--repo owner/name]"
+
 // runDeclare is the `rein declare` entry point. args is os.Args[2:].
 // Returns (exitCode, error) so the caller owns process exit — no
 // os.Exit() inside, which would skip the deferred log close.
 func runDeclare(args []string) (int, error) {
-	number, repoFlag, err := parseDeclareArgs(args)
+	a, err := parseDeclareArgs(args)
 	if err != nil {
 		return 2, err
 	}
 	if runID := os.Getenv("REIN_RUN_ID"); runID != "" {
-		return declareDirect(number, repoFlag, runID)
+		return declareDirect(a, runID)
 	}
-	return declareViaProxy(number, repoFlag)
+	return declareViaProxy(a)
 }
 
-// parseDeclareArgs validates `rein declare <n> [--repo owner/name]`.
-func parseDeclareArgs(args []string) (number int, repoFlag string, err error) {
-	var numArg string
+// parseDeclareArgs validates both forms of `rein declare`. Title and body
+// are validated HERE so a malformed proposal fails fast in the sandbox,
+// and again broker-side (the sandbox is untrusted).
+func parseDeclareArgs(args []string) (declareArgs, error) {
+	var a declareArgs
+	var numArg, rawTitle, rawBody string
+	sawBody := false
 	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case a == "--repo":
+		arg := args[i]
+		next := func(flag string) (string, error) {
 			if i+1 >= len(args) {
-				return 0, "", fmt.Errorf("usage: rein declare <issue-number> [--repo owner/name]")
+				return "", fmt.Errorf("rein declare: %s needs a value\n%s", flag, declareUsage)
 			}
-			repoFlag = args[i+1]
 			i++
-		case strings.HasPrefix(a, "--repo="):
-			repoFlag = strings.TrimPrefix(a, "--repo=")
-		case strings.HasPrefix(a, "-"):
-			return 0, "", fmt.Errorf("rein declare: unknown flag %q (usage: rein declare <issue-number> [--repo owner/name])", a)
+			return args[i], nil
+		}
+		var err error
+		switch {
+		case arg == "--repo":
+			if a.repo, err = next("--repo"); err != nil {
+				return declareArgs{}, err
+			}
+		case strings.HasPrefix(arg, "--repo="):
+			a.repo = strings.TrimPrefix(arg, "--repo=")
+		case arg == "--new":
+			a.isNew = true
+			if rawTitle, err = next("--new"); err != nil {
+				return declareArgs{}, err
+			}
+		case strings.HasPrefix(arg, "--new="):
+			a.isNew = true
+			rawTitle = strings.TrimPrefix(arg, "--new=")
+		case arg == "--body":
+			sawBody = true
+			if rawBody, err = next("--body"); err != nil {
+				return declareArgs{}, err
+			}
+		case strings.HasPrefix(arg, "--body="):
+			sawBody = true
+			rawBody = strings.TrimPrefix(arg, "--body=")
+		case strings.HasPrefix(arg, "-"):
+			return declareArgs{}, fmt.Errorf("rein declare: unknown flag %q\n%s", arg, declareUsage)
 		case numArg == "":
-			numArg = a
+			numArg = arg
 		default:
-			return 0, "", fmt.Errorf("rein declare: unexpected argument %q", a)
+			return declareArgs{}, fmt.Errorf("rein declare: unexpected argument %q", arg)
 		}
 	}
+
+	if a.isNew {
+		if numArg != "" {
+			return declareArgs{}, fmt.Errorf("rein declare: --new files a NEW issue and takes no issue number (got %q)", numArg)
+		}
+		title, err := issuemeta.ValidateTitle(rawTitle)
+		if err != nil {
+			return declareArgs{}, fmt.Errorf("rein declare --new: %w", err)
+		}
+		body, err := issuemeta.ValidateBody(rawBody)
+		if err != nil {
+			return declareArgs{}, fmt.Errorf("rein declare --new: %w", err)
+		}
+		a.title, a.body = title, body
+		return a, nil
+	}
+
+	if sawBody {
+		return declareArgs{}, fmt.Errorf("rein declare: --body only applies to --new\n%s", declareUsage)
+	}
 	if numArg == "" {
-		return 0, "", fmt.Errorf("usage: rein declare <issue-number> [--repo owner/name]")
+		return declareArgs{}, errors.New(declareUsage)
 	}
 	if !issueArgPattern.MatchString(numArg) {
-		return 0, "", fmt.Errorf("rein declare: %q is not a valid issue number (positive decimal, no leading zeros)", numArg)
+		return declareArgs{}, fmt.Errorf("rein declare: %q is not a valid issue number (positive decimal, no leading zeros)", numArg)
 	}
-	number, err = strconv.Atoi(numArg)
+	n, err := strconv.Atoi(numArg)
 	if err != nil {
-		return 0, "", fmt.Errorf("rein declare: parse %q: %w", numArg, err)
+		return declareArgs{}, fmt.Errorf("rein declare: parse %q: %w", numArg, err)
 	}
-	return number, repoFlag, nil
+	a.number = n
+	return a, nil
 }
 
 // declareDirect runs the declaration fully in-process (direct mode).
-func declareDirect(number int, repoFlag, runID string) (int, error) {
+func declareDirect(a declareArgs, runID string) (int, error) {
 	logger, closeLog, err := openLog()
 	if err != nil {
 		return 1, err
@@ -123,7 +185,7 @@ func declareDirect(number int, repoFlag, runID string) (int, error) {
 	if err != nil {
 		return 1, fmt.Errorf("load session: %w", err)
 	}
-	logger.Printf("declare (direct): issue=%d repo=%q run=%s session=%s source=%s", number, repoFlag, runID, sess.ID, sessSource)
+	logger.Printf("declare (direct): issue=%d new=%t repo=%q run=%s session=%s source=%s", a.number, a.isNew, a.repo, runID, sess.ID, sessSource)
 
 	appCfg, ks, _, err := config.ResolveApp()
 	if err != nil {
@@ -217,11 +279,18 @@ func declareDirect(number int, repoFlag, runID string) (int, error) {
 				Repo: n.Repo, Issue: n.Issue, InstallURL: n.InstallURL, AppName: n.AppName,
 			})
 		},
-		Grant:  gcfg,
-		Logger: logger,
+		CreateIssue: createIssueFunc(func() githubapp.Config { return appCfg }, ks, session.OwnerOf(sess), logger),
+		Grant:       gcfg,
+		Logger:      logger,
 	}
 
-	out := declare.Run(context.Background(), deps, number, repoFlag)
+	ctx := context.Background()
+	var out declare.Outcome
+	if a.isNew {
+		out = declare.RunNew(ctx, deps, declare.NewIssue{Repo: a.repo, Title: a.title, Body: a.body})
+	} else {
+		out = declare.Run(ctx, deps, a.number, a.repo)
+	}
 	fmt.Println(out.Message)
 	if !out.Confirmed {
 		return 1, nil // message already printed; not an internal error
@@ -233,18 +302,7 @@ func declareDirect(number int, repoFlag, runID string) (int, error) {
 // virtual host through the sandbox's proxy (srt routes the CONNECT to
 // rein's per-run socket; SSL_CERT_FILE already trusts rein's CA — both
 // are set by the sandbox launch). Blocks while the human decides.
-func declareViaProxy(number int, repoFlag string) (int, error) {
-	u, err := url.Parse(declareHostURL)
-	if err != nil {
-		return 1, err
-	}
-	q := u.Query()
-	q.Set("issue", strconv.Itoa(number))
-	if repoFlag != "" {
-		q.Set("repo", repoFlag)
-	}
-	u.RawQuery = q.Encode()
-
+func declareViaProxy(a declareArgs) (int, error) {
 	client := &http.Client{
 		Timeout: declareRequestTimeout,
 		// srt exposes its proxy via the standard env vars in-sandbox;
@@ -255,7 +313,31 @@ func declareViaProxy(number int, repoFlag string) (int, error) {
 		// The endpoint never redirects; refuse to follow anything.
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	resp, err := client.Get(u.String())
+	var resp *http.Response
+	var err error
+	if a.isNew {
+		payload, merr := json.Marshal(struct {
+			Title string `json:"title"`
+			Body  string `json:"body,omitempty"`
+			Repo  string `json:"repo,omitempty"`
+		}{a.title, a.body, a.repo})
+		if merr != nil {
+			return 1, merr
+		}
+		resp, err = client.Post(declareHostURL+"/new", "application/json", bytes.NewReader(payload))
+	} else {
+		u, perr := url.Parse(declareHostURL)
+		if perr != nil {
+			return 1, perr
+		}
+		q := u.Query()
+		q.Set("issue", strconv.Itoa(a.number))
+		if a.repo != "" {
+			q.Set("repo", a.repo)
+		}
+		u.RawQuery = q.Encode()
+		resp, err = client.Get(u.String())
+	}
 	if err != nil {
 		return 1, fmt.Errorf("not inside a rein run (no REIN_RUN_ID and the declare endpoint is unreachable: %v). Launch your agent via `rein run -- <cmd>` and declare from within it", err)
 	}
@@ -268,12 +350,18 @@ func declareViaProxy(number int, repoFlag string) (int, error) {
 	}
 	_ = json.Unmarshal(body, &parsed)
 
+	// A NEW issue's number is assigned by GitHub, so success is "the broker
+	// confirmed SOME issue"; a declared number must come back unchanged.
+	confirmed := parsed.Confirmed > 0
+	if !a.isNew {
+		confirmed = parsed.Confirmed == a.number
+	}
 	switch {
-	case resp.StatusCode == http.StatusOK && parsed.Confirmed == number:
+	case resp.StatusCode == http.StatusOK && confirmed:
 		if parsed.Message != "" {
 			fmt.Println(parsed.Message)
 		} else {
-			fmt.Printf("issue #%d confirmed — writes are unlocked for this run (push to agent/%d/<nonce>)\n", number, number)
+			fmt.Printf("issue #%d confirmed — writes are unlocked for this run (push to agent/%d/<nonce>)\n", parsed.Confirmed, parsed.Confirmed)
 		}
 		return 0, nil
 	case parsed.Message != "":

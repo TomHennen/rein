@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/runscope"
 	"github.com/TomHennen/rein/internal/session"
+	"github.com/TomHennen/rein/internal/srt"
 )
 
 // runSession dispatches `rein session <sub>`. args is os.Args[2:].
@@ -159,6 +161,15 @@ func sessionAllowDomain(host string) error {
 // run's scope expansions) in one place (mocks §2.2).
 func sessionShow() error {
 	sess, source, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
+	if err != nil || session.SourceFilePath(source) == "" {
+		// In-sandbox there is no session file and never will be: the scope
+		// was fixed OUTSIDE, at launch. Reporting "no session file" reads as
+		// breakage (#180) — say what the run's scope actually is instead.
+		if os.Getenv(srt.EnvInSandbox) == "1" {
+			printSandboxSessionView(os.Stdout)
+			return nil
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("load session: %w", err)
 	}
@@ -204,6 +215,22 @@ func sessionShow() error {
 		return err
 	}
 	return showLiveRuns(stateDir, sess)
+}
+
+// printSandboxSessionView is `rein session show` as seen from INSIDE the
+// sandbox (#180). Everything the host view reads — the session yaml, the
+// state dir, the install probe — is deliberately out of reach here, so
+// this prints the facts rein handed in through the environment.
+func printSandboxSessionView(w io.Writer) {
+	repos := os.Getenv(srt.EnvInSandboxRepos)
+	if repos == "" {
+		repos = "(not reported)"
+	}
+	fmt.Fprintln(w, "inside the rein sandbox: scope is fixed at launch (no session file in here, and that is normal).")
+	fmt.Fprintf(w, "  repos:  %s\n", strings.Join(strings.Split(repos, ","), ", "))
+	fmt.Fprintln(w, "  issues: declare the one your work is for with `rein declare <n>`,")
+	fmt.Fprintln(w, "          or ask the human to file a new one with `rein declare --new \"<title>\"`.")
+	fmt.Fprintln(w, "  Scope and egress can only be changed by the human, on the host, before the next run.")
 }
 
 // showLiveRuns prints the per-run deltas: confirmed issues, and the repos

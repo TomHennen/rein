@@ -104,6 +104,17 @@ type Deps struct {
 	// expansion is exactly the #53 404 the probe exists to prevent.
 	ProbeInstall func(ctx context.Context, repo string) error
 
+	// CreateIssue files a new issue and returns its metadata — including
+	// CanonicalURL, so the issue rein itself filed is covered by the
+	// per-write-mint TM-G6 transfer re-check like any other.
+	//
+	// It runs ONLY after the human confirmed (RunNew's ordering), it runs
+	// host-side under a broker-minted issues:write token that never
+	// reaches the agent, and nothing it returns crosses back into the
+	// sandbox except the issue number. nil means "filing is not available
+	// in this run" — refused before any prompt.
+	CreateIssue func(ctx context.Context, repo, title, body string) (issuemeta.Meta, error)
+
 	// InstallURL is the App's installation deep-link, carried in the 404
 	// notice and the agent-visible message.
 	InstallURL string
@@ -191,7 +202,7 @@ func Run(ctx context.Context, d Deps, number int, repoFlag string) Outcome {
 	// App isn't installed) trains rubber-stamping, and a cross-owner
 	// request is structurally impossible rather than a human decision.
 	if expandingScope {
-		if out, stop := d.checkExpansionCoverage(ctx, repo, number, logger); stop {
+		if out, stop := d.checkInstallCoverage(ctx, repo, number, logger); stop {
 			return out
 		}
 	}
@@ -286,13 +297,15 @@ func expansionApprovedMessage(number int, repo string) string {
 		number, repo, repo, number, repo)
 }
 
-// checkExpansionCoverage runs the install-coverage probe for a repo the
-// session does not yet cover. stop=true means the caller must return the
-// returned Outcome — no prompt fires.
-func (d Deps) checkExpansionCoverage(ctx context.Context, repo string, number int, logger *log.Logger) (Outcome, bool) {
+// checkInstallCoverage runs the install-coverage probe for repo. stop=true
+// means the caller must return the returned Outcome — no prompt fires.
+// Callers: a SCOPE EXPANSION (the session's standing repos were probed at
+// launch) and every `rein declare --new` (nothing can be filed on a repo
+// the App is not installed on). number is 0 when there is no issue yet.
+func (d Deps) checkInstallCoverage(ctx context.Context, repo string, number int, logger *log.Logger) (Outcome, bool) {
 	if d.ProbeInstall == nil {
-		// Fail closed: an unprobed expansion is the #53 mid-run 404.
-		logger.Printf("declare: no install-coverage probe wired; refusing expansion to %s", repo)
+		// Fail closed: an unprobed repo is the #53 mid-run 404.
+		logger.Printf("declare: no install-coverage probe wired; refusing %s", repo)
 		return Outcome{Issue: number, Repo: repo, Audit: AuditCoverageUnknown,
 			Message: fmt.Sprintf("rein: could not verify that the GitHub App covers %s; retry", repo)}, true
 	}

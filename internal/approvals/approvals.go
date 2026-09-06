@@ -227,6 +227,18 @@ type RunContext struct {
 	// declare; never consulted by any write gate.
 	PendingIssue *ConfirmedIssue `json:"pending_issue,omitempty"`
 
+	// PendingNewIssue is the FILE-A-NEW-ISSUE request awaiting the human
+	// (issue #180) — transport for the out-of-process approval surfaces,
+	// exactly as PendingIssue is, plus their only way to answer: a new
+	// issue has no number, so those surfaces cannot record a confirmed
+	// issue and instead nonce-match this request and set Approved. Only
+	// the BROKER that wrote the request acts on that (it holds the App
+	// key and files the issue); no write gate ever consults this.
+	//
+	// Mutually exclusive with PendingIssue by construction: each ceremony
+	// writes a whole fresh RunContext.
+	PendingNewIssue *PendingNewIssue `json:"pending_new_issue,omitempty"`
+
 	// PendingNotice is the install-NOTICE snapshot (issue #69): transport
 	// for the out-of-process notice surface (`rein approval notice
 	// --run-id X`, run by the tmux popup), exactly as PendingIssue is for
@@ -248,6 +260,88 @@ type PendingNotice struct {
 	InstallURL string    `json:"install_url,omitempty"`
 	AppName    string    `json:"app_name,omitempty"`
 	WrittenAt  time.Time `json:"written_at"`
+}
+
+// PendingNewIssue is one agent request to FILE a new issue (issue #180),
+// awaiting the human's Form A confirmation.
+//
+// Nonce is a per-request random string minted by the broker. An approval
+// surface may only flip Approved by presenting it (MarkNewIssueApproved),
+// which binds the answer to this exact request: a stale marker left by an
+// earlier request can never approve a later one, and the broker clears the
+// request once it has acted.
+//
+// Title/Body are the agent's proposal, already validated and sanitized by
+// the broker before they were written here.
+type PendingNewIssue struct {
+	Nonce     string    `json:"nonce"`
+	Repo      string    `json:"repo"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body,omitempty"`
+	WrittenAt time.Time `json:"written_at"`
+
+	// Approved marks the human's confirmation. It is a HANDOFF marker, not
+	// a grant: it authorizes nothing by itself and is meaningful only to
+	// the broker process that wrote this request. It is reachable only to
+	// same-uid host processes — the sandbox has neither write access to
+	// the state dir nor a REIN_RUN_ID to name a run with.
+	Approved   bool      `json:"approved,omitempty"`
+	ApprovedAt time.Time `json:"approved_at,omitempty"`
+}
+
+// MarkNewIssueApproved records that the human confirmed the pending
+// new-issue request identified by nonce. Fails (without writing) when
+// there is no pending request or the nonce doesn't match it — a surface
+// approving a request that is no longer the live one must not succeed.
+func MarkNewIssueApproved(stateDir, runID, nonce string) error {
+	if nonce == "" {
+		return errors.New("approvals: new-issue approval needs a nonce")
+	}
+	rc, err := ReadRunContext(stateDir, runID)
+	if err != nil {
+		return err
+	}
+	if rc.PendingNewIssue == nil {
+		return errors.New("approvals: run has no pending new-issue request")
+	}
+	if rc.PendingNewIssue.Nonce != nonce {
+		return errors.New("approvals: pending new-issue request does not match this approval")
+	}
+	rc.PendingNewIssue.Approved = true
+	rc.PendingNewIssue.ApprovedAt = time.Now()
+	return WriteRunContext(stateDir, runID, rc)
+}
+
+// NewIssueApproved reports whether the run's pending new-issue request is
+// the one identified by nonce AND has been approved. Any drift (request
+// replaced, nonce changed, file unreadable) reads as NOT approved.
+func NewIssueApproved(stateDir, runID, nonce string) bool {
+	if nonce == "" {
+		return false
+	}
+	rc, err := ReadRunContext(stateDir, runID)
+	if err != nil || rc.PendingNewIssue == nil {
+		return false
+	}
+	return rc.PendingNewIssue.Nonce == nonce && rc.PendingNewIssue.Approved
+}
+
+// ClearPendingNewIssue drops the run's pending new-issue request once the
+// broker has acted on it, so its approval marker cannot be re-read.
+// Best-effort: a missing run context is not an error.
+func ClearPendingNewIssue(stateDir, runID string) error {
+	rc, err := ReadRunContext(stateDir, runID)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if rc.PendingNewIssue == nil {
+		return nil
+	}
+	rc.PendingNewIssue = nil
+	return WriteRunContext(stateDir, runID, rc)
 }
 
 // RunStatus is one entry returned by List, for `rein approval status`.
