@@ -79,7 +79,8 @@ func sandboxProxyFromEnv() (sandboxProxy, error) {
 		}
 		u, err := url.Parse(v)
 		if err != nil || u.Host == "" {
-			return sandboxProxy{}, fmt.Errorf("%s=%q is not a proxy URL", name, v)
+			// Not echoed: the value carries srt's bridge secret.
+			return sandboxProxy{}, fmt.Errorf("%s is not a proxy URL", name)
 		}
 		sp := sandboxProxy{addr: u.Host}
 		if u.User != nil {

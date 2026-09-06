@@ -183,6 +183,131 @@ func TestExpose_ParkedPoolIsBounded(t *testing.T) {
 	}
 }
 
+// helperEcho plays the helper after the 101: on the go-byte answer DialOK and
+// echo lines back, until the stream ends.
+func helperEcho(tc net.Conn, br *bufio.Reader) {
+	if b, err := br.ReadByte(); err != nil || b != ExposeGo {
+		return
+	}
+	tc.Write([]byte{ExposeDialOK})
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			return
+		}
+		tc.Write([]byte("echo:" + line))
+	}
+}
+
+func dialBrowser(t *testing.T, port int) net.Conn {
+	t.Helper()
+	c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(port), 5*time.Second)
+	if err != nil {
+		t.Fatalf("host loopback listener not reachable: %v", err)
+	}
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	return c
+}
+
+func roundTrip(t *testing.T, browser net.Conn, msg string) string {
+	t.Helper()
+	if _, err := browser.Write([]byte(msg + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := bufio.NewReader(browser).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read from bridge: %v", err)
+	}
+	return reply
+}
+
+// TestExpose_ShutdownMidSpliceDoesNotPanic pins the double-close: the run ends
+// (ctx cancelled) while a browser connection is actively bridged. The parking
+// goroutine and the bridge both finish the same entry; that must be idempotent
+// and both ends must simply close.
+func TestExpose_ShutdownMidSpliceDoesNotPanic(t *testing.T) {
+	port := freePort(t)
+	h := newHarness(t, harnessOpts{exposePorts: []int{port}})
+	tc, br, resp := park(t, h, port, "")
+	defer tc.Close()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	go helperEcho(tc, br)
+	browser := dialBrowser(t, port)
+	defer browser.Close()
+	if got := roundTrip(t, browser, "ping"); got != "echo:ping\n" {
+		t.Fatalf("bridge reply = %q", got)
+	}
+	h.cancel() // run over while the splice is live
+	// Both ends see the stream end; the broker must not panic (a panic would
+	// abort the test binary, not just this test).
+	_ = browser.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadAll(browser); err != nil {
+		t.Errorf("browser side after shutdown: %v", err)
+	}
+}
+
+// TestExpose_BrowserWaitingBeforePark pins the go-byte ordering: a browser
+// already blocked on an EMPTY pool must not get its go-byte written before the
+// helper has read the 101 (the two interleaved corrupt the helper's response).
+func TestExpose_BrowserWaitingBeforePark(t *testing.T) {
+	port := freePort(t)
+	h := newHarness(t, harnessOpts{exposePorts: []int{port}})
+	for i := 0; i < 20; i++ {
+		browser := dialBrowser(t, port)
+		tc, br, resp := park(t, h, port, "") // the browser is already waiting
+		if resp.StatusCode != http.StatusSwitchingProtocols {
+			t.Fatalf("iteration %d: status = %d (a go-byte raced the 101?)", i, resp.StatusCode)
+		}
+		go helperEcho(tc, br)
+		if got := roundTrip(t, browser, "hi"); got != "echo:hi\n" {
+			t.Fatalf("iteration %d: bridge reply = %q", i, got)
+		}
+		browser.Close()
+		tc.Close()
+	}
+}
+
+// TestExpose_DeadParkedStreamIsSkipped: a helper that parked and then went
+// away must not consume a browser connection; the next live stream is used
+// and the pool slot is re-admitted.
+func TestExpose_DeadParkedStreamIsSkipped(t *testing.T) {
+	port := freePort(t)
+	h := newHarness(t, harnessOpts{exposePorts: []int{port}})
+	dead, _, resp := park(t, h, port, "")
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	dead.Close() // helper vanished while parked
+	live, br, resp := park(t, h, port, "")
+	defer live.Close()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	go helperEcho(live, br)
+	time.Sleep(50 * time.Millisecond) // let the dead stream's EOF land on first
+	browser := dialBrowser(t, port)
+	defer browser.Close()
+	if got := roundTrip(t, browser, "alive"); got != "echo:alive\n" {
+		t.Errorf("bridge reply = %q (the dead stream was used?)", got)
+	}
+	// Both slots are released: the pool admits maxParkedPerPort fresh streams.
+	var keep []net.Conn
+	defer func() {
+		for _, c := range keep {
+			c.Close()
+		}
+	}()
+	for i := 0; i < maxParkedPerPort; i++ {
+		c, _, r := park(t, h, port, "")
+		keep = append(keep, c)
+		if r.StatusCode != http.StatusSwitchingProtocols {
+			t.Fatalf("re-admission %d: status = %d", i, r.StatusCode)
+		}
+	}
+}
+
 // TestExpose_BusyPortFailsClosed: a host port already in use aborts
 // construction of the listeners (the launch), instead of silently not
 // forwarding.

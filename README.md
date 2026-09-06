@@ -253,8 +253,12 @@ the launch closed if something on the host already listens there. The bridge is
 agent-initiated through the same broker socket everything else rides (srt's
 seccomp filter blocks the alternative), never carries a GitHub token, and its
 parked-stream pool is bounded. The agent's contract names the forwarded ports.
-What you open is the agent's code running in your browser, exactly as if you
-had run it on the host yourself — including that page's unrestricted egress.
+What you open is **agent-written code running in your browser**, exactly as if
+you had run it on the host yourself — including that page's unrestricted egress.
+Browser cookies are not port-scoped, so a page on `localhost:5173` shares the
+cookie jar of every other `localhost` app you use and can reach other loopback
+services from a trusted-looking origin; if that matters to you, open it as
+`http://<anything>.localhost:5173` for a separate cookie jar.
 
 ### MCP servers in the sandbox
 

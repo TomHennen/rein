@@ -88,6 +88,7 @@ type harness struct {
 	approvals  int32
 	readTok    string
 	writeTok   string
+	cancel     context.CancelFunc // ends the proxy (run shutdown) early
 }
 
 type harnessOpts struct {
@@ -237,6 +238,7 @@ func newHarness(t *testing.T, opts harnessOpts) *harness {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	h.cancel = cancel
 	if err := p.ServeExpose(ctx); err != nil {
 		t.Fatal(err)
 	}

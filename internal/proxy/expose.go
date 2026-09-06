@@ -61,14 +61,28 @@ const (
 
 var exposePortParam = regexp.MustCompile(`^[1-9][0-9]{0,4}$`)
 
-// parked is one idle upgraded stream from the helper. first carries the
-// result of the single background read the parking goroutine keeps on the
-// stream: EOF/error before use means the helper went away (drop it); after
-// the go-byte it is the helper's status byte.
+// parked is one upgraded stream from the helper. Lifecycle: enqueued, then
+// ready (the 101 is on the wire — only then may a bridge write the go-byte),
+// then taken by exactly one bridge, then finished. finish is idempotent so the
+// parking goroutine (shutdown) and the bridge can both call it; a bridge that
+// pulls an already-finished entry skips it.
 type parked struct {
 	conn  net.Conn
-	first chan readResult
-	done  chan struct{} // closed when the stream has been consumed or dropped
+	first chan readResult // the single background read: liveness while parked, the status byte once taken
+	ready chan struct{}
+	done  chan struct{}
+	once  sync.Once
+}
+
+func (pk *parked) finish() { pk.once.Do(func() { close(pk.done) }) }
+
+func (pk *parked) finished() bool {
+	select {
+	case <-pk.done:
+		return true
+	default:
+		return false
+	}
 }
 
 type readResult struct {
@@ -94,7 +108,7 @@ func newExposer(ports []int) *exposer {
 
 func (e *exposer) close() { e.once.Do(func() { close(e.closed) }) }
 
-// ExposedPorts reports the operator-declared ports (sorted by config order).
+// ExposedPorts reports the operator-declared ports, ascending.
 func (p *Proxy) ExposedPorts() []int {
 	if p.expose == nil {
 		return nil
@@ -117,51 +131,55 @@ func sortInts(a []int) {
 
 // serveExpose answers the expose.rein.internal virtual host: validates the
 // helper's Upgrade request, parks the stream, and BLOCKS until it has been
-// consumed by a browser connection (or dropped), so the caller's deferred
+// consumed by a browser connection (or the run ends), so the caller's deferred
 // close runs only afterwards. Never relays, never injects.
 func (p *Proxy) serveExpose(conn net.Conn, br io.Reader, req *http.Request) bool {
 	if req.Body != nil {
 		_, _ = io.CopyN(io.Discard, req.Body, 4096)
 		req.Body.Close()
 	}
-	record := func(decision string, port int) {
-		p.audit.Record(AuditEntry{Session: p.sessionID, Host: ExposeHost, Method: req.Method, Path: req.URL.Path, Decision: decision, Issue: port})
+	record := func(decision, path string) {
+		p.audit.Record(AuditEntry{Session: p.sessionID, Host: ExposeHost, Method: req.Method, Path: path, Decision: decision})
 	}
 	if p.expose == nil {
-		record("refused-expose-unavailable", 0)
+		record("refused-expose-unavailable", req.URL.Path)
 		p.writeLocalJSON(conn, http.StatusForbidden, "rein: no ports are exposed in this run (session expose_ports)")
 		return false
 	}
 	portStr := req.URL.Query().Get("port")
 	if req.Method != http.MethodGet || req.URL.Path != "/v1/expose" || !exposePortParam.MatchString(portStr) ||
 		!strings.EqualFold(req.Header.Get("Upgrade"), ExposeUpgrade) || !headerHasToken(req.Header.Get("Connection"), "upgrade") {
-		record("refused-expose-invalid", 0)
+		record("refused-expose-invalid", req.URL.Path)
 		p.writeLocalJSON(conn, http.StatusBadRequest, "rein: want GET /v1/expose?port=<n> with Upgrade: "+ExposeUpgrade)
 		return false
 	}
 	port, _ := strconv.Atoi(portStr)
 	pool, ok := p.expose.ports[port]
 	if !ok {
-		record("refused-expose-port", port)
+		record("refused-expose-port", "port="+portStr)
 		p.writeLocalJSON(conn, http.StatusForbidden, fmt.Sprintf("rein: port %d is not exposed; the human declares ports in the session file (expose_ports)", port))
 		return false
 	}
 
-	pk := &parked{conn: &prefixConn{r: br, Conn: conn}, first: make(chan readResult, 1), done: make(chan struct{})}
+	pk := &parked{conn: &prefixConn{r: br, Conn: conn}, first: make(chan readResult, 1), ready: make(chan struct{}), done: make(chan struct{})}
 	select {
 	case pool <- pk:
 	default:
-		record("refused-expose-full", port)
+		record("refused-expose-full", "port="+portStr)
 		p.writeLocalJSON(conn, http.StatusTooManyRequests, fmt.Sprintf("rein: port %d already has %d parked streams", port, maxParkedPerPort))
 		return false
 	}
 
+	// The 101 must be on the wire before any bridge writes the go-byte, or the
+	// helper reads the two interleaved. A failed write finishes the entry; a
+	// bridge that pulls it skips it.
 	_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 	if _, err := io.WriteString(conn, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: "+ExposeUpgrade+"\r\nConnection: Upgrade\r\n\r\n"); err != nil {
-		p.dropParked(pool, pk)
+		pk.finish()
 		return false
 	}
 	_ = conn.SetWriteDeadline(time.Time{})
+	close(pk.ready)
 
 	// One background read: liveness while parked, the status byte once taken.
 	go func() {
@@ -173,29 +191,11 @@ func (p *Proxy) serveExpose(conn net.Conn, br io.Reader, req *http.Request) bool
 	select {
 	case <-pk.done:
 	case <-p.expose.closed:
-		p.dropParked(pool, pk)
+		// Run over: finish the entry (a bridge mid-splice sees its conn close
+		// when we return) and let the deferred close tear the stream down.
+		pk.finish()
 	}
 	return false
-}
-
-// dropParked removes pk from pool if it is still parked and releases it.
-func (p *Proxy) dropParked(pool chan *parked, pk *parked) {
-	// Drain-and-requeue: the pool is small and this is rare.
-	n := len(pool)
-	for i := 0; i < n; i++ {
-		select {
-		case x := <-pool:
-			if x != pk {
-				pool <- x
-			}
-		default:
-		}
-	}
-	select {
-	case <-pk.done:
-	default:
-		close(pk.done)
-	}
 }
 
 // ServeExpose binds a loopback listener per exposed port and bridges each
@@ -216,7 +216,7 @@ func (p *Proxy) ServeExpose(ctx context.Context) error {
 			return fmt.Errorf("expose port %d: %w (something on the host already listens there?)", port, err)
 		}
 		lns = append(lns, ln)
-		p.audit.Record(AuditEntry{Session: p.sessionID, Host: ExposeHost, Method: "LISTEN", Path: "127.0.0.1:" + strconv.Itoa(port), Decision: "exposed", Issue: port})
+		p.audit.Record(AuditEntry{Session: p.sessionID, Host: ExposeHost, Method: "LISTEN", Path: "127.0.0.1:" + strconv.Itoa(port), Decision: "exposed"})
 		go p.acceptExposed(ctx, ln, port)
 	}
 	go func() {
@@ -240,10 +240,9 @@ func (p *Proxy) acceptExposed(ctx context.Context, ln net.Listener, port int) {
 	}
 }
 
-// bridgeExposed takes a parked stream for port, runs the go/status handshake,
-// and splices hc with it. Any failure closes hc (the browser sees a reset).
-func (p *Proxy) bridgeExposed(ctx context.Context, hc net.Conn, pool chan *parked, port int) {
-	defer hc.Close()
+// take pulls the next usable parked stream for port: ready, not finished, and
+// with the helper still on the other end. Returns nil on timeout/shutdown.
+func (p *Proxy) take(ctx context.Context, pool chan *parked, port int) *parked {
 	timer := time.NewTimer(takeTimeout)
 	defer timer.Stop()
 	for {
@@ -252,42 +251,60 @@ func (p *Proxy) bridgeExposed(ctx context.Context, hc net.Conn, pool chan *parke
 		case pk = <-pool:
 		case <-timer.C:
 			p.logger.Printf("expose: port %d: no parked stream within %s (is `rein expose %d` running in the sandbox?)", port, takeTimeout, port)
-			return
+			return nil
 		case <-ctx.Done():
-			return
+			return nil
+		}
+		select {
+		case <-pk.ready:
+		case <-pk.done:
+			continue // the 101 never made it
+		case <-ctx.Done():
+			pk.finish()
+			return nil
+		}
+		if pk.finished() {
+			continue
 		}
 		// A helper that went away while parked has already reported on first.
 		select {
-		case r := <-pk.first:
-			_ = r
-			close(pk.done)
-			continue // dead stream; take the next one
+		case <-pk.first:
+			pk.finish()
+			continue
 		default:
 		}
-		_ = pk.conn.SetWriteDeadline(time.Now().Add(statusTimeout))
-		if _, err := pk.conn.Write([]byte{ExposeGo}); err != nil {
-			close(pk.done)
-			continue
-		}
-		_ = pk.conn.SetWriteDeadline(time.Time{})
-		select {
-		case r := <-pk.first:
-			if r.err != nil || r.b != ExposeDialOK {
-				p.logger.Printf("expose: port %d: nothing listening on 127.0.0.1:%d inside the sandbox", port, port)
-				close(pk.done)
-				return
-			}
-		case <-time.After(statusTimeout):
-			close(pk.done)
-			return
-		case <-ctx.Done():
-			close(pk.done)
-			return
-		}
-		splice(hc, pk.conn)
-		close(pk.done)
+		return pk
+	}
+}
+
+// bridgeExposed takes a parked stream for port, runs the go/status handshake,
+// and splices hc with it. Any failure closes hc (the browser sees a reset).
+func (p *Proxy) bridgeExposed(ctx context.Context, hc net.Conn, pool chan *parked, port int) {
+	defer hc.Close()
+	pk := p.take(ctx, pool, port)
+	if pk == nil {
 		return
 	}
+	defer pk.finish()
+	_ = pk.conn.SetWriteDeadline(time.Now().Add(statusTimeout))
+	if _, err := pk.conn.Write([]byte{ExposeGo}); err != nil {
+		return
+	}
+	_ = pk.conn.SetWriteDeadline(time.Time{})
+	select {
+	case r := <-pk.first:
+		if r.err != nil || r.b != ExposeDialOK {
+			p.logger.Printf("expose: port %d: nothing listening on 127.0.0.1:%d inside the sandbox", port, port)
+			p.audit.Record(AuditEntry{Session: p.sessionID, Host: ExposeHost, Method: "BRIDGE", Path: "127.0.0.1:" + strconv.Itoa(port), Decision: "refused-expose-nolistener"})
+			return
+		}
+	case <-time.After(statusTimeout):
+		return
+	case <-ctx.Done():
+		return
+	}
+	p.audit.Record(AuditEntry{Session: p.sessionID, Host: ExposeHost, Method: "BRIDGE", Path: "127.0.0.1:" + strconv.Itoa(port), Decision: "exposed-bridged"})
+	splice(hc, pk.conn)
 }
 
 // splice copies both directions until both are done, half-closing the write
@@ -298,15 +315,26 @@ func splice(a, b net.Conn) {
 	cp := func(dst, src net.Conn) {
 		defer wg.Done()
 		_, _ = io.Copy(dst, src)
-		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
-		} else {
-			_ = dst.SetReadDeadline(time.Now())
-		}
+		closeWrite(dst)
 	}
 	go cp(a, b)
 	go cp(b, a)
 	wg.Wait()
+}
+
+// closeWrite half-closes dst's write side, unwrapping the read-prefix wrapper
+// (whose embedded interface hides the TLS/TCP CloseWrite). Falls back to
+// unblocking the peer's reader when no half-close exists.
+func closeWrite(dst net.Conn) {
+	inner := dst
+	if pc, ok := dst.(*prefixConn); ok {
+		inner = pc.Conn
+	}
+	if cw, ok := inner.(interface{ CloseWrite() error }); ok {
+		_ = cw.CloseWrite()
+		return
+	}
+	_ = dst.SetReadDeadline(time.Now())
 }
 
 // headerHasToken reports whether a comma-separated header lists token
