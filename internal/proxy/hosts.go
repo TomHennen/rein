@@ -37,6 +37,14 @@ var CDNHosts = []string{
 // request itself (classLocalDeclare), responses token-free.
 const DeclareHost = "declare.rein.internal"
 
+// ProbeHost is answered on the TCP listener's CONNECT line itself (no TLS)
+// with ProbeHeader carrying the run's nonce: the launch self-test's proof that
+// THIS rein, not a leftover proxy, is what the sandbox reaches (#185).
+const (
+	ProbeHost   = "probe.rein.internal"
+	ProbeHeader = "X-Rein-Probe"
+)
+
 // LocalHosts are the virtual hosts the proxy terminates AND answers
 // locally (never relayed). Kept as a list next to InjectHosts/CDNHosts so
 // srt config assembly has one source of truth.

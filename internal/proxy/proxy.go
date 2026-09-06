@@ -60,6 +60,13 @@ type Config struct {
 	// with ServeExpose.
 	ExposePorts []int
 
+	// Egress, ProxySecret, and ProbeNonce configure the TCP (external-proxy)
+	// listener (#185, tcp.go). ServeTCP refuses everything until all three are
+	// set; the unix-socket path ignores them.
+	Egress      *EgressPolicy
+	ProxySecret string
+	ProbeNonce  string
+
 	// HandshakeTimeout bounds the inbound pre-request window (CONNECT preamble
 	// + TLS handshake). Zero uses defaultHandshakeTimeout. (C1)
 	HandshakeTimeout time.Duration
@@ -92,6 +99,10 @@ type Proxy struct {
 	decl             *DeclarationHooks
 	inScope          func(repo string) bool
 	expose           *exposer // nil when no ports are exposed
+	egress           *EgressPolicy
+	proxySecret      string
+	probeNonce       string
+	tunnels          tunnelGate
 }
 
 // Inbound deadline defaults (C1). Handshake ~10s matches the upstream
@@ -144,6 +155,9 @@ func New(cfg Config) (*Proxy, error) {
 	}
 	return &Proxy{
 		expose:           ex,
+		egress:           cfg.Egress,
+		proxySecret:      cfg.ProxySecret,
+		probeNonce:       cfg.ProbeNonce,
 		sessionID:        cfg.SessionID,
 		core:             cfg.Core,
 		ca:               cfg.CA,
@@ -196,6 +210,11 @@ func defaultTransport() *http.Transport {
 // cancelled. runbroker.Host.Close always does both (cancel then close), so this
 // is a documented contract, not a leak in practice.
 func (p *Proxy) Serve(ctx context.Context, ln net.Listener) error {
+	return p.serveWith(ctx, ln, p.handleConn)
+}
+
+// serveWith is the accept loop shared by the unix-socket and TCP listeners.
+func (p *Proxy) serveWith(ctx context.Context, ln net.Listener, handle func(net.Conn)) error {
 	var (
 		mu      sync.Mutex
 		conns   = map[net.Conn]struct{}{}
@@ -240,7 +259,7 @@ func (p *Proxy) Serve(ctx context.Context, ln net.Listener) error {
 				delete(conns, conn)
 				mu.Unlock()
 			}()
-			p.handleConn(conn)
+			handle(conn)
 		}()
 	}
 }
@@ -279,7 +298,13 @@ func (p *Proxy) handleConn(conn net.Conn) {
 			return
 		}
 	}
+	p.terminateTLS(conn, br, "")
+}
 
+// terminateTLS is the TLS-terminating half shared by both listeners. wantHost,
+// when set (the TCP path), is the CONNECT target: the SNI must equal it, so a
+// CONNECT to one class can never present the SNI of another (two-key rule).
+func (p *Proxy) terminateTLS(conn net.Conn, br *bufio.Reader, wantHost string) {
 	tlsConn := tls.Server(&prefixConn{r: br, Conn: conn}, &tls.Config{
 		GetCertificate: p.ca.getLeaf,
 		NextProtos:     []string{"http/1.1"}, // pin: http.ReadRequest can't parse h2 (design §4.1)
@@ -300,6 +325,11 @@ func (p *Proxy) handleConn(conn net.Conn) {
 	if sni == "" {
 		// No SNI ⇒ no identity ⇒ we can't safely inject or route. Fail closed.
 		p.logger.Printf("connection with no SNI; refusing")
+		return
+	}
+	if wantHost != "" && sni != wantHost {
+		p.logger.Printf("CONNECT %q but SNI %q; refusing", wantHost, sni)
+		p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: http.MethodConnect, Decision: "refused-connect-sni-mismatch"})
 		return
 	}
 	p.serveRequests(tlsConn, sni)
