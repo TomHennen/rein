@@ -263,6 +263,13 @@ the agent contacts is in the run's audit log. The launch prints a fixed banner
 saying all of this; it cannot be suppressed, and there is deliberately no
 environment switch for open mode.
 
+The proxy needs a per-run secret, which rein folds into `HTTP_PROXY`,
+`HTTPS_PROXY`, `ALL_PROXY` and their lowercase forms inside the sandbox. Tools
+that read only a tool-specific proxy variable srt also sets (`FTP_PROXY`,
+`RSYNC_PROXY`, `DOCKER_*_PROXY`, `CLOUDSDK_PROXY_*`, `GRPC_PROXY`,
+`GIT_SSH_COMMAND`) get a 407 or a port refusal rather than a bypass; point
+them at `$HTTPS_PROXY` if you hit one.
+
 ### Reaching a server the agent starts (`expose_ports`)
 
 The sandbox has its own network namespace, so a dev server the agent starts on

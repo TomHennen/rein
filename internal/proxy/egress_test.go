@@ -53,7 +53,9 @@ func newTestPolicy(t *testing.T, mode EgressMode, domains, internal []string) *E
 // refused too (the allowlist never overrides never-route).
 func TestEgressDecide_NeverRouteIsUnconditional(t *testing.T) {
 	for _, mode := range []EgressMode{EgressRestricted, EgressOpen} {
-		p := newTestPolicy(t, mode, []string{"loop.corp", "internal.corp", "metadata.corp", "*.corp", "127.1", "0x7f000001"}, nil)
+		// Every name is LISTED so restricted mode resolves it (an unlisted name
+		// is refused before any lookup; see TestEgressDecide_RestrictedNeverResolvesUnlisted).
+		p := newTestPolicy(t, mode, []string{"loop.corp", "internal.corp", "metadata.corp", "nat64.corp", "sixtofour.corp", "teredo.corp", "sitelocal.corp", "tailnet.corp", "evil.example", "127.1", "0x7f000001"}, nil)
 		cases := map[string]string{
 			"localhost":          "loopback",
 			"foo.localhost":      "loopback",
@@ -97,6 +99,73 @@ func TestEgressDecide_NeverRouteIsUnconditional(t *testing.T) {
 				t.Errorf("mode=%s host=%s reason=%s; want *-%s", mode, host, d.Reason, want)
 			}
 		}
+	}
+}
+
+// TestEgressDecide_RestrictedNeverResolvesUnlisted: in restricted mode an
+// unlisted name is refused WITHOUT a lookup (a resolve would be a DNS
+// exfiltration channel: CONNECT <data>.attacker.tld). Listed names resolve.
+func TestEgressDecide_RestrictedNeverResolvesUnlisted(t *testing.T) {
+	p := newTestPolicy(t, EgressRestricted, []string{"pypi.org", "*.pythonhosted.org"}, []string{"internal.corp:8443"})
+	inner := p.Resolve
+	p.Resolve = func(ctx context.Context, host string) ([]net.IPAddr, error) {
+		switch host {
+		case "pypi.org", "files.pythonhosted.org", "internal.corp", "codeload.github.com":
+			return inner(ctx, host)
+		}
+		t.Errorf("resolver called for unlisted host %q", host)
+		return nil, &net.DNSError{Err: "must not resolve", Name: host}
+	}
+	if d := p.Decide(context.Background(), "exfil-chunk.attacker.tld", 443); d.Allowed || d.Reason != "refused-egress-host" {
+		t.Errorf("unlisted => %+v", d)
+	}
+	if d := p.Decide(context.Background(), "pypi.org", 443); !d.Allowed {
+		t.Errorf("listed => %+v", d)
+	}
+	// CDN hosts are on the list by construction (raw tunnels in restricted mode).
+	p.Resolve = fakeResolver(map[string][]string{"codeload.github.com": {"140.82.112.9"}})
+	if d := p.Decide(context.Background(), "codeload.github.com", 443); !d.Allowed || len(d.Addrs) == 0 {
+		t.Errorf("CDN host in restricted mode => %+v", d)
+	}
+}
+
+// TestNewEgressPolicy_RejectsPublicSuffixWildcards: `*.com` (and friends) is
+// open mode by another name; only a two-label suffix is a wildcard.
+func TestNewEgressPolicy_RejectsPublicSuffixWildcards(t *testing.T) {
+	for _, bad := range []string{"*.com", "*.org", "*.io", "*"} {
+		if _, err := NewEgressPolicy(EgressRestricted, []string{bad}, nil, nil); err == nil {
+			t.Errorf("wildcard %q accepted", bad)
+		}
+	}
+	if _, err := NewEgressPolicy(EgressRestricted, []string{"*.example.com", "_dmarc.example.com"}, nil, nil); err != nil {
+		t.Errorf("legitimate entries rejected: %v", err)
+	}
+}
+
+// TestEgressDecide_Normalizes: uppercase and a trailing FQDN dot match the
+// lowercase list entry; underscores are legal host characters.
+func TestEgressDecide_Normalizes(t *testing.T) {
+	p := newTestPolicy(t, EgressRestricted, []string{"pypi.org", "_dmarc.example"}, nil)
+	p.Resolve = fakeResolver(map[string][]string{"pypi.org": {"151.101.0.223"}, "_dmarc.example": {"93.184.216.34"}})
+	for _, host := range []string{"PyPI.org", "pypi.org."} {
+		if d := p.Decide(context.Background(), host, 443); !d.Allowed {
+			t.Errorf("%q => %+v", host, d)
+		}
+	}
+	if d := p.Decide(context.Background(), "_dmarc.example", 443); !d.Allowed {
+		t.Errorf("underscore host => %+v", d)
+	}
+}
+
+// TestNeverRoute_FailsClosedOnNil: the dial pin's backstop must refuse an
+// unparseable address, never allow it.
+func TestNeverRoute_FailsClosedOnNil(t *testing.T) {
+	p := newTestPolicy(t, EgressOpen, nil, nil)
+	if why := p.neverRoute(nil, 443, false); why == "" {
+		t.Error("nil IP allowed")
+	}
+	if why := p.neverRoute(net.ParseIP("::7f00:1"), 443, false); why != "loopback" {
+		t.Errorf("IPv4-compatible ::127.0.0.1 => %q, want loopback", why)
 	}
 }
 

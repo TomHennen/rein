@@ -12,6 +12,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -53,8 +54,11 @@ type EgressPolicy struct {
 	// listenerPorts are rein's own loopback ports (the proxy, expose_ports);
 	// any address on them is never-route regardless of range.
 	listenerPorts map[int]bool
-	// localAddrs are the host's interface addresses at construction.
-	localAddrs []net.IP
+	// localAddrs are the host's interface addresses, refreshed on use when
+	// older than localAddrsTTL (a VPN or docker interface can appear mid-run).
+	localAddrs   []net.IP
+	localAddrsAt time.Time
+	localMu      sync.Mutex
 
 	// Resolve is the name resolver (tests inject). Nil uses net.DefaultResolver.
 	Resolve func(ctx context.Context, host string) ([]net.IPAddr, error)
@@ -94,10 +98,14 @@ func NewEgressPolicy(mode EgressMode, domains, internal []string, listenerPorts 
 		case d == "":
 			continue
 		case strings.HasPrefix(d, "*."):
-			if strings.Count(d, "*") != 1 || len(d) < 4 {
-				return nil, fmt.Errorf("egress: bad wildcard %q", d)
+			// Two labels after the star (srt's rule): `*.com` would be open
+			// mode by another name.
+			if strings.Count(d, "*") != 1 || !strings.Contains(d[2:], ".") {
+				return nil, fmt.Errorf("egress: wildcard %q is malformed or a public suffix", d)
 			}
 			p.suffixes = append(p.suffixes, d[1:])
+		case strings.Contains(d, "*"):
+			return nil, fmt.Errorf("egress: %q: a bare or mid-name * is not an allowlist entry", d)
 		case strings.Contains(d, ":"):
 			host, port, err := splitHostPortStrict(d)
 			if err != nil {
@@ -124,15 +132,52 @@ func NewEgressPolicy(mode EgressMode, domains, internal []string, listenerPorts 
 	for _, lp := range listenerPorts {
 		p.listenerPorts[lp] = true
 	}
-	addrs, err := net.InterfaceAddrs()
-	if err == nil {
-		for _, a := range addrs {
-			if ipn, ok := a.(*net.IPNet); ok {
-				p.localAddrs = append(p.localAddrs, ipn.IP)
-			}
-		}
+	// The GitHub CDN hosts are always-allowed raw tunnels (the design's table);
+	// they ride the list so restricted mode resolves and dials them like any
+	// listed host. Port entries for them are still rejected above.
+	for _, h := range CDNHosts {
+		p.exact[h] = true
+	}
+	// Fail closed: without the interface list the own-address rule is gone.
+	if err := p.refreshLocalAddrs(); err != nil {
+		return nil, err
 	}
 	return p, nil
+}
+
+const localAddrsTTL = 10 * time.Second
+
+// refreshLocalAddrs re-reads the interface list when the snapshot is stale.
+func (p *EgressPolicy) refreshLocalAddrs() error {
+	p.localMu.Lock()
+	defer p.localMu.Unlock()
+	if !p.localAddrsAt.IsZero() && time.Since(p.localAddrsAt) < localAddrsTTL {
+		return nil
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return fmt.Errorf("egress: list interface addresses: %w", err)
+	}
+	local := make([]net.IP, 0, len(addrs))
+	for _, a := range addrs {
+		if ipn, ok := a.(*net.IPNet); ok {
+			local = append(local, ipn.IP)
+		}
+	}
+	p.localAddrs, p.localAddrsAt = local, time.Now()
+	return nil
+}
+
+func (p *EgressPolicy) ownAddress(ip net.IP) bool {
+	_ = p.refreshLocalAddrs() // on failure the last snapshot stays in force
+	p.localMu.Lock()
+	defer p.localMu.Unlock()
+	for _, la := range p.localAddrs {
+		if la.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // reservedHost reports whether host is one rein terminates or answers itself.
@@ -182,7 +227,7 @@ func validHostSyntax(host string) error {
 	for _, r := range host {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '-', r == '.', r == ':', r == '[', r == ']':
+		case r == '-', r == '.', r == ':', r == '[', r == ']', r == '_':
 		default:
 			return fmt.Errorf("host contains %q", r)
 		}
@@ -222,6 +267,21 @@ func (p *EgressPolicy) Decide(ctx context.Context, host string, port int) Egress
 	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
 		return refuse("loopback", "rein: loopback and the host's own services are never reachable from the sandbox")
 	}
+	// An IP literal needs no lookup: never-route it first so the refusal names
+	// the real reason.
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+		if why := p.neverRoute(ip, port, internal); why != "" {
+			return refuse(why, fmt.Sprintf("rein: %s is a %s address; the sandbox never reaches loopback, private, or link-local targets", host, why))
+		}
+	}
+	// Mode BEFORE resolution: in restricted mode an unlisted name must be
+	// refused without a lookup, or `CONNECT <data>.attacker.tld` is a DNS
+	// exfiltration channel and an internal-name oracle (srt string-matched
+	// first too). Never-route still runs on everything that will dial.
+	listed := p.listed(host, hp)
+	if p.Mode == EgressRestricted && !internal && !listed {
+		return refuse("host", fmt.Sprintf("rein: %s is not allowed for this run. Ask the human to run, on the host: rein session allow-domain %s (takes effect on the next run)", host, host))
+	}
 	// Resolve once; every address must pass never-route.
 	addrs, err := p.resolve(ctx, host)
 	if err != nil || len(addrs) == 0 {
@@ -235,12 +295,10 @@ func (p *EgressPolicy) Decide(ctx context.Context, host string, port int) Egress
 	switch {
 	case internal:
 		return EgressDecision{Allowed: true, Reason: "allowed-egress-internal", Addrs: addrs, AllowPrivate: true}
-	case p.Mode == EgressOpen:
-		return EgressDecision{Allowed: true, Reason: "allowed-egress-open", Addrs: addrs}
-	case p.listed(host, hp):
+	case listed:
 		return EgressDecision{Allowed: true, Reason: "allowed-egress-list", Addrs: addrs}
 	}
-	return refuse("host", fmt.Sprintf("rein: %s is not allowed for this run. Ask the human to run, on the host: rein session allow-domain %s (takes effect on the next run)", host, host))
+	return EgressDecision{Allowed: true, Reason: "allowed-egress-open", Addrs: addrs}
 }
 
 func (p *EgressPolicy) listed(host, hp string) bool {
@@ -279,6 +337,17 @@ func (p *EgressPolicy) resolve(ctx context.Context, host string) ([]net.IP, erro
 // neverRoute returns the reason an address must not be dialed, or "".
 // allowPrivate exempts the private/ULA/CGNAT ranges only (internal hosts).
 func (p *EgressPolicy) neverRoute(ip net.IP, port int, allowPrivate bool) string {
+	if ip == nil {
+		return "unparseable" // the backstop must fail closed, never allow
+	}
+	if ip.IsLoopback() || ip.IsUnspecified() {
+		if p.listenerPorts[port] {
+			return "own-listener"
+		}
+		if !(ip.IsLoopback() && p.permitLoopback) {
+			return "loopback"
+		}
+	}
 	if v4 := embeddedIPv4(ip); v4 != nil {
 		ip = v4
 	}
@@ -302,10 +371,8 @@ func (p *EgressPolicy) neverRoute(ip net.IP, port int, allowPrivate bool) string
 	case len(ip) == net.IPv6len && ip[0] == 0xfe && ip[1]&0xc0 == 0xc0: // fec0::/10 site-local
 		return "link-local"
 	}
-	for _, la := range p.localAddrs {
-		if la.Equal(ip) {
-			return "own-address"
-		}
+	if p.ownAddress(ip) {
+		return "own-address"
 	}
 	if ip.IsPrivate() || isCGNAT(ip) {
 		if allowPrivate {
@@ -329,7 +396,18 @@ func embeddedIPv4(ip net.IP) net.IP {
 	if ip == nil || ip.To4() != nil {
 		return nil
 	}
+	allZero := true
+	for _, b := range ip[:12] {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
 	switch {
+	case allZero:
+		// IPv4-compatible ::a.b.c.d (::/96, deprecated but parseable): the
+		// tail is the real target (::1 maps to 0.0.0.1 => reserved, refused).
+		return net.IPv4(ip[12], ip[13], ip[14], ip[15])
 	case ip[0] == 0 && ip[1] == 0x64 && ip[2] == 0xff && ip[3] == 0x9b:
 		// 64:ff9b::/96 (last 4 bytes) and 64:ff9b:1::/48 (same tail position)
 		return net.IPv4(ip[12], ip[13], ip[14], ip[15])
@@ -340,6 +418,28 @@ func embeddedIPv4(ip net.IP) net.IP {
 		return net.IPv4(byte(x>>24), byte(x>>16), byte(x>>8), byte(x))
 	}
 	return nil
+}
+
+// pinnedDialer is the belt-and-braces dialer for rein's OWN upstream dials
+// (the inject transport): whatever the host resolver says github.com is, a
+// never-route address never receives a token. Own interface addresses are
+// snapshotted at construction.
+func pinnedDialer() *net.Dialer {
+	guard := &EgressPolicy{listenerPorts: map[int]bool{}}
+	_ = guard.refreshLocalAddrs()
+	return &net.Dialer{
+		Timeout: 30 * time.Second,
+		Control: func(network, address string, c syscall.RawConn) error {
+			h, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return err
+			}
+			if why := guard.neverRoute(net.ParseIP(h), 0, false); why != "" {
+				return fmt.Errorf("rein: upstream dial pin refused %s (%s)", address, why)
+			}
+			return nil
+		},
+	}
 }
 
 // dialChecked dials the FIRST reachable checked address, with the never-route

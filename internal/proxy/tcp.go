@@ -9,6 +9,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -29,11 +30,21 @@ const ProxyUser = "srt"
 // (srt's bridge dials TCP:localhost:<port>; the peer check needs the exact
 // tuple) and returns it with its port.
 func ListenTCP() (net.Listener, int, error) {
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		return nil, 0, fmt.Errorf("proxy: listen tcp: %w", err)
+	for attempt := 0; attempt < 8; attempt++ {
+		ln, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			return nil, 0, fmt.Errorf("proxy: listen tcp: %w", err)
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+		// srt's in-sandbox bridge listens on these; a host listener on the same
+		// number would make the self-test's loopback control ambiguous.
+		if port == 3128 || port == 1080 {
+			ln.Close()
+			continue
+		}
+		return ln, port, nil
 	}
-	return ln, ln.Addr().(*net.TCPAddr).Port, nil
+	return nil, 0, fmt.Errorf("proxy: could not bind a usable loopback port")
 }
 
 // ServeTCP runs the external-proxy accept loop until ctx is done.
@@ -84,17 +95,19 @@ func (p *Proxy) handleTCPConn(conn net.Conn) {
 	if err != nil {
 		return
 	}
+	// Auth FIRST: an unauthenticated peer learns nothing but the bare 407 and
+	// writes nothing attacker-chosen into the audit log.
+	if subtle.ConstantTimeCompare([]byte(req.Header.Get("Proxy-Authorization")), []byte(proxyAuthValue(p.proxySecret))) != 1 {
+		audit("refused-proxy-auth", "")
+		_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+		_, _ = io.WriteString(conn, "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"rein\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+		return
+	}
 	if req.Method != http.MethodConnect {
 		// No plaintext relay: it could only ever be a route toward the inject
 		// path with a token on the wire.
 		audit("refused-egress-plaintext", req.Host)
 		p.writeLocalJSON(conn, http.StatusForbidden, "rein: only CONNECT (https) is proxied; plain http:// is refused")
-		return
-	}
-	if req.Header.Get("Proxy-Authorization") != proxyAuthValue(p.proxySecret) {
-		audit("refused-proxy-auth", req.Host)
-		_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-		_, _ = io.WriteString(conn, "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"rein\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		return
 	}
 	target := strings.ToLower(strings.TrimSpace(req.Host))
@@ -112,7 +125,7 @@ func (p *Proxy) handleTCPConn(conn net.Conn) {
 
 	// Class by CONNECT target. rein's own hosts are 443-only, always.
 	if reservedHost(host) {
-		if port != egressDefaultPort {
+		if port != egressDefaultPort && port != p.egress.defPort() { // defPort: the test hook; 443 in production
 			audit("refused-egress-port", hp)
 			p.writeLocalJSON(conn, http.StatusForbidden, fmt.Sprintf("rein: %s is reachable on port 443 only", host))
 			return
@@ -126,14 +139,15 @@ func (p *Proxy) handleTCPConn(conn net.Conn) {
 			return
 		case classifyHost(host) == classPassthrough:
 			// CDN: an always-allowed raw tunnel (the agent sees GitHub's real
-			// certificate), still never-route-checked.
+			// certificate). On the policy's list by construction, so the gate
+			// resolves + never-route-checks it like any listed host.
 			dec := p.egress.Decide(context.Background(), host, port)
-			if !dec.Allowed && !strings.HasSuffix(dec.Reason, "-host") {
+			if !dec.Allowed {
 				audit(dec.Reason, hp)
 				p.writeLocalJSON(conn, http.StatusForbidden, dec.Message)
 				return
 			}
-			dec.Allowed, dec.Reason = true, "allowed-egress-cdn"
+			dec.Reason = "allowed-egress-cdn"
 			p.tunnel(conn, br, dec, hp, port)
 			return
 		default:

@@ -380,6 +380,9 @@ func NormalizeAllowDomain(host string) (string, error) {
 	if strings.Contains(d, "*") && (d == "*" || !strings.HasPrefix(d, "*.") || strings.Count(d, "*") != 1) {
 		return "", fmt.Errorf("%q: a wildcard must be of the form *.suffix (a bare * would allow ALL egress)", host)
 	}
+	if strings.HasPrefix(d, "*.") && !strings.Contains(d[2:], ".") {
+		return "", fmt.Errorf("%q: a public-suffix wildcard is too broad; use *.example.com, or open_egress for the whole web", host)
+	}
 	if !strings.Contains(d, ".") {
 		return "", fmt.Errorf("%q does not look like a host (needs a dot)", host)
 	}

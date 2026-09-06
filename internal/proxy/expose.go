@@ -327,7 +327,10 @@ func splice(a, b net.Conn) {
 // unblocking the peer's reader when no half-close exists.
 func closeWrite(dst net.Conn) {
 	inner := dst
-	if pc, ok := dst.(*prefixConn); ok {
+	if ic, ok := inner.(*idleConn); ok {
+		inner = ic.Conn
+	}
+	if pc, ok := inner.(*prefixConn); ok {
 		inner = pc.Conn
 	}
 	if cw, ok := inner.(interface{ CloseWrite() error }); ok {

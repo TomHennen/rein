@@ -74,6 +74,15 @@ func TestRewriteProxyEnv(t *testing.T) {
 	if got := rewriteProxyEnv([]string{"HOME=/home/x"}, "abc"); len(got) != 0 {
 		t.Errorf("no proxy vars => nothing to set, got %v", got)
 	}
+	// docker's own pair and gcloud's credential pair (srt sets them only when
+	// it owns the token).
+	got = rewriteProxyEnv([]string{"HTTPS_PROXY=http://localhost:3128", "DOCKER_HTTPS_PROXY=http://localhost:3128", "CLOUDSDK_PROXY_PORT=3128"}, "abc")
+	joined := strings.Join(got, "\n")
+	for _, want := range []string{"DOCKER_HTTPS_PROXY=http://srt:abc@localhost:3128", "CLOUDSDK_PROXY_USERNAME=srt", "CLOUDSDK_PROXY_PASSWORD=abc"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q in %v", want, got)
+		}
+	}
 }
 
 func TestExposePortsCSV(t *testing.T) {

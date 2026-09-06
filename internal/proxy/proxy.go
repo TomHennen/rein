@@ -186,6 +186,10 @@ func New(cfg Config) (*Proxy, error) {
 // system-root TLS.
 func defaultTransport() *http.Transport {
 	return &http.Transport{
+		// Never-route pin on rein's own upstream dials: a token must not reach
+		// a loopback/private/link-local address whatever the resolver says
+		// github.com is (#185 [review 4]).
+		DialContext:           pinnedDialer().DialContext,
 		DisableCompression:    true,
 		ForceAttemptHTTP2:     false,
 		TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{},

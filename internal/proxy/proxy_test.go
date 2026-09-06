@@ -91,6 +91,7 @@ type harness struct {
 	cancel     context.CancelFunc // ends the proxy (run shutdown) early
 	tcpPort    int                // the #185 TCP listener, when opts.egress is set
 	ghHostPort string             // the fake GitHub httptest server's host:port
+	pol        *EgressPolicy      // the TCP listener's policy, when opts.egress is set
 }
 
 func (h *harness) ghAddr() string { return h.ghHostPort }

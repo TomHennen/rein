@@ -34,7 +34,13 @@ func tcpHarness(t *testing.T, mode EgressMode, domains []string) *harness {
 	pol.Resolve = fakeResolver(map[string][]string{
 		"allowed.example": {ghHost}, "other.example": {ghHost}, "example.com": {ghHost},
 	})
+	h.pol = pol
 	return h
+}
+
+// egressResolve replaces the harness policy's resolver map.
+func (h *harness) egressResolve(m map[string][]string) {
+	h.pol.Resolve = fakeResolver(m)
 }
 
 // tgt renders host:<the test default port>.
@@ -201,6 +207,147 @@ func TestTCP_InjectHostsTerminateAndPinSNI(t *testing.T) {
 		if _, err := http.ReadResponse(bufio.NewReader(tc2), nil); err == nil {
 			t.Error("CONNECT github.com with SNI api.github.com was served; the two-key rule must refuse it")
 		}
+	}
+}
+
+// TestTCP_CDNRawTunnelInRestrictedMode: a CDN host is a raw tunnel (no rein
+// TLS, no token) even when the operator listed nothing.
+func TestTCP_CDNRawTunnelInRestrictedMode(t *testing.T) {
+	h := tcpHarness(t, EgressRestricted, nil)
+	ghHost, _, _ := net.SplitHostPort(h.ghAddr())
+	h.egressResolve(map[string][]string{"codeload.github.com": {ghHost}})
+	c, br, resp := connect(t, h, h.tgt("codeload.github.com"), proxyAuthValue(testSecret))
+	defer c.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CDN CONNECT: status = %d body=%s", resp.StatusCode, body(resp))
+	}
+	tc := tls.Client(&prefixConn{r: br, Conn: c}, &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"http/1.1"}})
+	if err := tc.Handshake(); err != nil {
+		t.Fatalf("client TLS through the CDN tunnel: %v", err)
+	}
+	fmt.Fprintf(tc, "GET /o/r/tarball HTTP/1.1\r\nHost: codeload.github.com\r\n\r\n")
+	if _, err := http.ReadResponse(bufio.NewReader(tc), nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := h.gh.last().Auth; got != "" {
+		t.Errorf("CDN tunnel carried Authorization %q", got)
+	}
+}
+
+// TestTCP_UnauthenticatedGetsOnly407: before the secret, every request shape
+// (plaintext GET included) gets the bare 407, not a rein-identifying 403.
+func TestTCP_UnauthenticatedGetsOnly407(t *testing.T) {
+	h := tcpHarness(t, EgressOpen, nil)
+	c, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(h.tcpPort))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	fmt.Fprintf(c, "GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		t.Errorf("unauthenticated plaintext GET: status = %d, want 407", resp.StatusCode)
+	}
+}
+
+// TestTCP_TunnelHalfClose: a client that shuts its write side after sending
+// its request must still receive the response (the half-close reaches the
+// TCP upstream instead of tearing the tunnel down).
+func TestTCP_TunnelHalfClose(t *testing.T) {
+	// A plain-TCP echo upstream: reads until EOF, then writes what it got.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				b, _ := io.ReadAll(c)
+				c.Write(append([]byte("echo:"), b...))
+			}()
+		}
+	}()
+	upHost, upPort, _ := net.SplitHostPort(ln.Addr().String())
+	pol, err := NewEgressPolicy(EgressOpen, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol.permitLoopback = true
+	pol.defaultPort, _ = strconv.Atoi(upPort)
+	pol.Resolve = fakeResolver(map[string][]string{"echo.example": {upHost}})
+	h := newHarness(t, harnessOpts{egress: pol, proxySecret: testSecret, probeNonce: "n"})
+
+	c, br, resp := connect(t, h, "echo.example:"+upPort, proxyAuthValue(testSecret))
+	defer c.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT: %d", resp.StatusCode)
+	}
+	c.Write([]byte("half"))
+	c.(*net.TCPConn).CloseWrite() // client half-closes after its request
+	got, err := io.ReadAll(br)
+	if err != nil || string(got) != "echo:half" {
+		t.Errorf("after half-close got %q err=%v, want echo:half", got, err)
+	}
+}
+
+// TestTCP_TunnelBound: the 257th concurrent raw tunnel is refused with 429.
+func TestTCP_TunnelBound(t *testing.T) {
+	h := tcpHarness(t, EgressOpen, nil)
+	var held []net.Conn
+	defer func() {
+		for _, c := range held {
+			c.Close()
+		}
+	}()
+	for i := 0; i < maxConcurrentTunnels; i++ {
+		c, _, resp := connect(t, h, h.tgt("other.example"), proxyAuthValue(testSecret))
+		held = append(held, c)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("tunnel %d: status = %d", i, resp.StatusCode)
+		}
+	}
+	_, _, resp := connect(t, h, h.tgt("other.example"), proxyAuthValue(testSecret))
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("tunnel %d: status = %d, want 429", maxConcurrentTunnels+1, resp.StatusCode)
+	}
+}
+
+// TestTCP_SNIMismatchIsAudited: CONNECT github.com but SNI api.github.com is
+// refused AND recorded.
+func TestTCP_SNIMismatchIsAudited(t *testing.T) {
+	pol, err := NewEgressPolicy(EgressRestricted, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audit := &syncBuffer{}
+	h := newHarnessWithAudit(t, harnessOpts{egress: pol, proxySecret: testSecret, probeNonce: "n"}, audit)
+	c, br, resp := connect(t, h, "github.com:443", proxyAuthValue(testSecret))
+	defer c.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatal(resp.StatusCode)
+	}
+	tc := tls.Client(&prefixConn{r: br, Conn: c}, &tls.Config{ServerName: "api.github.com", RootCAs: h.caPool, NextProtos: []string{"http/1.1"}})
+	_ = tc.Handshake()
+	fmt.Fprintf(tc, "GET /repos/o/r/pulls HTTP/1.1\r\nHost: api.github.com\r\n\r\n")
+	if _, err := http.ReadResponse(bufio.NewReader(tc), nil); err == nil {
+		t.Error("mismatched SNI was served")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(audit.String(), "refused-connect-sni-mismatch") && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(audit.String(), "refused-connect-sni-mismatch") {
+		t.Errorf("audit lacks the mismatch refusal:\n%s", audit.String())
 	}
 }
 

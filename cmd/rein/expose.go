@@ -310,7 +310,7 @@ func parseSandboxExecArgs(args []string) (ports []int, argv []string, err error)
 
 // proxyEnvNames are the variables srt sets to its in-sandbox proxy URL, in
 // the exact spelling generateProxyEnvVars uses.
-var proxyEnvNames = []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"}
+var proxyEnvNames = []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy", "DOCKER_HTTP_PROXY", "DOCKER_HTTPS_PROXY"}
 
 // rewriteProxyEnv returns the KEY=VALUE pairs to (re)set so every proxy URL
 // in env carries the secret as userinfo (srt:<secret>@), plus git's
@@ -336,6 +336,14 @@ func rewriteProxyEnv(env []string, secret string) []string {
 		}
 	}
 	if len(out) > 0 {
+		// gcloud reads the credential from its own pair (srt sets them only
+		// when it owns the token).
+		for _, kv := range env {
+			if strings.HasPrefix(kv, "CLOUDSDK_PROXY_PORT=") {
+				out = append(out, "CLOUDSDK_PROXY_USERNAME="+proxy.ProxyUser, "CLOUDSDK_PROXY_PASSWORD="+secret)
+				break
+			}
+		}
 		gcp := "http.proxyAuthMethod=basic"
 		for _, kv := range env {
 			if strings.HasPrefix(kv, "GIT_CONFIG_PARAMETERS=") && !strings.Contains(kv, gcp) {
