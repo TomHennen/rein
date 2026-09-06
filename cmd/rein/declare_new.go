@@ -54,7 +54,10 @@ func createIssueFunc(cfg func() githubapp.Config, ks keystore.Keystore, owner st
 // newIssueBody appends rein's attribution trailer. The issue is filed
 // under the App's bot identity, so the body has to say whose work it is.
 func newIssueBody(body, owner string) string {
-	trailer := "_Filed by rein on behalf of @" + owner + "._"
+	trailer := "_Filed by rein on behalf of the operator._"
+	if owner != "" {
+		trailer = "_Filed by rein on behalf of @" + owner + "._"
+	}
 	if strings.TrimSpace(body) == "" {
 		return trailer
 	}

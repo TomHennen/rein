@@ -120,12 +120,23 @@ func TestCreate(t *testing.T) {
 	var gotAuth, gotPath string
 	var gotBody map[string]string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			// The same issue, as Fetch would read it back.
+			json.NewEncoder(w).Encode(map[string]any{
+				"number": 7, "title": "Add a thing", "state": "open",
+				"url": srvURL(r) + "/repos/o/r/issues/7",
+			})
+			return
+		}
 		gotAuth, gotPath = r.Header.Get("Authorization"), r.URL.Path
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]any{
 			"number": 7, "title": "Add a thing", "state": "open",
-			"url": srvURL(r) + "/repos/o/r/issues/7",
+			// GitHub returns both; only `url` is the REST anchor
+			// CheckCanonical can GET with a Bearer token.
+			"url":      srvURL(r) + "/repos/o/r/issues/7",
+			"html_url": "https://github.com/o/r/issues/7",
 		})
 	}))
 	defer srv.Close()
@@ -139,8 +150,13 @@ func TestCreate(t *testing.T) {
 	}
 	// The TM-G6 anchor must be present, or the per-write-mint transfer
 	// re-check would silently exempt the issue rein just filed.
-	if meta.CanonicalURL == "" || !strings.HasSuffix(meta.CanonicalURL, "/repos/o/r/issues/7") {
-		t.Errorf("canonical URL = %q", meta.CanonicalURL)
+	if meta.CanonicalURL != srv.URL+"/repos/o/r/issues/7" {
+		t.Errorf("canonical URL = %q, want the REST url (not html_url)", meta.CanonicalURL)
+	}
+	// Same anchor shape the declared-issue path records, so the TM-G6
+	// re-check treats a filed issue exactly like a declared one.
+	if fetched := mustFetch(t, srv.URL); fetched.CanonicalURL != meta.CanonicalURL {
+		t.Errorf("Create anchor %q != Fetch anchor %q", meta.CanonicalURL, fetched.CanonicalURL)
 	}
 	if gotAuth != "Bearer tok" || gotPath != "/repos/o/r/issues" {
 		t.Errorf("request = %s %s", gotAuth, gotPath)
@@ -178,3 +194,12 @@ func TestCreate_NoNumberFailsClosed(t *testing.T) {
 }
 
 func srvURL(r *http.Request) string { return "http://" + r.Host }
+
+func mustFetch(t *testing.T, base string) Meta {
+	t.Helper()
+	m, err := Fetch(context.Background(), base, "tok", "o/r", 7)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	return m
+}
