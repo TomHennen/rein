@@ -133,7 +133,11 @@ func parkAndServe(sp sandboxProxy, port int) error {
 	if err != nil {
 		return err
 	}
-	defer raw.Close()
+	defer func() {
+		if raw != nil { // nil once a splice goroutine owns the stream
+			raw.Close()
+		}
+	}()
 	_ = raw.SetDeadline(time.Now().Add(15 * time.Second))
 	auth := ""
 	if sp.authValue != "" {
@@ -187,11 +191,20 @@ func parkAndServe(sp sandboxProxy, port int) error {
 		_, _ = tc.Write([]byte{proxy.ExposeDialFailed})
 		return nil // not a tunnel failure: nothing is listening yet; park again
 	}
-	defer local.Close()
 	if _, err := tc.Write([]byte{proxy.ExposeDialOK}); err != nil {
+		local.Close()
 		return err
 	}
-	spliceConns(local, &bufferedConn{r: tr, Conn: tc})
+	// Taken: the splice runs on its own goroutine so THIS worker re-parks at
+	// once. Workers are the idle-stream count, not a concurrency cap — a browser
+	// holds several keep-alive connections open for minutes, and each one must
+	// not starve the next (the HMR websocket was the one that failed).
+	raw = nil // ownership moves to the splice goroutine (see the deferred close)
+	go func() {
+		defer local.Close()
+		defer tc.Close()
+		spliceConns(local, &bufferedConn{r: tr, Conn: tc})
+	}()
 	return nil
 }
 

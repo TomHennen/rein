@@ -9,6 +9,8 @@ Invariants (a break is exit 1, independent of the golden):
   - the host's curl of the DECLARED port gets 200 with the sandbox-written body,
   - the host's curl of an UNDECLARED port (18474) gets nothing (000): only the
     declared port is bridged,
+  - 8 idle keep-alive connections held open (a browser's habit) do not starve a
+    fresh request: the helper re-parks as soon as a stream is taken,
   - the launch banner names the forwarded URL and the injected contract carries
     the PORTS section, so both the human and the agent were told,
   - the agent sees the port in REIN_IN_SANDBOX_EXPOSE_PORTS.
@@ -24,6 +26,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -76,9 +79,23 @@ def host_side(workdir: str, out: dict) -> None:
         if code == "200":
             break
         time.sleep(1)
+    # A browser holds several idle keep-alive connections open for minutes.
+    # Hold 8 of them (more than the helper's idle-stream count) and prove a
+    # fresh request still gets through: idle connections must not starve the
+    # tunnel (the HMR websocket was the casualty before this was fixed).
+    idle = []
+    try:
+        for _ in range(8):
+            s = socket.create_connection(("127.0.0.1", PORT), timeout=5)
+            idle.append(s)
+        time.sleep(2)
+        icode, ibody = _get(PORT)
+    finally:
+        for s in idle:
+            s.close()
     ucode, _ = _get(UNDECLARED)
-    out.update(code=code, body=body, ucode=ucode)
-    verdict = f"declared={code}:{body} undeclared={ucode}"
+    out.update(code=code, body=body, ucode=ucode, icode=icode, ibody=ibody)
+    verdict = f"declared={code}:{body} with-8-idle={icode} undeclared={ucode}"
     with open(os.path.join(workdir, VERDICT_FILE), "w") as f:
         f.write(verdict)
 
@@ -127,7 +144,8 @@ def main() -> int:
         checks = {
             f"host curl of the declared port {PORT} got 200 + the sandbox body": seen.get("code") == "200" and seen.get("body") == BODY,
             f"host curl of the undeclared port {UNDECLARED} got nothing (000)": seen.get("ucode") == "000",
-            "the sandbox echoed the host's verdict into the transcript": verdict == f"declared=200:{BODY} undeclared=000",
+            "8 idle keep-alive connections do not starve a fresh request": seen.get("icode") == "200" and seen.get("ibody") == BODY,
+            "the sandbox echoed the host's verdict into the transcript": verdict == f"declared=200:{BODY} with-8-idle=200 undeclared=000",
             "the launch banner names the forwarded URL": f"http://localhost:{PORT}" in raw and "exposed ports" in raw,
             "the injected contract carries the PORTS section": "PORTS" in raw and f"{PORT} -> http://localhost:{PORT}" in raw,
             "the agent sees the port in REIN_IN_SANDBOX_EXPOSE_PORTS": f"@ENV REIN_IN_SANDBOX_EXPOSE_PORTS={PORT}" in raw,
@@ -144,6 +162,7 @@ def main() -> int:
         print("--- outcomes (asserted; not all in the golden) ---", flush=True)
         print(f"  host GET http://127.0.0.1:{PORT}/ -> 200 {BODY!r} (served from inside the sandbox)", flush=True)
         print(f"  host GET http://127.0.0.1:{UNDECLARED}/ -> 000 (undeclared port: not bridged)", flush=True)
+        print(f"  host GET with 8 idle keep-alive connections held -> 200 (idle connections don't starve the tunnel)", flush=True)
 
         if os.getenv("REIN_UPDATE_GOLDEN"):
             p = H.update_golden(GOLDEN, raw)
