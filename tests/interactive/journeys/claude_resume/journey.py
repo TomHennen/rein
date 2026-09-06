@@ -100,6 +100,12 @@ def overlay_dir(env: dict) -> str:
     deterministic and isolated from prior box state (e.g. a stale settings.json from an
     older rein). The resume proof still holds: run 1 creates the session run 2 resumes,
     both WITHIN this journey."""
+    # Honor the throwaway-overlay override (reinharness.rein_env) so this wipe
+    # NEVER targets the developer's real ~/.config/rein-sandbox-home. The override
+    # is the `.claude` dir; its parent is the rein-sandbox-home we reset.
+    overlay = env.get("REIN_SANDBOX_CLAUDE_HOME_DIR")
+    if overlay:
+        return os.path.dirname(overlay)
     base = env.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
     return os.path.join(base, "rein-sandbox-home")
 
@@ -115,6 +121,17 @@ def reset_overlay_preserving_onboarding(env: dict) -> dict:
     Returns the preserved keys (empty when the box has none yet, e.g. a first
     run — that box still hits the wizard, which is #151's open half)."""
     parent = overlay_dir(env)
+    # Guardrail: this rmtree once nuked the developer's REAL ~/.config/rein-sandbox-home
+    # (#176). rein_env sets REIN_SANDBOX_CLAUDE_HOME_DIR to a throwaway under the temp
+    # root, so parent MUST be under it — refuse to delete anything else, no matter how
+    # the path was derived. A missing override (someone ran this outside rein_env) trips
+    # this rather than silently wiping real state.
+    tmp_root = os.path.realpath(tempfile.gettempdir())
+    if os.path.commonpath([os.path.realpath(parent), tmp_root]) != tmp_root:
+        raise SystemExit(
+            f"refusing to rmtree {parent!r}: not under the temp root {tmp_root!r}. "
+            "The overlay override (REIN_SANDBOX_CLAUDE_HOME_DIR) is missing or wrong; "
+            "run this journey via reinharness.rein_env (see #176).")
     cfg = os.path.join(parent, ".claude", ".claude.json")
     kept: dict = {}
     try:

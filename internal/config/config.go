@@ -45,6 +45,10 @@ const (
 // callers can refer to the same string without typos.
 const AppKeystoreRole = "primary"
 
+// EnvSandboxClaudeHomeDir overrides the CLAUDE_CONFIG_DIR overlay location
+// (see SandboxClaudeHomeDir).
+const EnvSandboxClaudeHomeDir = "REIN_SANDBOX_CLAUDE_HOME_DIR"
+
 // LoadAppConfig reads REIN_APP_CLIENT_ID, REIN_APP_PRIVATE_KEY_PATH,
 // REIN_APP_INSTALLATION_ID, and REIN_TEST_REPO_A and returns a validated
 // githubapp.Config alongside a Keystore that exposes the env-var PEM
@@ -246,7 +250,19 @@ func ConfigDir() (string, error) {
 // sessions resume across runs; a single SHARED dir (rein sessions span multiple
 // repos, so there is no clean repo key — mirrors host claude's one ~/.claude).
 // Does NOT create the directory (the caller creates it 0700 and seeds it).
+//
+// EnvSandboxClaudeHomeDir overrides the location outright: when set, its value
+// is the overlay dir verbatim. The journey/test harness sets it to a throwaway
+// so a test run never reads or wipes the developer's real, persistent overlay (a
+// live bug: a test that shared this dir could delete a real in-rein claude
+// session). A user may also set it to relocate the overlay. The path is still
+// subjected to the same fail-closed ownership/mode/symlink checks at seed time
+// (see prepareClaudeOverlay), so the override cannot steer the OAuth token into
+// an unsafe dir.
 func SandboxClaudeHomeDir() (string, error) {
+	if o := strings.TrimSpace(os.Getenv(EnvSandboxClaudeHomeDir)); o != "" {
+		return o, nil
+	}
 	base := os.Getenv("XDG_CONFIG_HOME")
 	if base == "" {
 		home, err := os.UserHomeDir()

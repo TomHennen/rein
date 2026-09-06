@@ -42,6 +42,7 @@ everything else runs without it.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import io
 import json
@@ -132,8 +133,55 @@ def throwaway_repo_b(env: dict | None = None) -> str:
 # --------------------------------------------------------------------------
 
 
+# Env var rein honors to relocate the overlay (config.EnvSandboxClaudeHomeDir).
+SANDBOX_CLAUDE_HOME_DIR_ENV = "REIN_SANDBOX_CLAUDE_HOME_DIR"
+# Onboarding keys carried into the throwaway overlay so a journey's claude does
+# NOT hit the first-run wizard (#151). Must match claude_resume's own list.
+_OVERLAY_ONBOARDING_KEYS = ("theme", "hasCompletedOnboarding", "lastOnboardingVersion")
+_JOURNEY_OVERLAY: str | None = None
+
+
+def _real_overlay_claude_json() -> str:
+    """The DEVELOPER's real, persistent sandbox overlay .claude.json — read-only
+    here, only to copy onboarding keys out. Mirrors config.SandboxClaudeHomeDir."""
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config")
+    return os.path.join(base, "rein-sandbox-home", ".claude", ".claude.json")
+
+
+def journey_overlay_dir() -> str:
+    """A THROWAWAY CLAUDE_CONFIG_DIR overlay for journeys, isolated from the
+    developer's real ~/.config/rein-sandbox-home. Every sandboxed `rein run` a
+    test drives points here via REIN_SANDBOX_CLAUDE_HOME_DIR (set in rein_env), so a
+    journey — claude_resume wipes its overlay every run — can never delete real
+    in-rein claude sessions/trust. Created once per process, onboarding keys
+    copied in so the wizard stays quiet, removed at exit. Keeps the real
+    `rein-sandbox-home/.claude` suffix so transcripts normalize to <OVERLAY>."""
+    global _JOURNEY_OVERLAY
+    if _JOURNEY_OVERLAY:
+        return _JOURNEY_OVERLAY
+    root = tempfile.mkdtemp(prefix="rein-journey-cfg-")
+    overlay = os.path.join(root, "rein-sandbox-home", ".claude")
+    os.makedirs(overlay, exist_ok=True)
+    os.chmod(overlay, 0o700)  # assertTightUserDir requires 0700 exactly
+    os.chmod(os.path.dirname(overlay), 0o700)
+    try:
+        with open(_real_overlay_claude_json()) as fh:
+            data = json.load(fh)
+        kept = {k: data[k] for k in _OVERLAY_ONBOARDING_KEYS if k in data}
+        if kept:
+            with open(os.path.join(overlay, ".claude.json"), "w") as fh:
+                json.dump(kept, fh)
+    except (OSError, ValueError):
+        pass  # no real overlay yet (fresh box): journey may hit the wizard (#151)
+    atexit.register(lambda: shutil.rmtree(root, ignore_errors=True))
+    _JOURNEY_OVERLAY = overlay
+    return overlay
+
+
 def rein_env() -> dict:
-    """Return the REIN_* environment as the shell provides it (os.environ),
+    """Return the REIN_* environment as the shell provides it (os.environ), with
+    the sandbox claude overlay redirected to a throwaway (journey_overlay_dir) and
     minus the operator's own $TMUX/$TMUX_PANE.
 
     Minting journeys resolve the App from state.json (they run in the real home).
@@ -150,6 +198,7 @@ def rein_env() -> dict:
     env = dict(os.environ)
     env.pop("TMUX", None)
     env.pop("TMUX_PANE", None)
+    env[SANDBOX_CLAUDE_HOME_DIR_ENV] = journey_overlay_dir()
     return env
 
 
@@ -1645,6 +1694,12 @@ _NORMALIZE_RULES = [
     # per-run proxy socket + run id
     (r"/run/user/\d+/rein/run-[A-Za-z0-9_-]+/proxy\.sock", "<PROXY_SOCK>"),
     (r"run-[A-Za-z0-9_-]{16,}", "run-<RUNID>"),
+    # the CLAUDE_CONFIG_DIR overlay path. In prod it lives under the operator's
+    # home (~/.config/rein-sandbox-home/.claude); under the journey harness it is
+    # a per-run throwaway under the temp root (#176). Collapse BOTH forms to one
+    # placeholder — anchored on the leading '/' so `@CLAUDE_CONFIG_DIR=` and any
+    # other prefix survive — BEFORE the <TMP>/<HOME> rules would split them apart.
+    (r"/\S*/rein-sandbox-home/\.claude", "<OVERLAY>"),
     # scratch dirs (the trailing char class excludes '/', so a suffix like
     # /session.yaml is preserved: <TMP>/session.yaml)
     (r"/tmp/rein-[A-Za-z0-9_.-]+", "<TMP>"),
@@ -2479,8 +2534,9 @@ def pretrust_workspace(path: str, *, env: dict | None = None) -> bool:
 
 
 def _merge_overlay_config(patch: dict, *, env: dict | None = None) -> bool:
-    """Deep-merge `patch` into rein's SANDBOX overlay .claude.json (throwaway, wiped by
-    journeys — never the developer's real ~/.claude). False if it cannot be written."""
+    """Deep-merge `patch` into the THROWAWAY sandbox overlay .claude.json — the
+    journey_overlay_dir one (REIN_SANDBOX_CLAUDE_HOME_DIR), NOT the developer's real
+    ~/.config/rein-sandbox-home. False if it cannot be written."""
     return _merge_overlay_json(".claude.json", patch, env=env)
 
 
@@ -2490,9 +2546,14 @@ def _merge_overlay_settings(patch: dict, *, env: dict | None = None) -> bool:
 
 
 def _merge_overlay_json(name: str, patch: dict, *, env: dict | None = None) -> bool:
-    base = (env or os.environ).get("XDG_CONFIG_HOME") or os.path.join(
-        os.path.expanduser("~"), ".config")
-    cfg = os.path.join(base, "rein-sandbox-home", ".claude", name)
+    e = env or os.environ
+    overlay = e.get(SANDBOX_CLAUDE_HOME_DIR_ENV)
+    if overlay:
+        cfg = os.path.join(overlay, name)
+    else:
+        base = e.get("XDG_CONFIG_HOME") or os.path.join(
+            os.path.expanduser("~"), ".config")
+        cfg = os.path.join(base, "rein-sandbox-home", ".claude", name)
 
     def merge(dst: dict, src: dict) -> dict:
         for k, v in src.items():
