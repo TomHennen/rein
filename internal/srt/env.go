@@ -80,6 +80,9 @@ const (
 	// loopback ports the human can reach from the host (#179). Absent when
 	// none are exposed.
 	EnvInSandboxExposePorts = "REIN_IN_SANDBOX_EXPOSE_PORTS"
+
+	// EnvProxyAuth carries the per-run proxy secret (#185; see EnvParams.ProxyAuth).
+	EnvProxyAuth = "REIN_PROXY_AUTH"
 )
 
 // EnvParams are the inputs to BuildEnv.
@@ -196,6 +199,14 @@ type EnvParams struct {
 	// ExposePorts, when non-empty, is delivered as REIN_IN_SANDBOX_EXPOSE_PORTS
 	// (comma-separated). A non-secret fact about the run's tunnel (#179).
 	ExposePorts string
+
+	// ProxyAuth, when non-empty, is delivered as REIN_PROXY_AUTH: the per-run
+	// proxy secret rein's TCP listener requires (#185). srt mints none for an
+	// external proxy, so `rein sandbox-exec` folds this into the child's proxy
+	// URLs and the self-test probe sends it directly. The agent is the intended
+	// client (as with srt's own token); the value never reaches a host process
+	// except through the sandbox's environment.
+	ProxyAuth string
 
 	// ClaudeConfigDir, when non-empty, is delivered as CLAUDE_CONFIG_DIR — the
 	// rein-owned PERSISTENT overlay claude reads/writes instead of the host's
@@ -362,6 +373,9 @@ func BuildEnv(p EnvParams) []string {
 	}
 	if p.ExposePorts != "" {
 		out = append(out, EnvInSandboxExposePorts+"="+p.ExposePorts)
+	}
+	if p.ProxyAuth != "" {
+		out = append(out, EnvProxyAuth+"="+p.ProxyAuth)
 	}
 	if p.HomeEphemeral {
 		out = append(out, EnvInSandboxHome+"=ephemeral")

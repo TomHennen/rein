@@ -231,6 +231,45 @@ wildcard and for a large custom set you add (the curated preset's own wildcards
 do not warn; the banner naming the preset is the disclosure). Keep the list
 minimal and deliberate.
 
+### Open egress: let the agent reach the web (`open_egress`)
+
+Since #185 rein itself is the sandbox's egress proxy (srt's external-proxy
+shape: srt keeps the network namespace unshared and bridges the sandbox's proxy
+port to rein; srt enforces nothing, rein decides every CONNECT). The allowlist
+and preset behave exactly as before, now enforced by rein, and there is a
+second mode for research and docs:
+
+```yaml
+open_egress: true      # or: rein session open-egress   (off: rein session open-egress off)
+```
+
+Open mode reaches **any public host on port 443**. It still refuses plain
+`http://`, other ports (name `host:port` in `allow_domains` for one), and every
+loopback, private, link-local, CGNAT and metadata address, the host's own
+addresses, and rein's own ports, resolving each name first and pinning the
+checked addresses at dial time. A private host you actually want (a build
+server on the LAN) is a separate opt-in that never exempts loopback or metadata:
+
+```yaml
+allow_internal_hosts:
+  - build.corp:443
+```
+
+**Open mode is a data-exfiltration surface by definition.** The agent can send
+anything it can read (your checkout, its transcript, its own Anthropic
+credential) to any site, and everything it reads from the web is untrusted
+input. GitHub credential hiding and write brokering are unchanged; every host
+the agent contacts is in the run's audit log. The launch prints a fixed banner
+saying all of this; it cannot be suppressed, and there is deliberately no
+environment switch for open mode.
+
+The proxy needs a per-run secret, which rein folds into `HTTP_PROXY`,
+`HTTPS_PROXY`, `ALL_PROXY` and their lowercase forms inside the sandbox. Tools
+that read only a tool-specific proxy variable srt also sets (`FTP_PROXY`,
+`RSYNC_PROXY`, `DOCKER_*_PROXY`, `CLOUDSDK_PROXY_*`, `GRPC_PROXY`,
+`GIT_SSH_COMMAND`) get a 407 or a port refusal rather than a bypass; point
+them at `$HTTPS_PROXY` if you hit one.
+
 ### Reaching a server the agent starts (`expose_ports`)
 
 The sandbox has its own network namespace, so a dev server the agent starts on

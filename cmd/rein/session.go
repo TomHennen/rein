@@ -30,7 +30,7 @@ import (
 // runSession dispatches `rein session <sub>`. args is os.Args[2:].
 func runSession(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: rein session show | rein session add-repo <owner/name> | rein session allow-domain <host> | rein session expose-port <port>")
+		fmt.Fprintln(os.Stderr, "usage: rein session show | rein session add-repo <owner/name> | rein session allow-domain <host> | rein session expose-port <port> | rein session open-egress [on|off]")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -51,9 +51,44 @@ func runSession(args []string) error {
 			return errors.New("usage: rein session expose-port <port>")
 		}
 		return sessionExposePort(args[1])
+	case "open-egress":
+		on := true
+		if len(args) >= 2 {
+			switch args[1] {
+			case "on":
+			case "off":
+				on = false
+			default:
+				return errors.New("usage: rein session open-egress [on|off]")
+			}
+		}
+		return sessionOpenEgress(on)
 	default:
-		fmt.Fprintf(os.Stderr, "rein session: unknown subcommand %q (want show|add-repo|allow-domain|expose-port)\n", args[0])
+		fmt.Fprintf(os.Stderr, "rein session: unknown subcommand %q (want show|add-repo|allow-domain|expose-port|open-egress)\n", args[0])
 		os.Exit(2)
+	}
+	return nil
+}
+
+// sessionOpenEgress flips open_egress (#185). The banner at the next launch
+// is the disclosure; this command only repeats the one-line version.
+func sessionOpenEgress(on bool) error {
+	_, source, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
+	if err != nil {
+		return fmt.Errorf("load session: %w", err)
+	}
+	path := session.SourceFilePath(source)
+	if path == "" {
+		return fmt.Errorf("this session has no file to edit (it came from the env fallback).\n      Run `rein init` to write a session file first")
+	}
+	if _, err := session.SetOpenEgressInFile(path, on); err != nil {
+		return fmt.Errorf("rein: %w", err)
+	}
+	if on {
+		fmt.Println("rein: open_egress: true. The sandboxed agent can reach any public host on 443 from the NEXT run —")
+		fmt.Println("      and send anything it can read there. Loopback/private/other ports stay refused. `rein session open-egress off` reverts.")
+	} else {
+		fmt.Println("rein: open_egress: false. Egress is back to the allowlist (+ preset) from the NEXT run.")
 	}
 	return nil
 }
@@ -152,6 +187,12 @@ func sessionShow() error {
 	}
 	if len(sess.ExposePorts) > 0 {
 		fmt.Printf("  ports:     %s   (expose_ports: your browser -> the sandbox)\n", exposePortsCSV(sess.ExposePorts))
+	}
+	if sess.OpenEgress {
+		fmt.Println("  egress:    OPEN — any public host on 443 (open_egress: true; a data-exfiltration surface)")
+	}
+	if len(sess.AllowInternalHosts) > 0 {
+		fmt.Printf("  internal:  %s   (allow_internal_hosts)\n", strings.Join(sess.AllowInternalHosts, ", "))
 	}
 	if !sess.Created.IsZero() {
 		fmt.Printf("  created:   %s  (no TTL enforced in Phase 1)\n", sess.Created.UTC().Format("2006-01-02 15:04 UTC"))

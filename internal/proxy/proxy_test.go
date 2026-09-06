@@ -89,7 +89,12 @@ type harness struct {
 	readTok    string
 	writeTok   string
 	cancel     context.CancelFunc // ends the proxy (run shutdown) early
+	tcpPort    int                // the #185 TCP listener, when opts.egress is set
+	ghHostPort string             // the fake GitHub httptest server's host:port
+	pol        *EgressPolicy      // the TCP listener's policy, when opts.egress is set
 }
+
+func (h *harness) ghAddr() string { return h.ghHostPort }
 
 type harnessOpts struct {
 	repos            []string          // session scope ceiling; nil ⇒ InScope allows all
@@ -101,6 +106,9 @@ type harnessOpts struct {
 	idleTimeout      time.Duration     // if set, overrides the inbound idle deadline
 	decl             *DeclarationHooks // if set, the #35 declaration gate
 	exposePorts      []int             // if set, the #179 reverse-tunnel ports
+	egress           *EgressPolicy     // if set, also serve the #185 TCP listener
+	proxySecret      string
+	probeNonce       string
 }
 
 // syncBuffer is a goroutine-safe bytes.Buffer for capturing the audit log,
@@ -141,6 +149,7 @@ func newHarness(t *testing.T, opts harnessOpts) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	h.ghHostPort = ghURL.Host
 	// Upstream transport: redirect every GitHub host to the test server; the
 	// leg to httptest won't validate ServerName github.com, so skip verify —
 	// injection/relay is what's under test, not this hop.
@@ -225,6 +234,9 @@ func newHarness(t *testing.T, opts harnessOpts) *harness {
 		IdleTimeout:      opts.idleTimeout,
 		Declaration:      opts.decl,
 		ExposePorts:      opts.exposePorts,
+		Egress:           opts.egress,
+		ProxySecret:      opts.proxySecret,
+		ProbeNonce:       opts.probeNonce,
 		InScope:          inScope,
 	})
 	if err != nil {
@@ -241,6 +253,14 @@ func newHarness(t *testing.T, opts harnessOpts) *harness {
 	h.cancel = cancel
 	if err := p.ServeExpose(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if opts.egress != nil {
+		tln, port, err := ListenTCP()
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.tcpPort = port
+		go p.ServeTCP(ctx, tln)
 	}
 	go p.Serve(ctx, ln)
 	return h

@@ -55,6 +55,13 @@ type Network struct {
 	DeniedDomains   []string   `json:"deniedDomains"`
 	StrictAllowlist bool       `json:"strictAllowlist"`
 	MitmProxy       *MitmProxy `json:"mitmProxy,omitempty"`
+	// HttpProxyPort/SocksProxyPort (#185): the external-proxy shape. Both set
+	// to rein's loopback port => srt starts NO proxy of its own, mints no auth
+	// token, and bridges the sandbox's fixed proxy ports to rein. srt then
+	// enforces nothing; rein's EgressPolicy does. allowedDomains stays a
+	// defined (empty) array so srt still unshares the network namespace.
+	HttpProxyPort  *int `json:"httpProxyPort,omitempty"`
+	SocksProxyPort *int `json:"socksProxyPort,omitempty"`
 }
 
 // MitmProxy points srt at rein's per-run unix socket and enumerates the EXACT
@@ -181,6 +188,13 @@ type Params struct {
 	// fails closed. Empty in the config handed to the real agent launch is
 	// fine, but the launch path always sets it for the verify spawn.
 	SentinelPath string
+
+	// ExternalProxyPort, when non-zero, selects the external-proxy shape
+	// (#185): rein's loopback TCP listener replaces srt's proxy and the
+	// egress allowlist moves into rein (ExtraAllowedDomains is then ignored
+	// here; the launch feeds it to proxy.EgressPolicy instead). Zero keeps the
+	// mitm shape (srt filters, rein injects over the unix socket).
+	ExternalProxyPort int
 }
 
 // Build assembles a validated Config from p. It returns an error if the result
@@ -360,20 +374,38 @@ func Build(p Params) (Config, error) {
 	}
 	denyRead = dedupeSorted(denyRead)
 
-	cfg := Config{
-		Network: Network{
-			AllowedDomains:  append([]string(nil), allowed...),
-			DeniedDomains:   []string{},
-			StrictAllowlist: true,
-			MitmProxy: &MitmProxy{
-				SocketPath: filepath.Clean(p.SocketPath),
-				// EXACTLY the inject hosts + the local-only virtual hosts
-				// (declare.rein.internal routes to rein's socket like the
-				// inject hosts but is answered locally, never relayed) —
-				// never CDN, never a wildcard.
-				Domains: append(append([]string(nil), proxy.InjectHosts...), proxy.LocalHosts...),
-			},
+	network := Network{
+		AllowedDomains:  append([]string(nil), allowed...),
+		DeniedDomains:   []string{},
+		StrictAllowlist: true,
+		MitmProxy: &MitmProxy{
+			SocketPath: filepath.Clean(p.SocketPath),
+			// EXACTLY the inject hosts + the local-only virtual hosts
+			// (declare.rein.internal routes to rein's socket like the
+			// inject hosts but is answered locally, never relayed) —
+			// never CDN, never a wildcard.
+			Domains: append(append([]string(nil), proxy.InjectHosts...), proxy.LocalHosts...),
 		},
+	}
+	if p.ExternalProxyPort != 0 {
+		if p.ExternalProxyPort < 1 || p.ExternalProxyPort > 65535 {
+			return Config{}, fmt.Errorf("srt: external proxy port %d out of range", p.ExternalProxyPort)
+		}
+		port := p.ExternalProxyPort
+		network = Network{
+			// Defined-but-empty keeps srt's network restriction (unshare-net +
+			// bridge) on while leaving srt nothing to allow; deny-all is the
+			// belt to that suspenders. Neither is consulted: srt starts no
+			// proxy in this shape.
+			AllowedDomains:  []string{},
+			DeniedDomains:   []string{"*"},
+			StrictAllowlist: true,
+			HttpProxyPort:   &port,
+			SocksProxyPort:  &port,
+		}
+	}
+	cfg := Config{
+		Network: network,
 		Filesystem: Filesystem{
 			DenyRead:   denyRead,
 			AllowRead:  dedupeSorted(allowRead),
@@ -425,6 +457,38 @@ func srtDefaultHomeWriteDenies(home string) []string {
 	return out
 }
 
+// validateExternalProxyShape is Validate for the #185 shape: BOTH proxy ports
+// set to the same port (or srt would still start its own unauthenticated mux
+// for the other protocol), no mitmProxy (it would be dead config that reads
+// like a live injection route), a defined-but-empty allowlist and deny-all
+// (srt must keep the namespace unshared yet have nothing to allow), and the
+// filesystem rules unchanged.
+func (c Config) validateExternalProxyShape() error {
+	n := c.Network
+	if n.HttpProxyPort == nil || n.SocksProxyPort == nil {
+		return fmt.Errorf("srt: external proxy shape needs BOTH httpProxyPort and socksProxyPort (else srt starts its own mux for the missing one)")
+	}
+	if *n.HttpProxyPort != *n.SocksProxyPort {
+		return fmt.Errorf("srt: httpProxyPort %d != socksProxyPort %d (one rein listener serves both; a second port would be an unaudited route)", *n.HttpProxyPort, *n.SocksProxyPort)
+	}
+	if *n.HttpProxyPort < 1 || *n.HttpProxyPort > 65535 {
+		return fmt.Errorf("srt: external proxy port %d out of range", *n.HttpProxyPort)
+	}
+	if n.MitmProxy != nil {
+		return fmt.Errorf("srt: external proxy shape must not carry mitmProxy (mixed shapes)")
+	}
+	if n.AllowedDomains == nil {
+		return fmt.Errorf("srt: allowedDomains must be a defined (empty) array in the external proxy shape, or srt drops the network namespace")
+	}
+	if len(n.AllowedDomains) != 0 {
+		return fmt.Errorf("srt: allowedDomains must be EMPTY in the external proxy shape (srt enforces nothing here; a non-empty list reads like policy)")
+	}
+	if len(n.DeniedDomains) != 1 || n.DeniedDomains[0] != "*" {
+		return fmt.Errorf("srt: deniedDomains must be [\"*\"] in the external proxy shape")
+	}
+	return c.validateFilesystem()
+}
+
 // Validate is the fail-closed sanity check on an emitted Config. It catches the
 // mistakes that would silently weaken the sandbox even when srt accepts the
 // file: a missing/loosened mitmProxy, a wildcard or CDN host in the injector,
@@ -433,11 +497,14 @@ func srtDefaultHomeWriteDenies(home string) []string {
 // VerifyConfigApplied is the backstop for srt accepting-but-not-applying.
 func (c Config) Validate() error {
 	n := c.Network
-	if len(n.AllowedDomains) == 0 {
-		return fmt.Errorf("srt: allowedDomains is empty (srt would block all egress)")
-	}
 	if !n.StrictAllowlist {
 		return fmt.Errorf("srt: strictAllowlist must be true (an unmatched host must hard-deny, never ask)")
+	}
+	if n.HttpProxyPort != nil || n.SocksProxyPort != nil {
+		return c.validateExternalProxyShape()
+	}
+	if len(n.AllowedDomains) == 0 {
+		return fmt.Errorf("srt: allowedDomains is empty (srt would block all egress)")
 	}
 	if n.MitmProxy == nil {
 		return fmt.Errorf("srt: mitmProxy is nil (no injection path; credentials would never reach GitHub)")
@@ -515,6 +582,12 @@ func (c Config) Validate() error {
 			return fmt.Errorf("srt: local host %q missing from mitmProxy.domains", h)
 		}
 	}
+	return c.validateFilesystem()
+}
+
+// validateFilesystem is the filesystem half of Validate, shared by both
+// network shapes.
+func (c Config) validateFilesystem() error {
 	if len(c.Filesystem.AllowWrite) == 0 {
 		return fmt.Errorf("srt: allowWrite is empty (the working tree must be writable or git ops fail under the denyRead tmpfs)")
 	}

@@ -202,6 +202,12 @@ func validateEgressDomain(d string) error {
 		if d == "*" || !strings.HasPrefix(d, "*.") || strings.Count(d, "*") != 1 {
 			return fmt.Errorf("a wildcard must be of the form *.suffix (a bare * would allow ALL egress)")
 		}
+		// srt's rule, kept now that rein enforces the list itself (#185): the
+		// suffix needs two labels, or `*.com,*.org,*.net` is a quiet open mode
+		// through an env var. Open mode is a session-file decision only.
+		if !strings.Contains(d[2:], ".") {
+			return fmt.Errorf("wildcard %q is too broad (a public suffix); use *.example.com, or open_egress in the session file", d)
+		}
 	}
 	return nil
 }
