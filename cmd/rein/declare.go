@@ -279,7 +279,7 @@ func declareDirect(a declareArgs, runID string) (int, error) {
 				Repo: n.Repo, Issue: n.Issue, InstallURL: n.InstallURL, AppName: n.AppName,
 			})
 		},
-		CreateIssue: createIssueFunc(func() githubapp.Config { return appCfg }, ks, session.OwnerOf(sess), logger),
+		CreateIssue: createIssueFunc(func() githubapp.Config { return appCfg }, ks, session.OwnerOf(sess), stateDir, runID, logger),
 		Grant:       gcfg,
 		Logger:      logger,
 	}

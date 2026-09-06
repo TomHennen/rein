@@ -143,7 +143,9 @@ func ObtainNewIssueApproval(ctx context.Context, req NewIssueRequest, cfg Config
 // title is sanitized once, HERE, and both the displayed text and the
 // expected word derive from that same string.
 func formANewRequest(req NewIssueRequest, cfg Config) prompt.Request {
-	title := issuemeta.SanitizeTitle(req.Title)
+	// The whole proposed title, not a 140-rune prefix of it: what the
+	// human confirms must be what gets filed.
+	title := issuemeta.SanitizeProposedTitle(req.Title)
 	return prompt.Request{
 		SessionID:   req.Session.ID,
 		Role:        req.Session.Role,
@@ -199,7 +201,7 @@ func denyHelpfulNew(req NewIssueRequest, cfg Config) bool {
 	}
 	fmt.Fprintln(cfg.Stderr)
 	fmt.Fprintf(cfg.Stderr, "rein: the agent asked to FILE a new issue in %s — NOT confirmed, no approval surface reached you.\n", req.Repo)
-	fmt.Fprintf(cfg.Stderr, "  proposed title: %q\n", issuemeta.SanitizeTitle(req.Title))
+	fmt.Fprintf(cfg.Stderr, "  proposed title: %q\n", issuemeta.SanitizeProposedTitle(req.Title))
 	fmt.Fprintln(cfg.Stderr, "  To decide, in ANOTHER terminal run:")
 	fmt.Fprintf(cfg.Stderr, "    %s approval grant --run-id %s\n", reinCmd, cfg.RunID)
 	fmt.Fprintln(cfg.Stderr, "  Nothing was filed. The agent can re-run `rein declare --new`.")

@@ -139,6 +139,13 @@ type Request struct {
 // approval token: the issue number, or ConfirmWord when set.
 func (r Request) matches(line string) bool {
 	line = strings.TrimSpace(line)
+	if r.NewIssue && r.ConfirmWord == "" {
+		// A new issue has no number, so Issue is 0 — falling through would
+		// silently make "0" the approval token and render "first word ()".
+		// The callers guarantee a word; this is the guarantee at the gate,
+		// because grantNewIssue builds its request from an on-disk snapshot.
+		return false
+	}
 	if r.ConfirmWord != "" {
 		return strings.EqualFold(line, r.ConfirmWord)
 	}

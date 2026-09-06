@@ -68,6 +68,23 @@ func TestRequestMatches_ConfirmWord(t *testing.T) {
 	}
 }
 
+// TestRequestMatches_NewIssueWithoutConfirmWordDenies: Issue is 0 for a
+// new-issue request, so a missing ConfirmWord must not fall through to
+// "typing 0 approves". grantNewIssue builds its request from an on-disk
+// snapshot, so the invariant is enforced across a file boundary and this
+// is the guarantee at the gate.
+func TestRequestMatches_NewIssueWithoutConfirmWordDenies(t *testing.T) {
+	req := Request{NewIssue: true, Title: "whatever"}
+	for _, answer := range []string{"0", "", "whatever", "yes"} {
+		if req.matches(answer) {
+			t.Errorf("matches(%q) = true on a new-issue request with no ConfirmWord", answer)
+		}
+	}
+	if res, _ := (&StubPrompter{Response: "0"}).Confirm(t.Context(), req); res.Approved {
+		t.Error("the stub must not approve a new-issue request with no ConfirmWord")
+	}
+}
+
 // TestStubPrompter_NewIssueUsesConfirmWord keeps the test double honest:
 // it must accept exactly what TTYPrompter would.
 func TestStubPrompter_NewIssueUsesConfirmWord(t *testing.T) {

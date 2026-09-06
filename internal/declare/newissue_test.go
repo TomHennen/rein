@@ -129,10 +129,17 @@ func TestRunNew_CreateFailureAfterApproval(t *testing.T) {
 	if out.Confirmed || out.Audit != AuditNewCreateFailed {
 		t.Fatalf("expected a create failure, got %+v", out)
 	}
-	for _, want := range []string{"APPROVED", "could NOT be created", "Nothing was filed", "issues:write"} {
+	for _, want := range []string{"APPROVED", "could not complete filing", "MAY OR MAY NOT", "issues:write"} {
 		if !strings.Contains(out.Message, want) {
 			t.Errorf("message missing %q: %q", want, out.Message)
 		}
+	}
+	// rein cannot know the remote outcome: a read timeout or an unparseable
+	// response lands here with the issue possibly created. Claiming
+	// otherwise would send the human away without checking, and the
+	// suggested retry would then file a duplicate.
+	if strings.Contains(out.Message, "Nothing was filed") {
+		t.Errorf("message asserts a remote fact it cannot know: %q", out.Message)
 	}
 	if _, err := approvals.ReadApproval(d.StateDir, d.RunID); err == nil {
 		t.Error("a failed create must record nothing")

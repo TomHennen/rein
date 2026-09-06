@@ -107,12 +107,37 @@ func TestBodyExcerpt(t *testing.T) {
 	if got := BodyExcerpt("a\x1b[2Jb"); strings.Contains(got, "\x1b") {
 		t.Errorf("excerpt must strip escapes: %q", got)
 	}
+	// The marker must COUNT what is withheld: the human is approving the
+	// filing of text they cannot see, and needs to know how much.
 	long := BodyExcerpt(strings.Repeat("x", 500))
-	if !strings.HasSuffix(long, "(truncated)") {
-		t.Errorf("a long body must be marked truncated: %q", long)
+	for _, want := range []string{"truncated", "300 more characters", "unseen"} {
+		if !strings.Contains(long, want) {
+			t.Errorf("truncation marker missing %q: %q", want, long)
+		}
 	}
-	if len([]rune(long)) > bodyExcerptRunes+20 {
+	if len([]rune(long)) > bodyExcerptRunes+80 {
 		t.Errorf("excerpt not bounded: %d runes", len([]rune(long)))
+	}
+}
+
+// TestSanitizeProposedTitle: the human must see EVERY character that
+// will be filed. SanitizeTitle's 140-rune budget is for a FETCHED title
+// and would hide 60 agent-controlled characters of a 200-char proposal.
+func TestSanitizeProposedTitle(t *testing.T) {
+	full := strings.Repeat("x", MaxTitleChars)
+	if got := SanitizeProposedTitle(full); got != full {
+		t.Errorf("a title at the accepted maximum must render whole: %d of %d runes",
+			len([]rune(got)), MaxTitleChars)
+	}
+	if got := SanitizeTitle(full); len([]rune(got)) >= MaxTitleChars {
+		t.Skip("SanitizeTitle no longer truncates; this test's premise is gone")
+	}
+	// Still sanitized, and still bounded for anything longer.
+	if got := SanitizeProposedTitle("a\x1b[2Jb"); strings.Contains(got, "\x1b") {
+		t.Errorf("escape survived: %q", got)
+	}
+	if got := SanitizeProposedTitle(strings.Repeat("y", 500)); len([]rune(got)) > MaxTitleChars+1 {
+		t.Errorf("not bounded: %d runes", len([]rune(got)))
 	}
 }
 

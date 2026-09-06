@@ -15,10 +15,12 @@ import (
 	"os"
 	"strings"
 
+	"github.com/TomHennen/rein/internal/approvals"
 	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/issuemeta"
 	"github.com/TomHennen/rein/internal/keystore"
+	"github.com/TomHennen/rein/internal/tokencache"
 )
 
 // createIssueFunc returns the declare.Deps.CreateIssue hook. cfg is
@@ -26,19 +28,32 @@ import (
 // as it stands at filing time; owner names the human the issue is filed on
 // behalf of.
 //
-// The write tier is MintGhSessionToken, not MintWriteToken: the plain
-// write mint is contents+metadata only and 403s on POST /issues.
-func createIssueFunc(cfg func() githubapp.Config, ks keystore.Keystore, owner string, logger *log.Logger) func(context.Context, string, string, string) (issuemeta.Meta, error) {
+// The tier is MintIssueWriteToken — issues:write + metadata:read, and
+// nothing else. MintWriteToken (contents only) 403s on POST /issues, and
+// MintGhSessionToken would work but also carries contents:write and
+// pull_requests:write across the session scope: a push-and-merge capable
+// credential minted for a ceremony the human approved as "file an issue".
+//
+// stateDir/runID, when set, ledger the token (approvals.AppendWriteToken)
+// so a broker that dies between the mint and the deferred revoke still has
+// it revoked by the run-exit drain. Without that, a crash strands a live
+// token for its native ~1h with nothing tracking it.
+func createIssueFunc(cfg func() githubapp.Config, ks keystore.Keystore, owner, stateDir, runID string, logger *log.Logger) func(context.Context, string, string, string) (issuemeta.Meta, error) {
 	return func(ctx context.Context, repo, title, body string) (issuemeta.Meta, error) {
 		c, err := githubapp.NewClient(cfg(), ks, config.AppKeystoreRole)
 		if err != nil {
 			return issuemeta.Meta{}, err
 		}
 		mctx, cancel := context.WithTimeout(ctx, mintTimeout)
-		token, _, err := c.MintGhSessionToken(mctx)
+		token, expiresAt, err := c.MintIssueWriteToken(mctx)
 		cancel()
 		if err != nil {
 			return issuemeta.Meta{}, fmt.Errorf("mint issues:write token: %w", err)
+		}
+		if stateDir != "" && runID != "" {
+			if lerr := approvals.AppendWriteToken(stateDir, runID, tokencache.Entry{Token: token, ExpiresAt: expiresAt}); lerr != nil {
+				logger.Printf("declare --new: write-token ledger append failed (best-effort): %v", lerr)
+			}
 		}
 		defer func() {
 			rctx, rcancel := context.WithTimeout(context.Background(), mintTimeout)

@@ -106,15 +106,19 @@ func RunNew(ctx context.Context, d Deps, req NewIssue) Outcome {
 
 	meta, err := d.CreateIssue(ctx, repo, title, body)
 	if err != nil {
-		// The human APPROVED and nothing exists. Say both halves plainly —
-		// this is the one path where a silent failure would leave the human
-		// believing they filed something.
+		// The human APPROVED and rein cannot confirm what happened remotely.
+		// Do NOT claim nothing was filed: a read timeout, a parse failure, or
+		// a numberless response all land here with the issue possibly
+		// created. Only the local half is knowable — nothing is confirmed —
+		// and the retry can duplicate, so say to look first.
 		logger.Printf("declare --new: create in %s FAILED after approval: %v", repo, err)
 		return Outcome{Repo: repo, Audit: AuditNewCreateFailed, Message: fmt.Sprintf(
-			"rein: APPROVED, but the issue could NOT be created in %s: %s\n"+
-				"      Nothing was filed and nothing is confirmed. (If this says the App lacks access,\n"+
-				"      the GitHub App needs issues:write on %s.) Retry `rein declare --new`.",
-			repo, issuemeta.BodyExcerpt(err.Error()), repo)}
+			"rein: APPROVED, but rein could not complete filing the issue in %s: %s\n"+
+				"      Nothing is confirmed, so writes stay locked. The issue MAY OR MAY NOT have been\n"+
+				"      created — check %s before retrying, or a retry can file it twice. If the error\n"+
+				"      says the App lacks access, it needs issues:write on %s.\n"+
+				"      If the issue IS there, run `rein declare <n>` on it instead.",
+			repo, issuemeta.BodyExcerpt(err.Error()), repo, repo)}
 	}
 
 	ci := approvals.ConfirmedIssue{

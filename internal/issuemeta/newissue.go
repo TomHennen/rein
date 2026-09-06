@@ -99,23 +99,40 @@ func FirstWord(title string) string {
 	return ""
 }
 
+// SanitizeProposedTitle renders a proposed title for the human's prompt.
+// Unlike SanitizeTitle (which truncates at a FETCHED title's display
+// budget) it shows the whole thing up to MaxTitleChars — the human must
+// see every character that will be filed, not a prefix of it.
+func SanitizeProposedTitle(s string) string {
+	runes := []rune(sanitizeForDisplay(s))
+	if len(runes) <= MaxTitleChars {
+		return string(runes)
+	}
+	return string(runes[:MaxTitleChars]) + "…"
+}
+
 // BodyExcerpt renders a proposed body for the human's prompt: sanitized
 // like a title (no escapes, no bidi), all whitespace collapsed to single
 // spaces so it cannot forge prompt lines, and truncated with a marker.
+//
+// The marker COUNTS what is being withheld. A bare "(truncated)" lets the
+// human approve filing a 4000-character body having read 200 of it
+// without registering the gap; the count is the disclosure.
 func BodyExcerpt(body string) string {
 	flat := strings.Join(strings.Fields(sanitizeForDisplay(body)), " ")
 	runes := []rune(flat)
 	if len(runes) <= bodyExcerptRunes {
 		return flat
 	}
-	return string(runes[:bodyExcerptRunes]) + "… (truncated)"
+	return fmt.Sprintf("%s… (truncated — %d more characters WILL be filed, unseen)",
+		string(runes[:bodyExcerptRunes]), len(runes)-bodyExcerptRunes)
 }
 
 // Create files a new issue via POST /repos/{repo}/issues and returns the
 // created issue's Meta — including CanonicalURL, the TM-G6 transfer
 // anchor the per-write-mint re-check needs.
 //
-// token must carry issues:write (the MintGhSessionToken shape; the plain
+// token must carry issues:write (the MintIssueWriteToken shape; the plain
 // write mint is contents-only and 403s here). It never leaves the broker.
 func Create(ctx context.Context, apiBase, token, repo, title, body string) (Meta, error) {
 	if repo == "" || !strings.Contains(repo, "/") {
