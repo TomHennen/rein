@@ -71,6 +71,25 @@ func TestBuildAgentContract_RegistriesHintTracksPreset(t *testing.T) {
 	}
 }
 
+// TestBuildAgentContract_BrowserHintTracksHost: the headless-browser line appears
+// only when the host actually has Playwright browsers; promising one that is not
+// there would send the agent into `npx playwright install` against a read-only dir.
+func TestBuildAgentContract_BrowserHintTracksHost(t *testing.T) {
+	with := buildAgentContract(contractParams{
+		WorkTree: "/work/repo", HomeEphemeral: true,
+		PlaywrightBrowsers: "/home/someone/.cache/ms-playwright",
+	})
+	for _, want := range []string{"headless Chromium", "/home/someone/.cache/ms-playwright", "read-only", "Do NOT run `npx playwright install`"} {
+		if !strings.Contains(with, want) {
+			t.Errorf("browser contract missing %q\n--- contract ---\n%s", want, with)
+		}
+	}
+	without := buildAgentContract(contractParams{WorkTree: "/work/repo", HomeEphemeral: true})
+	if strings.Contains(without, "Chromium") || strings.Contains(without, "playwright") {
+		t.Errorf("contract promises a browser the host does not have\n--- contract ---\n%s", without)
+	}
+}
+
 // TestBuildAgentContract_KillSwitchTellsNoLie: under REIN_SANDBOX_SHOW_HOME the
 // $HOME deny is OFF, so $HOME is a real, persistent home. Telling the agent its
 // $HOME is ephemeral would then be a LIE that could make it refuse to use a

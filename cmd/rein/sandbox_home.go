@@ -156,9 +156,28 @@ func sandboxAllowReadPaths(home, srtPath string, cmdline []string) []string {
 		// pyenv-managed Python interpreters: read-mostly binary trees; a
 		// pyenv-selected python otherwise vanishes mid-run. No credentials.
 		filepath.Join(home, ".pyenv"),
+		// Host-installed Playwright browsers (`npx playwright install`): the
+		// headless Chromium a web-project agent renders/screenshots with. Binary
+		// tree, no credentials. Read-only on purpose: the HOST's playwright execs
+		// from the same dir, so a writable bind would be a host-exec vector.
+		filepath.Join(home, ".cache", "ms-playwright"),
 	)
 
 	return dedupePaths(out)
+}
+
+// playwrightBrowsersDir returns the host's Playwright browser dir (allowed back
+// read-only above) when it exists, else "" — the contract must not promise a
+// browser that is not there.
+func playwrightBrowsersDir(home string) string {
+	if home == "" {
+		return ""
+	}
+	dir := filepath.Join(home, ".cache", "ms-playwright")
+	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+		return dir
+	}
+	return ""
 }
 
 // agentUnderClaudeDenyError detects the `claude migrate-installer` layout, where the

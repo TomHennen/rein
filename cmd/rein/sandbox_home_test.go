@@ -30,6 +30,7 @@ func TestSandboxAllowReadPathsCuratedSet(t *testing.T) {
 		"/home/someone/.rustup",
 		"/home/someone/go",
 		"/home/someone/.pyenv",
+		"/home/someone/.cache/ms-playwright",
 	} {
 		if !set[want] {
 			t.Errorf("curated allow-back %q missing; got %v", want, got)

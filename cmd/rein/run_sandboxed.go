@@ -795,6 +795,7 @@ func runSandboxed(cmdline []string) (int, error) {
 		// Empty summary under `none`, so the registries line is omitted.
 		EgressPreset:        presetName,
 		EgressPresetSummary: srt.EgressPresetSummary(presetName),
+		PlaywrightBrowsers:  playwrightBrowsersDir(home),
 	})
 	contractOff := srt.DisableClaudeMCPFromEnv(os.Getenv(EnvDisableAgentContract))
 	agentArgv := cmdline

@@ -1,22 +1,22 @@
 $ rein init --no-symlink --skip-mint-check --shell bash
 rein init: setting up local scaffolding
-  state dir:  /tmp/rein-itest-home-1wq1_2x2/.local/state/rein
-  config dir: /tmp/rein-itest-home-1wq1_2x2/.config/rein
+  state dir:  /tmp/rein-itest-home-g5_j1cv9/.local/state/rein
+  config dir: /tmp/rein-itest-home-g5_j1cv9/.config/rein
 Name this machine [demo-box]:
   machine:    demo-box (label for this machine's App name)
   setup:      no state.json; REIN_APP_* env vars detected — using env-managed path (marker state.json will be written)
               wrote managed_externally marker (state.json)
   app:        client_id=Iv23liHH7Gu2xMxCZ7rz installation_id=138434780
-  shim:       3 binaries under /tmp/rein-itest-home-1wq1_2x2/.local/state/rein/shim
+  shim:       3 binaries under /tmp/rein-itest-home-g5_j1cv9/.local/state/rein/shim
   symlink:    skipped (--no-symlink)
   mint check: skipped (--skip-mint-check)
   (add more later with `rein session add-repo`, or approve the agent's
    expansion requests as it encounters work)
 Which repo should the agent work on? (default detected from this dir) [TomHennen/rein]: octo-example/demo-repo
-  session:    scaffolded at /tmp/rein-itest-home-1wq1_2x2/.config/rein/dev-session.yaml (repos: [octo-example/demo-repo])
+  session:    scaffolded at /tmp/rein-itest-home-g5_j1cv9/.config/rein/dev-session.yaml (repos: [octo-example/demo-repo])
               writes are agent-declared (#35): the agent runs `rein declare <n>`,
               you confirm on your terminal, then writes flow for that run. Reads work immediately.
-Add alias claude='rein run -- claude' to /tmp/rein-itest-home-1wq1_2x2/.bashrc? [y/N]:
+Add alias claude='rein run -- claude' to /tmp/rein-itest-home-g5_j1cv9/.bashrc? [y/N]:
   alias:      not installed (opt-in; enable with `rein init --alias`)
   install on repo:
     to let the agent work on octo-example/demo-repo, install the App on it.
@@ -27,17 +27,17 @@ Add alias claude='rein run -- claude' to /tmp/rein-itest-home-1wq1_2x2/.bashrc? 
 
 rein init: done.
 Next:
-  - /tmp/rein-itest-home-1wq1_2x2/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
+  - /tmp/rein-itest-home-g5_j1cv9/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
   - run `rein run -- claude` (or another agent) to launch with rein in effect
   - (optional) enable the `claude` alias with `rein init --alias`
   - run `rein doctor` to verify everything is wired up
 
 $ rein doctor
-[warn]  rein on PATH:              `which rein` (/home/admin/.local/bin/rein) differs from running binary (/mnt/dev/dev/rein/.claude/worktrees/dev-preset-default/bin/rein); re-run `rein init` to refresh the ~/.local/bin/rein symlink
-[ok]    shim freshness:            3 shims under /tmp/rein-itest-home-1wq1_2x2/.local/state/rein/shim up to date
+[warn]  rein on PATH:              `which rein` (/home/admin/.local/bin/rein) differs from running binary (/mnt/dev/dev/rein/.claude/worktrees/cuddly-wondering-pretzel/bin/rein); re-run `rein init` to refresh the ~/.local/bin/rein symlink
+[ok]    shim freshness:            3 shims under /tmp/rein-itest-home-g5_j1cv9/.local/state/rein/shim up to date
 [ok]    app key:                   /home/admin/.config/rein/primary.pem (mode 0600)
-[ok]    app credentials:           mint ok (token expires 2026-09-06T14:30:25Z)
-[ok]    session:                   file:/tmp/rein-itest-home-1wq1_2x2/.config/rein/dev-session.yaml (id=sess_dev_init_59e5ea3e role=implement repos=[octo-example/demo-repo])
+[ok]    app credentials:           mint ok (token expires 2026-09-06T15:18:33Z)
+[ok]    session:                   file:/tmp/rein-itest-home-g5_j1cv9/.config/rein/dev-session.yaml (id=sess_dev_init_4444324f role=implement repos=[octo-example/demo-repo])
 [warn]  $TMUX:                     unset; tmux-popup grant layer will not fire (use the tty layer or `rein approval grant` from another terminal)
 [warn]  approval cache:            no active runs (per-run approvals; first write inside `rein run` will prompt)
 [warn]  gh-shim cache:             absent (next gh read will mint)
