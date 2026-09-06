@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -26,6 +27,7 @@ import (
 
 	"github.com/TomHennen/rein/internal/brokercore"
 	"github.com/TomHennen/rein/internal/classify"
+	"github.com/TomHennen/rein/internal/issuemeta"
 )
 
 // DeclareOutcome is what the broker-side declare hook reports back for
@@ -61,7 +63,25 @@ type DeclarationHooks struct {
 	// Declare performs one declaration (fetch + Form A prompt + record)
 	// and BLOCKS until the human decides. Runs out-of-sandbox.
 	Declare func(issue int, repo string) DeclareOutcome
+
+	// DeclareNew files a NEW issue after the human confirms it (issue
+	// #180): prompt → create under a broker-minted token → record, all
+	// out-of-sandbox. BLOCKS until the human decides. nil means the run
+	// cannot file issues (403), like a nil Declare.
+	DeclareNew func(repo, title, body string) DeclareOutcome
 }
+
+// declareNewPath is the file-a-new-issue endpoint on the declare virtual
+// host. POST, JSON body, bounded by declareNewBodyCap.
+const declareNewPath = "/v1/declare/new"
+
+// declareNewBodyCap bounds the JSON body the sandbox may POST. Derived
+// from the field limits rather than picked: 8 bytes per accepted rune
+// covers UTF-8's 4-byte maximum plus JSON's \uXXXX escaping, so a LEGAL
+// maximum-size title+body always fits and is refused on its own merits
+// (a length error naming the field) instead of being rejected as
+// oversized. Anything past this is refused unread rather than parsed.
+const declareNewBodyCap = 8 * (issuemeta.MaxTitleChars + issuemeta.MaxBodyChars)
 
 // Deny-path bounds (§5.4): before closing a connection on a
 // post-approval push deny, drain the client's in-flight upload so the
@@ -87,21 +107,42 @@ const undeclaredPushMsg = "rein: writes are locked until you declare your issue.
 // only — nothing here ever touches the upstream transport, and no
 // response carries a token.
 func (p *Proxy) serveDeclare(conn net.Conn, req *http.Request) bool {
-	// Discard any request body, bounded (the endpoint takes query params
-	// only; a GET normally has none).
-	if req.Body != nil {
-		_, _ = io.CopyN(io.Discard, req.Body, 4096)
-		req.Body.Close()
-	}
-
-	if p.decl == nil || p.decl.Declare == nil {
+	if p.decl == nil {
+		p.discardBody(req)
 		p.audit.Record(AuditEntry{Session: p.sessionID, Host: DeclareHost, Method: req.Method, Path: req.URL.Path, Decision: "refused-declare-unavailable"})
 		p.writeLocalJSON(conn, http.StatusForbidden, "rein: declare is not available in this run")
 		return false
 	}
-	if req.Method != http.MethodGet || req.URL.Path != "/v1/declare" {
-		p.audit.Record(AuditEntry{Session: p.sessionID, Host: DeclareHost, Method: req.Method, Path: req.URL.Path, Decision: "refused-declare-invalid"})
-		p.writeLocalJSON(conn, http.StatusNotFound, "rein: unknown declare endpoint (want GET /v1/declare?issue=<n>[&repo=owner/name])")
+	switch {
+	case req.Method == http.MethodGet && req.URL.Path == "/v1/declare":
+		return p.serveDeclareIssue(conn, req)
+	case req.Method == http.MethodPost && req.URL.Path == declareNewPath:
+		return p.serveDeclareNew(conn, req)
+	}
+	p.discardBody(req)
+	p.audit.Record(AuditEntry{Session: p.sessionID, Host: DeclareHost, Method: req.Method, Path: req.URL.Path, Decision: "refused-declare-invalid"})
+	p.writeLocalJSON(conn, http.StatusNotFound,
+		"rein: unknown declare endpoint (want GET /v1/declare?issue=<n>[&repo=owner/name] or POST "+declareNewPath+")")
+	return false
+}
+
+// discardBody drains a bounded amount of the request body. Nothing on
+// this host relays, so the body is only ever read to keep the connection
+// sane.
+func (p *Proxy) discardBody(req *http.Request) {
+	if req.Body != nil {
+		_, _ = io.CopyN(io.Discard, req.Body, 4096)
+		req.Body.Close()
+	}
+}
+
+// serveDeclareIssue answers GET /v1/declare?issue=<n>[&repo=] — the
+// declaration of an EXISTING issue.
+func (p *Proxy) serveDeclareIssue(conn net.Conn, req *http.Request) bool {
+	p.discardBody(req)
+	if p.decl.Declare == nil {
+		p.audit.Record(AuditEntry{Session: p.sessionID, Host: DeclareHost, Method: req.Method, Path: req.URL.Path, Decision: "refused-declare-unavailable"})
+		p.writeLocalJSON(conn, http.StatusForbidden, "rein: declare is not available in this run")
 		return false
 	}
 	q := req.URL.Query()
@@ -145,6 +186,93 @@ func (p *Proxy) serveDeclare(conn net.Conn, req *http.Request) bool {
 	}
 	p.writeLocalJSON(conn, http.StatusForbidden, msg)
 	return false
+}
+
+// serveDeclareNew answers POST /v1/declare/new — the agent proposing a
+// NEW issue for the human to approve (issue #180).
+//
+// Everything in the body is agent-supplied and re-validated HERE: the CLI
+// that normally sends it lives inside the sandbox and is not trusted to
+// have checked anything. Nothing is filed until the hook's prompt returns
+// approved, and no response on this path carries a token.
+func (p *Proxy) serveDeclareNew(conn net.Conn, req *http.Request) bool {
+	if p.decl.DeclareNew == nil {
+		p.discardBody(req)
+		p.audit.Record(AuditEntry{Session: p.sessionID, Host: DeclareHost, Method: req.Method, Path: req.URL.Path, Decision: "refused-declare-unavailable"})
+		p.writeLocalJSON(conn, http.StatusForbidden, "rein: declare --new is not available in this run")
+		return false
+	}
+	repo, title, body, err := parseDeclareNewBody(req)
+	if err != nil {
+		p.audit.Record(AuditEntry{Session: p.sessionID, Host: DeclareHost, Method: req.Method, Path: req.URL.Path, Decision: "refused-declare-new-invalid"})
+		p.writeLocalJSON(conn, http.StatusBadRequest, "rein: "+err.Error())
+		return false
+	}
+
+	p.logger.Printf("declare --new: agent proposes filing an issue (repo=%q, %d-char title); prompting", repo, len(title))
+	p.audit.Record(AuditEntry{Session: p.sessionID, Host: DeclareHost, Method: req.Method, Path: req.URL.Path, Decision: "declared-new"})
+
+	// BLOCKS while the human decides.
+	out := p.decl.DeclareNew(repo, title, body)
+
+	decision := out.Audit
+	if decision == "" {
+		decision = "refused-declare-new-denied"
+	}
+	p.audit.Record(AuditEntry{Session: p.sessionID, Host: DeclareHost, Method: req.Method, Path: req.URL.Path, Issue: out.Issue, Decision: decision})
+
+	if out.OK {
+		p.writeLocalRaw(conn, http.StatusOK, "application/json", marshalNoEscape(struct {
+			Confirmed int    `json:"confirmed"`
+			Message   string `json:"message"`
+		}{out.Issue, out.Message}))
+		return false
+	}
+	msg := out.Message
+	if msg == "" {
+		msg = "rein: filing a new issue was denied"
+	}
+	p.writeLocalJSON(conn, http.StatusForbidden, msg)
+	return false
+}
+
+// parseDeclareNewBody reads and validates the POST body. The read is
+// bounded to declareNewBodyCap+1 so an oversized body is REFUSED rather
+// than truncated into a smaller, valid-looking request.
+func parseDeclareNewBody(req *http.Request) (repo, title, body string, err error) {
+	if req.Body == nil {
+		return "", "", "", errors.New("declare --new needs a JSON body")
+	}
+	defer req.Body.Close()
+	raw, rerr := io.ReadAll(io.LimitReader(req.Body, declareNewBodyCap+1))
+	if rerr != nil {
+		return "", "", "", fmt.Errorf("could not read the request body: %v", rerr)
+	}
+	if len(raw) > declareNewBodyCap {
+		return "", "", "", fmt.Errorf("request body exceeds the %d-byte limit", declareNewBodyCap)
+	}
+	var in struct {
+		Repo  string `json:"repo"`
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	if jerr := json.Unmarshal(raw, &in); jerr != nil {
+		return "", "", "", errors.New("declare --new body must be JSON {\"title\":…,\"body\":…,\"repo\":…}")
+	}
+	if len(in.Repo) > 200 {
+		return "", "", "", errors.New("repo is not owner/name-shaped")
+	}
+	// Same rules the in-sandbox CLI applies, re-checked because the
+	// sandbox is untrusted.
+	title, err = issuemeta.ValidateTitle(in.Title)
+	if err != nil {
+		return "", "", "", err
+	}
+	body, err = issuemeta.ValidateBody(in.Body)
+	if err != nil {
+		return "", "", "", err
+	}
+	return in.Repo, title, body, nil
 }
 
 // serveUndeclaredWrite answers a write-tier request while the run's

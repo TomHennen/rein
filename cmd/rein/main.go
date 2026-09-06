@@ -804,6 +804,13 @@ func approvalStatus(stateDir string) error {
 			if pi := st.Context.PendingIssue; pi != nil {
 				fmt.Printf("  pending:    #%d %q in %s (awaiting confirmation)\n", pi.Number, pi.Title, pi.Repo)
 			}
+			if pn := st.Context.PendingNewIssue; pn != nil {
+				state := "awaiting confirmation"
+				if pn.Approved {
+					state = "approved; rein is filing it"
+				}
+				fmt.Printf("  pending:    NEW issue %q in %s (%s)\n", pn.Title, pn.Repo, state)
+			}
 		} else {
 			fmt.Println("  session:    <no run context on disk>")
 		}

@@ -5,15 +5,15 @@ rein: sandbox preflight:
   [ok]   bwrap userns: unprivileged user namespace works
   [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
 rein: egress preset "dev" active (11 package-registry/advisory hosts; egress_preset: none in the session file turns it off)
-rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-4dvwt51e (git -C /tmp/rein-itest-4dvwt51e rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
+rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-tf71afi7 (git -C /tmp/rein-itest-tf71afi7 rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked; egress answered by rein).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_ceremony (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-u9uciwh6/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-g_F081jCWfGtnqK8YmDGxw/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-itest-4dvwt51e
+  session: sess_journey_ceremony (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-dqvsl68m/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-Ak5dPVT1UDjdWYD6WANa8A/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-itest-tf71afi7
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-459629539
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-4117492453
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -24,7 +24,7 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-itest-4dvwt51e
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-itest-tf71afi7
     => work the agent must keep has to be written INTO the working tree.
     allowed back read-only: /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.local/bin, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv, /home/admin/.cache/ms-playwright
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
@@ -54,27 +54,27 @@ emit "@PHASE1_START  push BEFORE declare (expect: locked, no prompt)"
 echo "phase 1" >> probe-1.txt
 run git add -A
 run git commit -q -m "ceremony: pre-declaration write attempt"
-run git push --progress origin HEAD:refs/heads/agent/540/cerem-20260906-190402-a1b7c9
+run git push --progress origin HEAD:refs/heads/agent/560/cerem-20260906-211234-33caee
 emit "@PHASE1_RC=$?"
 
-emit "@PHASE2_START  rein declare 540 (blocks for the human)"
-run rein declare 540
+emit "@PHASE2_START  rein declare 560 (blocks for the human)"
+run rein declare 560
 emit "@PHASE2_RC=$?"
 
-emit "@PHASE3_START  push agent/540/<nonce> (expect: lands)"
-run git push --progress origin HEAD:refs/heads/agent/540/cerem-20260906-190402-a1b7c9
+emit "@PHASE3_START  push agent/560/<nonce> (expect: lands)"
+run git push --progress origin HEAD:refs/heads/agent/560/cerem-20260906-211234-33caee
 emit "@PHASE3_RC=$?"
 
 emit "@PHASE4_START  push a non-convention ref (expect: rejected)"
-run git push --progress origin HEAD:refs/heads/cerem-nonconvention-20260906-190402-867f7d
+run git push --progress origin HEAD:refs/heads/cerem-nonconvention-20260906-211234-023df8
 emit "@PHASE4_RC=$?"
 emit "@SCRIPT_DONE"
- /tmp/rein-itest-4dvwt51e
+ /tmp/rein-itest-tf71afi7
 ---
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/rein-itest-4dvwt51e
+- Your work persists ONLY in the working tree: /tmp/rein-itest-tf71afi7
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
@@ -98,6 +98,10 @@ GITHUB WRITES
   declare the issue this work is for:
       rein declare <n>
   That asks the human to approve, on their terminal. Reads work without it.
+- No issue exists for this work yet? Ask to file one:
+      rein declare --new "<title>" [--body "<text>"] [--repo owner/name]
+  The human approves, rein files it, and it becomes the declared issue.
+  (--repo is required when this session scopes more than one repo.)
 - Once confirmed, push ONLY to a branch named:
       agent/<n>/<nonce>
   where <n> is the declared issue number and <nonce> is a short name you choose
@@ -124,26 +128,26 @@ SBX| @CLONE_OK  (reads flow with no declaration at all)
 SBX| @PHASE1_START  push BEFORE declare (expect: locked, no prompt)
 SBX| $ git add -A
 SBX| $ git commit -q -m ceremony: pre-declaration write attempt
-SBX| $ git push --progress origin HEAD:refs/heads/agent/540/cerem-20260906-190402-a1b7c9
+SBX| $ git push --progress origin HEAD:refs/heads/agent/560/cerem-20260906-211234-33caee
 SBX| fatal: remote error: rein: writes are locked until you declare your issue. Run: rein declare <n> (then push to agent/<n>/<nonce>)
 SBX| @PHASE1_RC=128
-SBX| @PHASE2_START  rein declare 540 (blocks for the human)
-SBX| $ rein declare 540
+SBX| @PHASE2_START  rein declare 560 (blocks for the human)
+SBX| $ rein declare 560
 
 === rein: agent declares work on an issue ===
-   issue:    #540 "rein journey: write-ceremony walkthrough (safe to close)"  [open]
+   issue:    #560 "rein journey: write-ceremony walkthrough (safe to close)"  [open]
              in TomHennen/agentcreds-validation-a
    session:  sess_journey_ceremony (role=implement, repos=[TomHennen/agentcreds-validation-a])
    approving covers ALL writes for this run (git push, gh, API).
 
-To approve, type the issue number (540) and press enter.
+To approve, type the issue number (560) and press enter.
 To deny, press Ctrl-C or type anything else.
-> 540
+> 560
   [approved]
-SBX| issue #540 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/540/<nonce>)
+SBX| issue #560 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/560/<nonce>)
 SBX| @PHASE2_RC=0
-SBX| @PHASE3_START  push agent/540/<nonce> (expect: lands)
-SBX| $ git push --progress origin HEAD:refs/heads/agent/540/cerem-20260906-190402-a1b7c9
+SBX| @PHASE3_START  push agent/560/<nonce> (expect: lands)
+SBX| $ git push --progress origin HEAD:refs/heads/agent/560/cerem-20260906-211234-33caee
 SBX| Enumerating objects: 4, done.
 SBX| Counting objects: 100% (4/4), done.
 SBX| Delta compression using up to 8 threads
@@ -151,17 +155,17 @@ SBX| Compressing objects: 100% (2/2), done.
 SBX| Writing objects: 100% (3/3), 341 bytes | 341.00 KiB/s, done.
 SBX| Total 3 (delta 1), reused 0 (delta 0), pack-reused 0
 SBX| remote:
-SBX| remote: Create a pull request for 'agent/540/cerem-20260906-190402-a1b7c9' on GitHub by visiting:
-SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/540/cerem-20260906-190402-a1b7c9
+SBX| remote: Create a pull request for 'agent/560/cerem-20260906-211234-33caee' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/560/cerem-20260906-211234-33caee
 SBX| remote:
 SBX| To https://github.com/TomHennen/agentcreds-validation-a
-SBX|  * [new branch]      HEAD -> agent/540/cerem-20260906-190402-a1b7c9
+SBX|  * [new branch]      HEAD -> agent/560/cerem-20260906-211234-33caee
 SBX| @PHASE3_RC=0
 SBX| @PHASE4_START  push a non-convention ref (expect: rejected)
-SBX| $ git push --progress origin HEAD:refs/heads/cerem-nonconvention-20260906-190402-867f7d
+SBX| $ git push --progress origin HEAD:refs/heads/cerem-nonconvention-20260906-211234-023df8
 SBX| Total 0 (delta 0), reused 0 (delta 0), pack-reused 0
 SBX| To https://github.com/TomHennen/agentcreds-validation-a
-SBX|  ! [remote rejected] HEAD -> cerem-nonconvention-20260906-190402-867f7d (rein: refs must match agent/<issue>/<nonce> (e.g. agent/73/kx3q))
+SBX|  ! [remote rejected] HEAD -> cerem-nonconvention-20260906-211234-023df8 (rein: refs must match agent/<issue>/<nonce> (e.g. agent/73/kx3q))
 SBX| error: failed to push some refs to 'https://github.com/TomHennen/agentcreds-validation-a'
 SBX| @PHASE4_RC=1
 SBX| @SCRIPT_DONE

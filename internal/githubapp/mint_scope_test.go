@@ -57,6 +57,22 @@ func TestMint_RequestBodyPinsScopeCeiling(t *testing.T) {
 			},
 		},
 		{
+			// issue #180: filing an issue the human approved must not carry
+			// contents:write or pull_requests:write. This is the narrowest
+			// write tier and the assertion that keeps it narrow — a
+			// regression to MintGhSessionToken would hand a push-and-merge
+			// credential to a ceremony approved as "file an issue".
+			name: "issue-write",
+			mint: (*Client).MintIssueWriteToken,
+			wantPerms: map[string]string{
+				"issues":   "write",
+				"metadata": "read",
+			},
+			// workflows:write granted by the installation must NOT be
+			// requested here: filing an issue never touches workflows.
+			workflowsWrite: true,
+		},
+		{
 			name: "gh-read-only",
 			mint: (*Client).MintGhReadOnlyToken,
 			wantPerms: map[string]string{

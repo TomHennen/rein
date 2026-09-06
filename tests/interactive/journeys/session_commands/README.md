@@ -15,6 +15,13 @@ show`, which previously had no test of any kind. RAW golden, normalize-on-compar
 
 **Beside it (plain assertion, not in the golden):** the CROSS-OWNER reject.
 
+**Not in this journey — the IN-SANDBOX view (#180).** `rein session show` run
+*inside* the sandbox is a different code path (no session file in there, and never
+will be — scope is fixed at launch, outside): it used to print "no session file",
+which read as breakage. It now prints the run's fixed scope from
+`REIN_IN_SANDBOX_REPOS` plus a pointer to `rein declare <n>` / `rein declare --new`.
+Covered by the Go unit test `cmd/rein/session_sandbox_test.go`, not this journey.
+
 Run (from repo root):
 
 ```sh
