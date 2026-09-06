@@ -454,9 +454,12 @@ closes that gap.
   warnings: on by default, that was seven fixed warning lines every run, which
   would only train people to ignore the warnings about their OWN additions.
   The launch banner names the active preset and the opt-out instead; operator
-  wildcards still warn. The egress_preset journey now walks the default AND the
-  none opt-out (pypi 200 vs 000); every sandboxed golden regenerated for the
-  banner + the wider contract NETWORK line.
+  wildcards still warn. The agent contract's NETWORK section gains a one-line
+  hint (Tom's ask) that registries are OPEN by default, naming the preset and
+  its ecosystems, omitted under `none` so it never claims installs work when
+  they don't. The egress_preset journey now walks the default AND the none
+  opt-out (pypi 200 vs 000); every sandboxed golden regenerated for the
+  banner + the wider contract NETWORK section.
 
 - 2026-09-05 — **#163: "dev" egress preset (open-egress substitute).** srt 0.0.63
   can't express true allow-all (schema rejects a bare "*"; see #163 finding), so

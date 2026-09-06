@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/TomHennen/rein/internal/srt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,6 +44,30 @@ func TestBuildAgentContract_StatesTheEnforcedRules(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("contract missing %q; the agent would not know this rule.\n--- contract ---\n%s", want, got)
 		}
+	}
+}
+
+// TestBuildAgentContract_RegistriesHintTracksPreset: with the dev preset the
+// contract says registries are open and names the ecosystems; under `none` it
+// must NOT (a false "installs work" is worse than silence).
+func TestBuildAgentContract_RegistriesHintTracksPreset(t *testing.T) {
+	name, _, _ := srt.EgressPreset("")
+	on := buildAgentContract(contractParams{
+		WorkTree: "/work/repo", HomeEphemeral: true,
+		EgressPreset: name, EgressPresetSummary: srt.EgressPresetSummary(name),
+	})
+	for _, want := range []string{`registries are OPEN by default (egress preset "dev")`, "PyPI", "npm", "Go modules"} {
+		if !strings.Contains(on, want) {
+			t.Errorf("dev-preset contract missing %q\n--- contract ---\n%s", want, on)
+		}
+	}
+	none, _, _ := srt.EgressPreset("none")
+	off := buildAgentContract(contractParams{
+		WorkTree: "/work/repo", HomeEphemeral: true,
+		EgressPreset: none, EgressPresetSummary: srt.EgressPresetSummary(none),
+	})
+	if strings.Contains(off, "registries are OPEN") {
+		t.Errorf("contract under egress_preset: none claims registries are open\n--- contract ---\n%s", off)
 	}
 }
 

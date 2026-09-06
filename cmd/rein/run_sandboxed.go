@@ -792,6 +792,9 @@ func runSandboxed(cmdline []string) (int, error) {
 		WorkTreeEphemeral: cwdEphemeral,
 		WorkTreeRepo:      cwdRepo,
 		ExtraDomains:      extraDomains,
+		// Empty summary under `none`, so the registries line is omitted.
+		EgressPreset:        presetName,
+		EgressPresetSummary: srt.EgressPresetSummary(presetName),
 	})
 	contractOff := srt.DisableClaudeMCPFromEnv(os.Getenv(EnvDisableAgentContract))
 	agentArgv := cmdline

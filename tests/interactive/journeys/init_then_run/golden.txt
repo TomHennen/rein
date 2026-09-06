@@ -1,14 +1,14 @@
 $ rein init --yes --no-alias --no-symlink  (real mint check, App from state.json, NO env vars)
 rein init: setting up local scaffolding
-  state dir:  /tmp/rein-itest-home-n5gur4ti/.local/state/rein
-  config dir: /tmp/rein-itest-home-n5gur4ti/.config/rein
+  state dir:  /tmp/rein-itest-home-0ty1nlro/.local/state/rein
+  config dir: /tmp/rein-itest-home-0ty1nlro/.config/rein
   machine:    demo-box (label for this machine's App name)
   setup:      state.json: audit_done (steady state from manifest flow)
   app:        client_id=Iv23liHH7Gu2xMxCZ7rz installation_id=138434780
-  shim:       3 binaries under /tmp/rein-itest-home-n5gur4ti/.local/state/rein/shim
+  shim:       3 binaries under /tmp/rein-itest-home-0ty1nlro/.local/state/rein/shim
   symlink:    skipped (--no-symlink)
   mint check: minting a read-only installation token to verify App credentials
-              ok (token expires 2026-09-06T14:16:16Z)
+              ok (token expires 2026-09-06T14:32:51Z)
   session:    not scaffolded (pass --repo owner/name to scaffold)
   alias:      not installed (opt-in; enable with `rein init --alias`)
   install on repo:
@@ -19,7 +19,7 @@ rein init: setting up local scaffolding
 
 rein init: done.
 Next:
-  - /tmp/rein-itest-home-n5gur4ti/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
+  - /tmp/rein-itest-home-0ty1nlro/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
   - run `rein run -- claude` (or another agent) to launch with rein in effect
   - (optional) enable the `claude` alias with `rein init --alias`
   - run `rein doctor` to verify everything is wired up
@@ -34,9 +34,9 @@ rein: WARNING — DIRECT (UNSANDBOXED) MODE
   THROWAWAY repo. For real work, drop --direct to run sandboxed.
 ===============================================================
 rein: launching wrapped process with:
-  session: sess_init_then_run (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-itest-home-n5gur4ti/session.yaml]
-  PATH-front shim dir: /tmp/rein-itest-home-n5gur4ti/.local/state/rein/shim
-  per-process git config: /tmp/rein-run-2766534930/gitconfig
+  session: sess_init_then_run (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-itest-home-0ty1nlro/session.yaml]
+  PATH-front shim dir: /tmp/rein-itest-home-0ty1nlro/.local/state/rein/shim
+  per-process git config: /tmp/rein-run-1085302155/gitconfig
   (your real ~/.gitconfig is layered in via include.path)
 
   Writes are LOCKED until the agent declares its issue:  rein declare <n>
@@ -54,15 +54,15 @@ rein: sandbox preflight:
   [ok]   bwrap userns: unprivileged user namespace works
   [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
 rein: egress preset "dev" active (11 package-registry/advisory hosts; egress_preset: none in the session file turns it off)
-rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-journey-sbxclone-g60ou6sw (git -C /tmp/rein-journey-sbxclone-g60ou6sw rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
+rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-journey-sbxclone-_y7deq0b (git -C /tmp/rein-journey-sbxclone-_y7deq0b rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
 rein: launching SANDBOXED (srt) run:
-  session: sess_init_then_run (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-itest-home-n5gur4ti/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-dk5Qyu0ulMpW0qZJqBtQNw/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-journey-sbxclone-g60ou6sw
+  session: sess_init_then_run (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-itest-home-0ty1nlro/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-ibQD_LZJRlZrmmrAF2T5PA/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-journey-sbxclone-_y7deq0b
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-1231102014
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-3460813965
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -73,9 +73,9 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-journey-sbxclone-g60ou6sw
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-journey-sbxclone-_y7deq0b
     => work the agent must keep has to be written INTO the working tree.
-    allowed back read-only: /tmp/rein-itest-home-n5gur4ti/.local/bin, /tmp/rein-itest-home-n5gur4ti/.cargo, /tmp/rein-itest-home-n5gur4ti/.rustup, /tmp/rein-itest-home-n5gur4ti/go, /tmp/rein-itest-home-n5gur4ti/.pyenv
+    allowed back read-only: /tmp/rein-itest-home-0ty1nlro/.local/bin, /tmp/rein-itest-home-0ty1nlro/.cargo, /tmp/rein-itest-home-0ty1nlro/.rustup, /tmp/rein-itest-home-0ty1nlro/go, /tmp/rein-itest-home-0ty1nlro/.pyenv
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
       REIN_SANDBOX_ALLOW_READ=/abs/path[:/more] rein run --sandbox -- …
     or (NOT recommended — exposes your whole home dir): REIN_SANDBOX_SHOW_HOME=1
@@ -95,12 +95,12 @@ run() {
 cd "$0"
 run git clone --quiet https://github.com/TomHennen/agentcreds-validation-a clone
 [ -d clone/.git ] && emit "@SBX_CLONE_RC=0" || emit "@SBX_CLONE_RC=1"
- /tmp/rein-journey-sbxclone-g60ou6sw
+ /tmp/rein-journey-sbxclone-_y7deq0b
 ---
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/rein-journey-sbxclone-g60ou6sw
+- Your work persists ONLY in the working tree: /tmp/rein-journey-sbxclone-_y7deq0b
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
@@ -126,6 +126,7 @@ GITHUB WRITES
 
 NETWORK
 - Egress is restricted to GitHub plus: *.crates.io, *.golang.org, *.npmjs.org, *.pypi.org, *.pythonhosted.org, *.rubygems.org, api.anthropic.com, crates.io, osv.dev, platform.claude.com, pypi.org, rubygems.org, vuln.go.dev
+- Package registries are OPEN by default (egress preset "dev"): Go modules, npm, PyPI, crates.io, RubyGems (plus the osv.dev / vuln.go.dev advisory feeds). Dependency installs work.
 - Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.
 - You CANNOT open a blocked host yourself. To reach one, ask the human to run this
   single command, then restart rein (it applies to the NEXT run, not this one):

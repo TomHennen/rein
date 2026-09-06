@@ -54,6 +54,18 @@ var egressPresets = map[string][]string{
 	},
 }
 
+// egressPresetSummaries name each preset's ecosystems for the agent contract,
+// where the raw host list is too dense to answer "will pip install work?".
+var egressPresetSummaries = map[string]string{
+	"dev": "Go modules, npm, PyPI, crates.io, RubyGems (plus the osv.dev / vuln.go.dev advisory feeds)",
+}
+
+// EgressPresetSummary returns the human-readable ecosystem list for a resolved
+// preset name; "" for none or an unknown name.
+func EgressPresetSummary(name string) string {
+	return egressPresetSummaries[strings.ToLower(strings.TrimSpace(name))]
+}
+
 // EgressPreset returns the hosts for a named preset. "" selects
 // DefaultEgressPreset; EgressPresetNone yields no hosts. An unknown name is an
 // error — fail closed rather than silently apply nothing when the operator

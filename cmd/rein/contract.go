@@ -59,6 +59,11 @@ type contractParams struct {
 	WorkTreeRepo string
 	// ExtraDomains are the operator's extra egress hosts (beyond GitHub).
 	ExtraDomains []string
+	// EgressPreset / EgressPresetSummary name the active egress preset and its
+	// ecosystems, so the agent knows registries are open without decoding the
+	// host list. Empty under `egress_preset: none`.
+	EgressPreset        string
+	EgressPresetSummary string
 }
 
 // buildAgentContract renders the contract. Terse and factual on purpose: this
@@ -122,6 +127,9 @@ func buildAgentContract(p contractParams) string {
 		fmt.Fprintf(&b, "- Egress is restricted to GitHub plus: %s\n", strings.Join(p.ExtraDomains, ", "))
 	} else {
 		b.WriteString("- Egress is restricted to GitHub.\n")
+	}
+	if p.EgressPreset != "" && p.EgressPresetSummary != "" {
+		fmt.Fprintf(&b, "- Package registries are OPEN by default (egress preset %q): %s. Dependency installs work.\n", p.EgressPreset, p.EgressPresetSummary)
 	}
 	b.WriteString("- Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.\n")
 	// Self-help: the agent cannot widen egress itself (the allowlist is fixed
