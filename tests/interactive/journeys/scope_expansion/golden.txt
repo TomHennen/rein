@@ -4,15 +4,15 @@ rein: sandbox preflight:
   [ok]   seccomp: apply-seccomp present (unix-socket block available)
   [ok]   bwrap userns: unprivileged user namespace works
   [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
-rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-v7pfovqt (git -C /tmp/rein-itest-v7pfovqt rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
+rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-320namgl (git -C /tmp/rein-itest-320namgl rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_expansion (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-b-_nela0rm/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-kfpy5_2urrDBEyL0OTcLxA/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-itest-v7pfovqt
+  session: sess_journey_expansion (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-b-fym8ho1w/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-PKo9i4EyKzMVuaQBt1ZIDg/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-itest-320namgl
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-1834631967
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-2846338776
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -23,7 +23,7 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-itest-v7pfovqt
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-itest-320namgl
     => work the agent must keep has to be written INTO the working tree.
     allowed back read-only: /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.local/bin, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
@@ -64,15 +64,15 @@ emit "@PHASE3_START  push agent/2/<nonce> to repo B (expect: lands)"
 echo "scope-expansion probe $(date -u +%FT%TZ)" >> expansion-probe.txt
 run git add -A
 run git commit -q -m "scope-expansion journey: push to repo B"
-run git push --progress origin HEAD:refs/heads/agent/2/exp-20260905-194813-d5d9a2
+run git push --progress origin HEAD:refs/heads/agent/2/exp-20260906-124121-c5d4cd
 emit "@PHASE3_RC=$?"
 emit "@SCRIPT_DONE"
- /tmp/rein-itest-v7pfovqt
+ /tmp/rein-itest-320namgl
 ---
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/rein-itest-v7pfovqt
+- Your work persists ONLY in the working tree: /tmp/rein-itest-320namgl
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
@@ -99,9 +99,9 @@ GITHUB WRITES
 NETWORK
 - Egress is restricted to GitHub plus: api.anthropic.com, platform.claude.com
 - Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.
-- You CANNOT open a blocked host yourself. To reach one, ask the human to add it
-  to `allow_domains:` (or set `egress_preset: dev` for package registries) in
-  /tmp/rein-journey-sess-b-_nela0rm/session.yaml, then restart rein. It applies to the NEXT run, not this one.
+- You CANNOT open a blocked host yourself. To reach one, ask the human to run this
+  single command, then restart rein (it applies to the NEXT run, not this one):
+      rein session allow-domain <host>
 
 SBX| $ git clone --progress https://github.com/TomHennen/agentcreds-validation-a repo
 SBX| Cloning into 'repo'...
@@ -141,8 +141,8 @@ SBX|       working tree, where a nested repo can end up committed into the other
 SBX|       ephemeral; the durable artifact is the PUSH.
 SBX| @PHASE1_RC=0
 SBX| @PHASE2_START  clone repo B into scratch (scope grew, binds did not: use TMPDIR, not the working tree)
-SBX| $ git clone --progress https://github.com/TomHennen/agentcreds-validation-b /tmp/rein-agent-tmp-1834631967/rein-expansion-b
-SBX| Cloning into '/tmp/rein-agent-tmp-1834631967/rein-expansion-b'...
+SBX| $ git clone --progress https://github.com/TomHennen/agentcreds-validation-b /tmp/rein-agent-tmp-2846338776/rein-expansion-b
+SBX| Cloning into '/tmp/rein-agent-tmp-2846338776/rein-expansion-b'...
 SBX| remote: Enumerating objects: 3, done.
 SBX| remote: Counting objects: 100% (1/1), done.
 SBX| remote: Total 3 (delta 0), reused 0 (delta 0), pack-reused 2 (from 1)
@@ -151,7 +151,7 @@ SBX| @PHASE2_RC=0
 SBX| @PHASE3_START  push agent/2/<nonce> to repo B (expect: lands)
 SBX| $ git add -A
 SBX| $ git commit -q -m scope-expansion journey: push to repo B
-SBX| $ git push --progress origin HEAD:refs/heads/agent/2/exp-20260905-194813-d5d9a2
+SBX| $ git push --progress origin HEAD:refs/heads/agent/2/exp-20260906-124121-c5d4cd
 SBX| Enumerating objects: 5, done.
 SBX| Counting objects: 100% (5/5), done.
 SBX| Delta compression using up to 8 threads
@@ -159,11 +159,11 @@ SBX| Compressing objects: 100% (2/2), done.
 SBX| Writing objects: 100% (3/3), 378 bytes | 378.00 KiB/s, done.
 SBX| Total 3 (delta 0), reused 0 (delta 0), pack-reused 0
 SBX| remote:
-SBX| remote: Create a pull request for 'agent/2/exp-20260905-194813-d5d9a2' on GitHub by visiting:
-SBX| remote:      https://github.com/TomHennen/agentcreds-validation-b/pull/new/agent/2/exp-20260905-194813-d5d9a2
+SBX| remote: Create a pull request for 'agent/2/exp-20260906-124121-c5d4cd' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-b/pull/new/agent/2/exp-20260906-124121-c5d4cd
 SBX| remote:
 SBX| To https://github.com/TomHennen/agentcreds-validation-b
-SBX|  * [new branch]      HEAD -> agent/2/exp-20260905-194813-d5d9a2
+SBX|  * [new branch]      HEAD -> agent/2/exp-20260906-124121-c5d4cd
 SBX| @PHASE3_RC=0
 SBX| @SCRIPT_DONE
 rein: revoked 1 of 1 write token(s) on exit
