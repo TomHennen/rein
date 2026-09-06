@@ -99,3 +99,44 @@ func TestSourceFilePath(t *testing.T) {
 		t.Errorf("non-file source => empty, got %q", got)
 	}
 }
+
+func TestAddAllowDomainToFile_CreatesAndAppends(t *testing.T) {
+	// Key absent → created.
+	p := writeSession(t, "# sess\nid: s\nrole: implement\nrepos:\n  - TomH/a\n")
+	u, err := AddAllowDomainToFile(p, "pypi.org")
+	if err != nil {
+		t.Fatalf("add domain (create): %v", err)
+	}
+	if len(u.AllowDomains) != 1 || u.AllowDomains[0] != "pypi.org" {
+		t.Fatalf("allow_domains = %v, want [pypi.org]", u.AllowDomains)
+	}
+	// Key present → appended; comments + repos survive.
+	u, err = AddAllowDomainToFile(p, "*.golang.org")
+	if err != nil {
+		t.Fatalf("add domain (append): %v", err)
+	}
+	if len(u.AllowDomains) != 2 || u.AllowDomains[1] != "*.golang.org" {
+		t.Fatalf("allow_domains = %v", u.AllowDomains)
+	}
+	body, _ := os.ReadFile(p)
+	if !strings.Contains(string(body), "# sess") || !strings.Contains(string(body), "TomH/a") {
+		t.Errorf("comments/repos must survive:\n%s", body)
+	}
+	// Duplicate (case-insensitive) → sentinel, nothing added.
+	if _, err := AddAllowDomainToFile(p, "PyPI.org"); !errors.Is(err, ErrDomainAlreadyAllowed) {
+		t.Errorf("duplicate must be ErrDomainAlreadyAllowed, got %v", err)
+	}
+}
+
+func TestNormalizeAllowDomain_RejectsBadHosts(t *testing.T) {
+	for _, ok := range []string{"pypi.org", "*.golang.org", "Api.GitHub.com", "files.pythonhosted.org."} {
+		if _, err := NormalizeAllowDomain(ok); err != nil {
+			t.Errorf("NormalizeAllowDomain(%q) rejected a valid host: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "*", "https://x.com", "x.com/path", "x.com:443", "has space.com", "nodot", "a.*.b", "foo.*"} {
+		if _, err := NormalizeAllowDomain(bad); err == nil {
+			t.Errorf("NormalizeAllowDomain(%q) accepted a bad host", bad)
+		}
+	}
+}

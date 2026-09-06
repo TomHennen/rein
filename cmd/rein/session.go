@@ -29,7 +29,7 @@ import (
 // runSession dispatches `rein session <sub>`. args is os.Args[2:].
 func runSession(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: rein session show | rein session add-repo <owner/name>")
+		fmt.Fprintln(os.Stderr, "usage: rein session show | rein session add-repo <owner/name> | rein session allow-domain <host>")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -40,10 +40,44 @@ func runSession(args []string) error {
 			return errors.New("usage: rein session add-repo <owner/name>")
 		}
 		return sessionAddRepo(args[1])
+	case "allow-domain":
+		if len(args) < 2 {
+			return errors.New("usage: rein session allow-domain <host>")
+		}
+		return sessionAllowDomain(args[1])
 	default:
-		fmt.Fprintf(os.Stderr, "rein session: unknown subcommand %q (want show|add-repo)\n", args[0])
+		fmt.Fprintf(os.Stderr, "rein session: unknown subcommand %q (want show|add-repo|allow-domain)\n", args[0])
 		os.Exit(2)
 	}
+	return nil
+}
+
+// sessionAllowDomain adds an egress host to the session's allow_domains — the
+// single command the agent tells the human to run when it hits a blocked host
+// (the contract's self-help line points here). Takes effect on the NEXT run.
+func sessionAllowDomain(host string) error {
+	sess, source, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
+	if err != nil {
+		return fmt.Errorf("load session: %w", err)
+	}
+	_ = sess
+	path := session.SourceFilePath(source)
+	if path == "" {
+		return fmt.Errorf("this session has no file to add to (it came from the env fallback).\n      Run `rein init` to write a session file first")
+	}
+	updated, err := session.AddAllowDomainToFile(path, host)
+	if errors.Is(err, session.ErrDomainAlreadyAllowed) {
+		fmt.Printf("rein: %s is already allowed. Nothing to do.\n", host)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("rein: %w", err)
+	}
+	fmt.Printf("rein: added %s to egress allow_domains. Now:\n", host)
+	for _, d := range updated.AllowDomains {
+		fmt.Printf("  - %s\n", d)
+	}
+	fmt.Println("Takes effect on the NEXT `rein run` (egress is fixed at launch — restart the run).")
 	return nil
 }
 

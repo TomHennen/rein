@@ -35,6 +35,10 @@ func TestBuildAgentContract_StatesTheEnforcedRules(t *testing.T) {
 		"agent/<n>/<nonce>",  // exact #35 branch convention
 		"One issue per push", // exact #35 push rule
 		"api.anthropic.com, registry.npmjs.org",
+		// egress self-help: the ONE command the human runs, + the restart caveat
+		"CANNOT open a blocked host yourself",
+		"rein session allow-domain <host>",
+		"restart rein",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("contract missing %q; the agent would not know this rule.\n--- contract ---\n%s", want, got)

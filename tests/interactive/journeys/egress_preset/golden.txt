@@ -1,4 +1,4 @@
-$ rein run -- bash -c <egress-preset probe> /tmp/rein-preset-6t7avhmk
+$ rein run -- bash -c <egress-preset probe> /tmp/rein-preset-21jwsofk
 rein: sandbox preflight:
   [ok]   srt present: /home/admin/.npm-global/bin/srt
   [ok]   srt version: 0.0.63 (package.json; note `srt --version` misreports 1.0.0)
@@ -16,11 +16,11 @@ rein: EGRESS WARNING: 11 custom egress domains allowed — the sandboxed agent m
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_egress_preset (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-v_fmlcgc/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-6XpLwe9yvY5cw7m6B8H21Q/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-preset-6t7avhmk  [TomHennen/agentcreds-validation-a]
+  session: sess_journey_egress_preset (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-8qgyfu0q/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-0gMhcdiuUBvVrOmEkUXb9A/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-preset-21jwsofk  [TomHennen/agentcreds-validation-a]
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-2224269771
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-1116183835
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -31,7 +31,7 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-preset-6t7avhmk
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-preset-21jwsofk
     => work the agent must keep has to be written INTO the working tree.
     allowed back read-only: /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.local/bin, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
@@ -55,12 +55,12 @@ cd "$0"
 emit "@EGRESS_PRESET  (dev preset: package registries reachable, other hosts blocked)"
 emit "@PRESET_HOST=$(curl -sS -o /dev/null -w %{http_code} --max-time 20 https://pypi.org/ 2>&1 | tail -c 3)"
 emit "@OTHER_HOST=$(curl -sS -o /dev/null -w %{http_code} --max-time 20 https://example.com/ 2>&1 | tail -c 3)"
- /tmp/rein-preset-6t7avhmk
+ /tmp/rein-preset-21jwsofk
 ---
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/rein-preset-6t7avhmk
+- Your work persists ONLY in the working tree: /tmp/rein-preset-21jwsofk
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
@@ -87,6 +87,9 @@ GITHUB WRITES
 NETWORK
 - Egress is restricted to GitHub plus: *.crates.io, *.golang.org, *.npmjs.org, *.pypi.org, *.pythonhosted.org, *.rubygems.org, api.anthropic.com, crates.io, osv.dev, platform.claude.com, pypi.org, rubygems.org, vuln.go.dev
 - Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.
+- You CANNOT open a blocked host yourself. To reach one, ask the human to run this
+  single command, then restart rein (it applies to the NEXT run, not this one):
+      rein session allow-domain <host>
 
 SBX| @EGRESS_PRESET  (dev preset: package registries reachable, other hosts blocked)
 SBX| @PRESET_HOST=200

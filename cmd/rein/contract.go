@@ -124,6 +124,12 @@ func buildAgentContract(p contractParams) string {
 		b.WriteString("- Egress is restricted to GitHub.\n")
 	}
 	b.WriteString("- Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.\n")
+	// Self-help: the agent cannot widen egress itself (the allowlist is fixed
+	// at launch), so give it the ONE command the human runs — no file to edit,
+	// no docs to read — rather than let it retry or disable checksum checks.
+	b.WriteString("- You CANNOT open a blocked host yourself. To reach one, ask the human to run this\n")
+	b.WriteString("  single command, then restart rein (it applies to the NEXT run, not this one):\n")
+	b.WriteString("      rein session allow-domain <host>\n")
 
 	return b.String()
 }
