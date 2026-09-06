@@ -406,6 +406,14 @@ closes that gap.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-09-05 — **#163: "dev" egress preset (open-egress substitute).** srt 0.0.63
+  can't express true allow-all (schema rejects a bare "*"; see #163 finding), so
+  a named preset is the pragmatic answer: session `egress_preset: dev` (or
+  REIN_EGRESS_PRESET) expands to the package registries + advisory hosts a
+  dependency-fetching agent needs, as srt-legal *.suffix wildcards, NONE covering
+  a GitHub inject/CDN host. Still egress-only, never injected; the normal exfil
+  warnings fire. Live-verified pypi + proxy.golang.org reachable under it.
+
 - 2026-09-05 — **#165: security-status read perms (Dependabot alerts, code
   scanning).** Both returned "Resource not accessible by integration" — the App
   lacks security_events:read + vulnerability_alerts:read. Threaded the #158
