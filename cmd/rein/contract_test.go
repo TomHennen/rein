@@ -79,7 +79,7 @@ func TestBuildAgentContract_BrowserHintTracksHost(t *testing.T) {
 		WorkTree: "/work/repo", HomeEphemeral: true,
 		PlaywrightBrowsers: "/home/someone/.cache/ms-playwright",
 	})
-	for _, want := range []string{"headless Chromium", "/home/someone/.cache/ms-playwright", "read-only", "Do NOT run `npx playwright install`"} {
+	for _, want := range []string{"headless Chromium", "/home/someone/.cache/ms-playwright", "read-only", "Do NOT run `npx playwright install`", "chromium-<rev>"} {
 		if !strings.Contains(with, want) {
 			t.Errorf("browser contract missing %q\n--- contract ---\n%s", want, with)
 		}
@@ -95,8 +95,13 @@ func TestBuildAgentContract_BrowserHintTracksHost(t *testing.T) {
 // $HOME is ephemeral would then be a LIE that could make it refuse to use a
 // perfectly good cache — or, worse, distrust the rest of the contract.
 func TestBuildAgentContract_KillSwitchTellsNoLie(t *testing.T) {
-	got := buildAgentContract(contractParams{WorkTree: "/work/repo", HomeEphemeral: false})
-	for _, forbidden := range []string{"EPHEMERAL", "DISCARDED"} {
+	// PlaywrightBrowsers set too: under SHOW_HOME that dir is the host's real,
+	// WRITABLE one, so the "read-only" browser block would be a second lie.
+	got := buildAgentContract(contractParams{
+		WorkTree: "/work/repo", HomeEphemeral: false,
+		PlaywrightBrowsers: "/home/someone/.cache/ms-playwright",
+	})
+	for _, forbidden := range []string{"EPHEMERAL", "DISCARDED", "read-only", "playwright"} {
 		if strings.Contains(got, forbidden) {
 			t.Errorf("contract claims %q while the $HOME deny is OFF — that is false.\n--- contract ---\n%s", forbidden, got)
 		}

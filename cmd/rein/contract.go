@@ -109,10 +109,14 @@ func buildAgentContract(p contractParams) string {
 	} else if !p.WorkTreeEphemeral {
 		b.WriteString("  Write anything that must outlive this run THERE.\n")
 	}
-	if p.PlaywrightBrowsers != "" {
+	// Only under the home deny: the "read-only" claim is false under the
+	// SHOW_HOME kill switch, where the dir is the host's real, writable one.
+	if p.HomeEphemeral && p.PlaywrightBrowsers != "" {
 		fmt.Fprintf(&b, "- A headless Chromium is available: Playwright browsers are host-installed under\n  %s (read-only; found automatically by playwright/playwright-core).\n", p.PlaywrightBrowsers)
 		b.WriteString("  Use it to render, screenshot, and test web UIs. Do NOT run `npx playwright install`\n")
-		b.WriteString("  (that dir is read-only); ask the human to run it on the host if a browser is missing.\n")
+		b.WriteString("  (that dir is read-only). If Playwright reports a missing chromium-<rev>, the host's\n")
+		b.WriteString("  version differs from your pinned playwright: ask the human to run `npx playwright\n")
+		b.WriteString("  install chromium` on the host, or pin the playwright version the host has.\n")
 	}
 
 	b.WriteString("\nCREDENTIALS\n")

@@ -167,17 +167,26 @@ func sandboxAllowReadPaths(home, srtPath string, cmdline []string) []string {
 }
 
 // playwrightBrowsersDir returns the host's Playwright browser dir (allowed back
-// read-only above) when it exists, else "" — the contract must not promise a
-// browser that is not there.
-func playwrightBrowsersDir(home string) string {
-	if home == "" {
+// read-only above) when the agent will actually find it at Playwright's default
+// path, else "" — the contract must not promise a browser that is not there.
+// resolvedHome is the symlink-resolved home the allow-back is derived from
+// (empty under the SHOW_HOME kill switch: no allow-back, no claim). A symlink
+// anywhere under home (~/.cache -> /mnt/cache) binds the TARGET while the link
+// itself stays hidden in the home tmpfs, so the default lookup fails; refuse
+// to advertise in that case.
+func playwrightBrowsersDir(home, resolvedHome string) string {
+	if home == "" || resolvedHome == "" {
 		return ""
 	}
-	dir := filepath.Join(home, ".cache", "ms-playwright")
-	if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
-		return dir
+	want := filepath.Join(resolvedHome, ".cache", "ms-playwright")
+	got, err := proxy.ResolveAbs(filepath.Join(home, ".cache", "ms-playwright"))
+	if err != nil || got != want {
+		return ""
 	}
-	return ""
+	if fi, err := os.Stat(want); err != nil || !fi.IsDir() {
+		return ""
+	}
+	return want
 }
 
 // agentUnderClaudeDenyError detects the `claude migrate-installer` layout, where the
