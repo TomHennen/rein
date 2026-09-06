@@ -790,7 +790,6 @@ func runSandboxed(cmdline []string) (int, error) {
 		WorkTreeEphemeral: cwdEphemeral,
 		WorkTreeRepo:      cwdRepo,
 		ExtraDomains:      extraDomains,
-		SessionFilePath:   session.SourceFilePath(sessSource),
 	})
 	contractOff := srt.DisableClaudeMCPFromEnv(os.Getenv(EnvDisableAgentContract))
 	agentArgv := cmdline

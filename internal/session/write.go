@@ -166,6 +166,118 @@ func AddRepoToFile(path, repo string) (Session, error) {
 
 // appendRepoNode appends a scalar to the document's top-level `repos:`
 // sequence, preserving every other key and comment in the file.
+// ErrDomainAlreadyAllowed reports that the host is already in allow_domains.
+var ErrDomainAlreadyAllowed = errors.New("host already in allow_domains")
+
+// AddAllowDomainToFile appends host to the session file's `allow_domains:`
+// (creating the key when absent), preserving comments/formatting via a node
+// edit, and re-parses+Validates before replacing the file — the same
+// fail-closed discipline as AddRepoToFile. host must be a bare host or a strict
+// `*.suffix` wildcard (the only forms srt's egress matcher accepts).
+func AddAllowDomainToFile(path, host string) (Session, error) {
+	norm, err := NormalizeAllowDomain(host)
+	if err != nil {
+		return Session{}, err
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return Session{}, err
+	}
+	var current Session
+	if err := yaml.Unmarshal(body, &current); err != nil {
+		return Session{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if err := current.Validate(); err != nil {
+		return Session{}, fmt.Errorf("invalid session %s: %w (fix it before adding a domain)", path, err)
+	}
+	for _, d := range current.AllowDomains {
+		if strings.EqualFold(strings.TrimSpace(d), norm) {
+			return current, ErrDomainAlreadyAllowed
+		}
+	}
+
+	var doc yaml.Node
+	if err := yaml.Unmarshal(body, &doc); err != nil {
+		return Session{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if err := appendAllowDomainNode(&doc, norm); err != nil {
+		return Session{}, fmt.Errorf("edit %s: %w", path, err)
+	}
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return Session{}, fmt.Errorf("render %s: %w", path, err)
+	}
+	var updated Session
+	if err := yaml.Unmarshal(out, &updated); err != nil {
+		return Session{}, fmt.Errorf("re-parse edited session: %w", err)
+	}
+	if err := updated.Validate(); err != nil {
+		return Session{}, fmt.Errorf("edited session would be invalid: %w (nothing written)", err)
+	}
+	if err := writeAtomic(path, out); err != nil {
+		return Session{}, err
+	}
+	return updated, nil
+}
+
+// NormalizeAllowDomain lowercases/trims host and checks it is a bare host or a
+// strict `*.suffix` wildcard — rejecting a scheme, path, port, whitespace, or a
+// bare `*`. Mirrors srt's egress-domain rules so a bad entry fails at the CLI,
+// not silently at launch.
+func NormalizeAllowDomain(host string) (string, error) {
+	d := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(host), ".")))
+	if d == "" {
+		return "", errors.New("empty host")
+	}
+	if strings.Contains(d, "://") || strings.Contains(d, "/") {
+		return "", fmt.Errorf("%q must be a bare host (no scheme or path)", host)
+	}
+	if strings.Contains(d, ":") {
+		return "", fmt.Errorf("%q must not include a port", host)
+	}
+	for _, r := range d {
+		if r <= ' ' || r == 0x7f {
+			return "", fmt.Errorf("%q must not contain whitespace or control characters", host)
+		}
+	}
+	if strings.Contains(d, "*") && (d == "*" || !strings.HasPrefix(d, "*.") || strings.Count(d, "*") != 1) {
+		return "", fmt.Errorf("%q: a wildcard must be of the form *.suffix (a bare * would allow ALL egress)", host)
+	}
+	if !strings.Contains(d, ".") {
+		return "", fmt.Errorf("%q does not look like a host (needs a dot)", host)
+	}
+	return d, nil
+}
+
+// appendAllowDomainNode appends host to the root's `allow_domains:` sequence,
+// creating the key + sequence when absent.
+func appendAllowDomainNode(doc *yaml.Node, host string) error {
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return errors.New("not a YAML document")
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return errors.New("session file root is not a mapping")
+	}
+	scalar := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: host}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != "allow_domains" {
+			continue
+		}
+		seq := root.Content[i+1]
+		if seq.Kind != yaml.SequenceNode {
+			return errors.New("`allow_domains:` is not a list")
+		}
+		seq.Content = append(seq.Content, scalar)
+		return nil
+	}
+	// Key absent — add `allow_domains: [host]`.
+	root.Content = append(root.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "allow_domains"},
+		&yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Content: []*yaml.Node{scalar}})
+	return nil
+}
+
 func appendRepoNode(doc *yaml.Node, repo string) error {
 	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
 		return errors.New("not a YAML document")
