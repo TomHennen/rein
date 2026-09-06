@@ -65,6 +65,7 @@ one (a new dir + a new `golden.txt`). Each row links to the journey's own README
 | [scope_expansion](journeys/scope_expansion/) | declare a repo OUTSIDE scope → approve → push to it | COVERED |
 | [multi_repo](journeys/multi_repo/) | REAL cross-repo work across a 2-repo ceiling in ONE run | COVERED |
 | [sandbox_gh_read_staleness](journeys/sandbox_gh_read_staleness/) | the #95 regression guard: cross-run gh-read staleness | COVERED |
+| [security_read](journeys/security_read/) | the App's security-status read perms reach the sandbox (dependabot + code scanning, #165); SKIPs if the App lacks the grant | COVERED |
 | [tmux_popup_approval](journeys/tmux_popup_approval/) | the DEFAULT approval surface inside `$TMUX` — a real popup (#37) | COVERED |
 | [sandbox_filesystem](journeys/sandbox_filesystem/) | the sandbox filesystem boundary from INSIDE (#59/#63/#64) | COVERED |
 | [credential_boundary](journeys/credential_boundary/) | the credential hide, proven by an INDEPENDENT `bagel` scanner | COVERED |
