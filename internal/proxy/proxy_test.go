@@ -88,6 +88,7 @@ type harness struct {
 	approvals  int32
 	readTok    string
 	writeTok   string
+	cancel     context.CancelFunc // ends the proxy (run shutdown) early
 }
 
 type harnessOpts struct {
@@ -99,6 +100,7 @@ type harnessOpts struct {
 	handshakeTimeout time.Duration     // if set, overrides the inbound handshake deadline
 	idleTimeout      time.Duration     // if set, overrides the inbound idle deadline
 	decl             *DeclarationHooks // if set, the #35 declaration gate
+	exposePorts      []int             // if set, the #179 reverse-tunnel ports
 }
 
 // syncBuffer is a goroutine-safe bytes.Buffer for capturing the audit log,
@@ -222,6 +224,7 @@ func newHarness(t *testing.T, opts harnessOpts) *harness {
 		HandshakeTimeout: opts.handshakeTimeout,
 		IdleTimeout:      opts.idleTimeout,
 		Declaration:      opts.decl,
+		ExposePorts:      opts.exposePorts,
 		InScope:          inScope,
 	})
 	if err != nil {
@@ -235,6 +238,10 @@ func newHarness(t *testing.T, opts harnessOpts) *harness {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	h.cancel = cancel
+	if err := p.ServeExpose(ctx); err != nil {
+		t.Fatal(err)
+	}
 	go p.Serve(ctx, ln)
 	return h
 }

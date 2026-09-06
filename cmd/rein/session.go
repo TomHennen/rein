@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,7 +30,7 @@ import (
 // runSession dispatches `rein session <sub>`. args is os.Args[2:].
 func runSession(args []string) error {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: rein session show | rein session add-repo <owner/name> | rein session allow-domain <host>")
+		fmt.Fprintln(os.Stderr, "usage: rein session show | rein session add-repo <owner/name> | rein session allow-domain <host> | rein session expose-port <port>")
 		os.Exit(2)
 	}
 	switch args[0] {
@@ -45,10 +46,47 @@ func runSession(args []string) error {
 			return errors.New("usage: rein session allow-domain <host>")
 		}
 		return sessionAllowDomain(args[1])
+	case "expose-port":
+		if len(args) < 2 {
+			return errors.New("usage: rein session expose-port <port>")
+		}
+		return sessionExposePort(args[1])
 	default:
-		fmt.Fprintf(os.Stderr, "rein session: unknown subcommand %q (want show|add-repo|allow-domain)\n", args[0])
+		fmt.Fprintf(os.Stderr, "rein session: unknown subcommand %q (want show|add-repo|allow-domain|expose-port)\n", args[0])
 		os.Exit(2)
 	}
+	return nil
+}
+
+// sessionExposePort adds an in-sandbox port to the session's expose_ports
+// (#179): the human's browser reaches it at http://localhost:<port> on the
+// NEXT run.
+func sessionExposePort(arg string) error {
+	port, err := strconv.Atoi(strings.TrimSpace(arg))
+	if err != nil {
+		return fmt.Errorf("%q is not a port number", arg)
+	}
+	_, source, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
+	if err != nil {
+		return fmt.Errorf("load session: %w", err)
+	}
+	path := session.SourceFilePath(source)
+	if path == "" {
+		return fmt.Errorf("this session has no file to add to (it came from the env fallback).\n      Run `rein init` to write a session file first")
+	}
+	updated, err := session.AddExposePortToFile(path, port)
+	if errors.Is(err, session.ErrPortAlreadyExposed) {
+		fmt.Printf("rein: port %d is already exposed. Nothing to do.\n", port)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("rein: %w", err)
+	}
+	fmt.Printf("rein: added %d to expose_ports. Now:\n", port)
+	for _, p := range updated.ExposePorts {
+		fmt.Printf("  - %d  (http://localhost:%d on your side -> 127.0.0.1:%d in the sandbox)\n", p, p, p)
+	}
+	fmt.Println("Takes effect on the NEXT `rein run` (ports are bound at launch — restart the run).")
 	return nil
 }
 
@@ -111,6 +149,9 @@ func sessionShow() error {
 	fmt.Println("  issue:     agent-declared at runtime (confirmed per run; #35 model)")
 	if len(sess.AllowDomains) > 0 {
 		fmt.Printf("  egress:    +%s   (allow_domains)\n", strings.Join(sess.AllowDomains, ", +"))
+	}
+	if len(sess.ExposePorts) > 0 {
+		fmt.Printf("  ports:     %s   (expose_ports: your browser -> the sandbox)\n", exposePortsCSV(sess.ExposePorts))
 	}
 	if !sess.Created.IsZero() {
 		fmt.Printf("  created:   %s  (no TTL enforced in Phase 1)\n", sess.Created.UTC().Format("2006-01-02 15:04 UTC"))

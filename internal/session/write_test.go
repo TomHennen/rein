@@ -18,6 +18,39 @@ func writeSession(t *testing.T, body string) string {
 	return p
 }
 
+func TestAddExposePortToFile_CreatesAppendsAndRejects(t *testing.T) {
+	p := writeSession(t, "id: sess_x\nrole: implement\nrepos:\n  - o/r   # keep me\n")
+	u, err := AddExposePortToFile(p, 5173)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(u.ExposePorts) != 1 || u.ExposePorts[0] != 5173 {
+		t.Errorf("after first add: %v", u.ExposePorts)
+	}
+	u, err = AddExposePortToFile(p, 8080)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(u.ExposePorts) != 2 || u.ExposePorts[1] != 8080 {
+		t.Errorf("after second add: %v", u.ExposePorts)
+	}
+	if _, err := AddExposePortToFile(p, 5173); !errors.Is(err, ErrPortAlreadyExposed) {
+		t.Errorf("duplicate: err = %v, want ErrPortAlreadyExposed", err)
+	}
+	for _, bad := range []int{0, 70000} {
+		if _, err := AddExposePortToFile(p, bad); err == nil {
+			t.Errorf("port %d accepted", bad)
+		}
+	}
+	body, _ := os.ReadFile(p)
+	if !strings.Contains(string(body), "# keep me") {
+		t.Errorf("comment lost on node edit:\n%s", body)
+	}
+	if !strings.Contains(string(body), "expose_ports:") {
+		t.Errorf("expose_ports key missing:\n%s", body)
+	}
+}
+
 func TestAddRepoToFile_AppendsSameOwner(t *testing.T) {
 	p := writeSession(t, "id: s\nrole: implement\nrepos:\n  - TomH/a\n")
 	updated, err := AddRepoToFile(p, "TomH/b")

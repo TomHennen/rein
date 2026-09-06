@@ -80,6 +80,10 @@ type Config struct {
 	// the in-package test knob allowAutoApprove is set.
 	Declaration *proxy.DeclarationHooks
 
+	// ExposePorts are the operator-declared in-sandbox ports bridged to the
+	// host loopback (#179). Listeners are bound in Start and fail it closed.
+	ExposePorts []int
+
 	// allowAutoApprove opts in to nil-Approve auto-approval and a nil
 	// Declaration gate. Unexported on purpose: only in-package tests can
 	// set it, so a production caller can never silently get an ungated
@@ -231,6 +235,7 @@ func Start(cfg Config) (*Host, error) {
 		Upstream:    cfg.Upstream,
 		Declaration: cfg.Declaration,
 		InScope:     cfg.InScope,
+		ExposePorts: cfg.ExposePorts,
 		// Per-request idle signal for the expiry monitor. Cheap atomic store.
 		OnActivity: func() { h.markActivity(now()) },
 	})
@@ -245,6 +250,13 @@ func Start(cfg Config) (*Host, error) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	// Host-side loopback listeners for the reverse tunnel (#179); fail closed
+	// before the socket is served so a busy port aborts the launch.
+	if err := p.ServeExpose(ctx); err != nil {
+		cancel()
+		ln.Close()
+		return nil, err
+	}
 	h.ca = ca
 	h.ln = ln
 	h.cancel = cancel

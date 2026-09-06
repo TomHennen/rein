@@ -39,6 +39,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/TomHennen/rein/internal/brokercore"
@@ -218,6 +219,83 @@ func AddAllowDomainToFile(path, host string) (Session, error) {
 		return Session{}, err
 	}
 	return updated, nil
+}
+
+// ErrPortAlreadyExposed reports an expose-port add that is already present.
+var ErrPortAlreadyExposed = errors.New("port already in expose_ports")
+
+// AddExposePortToFile appends port to the session file's `expose_ports:`
+// (#179), with the same node-edit + re-validate discipline as
+// AddAllowDomainToFile.
+func AddExposePortToFile(path string, port int) (Session, error) {
+	if port < 1 || port > 65535 {
+		return Session{}, fmt.Errorf("%d is not a TCP port (1-65535)", port)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return Session{}, err
+	}
+	var current Session
+	if err := yaml.Unmarshal(body, &current); err != nil {
+		return Session{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if err := current.Validate(); err != nil {
+		return Session{}, fmt.Errorf("invalid session %s: %w (fix it before adding a port)", path, err)
+	}
+	for _, p := range current.ExposePorts {
+		if p == port {
+			return current, ErrPortAlreadyExposed
+		}
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(body, &doc); err != nil {
+		return Session{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if err := appendSeqNode(&doc, "expose_ports", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: strconv.Itoa(port)}); err != nil {
+		return Session{}, fmt.Errorf("edit %s: %w", path, err)
+	}
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return Session{}, fmt.Errorf("render %s: %w", path, err)
+	}
+	var updated Session
+	if err := yaml.Unmarshal(out, &updated); err != nil {
+		return Session{}, fmt.Errorf("re-parse edited session: %w", err)
+	}
+	if err := updated.Validate(); err != nil {
+		return Session{}, fmt.Errorf("edited session would be invalid: %w (nothing written)", err)
+	}
+	if err := writeAtomic(path, out); err != nil {
+		return Session{}, err
+	}
+	return updated, nil
+}
+
+// appendSeqNode appends item to the root mapping's `key:` sequence, creating
+// the key + sequence when absent.
+func appendSeqNode(doc *yaml.Node, key string, item *yaml.Node) error {
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return errors.New("not a YAML document")
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return errors.New("session file root is not a mapping")
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != key {
+			continue
+		}
+		seq := root.Content[i+1]
+		if seq.Kind != yaml.SequenceNode {
+			return fmt.Errorf("`%s:` is not a list", key)
+		}
+		seq.Content = append(seq.Content, item)
+		return nil
+	}
+	root.Content = append(root.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		&yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Content: []*yaml.Node{item}})
+	return nil
 }
 
 // NormalizeAllowDomain lowercases/trims host and checks it is a bare host or a

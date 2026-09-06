@@ -69,6 +69,9 @@ type contractParams struct {
 	// Empty when the host has none, so the contract never promises a browser
 	// that is not there.
 	PlaywrightBrowsers string
+	// ExposePorts are the in-sandbox loopback ports forwarded to the human's
+	// browser (#179). Empty omits the PORTS section.
+	ExposePorts []int
 }
 
 // buildAgentContract renders the contract. Terse and factual on purpose: this
@@ -117,6 +120,17 @@ func buildAgentContract(p contractParams) string {
 		b.WriteString("  (that dir is read-only). If Playwright reports a missing chromium-<rev>, the host's\n")
 		b.WriteString("  version differs from your pinned playwright: ask the human to run `npx playwright\n")
 		b.WriteString("  install chromium` on the host, or pin the playwright version the host has.\n")
+	}
+
+	if len(p.ExposePorts) > 0 {
+		b.WriteString("\nPORTS\n")
+		parts := make([]string, 0, len(p.ExposePorts))
+		for _, port := range p.ExposePorts {
+			parts = append(parts, fmt.Sprintf("%d -> http://localhost:%d", port, port))
+		}
+		fmt.Fprintf(&b, "- Forwarded to the human's browser: %s.\n", strings.Join(parts, ", "))
+		b.WriteString("  Bind servers to 127.0.0.1:<port> (localhost in here); the human opens the URL on\n")
+		b.WriteString("  their side. No other port is reachable from outside the sandbox.\n")
 	}
 
 	b.WriteString("\nCREDENTIALS\n")

@@ -580,6 +580,7 @@ func runSandboxed(cmdline []string) (int, error) {
 		InScope:       rscope.Contains,
 		ScopeKey:      rscope.Key,
 		Approve:       approve,
+		ExposePorts:   sess.ExposePorts, // #179: host loopback listeners, fail closed if busy
 		Declaration: buildDeclarationHooks(declareEnv{
 			sess:        sess,
 			sessionFile: session.SourceFilePath(sessSource),
@@ -693,6 +694,7 @@ func runSandboxed(cmdline []string) (int, error) {
 		Parent:              os.Environ(),
 		CABundlePath:        bundlePath,
 		StubGHToken:         stubGHToken,
+		ExposePorts:         exposePortsCSV(sess.ExposePorts),
 		GitAuthorName:       gitID.Name,
 		GitAuthorEmail:      gitID.Email,
 		GitConfigGlobalPath: managedGitConfig,
@@ -796,6 +798,7 @@ func runSandboxed(cmdline []string) (int, error) {
 		EgressPreset:        presetName,
 		EgressPresetSummary: srt.EgressPresetSummary(presetName),
 		PlaywrightBrowsers:  playwrightBrowsersDir(home, homeDeny),
+		ExposePorts:         sess.ExposePorts,
 	})
 	contractOff := srt.DisableClaudeMCPFromEnv(os.Getenv(EnvDisableAgentContract))
 	agentArgv := cmdline
@@ -803,6 +806,10 @@ func runSandboxed(cmdline []string) (int, error) {
 	if !contractOff {
 		agentArgv, injected = injectContract(cmdline, contract)
 	}
+	// #179: with exposed ports, launch through the staged binary's sandbox-exec
+	// so the tunnel helpers start beside the agent (after contract injection,
+	// which keys on the agent's own argv0).
+	agentArgv = sandboxExecArgv(reinBin, sess.ExposePorts, agentArgv)
 
 	printSandboxBanner(os.Stderr, sess, sessSource, socketPath, workTree, extraDomains, cmdline, showHome, allowReadPaths,
 		contractStatus(contractOff, injected), wt, agentTmp, ephemeralCwdPath, cwdRepo)
@@ -1467,6 +1474,13 @@ func printSandboxBanner(w io.Writer, sess session.Session, sessSource, socketPat
 	}
 	if len(extraDomains) > 0 {
 		fmt.Fprintf(w, "  extra egress ALLOWED (direct TLS, NOT injected, no rein token): %s\n", strings.Join(extraDomains, ", "))
+	}
+	if len(sess.ExposePorts) > 0 {
+		urls := make([]string, 0, len(sess.ExposePorts))
+		for _, p := range sess.ExposePorts {
+			urls = append(urls, fmt.Sprintf("http://localhost:%d", p))
+		}
+		fmt.Fprintf(w, "  exposed ports (your browser -> the agent's 127.0.0.1, expose_ports): %s\n", strings.Join(urls, ", "))
 	}
 	sess.WarnIgnoredIssue(w)
 	fmt.Fprintln(w, "  writes are LOCKED until the agent declares its issue:  rein declare <n>")

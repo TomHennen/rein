@@ -120,6 +120,18 @@ func TestValidate(t *testing.T) {
 			t.Error("expected error for malformed repo entry")
 		}
 	})
+	t.Run("expose_ports", func(t *testing.T) {
+		good := Session{ID: "x", Repos: []string{"o/r"}, ExposePorts: []int{5173, 8080}}
+		if err := good.Validate(); err != nil {
+			t.Errorf("valid ports rejected: %v", err)
+		}
+		for _, bad := range [][]int{{0}, {65536}, {-1}, {5173, 5173}} {
+			s := Session{ID: "x", Repos: []string{"o/r"}, ExposePorts: bad}
+			if err := s.Validate(); err == nil {
+				t.Errorf("expose_ports %v accepted; want an error", bad)
+			}
+		}
+	})
 }
 
 func TestLoadFromFile(t *testing.T) {
