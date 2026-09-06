@@ -1,18 +1,19 @@
-$ rein run -- bash -c <sandbox agent script> /tmp/rein-sbxfs-69_wqlj9
+$ rein run -- bash -c <sandbox agent script> /tmp/rein-sbxfs-iwyte5zf
 rein: sandbox preflight:
   [ok]   srt present: /home/admin/.npm-global/bin/srt
   [ok]   srt version: 0.0.63 (package.json; note `srt --version` misreports 1.0.0)
   [ok]   seccomp: apply-seccomp present (unix-socket block available)
   [ok]   bwrap userns: unprivileged user namespace works
   [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
+rein: egress preset "dev" active (11 package-registry/advisory hosts; egress_preset: none in the session file turns it off)
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_sandbox_fs (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-jkidssin/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-dD6CPTrcbFJyBAwW3kN0Nw/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-sbxfs-69_wqlj9  [TomHennen/agentcreds-validation-a]
+  session: sess_journey_sandbox_fs (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-1no3ebze/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-rBAdnYjiFaDkKcFQiqeU2g/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-sbxfs-iwyte5zf  [TomHennen/agentcreds-validation-a]
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-1769993953
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-2732415576
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -23,13 +24,13 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-sbxfs-69_wqlj9
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-sbxfs-iwyte5zf
     => work the agent must keep has to be written INTO the working tree.
     allowed back read-only: /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.local/bin, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
       REIN_SANDBOX_ALLOW_READ=/abs/path[:/more] rein run --sandbox -- …
     or (NOT recommended — exposes your whole home dir): REIN_SANDBOX_SHOW_HOME=1
-  extra egress ALLOWED (direct TLS, NOT injected, no rein token): api.anthropic.com, platform.claude.com
+  extra egress ALLOWED (direct TLS, NOT injected, no rein token): *.crates.io, *.golang.org, *.npmjs.org, *.pypi.org, *.pythonhosted.org, *.rubygems.org, api.anthropic.com, crates.io, osv.dev, platform.claude.com, pypi.org, rubygems.org, vuln.go.dev
   writes are LOCKED until the agent declares its issue:  rein declare <n>
   then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.
   to run bash WITHOUT rein for one command: `\bash` (bash/zsh) or `command bash` (fish)
@@ -76,12 +77,12 @@ run git commit -q -m "sandbox-filesystem journey: an ordinary edit"
 emit "@COMMIT_RC=$?"
 run git log --oneline -1
 emit "@SCRIPT_DONE"
- /tmp/rein-sbxfs-69_wqlj9
+ /tmp/rein-sbxfs-iwyte5zf
 ---
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/rein-sbxfs-69_wqlj9
+- Your work persists ONLY in the working tree: /tmp/rein-sbxfs-iwyte5zf
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
@@ -106,7 +107,8 @@ GITHUB WRITES
 - One issue per push.
 
 NETWORK
-- Egress is restricted to GitHub plus: api.anthropic.com, platform.claude.com
+- Egress is restricted to GitHub plus: *.crates.io, *.golang.org, *.npmjs.org, *.pypi.org, *.pythonhosted.org, *.rubygems.org, api.anthropic.com, crates.io, osv.dev, platform.claude.com, pypi.org, rubygems.org, vuln.go.dev
+- Package registries are OPEN by default (egress preset "dev"): Go modules, npm, PyPI, crates.io, RubyGems (plus the osv.dev / vuln.go.dev advisory feeds). Dependency installs work.
 - Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.
 - You CANNOT open a blocked host yourself. To reach one, ask the human to run this
   single command, then restart rein (it applies to the NEXT run, not this one):
@@ -116,7 +118,7 @@ SBX| @SANDBOX_FACTS  (the machine-readable mirror of the contract rein injected)
 SBX| $ sh -c env | grep ^REIN_IN_SANDBOX | sort
 SBX| REIN_IN_SANDBOX=1
 SBX| REIN_IN_SANDBOX_HOME=ephemeral
-SBX| REIN_IN_SANDBOX_WORKTREE=/tmp/rein-sbxfs-69_wqlj9
+SBX| REIN_IN_SANDBOX_WORKTREE=/tmp/rein-sbxfs-iwyte5zf
 SBX| @CREDS_HIDDEN  (real host secrets read as absent in-sandbox)
 SBX| $ cat /home/admin/.ssh/id_rsa
 SBX| cat: /home/admin/.ssh/id_rsa: No such file or directory
@@ -149,5 +151,5 @@ SBX| @ADD_RC=0
 SBX| $ git commit -q -m sandbox-filesystem journey: an ordinary edit
 SBX| @COMMIT_RC=0
 SBX| $ git log --oneline -1
-SBX| c5ab504 sandbox-filesystem journey: an ordinary edit
+SBX| 0a44eda sandbox-filesystem journey: an ordinary edit
 SBX| @SCRIPT_DONE

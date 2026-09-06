@@ -4,14 +4,15 @@ rein: sandbox preflight:
   [ok]   seccomp: apply-seccomp present (unix-socket block available)
   [ok]   bwrap userns: unprivileged user namespace works
   [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
+rein: egress preset "dev" active (11 package-registry/advisory hosts; egress_preset: none in the session file turns it off)
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_push_upstream (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-064rkkhz/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-YIVNABRCHGYfgINyaIFX4Q/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-push-upstream-xxrux94l  [TomHennen/agentcreds-validation-a]
+  session: sess_journey_push_upstream (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-8ewchbnr/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-Y8ilQqmaCK8erCBDVbqdRQ/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-push-upstream-vt5jo6w9  [TomHennen/agentcreds-validation-a]
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-999308763
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-3807365894
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -22,13 +23,13 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-push-upstream-xxrux94l
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-push-upstream-vt5jo6w9
     => work the agent must keep has to be written INTO the working tree.
     allowed back read-only: /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.local/bin, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
       REIN_SANDBOX_ALLOW_READ=/abs/path[:/more] rein run --sandbox -- …
     or (NOT recommended — exposes your whole home dir): REIN_SANDBOX_SHOW_HOME=1
-  extra egress ALLOWED (direct TLS, NOT injected, no rein token): api.anthropic.com, platform.claude.com
+  extra egress ALLOWED (direct TLS, NOT injected, no rein token): *.crates.io, *.golang.org, *.npmjs.org, *.pypi.org, *.pythonhosted.org, *.rubygems.org, api.anthropic.com, crates.io, osv.dev, platform.claude.com, pypi.org, rubygems.org, vuln.go.dev
   writes are LOCKED until the agent declares its issue:  rein declare <n>
   then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.
   to run bash WITHOUT rein for one command: `\bash` (bash/zsh) or `command bash` (fish)
@@ -44,25 +45,25 @@ run() {
 }
 cd "$0"
 emit "@GITKIND=$(test -d .git && echo dir || echo other)"
-run git checkout -q -b agent/472/up-20260906-124024-f211d7
+run git checkout -q -b agent/500/up-20260906-133042-7a0002
 echo "push-upstream probe" >> probe-upstream.txt
 run git add -A
 run git commit -q -m "push-upstream: agent commit"
 
-emit "@DECLARE_START  rein declare 472 (blocks for the human)"
-run rein declare 472
+emit "@DECLARE_START  rein declare 500 (blocks for the human)"
+run rein declare 500
 emit "@DECLARE_RC=$?"
 
-emit "@PUSH_START  git push -u agent/472/<nonce> (expect: lands, no config-file fault)"
-run git push -u --progress origin HEAD:refs/heads/agent/472/up-20260906-124024-f211d7
+emit "@PUSH_START  git push -u agent/500/<nonce> (expect: lands, no config-file fault)"
+run git push -u --progress origin HEAD:refs/heads/agent/500/up-20260906-133042-7a0002
 emit "@PUSH_RC=$?"
 emit "@SCRIPT_DONE"
- /tmp/rein-push-upstream-xxrux94l
+ /tmp/rein-push-upstream-vt5jo6w9
 ---
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/rein-push-upstream-xxrux94l
+- Your work persists ONLY in the working tree: /tmp/rein-push-upstream-vt5jo6w9
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
@@ -87,45 +88,46 @@ GITHUB WRITES
 - One issue per push.
 
 NETWORK
-- Egress is restricted to GitHub plus: api.anthropic.com, platform.claude.com
+- Egress is restricted to GitHub plus: *.crates.io, *.golang.org, *.npmjs.org, *.pypi.org, *.pythonhosted.org, *.rubygems.org, api.anthropic.com, crates.io, osv.dev, platform.claude.com, pypi.org, rubygems.org, vuln.go.dev
+- Package registries are OPEN by default (egress preset "dev"): Go modules, npm, PyPI, crates.io, RubyGems (plus the osv.dev / vuln.go.dev advisory feeds). Dependency installs work.
 - Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.
 - You CANNOT open a blocked host yourself. To reach one, ask the human to run this
   single command, then restart rein (it applies to the NEXT run, not this one):
       rein session allow-domain <host>
 
 SBX| @GITKIND=dir
-SBX| $ git checkout -q -b agent/472/up-20260906-124024-f211d7
+SBX| $ git checkout -q -b agent/500/up-20260906-133042-7a0002
 SBX| $ git add -A
 SBX| $ git commit -q -m push-upstream: agent commit
-SBX| @DECLARE_START  rein declare 472 (blocks for the human)
-SBX| $ rein declare 472
+SBX| @DECLARE_START  rein declare 500 (blocks for the human)
+SBX| $ rein declare 500
 
 === rein: agent declares work on an issue ===
-   issue:    #472 "rein journey: push -u upstream (safe to close)"  [open]
+   issue:    #500 "rein journey: push -u upstream (safe to close)"  [open]
              in TomHennen/agentcreds-validation-a
    session:  sess_journey_push_upstream (role=implement, repos=[TomHennen/agentcreds-validation-a])
    approving covers ALL writes for this run (git push, gh, API).
 
-To approve, type the issue number (472) and press enter.
+To approve, type the issue number (500) and press enter.
 To deny, press Ctrl-C or type anything else.
-> 472
+> 500
   [approved]
-SBX| issue #472 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/472/<nonce>)
+SBX| issue #500 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/500/<nonce>)
 SBX| @DECLARE_RC=0
-SBX| @PUSH_START  git push -u agent/472/<nonce> (expect: lands, no config-file fault)
-SBX| $ git push -u --progress origin HEAD:refs/heads/agent/472/up-20260906-124024-f211d7
+SBX| @PUSH_START  git push -u agent/500/<nonce> (expect: lands, no config-file fault)
+SBX| $ git push -u --progress origin HEAD:refs/heads/agent/500/up-20260906-133042-7a0002
 SBX| Enumerating objects: 4, done.
 SBX| Counting objects: 100% (4/4), done.
 SBX| Delta compression using up to 8 threads
-SBX| Compressing objects: 100% (2/2), done.
+SBX| Compressing objects: 100% (1/1), done.
 SBX| Writing objects: 100% (3/3), 357 bytes | 357.00 KiB/s, done.
-SBX| Total 3 (delta 1), reused 0 (delta 0), pack-reused 0
+SBX| Total 3 (delta 1), reused 2 (delta 1), pack-reused 0
 SBX| remote:
-SBX| remote: Create a pull request for 'agent/472/up-20260906-124024-f211d7' on GitHub by visiting:
-SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/472/up-20260906-124024-f211d7
+SBX| remote: Create a pull request for 'agent/500/up-20260906-133042-7a0002' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/500/up-20260906-133042-7a0002
 SBX| remote:
 SBX| To https://github.com/TomHennen/agentcreds-validation-a.git
-SBX|  * [new branch]      HEAD -> agent/472/up-20260906-124024-f211d7
+SBX|  * [new branch]      HEAD -> agent/500/up-20260906-133042-7a0002
 SBX| @PUSH_RC=0
 SBX| @SCRIPT_DONE
 rein: revoked 1 of 1 write token(s) on exit

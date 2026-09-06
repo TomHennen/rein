@@ -15,7 +15,8 @@ launched — the same terminal a real developer would type into.
 
 WHAT THE HELPERS GIVE YOU
 -------------------------
-- ``rein_env()``        — the REIN_* environment (os.environ as-is). Init-flavored
+- ``rein_env()``        — the REIN_* environment (os.environ minus the operator's
+                          $TMUX, so approvals never pop on their screen). Init-flavored
                           journeys that need the env-path App in a fresh isolated
                           home get it from ``init_app_env()`` (the real rein-init
                           App, else a synthetic one) so ``rein init`` never routes
@@ -132,14 +133,24 @@ def throwaway_repo_b(env: dict | None = None) -> str:
 
 
 def rein_env() -> dict:
-    """Return the REIN_* environment as the shell provides it (os.environ).
+    """Return the REIN_* environment as the shell provides it (os.environ),
+    minus the operator's own $TMUX/$TMUX_PANE.
 
     Minting journeys resolve the App from state.json (they run in the real home).
     Init-flavored journeys that run in a FRESH isolated home (no state.json)
     supply the env-path App via init_app_env() so `rein init` never routes into
     the 25-minute manifest flow.
+
+    $TMUX is stripped because rein's default approval surface inside tmux is a
+    popup on the ATTACHED client: a runner launched from inside the operator's
+    tmux would otherwise paint Form A over the operator's live screen (and a
+    stray keypress there approves a real write). The popup journey does not
+    need it — its pane shell gets a fresh $TMUX from the dedicated server.
     """
-    return dict(os.environ)
+    env = dict(os.environ)
+    env.pop("TMUX", None)
+    env.pop("TMUX_PANE", None)
+    return env
 
 
 def _real_config_dir() -> Path:

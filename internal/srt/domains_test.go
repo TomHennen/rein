@@ -18,7 +18,7 @@ func contains(hay []string, needle string) bool {
 // built-in default is exactly the hosts claude's startup preflight requires —
 // no telemetry/MCP hosts sneak in.
 func TestResolveExtraDomainsDefaultAlwaysPresent(t *testing.T) {
-	got, warns, err := ResolveExtraAllowedDomains(nil, "")
+	got, warns, err := ResolveExtraAllowedDomains(nil, "", nil)
 	if err != nil {
 		t.Fatalf("ResolveExtraAllowedDomains: %v", err)
 	}
@@ -43,6 +43,7 @@ func TestResolveExtraDomainsUnionAndDedupe(t *testing.T) {
 	got, _, err := ResolveExtraAllowedDomains(
 		[]string{"pypi.org", "Registry.NPMJS.org", "api.anthropic.com."},
 		"registry.npmjs.org, files.pythonhosted.org",
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -70,7 +71,7 @@ func TestResolveExtraDomainsUnionAndDedupe(t *testing.T) {
 // TestResolveExtraDomainsWildcardWarns: a *.suffix wildcard is ALLOWED (egress
 // is the operator's choice) but produces a loud exfil warning.
 func TestResolveExtraDomainsWildcardWarns(t *testing.T) {
-	got, warns, err := ResolveExtraAllowedDomains([]string{"*.internal.example.com"}, "")
+	got, warns, err := ResolveExtraAllowedDomains([]string{"*.internal.example.com"}, "", nil)
 	if err != nil {
 		t.Fatalf("resolve rejected a legal *.suffix wildcard: %v", err)
 	}
@@ -86,7 +87,7 @@ func TestResolveExtraDomainsWildcardWarns(t *testing.T) {
 // triggers a "keep this minimal" warning.
 func TestResolveExtraDomainsLargeSetWarns(t *testing.T) {
 	many := []string{"a.com", "b.com", "c.com", "d.com", "e.com", "f.com", "g.com", "h.com", "i.com"}
-	_, warns, err := ResolveExtraAllowedDomains(many, "")
+	_, warns, err := ResolveExtraAllowedDomains(many, "", nil)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -111,7 +112,7 @@ func TestResolveExtraDomainsRejectsMalformed(t *testing.T) {
 		"a\x00b.com", // embedded NUL
 	}
 	for _, b := range bad {
-		if _, _, err := ResolveExtraAllowedDomains([]string{b}, ""); err == nil {
+		if _, _, err := ResolveExtraAllowedDomains([]string{b}, "", nil); err == nil {
 			t.Errorf("resolve accepted malformed domain %q", b)
 		}
 	}
@@ -121,7 +122,7 @@ func TestResolveExtraDomainsRejectsMalformed(t *testing.T) {
 // host in allow_domains must NOT error (it can't create an injection gap — the
 // injector is driven by mitmProxy.domains) — it just dedupes.
 func TestResolveExtraDomainsGitHubHostDedupesNotErrors(t *testing.T) {
-	got, _, err := ResolveExtraAllowedDomains([]string{"github.com", "api.github.com"}, "")
+	got, _, err := ResolveExtraAllowedDomains([]string{"github.com", "api.github.com"}, "", nil)
 	if err != nil {
 		t.Fatalf("resolve should tolerate a GitHub host in allow_domains: %v", err)
 	}
@@ -135,13 +136,23 @@ func TestResolveExtraDomainsGitHubHostDedupesNotErrors(t *testing.T) {
 // GitHub inject/CDN host (which Validate rejects). A bad preset entry would fail
 // EVERY sandboxed launch that opts into it, so pin it here.
 func TestEgressPresetDevBuildsClean(t *testing.T) {
-	hosts, err := EgressPreset("dev")
-	if err != nil || len(hosts) == 0 {
-		t.Fatalf("EgressPreset(dev) = %v, %v", hosts, err)
+	name, hosts, err := EgressPreset("dev")
+	if err != nil || name != "dev" || len(hosts) == 0 {
+		t.Fatalf("EgressPreset(dev) = %q, %v, %v", name, hosts, err)
 	}
-	resolved, _, err := ResolveExtraAllowedDomains(hosts, "")
+	resolved, warns, err := ResolveExtraAllowedDomains(nil, "", hosts)
 	if err != nil {
 		t.Fatalf("preset failed domain resolution: %v", err)
+	}
+	// Curated preset hosts never warn: the preset is on by default, and a fixed
+	// page of warnings every run would bury the ones about operator additions.
+	if len(warns) != 0 {
+		t.Errorf("preset hosts must not warn, got %v", warns)
+	}
+	for _, h := range hosts {
+		if !contains(resolved, normalizeDomain(h)) {
+			t.Errorf("preset host %q missing from resolved set %v", h, resolved)
+		}
 	}
 	if _, err := Build(Params{
 		SocketPath:          "/run/user/1000/rein/run-x/proxy.sock",
@@ -155,10 +166,43 @@ func TestEgressPresetDevBuildsClean(t *testing.T) {
 // TestEgressPresetUnknownFailsClosed: an unknown preset name is an error, not a
 // silent no-op.
 func TestEgressPresetUnknownFailsClosed(t *testing.T) {
-	if _, err := EgressPreset("bogus"); err == nil {
+	if _, _, err := EgressPreset("bogus"); err == nil {
 		t.Error("unknown preset name must fail closed")
 	}
-	if h, err := EgressPreset(""); err != nil || h != nil {
-		t.Errorf("empty preset must be a clean no-op, got %v, %v", h, err)
+}
+
+// TestEgressPresetDefaultAndNone: an unset preset means "dev" (on by default,
+// so registries work out of the box); "none" is the explicit opt-out and must
+// yield NO preset hosts — the security-relevant path.
+func TestEgressPresetDefaultAndNone(t *testing.T) {
+	name, hosts, err := EgressPreset("")
+	if err != nil || name != DefaultEgressPreset || len(hosts) == 0 {
+		t.Errorf("EgressPreset(\"\") = %q, %v, %v; want the %q default with hosts", name, hosts, err, DefaultEgressPreset)
+	}
+	for _, in := range []string{"none", " None "} {
+		name, hosts, err := EgressPreset(in)
+		if err != nil || name != EgressPresetNone || hosts != nil {
+			t.Errorf("EgressPreset(%q) = %q, %v, %v; want the none opt-out with no hosts", in, name, hosts, err)
+		}
+	}
+	resolved, warns, err := ResolveExtraAllowedDomains(nil, "", nil)
+	if err != nil || len(warns) != 0 {
+		t.Fatalf("resolve with no preset: %v, warns %v", err, warns)
+	}
+	if contains(resolved, "pypi.org") {
+		t.Errorf("opted-out preset must not leak registry hosts: %v", resolved)
+	}
+}
+
+// TestEgressPresetOperatorWildcardStillWarns: the no-warn rule is scoped to
+// the curated preset. An operator wildcard on top of it still warns.
+func TestEgressPresetOperatorWildcardStillWarns(t *testing.T) {
+	_, hosts, _ := EgressPreset("dev")
+	_, warns, err := ResolveExtraAllowedDomains([]string{"*.internal.example.com"}, "", hosts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "*.internal.example.com") {
+		t.Errorf("want exactly one warning for the operator wildcard, got %v", warns)
 	}
 }
