@@ -82,6 +82,13 @@ type Session struct {
 	// it machine-wide. An unknown name fails the launch closed. Sandboxed only.
 	EgressPreset string `yaml:"egress_preset,omitempty"`
 
+	// ExposePorts are in-sandbox loopback ports the HUMAN can reach from the
+	// host at http://localhost:<port> via rein's reverse tunnel (#179), e.g. a
+	// dev server the agent starts. Operator-declared here, never agent-chosen:
+	// the agent could otherwise squat a port the human associates with
+	// something else. Sandboxed only (direct mode shares the host loopback).
+	ExposePorts []int `yaml:"expose_ports,omitempty"`
+
 	// Worktrees maps a session repo ("owner/name") to the ABSOLUTE path of the
 	// developer's EXISTING local checkout of it (issue #64). Each mapped
 	// checkout is bind-mounted READ-WRITE into the sandbox at launch, so the
@@ -248,6 +255,16 @@ func (s *Session) Validate() error {
 		if !filepath.IsAbs(path) {
 			return fmt.Errorf("session.worktrees[%s] = %q must be an absolute path", repo, path)
 		}
+	}
+	seen := map[int]bool{}
+	for i, port := range s.ExposePorts {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("session.expose_ports[%d] = %d is not a TCP port (1-65535)", i, port)
+		}
+		if seen[port] {
+			return fmt.Errorf("session.expose_ports lists %d twice", port)
+		}
+		seen[port] = true
 	}
 	return nil
 }

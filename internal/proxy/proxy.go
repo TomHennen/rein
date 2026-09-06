@@ -54,6 +54,12 @@ type Config struct {
 	// gate treats every repo as in-scope for message-ordering purposes.
 	InScope func(repo string) bool
 
+	// ExposePorts are the operator-declared in-sandbox ports reachable from
+	// the host's loopback via the expose.rein.internal reverse tunnel
+	// (expose.go, #179). Empty disables the virtual host. Listeners start
+	// with ServeExpose.
+	ExposePorts []int
+
 	// HandshakeTimeout bounds the inbound pre-request window (CONNECT preamble
 	// + TLS handshake). Zero uses defaultHandshakeTimeout. (C1)
 	HandshakeTimeout time.Duration
@@ -85,6 +91,7 @@ type Proxy struct {
 	onActivity       func()
 	decl             *DeclarationHooks
 	inScope          func(repo string) bool
+	expose           *exposer // nil when no ports are exposed
 }
 
 // Inbound deadline defaults (C1). Handshake ~10s matches the upstream
@@ -126,7 +133,17 @@ func New(cfg Config) (*Proxy, error) {
 	if idleTimeout <= 0 {
 		idleTimeout = defaultIdleTimeout
 	}
+	var ex *exposer
+	if len(cfg.ExposePorts) > 0 {
+		for _, port := range cfg.ExposePorts {
+			if port < 1 || port > 65535 {
+				return nil, fmt.Errorf("proxy: expose port %d out of range", port)
+			}
+		}
+		ex = newExposer(cfg.ExposePorts)
+	}
 	return &Proxy{
+		expose:           ex,
 		sessionID:        cfg.SessionID,
 		core:             cfg.Core,
 		ca:               cfg.CA,
@@ -310,6 +327,21 @@ func (p *Proxy) serveRequests(conn net.Conn, sni string) {
 			return
 		}
 		_ = conn.SetReadDeadline(time.Time{}) // unbounded past headers (body + approval)
+		if classifyHost(sni) == classLocalExpose {
+			// Upgrade path: the stream is handed over raw, so the buffered
+			// reader must go with it. Never keep-alive. Same identity rule as
+			// serveOne (Host must match SNI).
+			if p.onActivity != nil {
+				p.onActivity()
+			}
+			if !hostMatchesSNI(req.Host, sni) {
+				p.audit.Record(AuditEntry{Session: p.sessionID, Host: sni, Method: req.Method, Path: req.URL.Path, Decision: "refused-host-mismatch"})
+				p.writeLocalError(conn, http.StatusBadRequest, "rein: Host header does not match TLS SNI; refusing to relay")
+				return
+			}
+			p.serveExpose(conn, r, req)
+			return
+		}
 		keepAlive := p.serveOne(conn, req, sni)
 		if !keepAlive {
 			return
@@ -360,6 +392,12 @@ func (p *Proxy) serveOne(conn net.Conn, req *http.Request, sni string) (keepAliv
 	case classLocalDeclare:
 		// The declare virtual host: answered locally, never relayed (#35 §3).
 		return p.serveDeclare(conn, req)
+
+	case classLocalExpose:
+		// Handled in serveRequests (it needs the buffered reader); only a
+		// Host/SNI mismatch could reach here, and that is refused above.
+		p.writeLocalError(conn, http.StatusBadRequest, "rein: expose must be reached by SNI")
+		return false
 
 	case classInjectBearer, classInjectBasic:
 		return p.serveInject(conn, req, sni, class)

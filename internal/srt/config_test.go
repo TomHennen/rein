@@ -41,9 +41,10 @@ func TestBuildGoldenShape(t *testing.T) {
 		"codeload.github.com": true, "objects.githubusercontent.com": true, "raw.githubusercontent.com": true,
 		"results-receiver.actions.githubusercontent.com": true,
 		"declare.rein.internal":                          true,
+		"expose.rein.internal":                           true, // #179 reverse tunnel, local-only like declare
 	}
 	if len(rt.Network.AllowedDomains) != len(wantAllowed) {
-		t.Errorf("allowedDomains = %v, want %d (3 inject + 4 cdn + declare host)", rt.Network.AllowedDomains, len(wantAllowed))
+		t.Errorf("allowedDomains = %v, want %d (3 inject + 4 cdn + 2 local hosts)", rt.Network.AllowedDomains, len(wantAllowed))
 	}
 	for _, d := range rt.Network.AllowedDomains {
 		if !wantAllowed[d] {
@@ -55,13 +56,13 @@ func TestBuildGoldenShape(t *testing.T) {
 	// host (routed to the socket, answered locally) — no CDN, no wildcard.
 	wantInject := map[string]bool{
 		"github.com": true, "api.github.com": true, "uploads.github.com": true,
-		"declare.rein.internal": true,
+		"declare.rein.internal": true, "expose.rein.internal": true,
 	}
 	if rt.Network.MitmProxy == nil {
 		t.Fatal("mitmProxy nil")
 	}
-	if len(rt.Network.MitmProxy.Domains) != 4 {
-		t.Errorf("mitmProxy.domains = %v, want the 3 inject hosts + declare host", rt.Network.MitmProxy.Domains)
+	if len(rt.Network.MitmProxy.Domains) != len(wantInject) {
+		t.Errorf("mitmProxy.domains = %v, want the 3 inject hosts + 2 local hosts", rt.Network.MitmProxy.Domains)
 	}
 	for _, d := range rt.Network.MitmProxy.Domains {
 		if !wantInject[d] {
@@ -239,8 +240,8 @@ func TestBuildThreadsExtraDomainsEgressOnly(t *testing.T) {
 
 	// NONE of the extra hosts may be injected — mitmProxy.domains stays EXACTLY
 	// the three GitHub inject hosts + the local declare host.
-	if len(cfg.Network.MitmProxy.Domains) != 4 {
-		t.Fatalf("mitmProxy.domains must stay the 3 inject hosts + declare host, got %v", cfg.Network.MitmProxy.Domains)
+	if len(cfg.Network.MitmProxy.Domains) != 5 {
+		t.Fatalf("mitmProxy.domains must stay the 3 inject hosts + 2 local hosts, got %v", cfg.Network.MitmProxy.Domains)
 	}
 	for _, d := range cfg.Network.MitmProxy.Domains {
 		if d == "api.anthropic.com" || d == "registry.npmjs.org" || strings.Contains(d, "*") {

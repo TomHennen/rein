@@ -193,6 +193,12 @@ func main() {
 			os.Exit(code)
 		}
 		os.Exit(code)
+	case "expose":
+		// In-sandbox tunnel helper (#179); started by sandbox-exec, not by hand.
+		os.Exit(runExpose(os.Args[2:]))
+	case "sandbox-exec":
+		// In-sandbox launch wrapper (#179): starts the expose helpers, execs the agent.
+		os.Exit(runSandboxExec(os.Args[2:]))
 	case "declare":
 		code, err := runDeclare(os.Args[2:])
 		if err != nil {

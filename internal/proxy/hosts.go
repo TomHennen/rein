@@ -40,7 +40,7 @@ const DeclareHost = "declare.rein.internal"
 // LocalHosts are the virtual hosts the proxy terminates AND answers
 // locally (never relayed). Kept as a list next to InjectHosts/CDNHosts so
 // srt config assembly has one source of truth.
-var LocalHosts = []string{DeclareHost}
+var LocalHosts = []string{DeclareHost, ExposeHost}
 
 // hostClass is the injection treatment for a GitHub host (design §4.3).
 type hostClass int
@@ -57,6 +57,9 @@ const (
 	// classLocalDeclare: declare.rein.internal — answered locally by the
 	// declare handler; never relayed upstream, never injected.
 	classLocalDeclare
+	// classLocalExpose: expose.rein.internal — the reverse-tunnel parking
+	// endpoint (expose.go); answered locally, never relayed, never injected.
+	classLocalExpose
 )
 
 // classifyHost maps an SNI host to its injection treatment (design §4.3 table).
@@ -74,6 +77,8 @@ func classifyHost(host string) hostClass {
 		return classPassthrough
 	case DeclareHost:
 		return classLocalDeclare
+	case ExposeHost:
+		return classLocalExpose
 	default:
 		return classRefuse
 	}

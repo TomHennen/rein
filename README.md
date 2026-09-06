@@ -231,6 +231,31 @@ wildcard and for a large custom set you add (the curated preset's own wildcards
 do not warn; the banner naming the preset is the disclosure). Keep the list
 minimal and deliberate.
 
+### Reaching a server the agent starts (`expose_ports`)
+
+The sandbox has its own network namespace, so a dev server the agent starts on
+`127.0.0.1:5173` is invisible from your browser. Declare the ports you want
+forwarded and rein bridges them: your `http://localhost:5173` reaches the
+agent's `127.0.0.1:5173`, for that run only.
+
+```yaml
+expose_ports:
+  - 5173
+```
+
+```bash
+rein session expose-port 5173   # same thing, from the CLI; next run picks it up
+```
+
+Ports are **operator-declared, never agent-chosen** (the agent cannot squat a
+port you associate with something else), bound on your loopback only, and fail
+the launch closed if something on the host already listens there. The bridge is
+agent-initiated through the same broker socket everything else rides (srt's
+seccomp filter blocks the alternative), never carries a GitHub token, and its
+parked-stream pool is bounded. The agent's contract names the forwarded ports.
+What you open is the agent's code running in your browser, exactly as if you
+had run it on the host yourself — including that page's unrestricted egress.
+
 ### MCP servers in the sandbox
 
 Claude Code's MCP servers work under `rein run`, with one rule: **an MCP server's

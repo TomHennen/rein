@@ -75,6 +75,11 @@ const (
 	// direction: an agent that sees nothing here assumes its $HOME is real,
 	// which is the safe reading when the kill switch is on.
 	EnvInSandboxHome = "REIN_IN_SANDBOX_HOME"
+
+	// EnvInSandboxExposePorts is the comma-separated list of in-sandbox
+	// loopback ports the human can reach from the host (#179). Absent when
+	// none are exposed.
+	EnvInSandboxExposePorts = "REIN_IN_SANDBOX_EXPOSE_PORTS"
 )
 
 // EnvParams are the inputs to BuildEnv.
@@ -187,6 +192,10 @@ type EnvParams struct {
 	// and — because bwrap skips allowWrite sources that don't exist on the host —
 	// never binds writable, so the child hits EROFS on its first temp write.
 	AgentTmpDir string
+
+	// ExposePorts, when non-empty, is delivered as REIN_IN_SANDBOX_EXPOSE_PORTS
+	// (comma-separated). A non-secret fact about the run's tunnel (#179).
+	ExposePorts string
 
 	// ClaudeConfigDir, when non-empty, is delivered as CLAUDE_CONFIG_DIR — the
 	// rein-owned PERSISTENT overlay claude reads/writes instead of the host's
@@ -350,6 +359,9 @@ func BuildEnv(p EnvParams) []string {
 	out = append(out, EnvInSandbox+"=1")
 	if p.WorkTree != "" {
 		out = append(out, EnvInSandboxWorktree+"="+p.WorkTree)
+	}
+	if p.ExposePorts != "" {
+		out = append(out, EnvInSandboxExposePorts+"="+p.ExposePorts)
 	}
 	if p.HomeEphemeral {
 		out = append(out, EnvInSandboxHome+"=ephemeral")
