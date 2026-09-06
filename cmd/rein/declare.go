@@ -98,7 +98,7 @@ func parseDeclareArgs(args []string) (declareArgs, error) {
 		arg := args[i]
 		next := func(flag string) (string, error) {
 			if i+1 >= len(args) {
-				return "", fmt.Errorf("rein declare: %s needs a value\n%s", flag, declareUsage)
+				return "", fmt.Errorf("%s needs a value\n%s", flag, declareUsage)
 			}
 			i++
 			return args[i], nil
@@ -128,42 +128,42 @@ func parseDeclareArgs(args []string) (declareArgs, error) {
 			sawBody = true
 			rawBody = strings.TrimPrefix(arg, "--body=")
 		case strings.HasPrefix(arg, "-"):
-			return declareArgs{}, fmt.Errorf("rein declare: unknown flag %q\n%s", arg, declareUsage)
+			return declareArgs{}, fmt.Errorf("unknown flag %q\n%s", arg, declareUsage)
 		case numArg == "":
 			numArg = arg
 		default:
-			return declareArgs{}, fmt.Errorf("rein declare: unexpected argument %q", arg)
+			return declareArgs{}, fmt.Errorf("unexpected argument %q", arg)
 		}
 	}
 
 	if a.isNew {
 		if numArg != "" {
-			return declareArgs{}, fmt.Errorf("rein declare: --new files a NEW issue and takes no issue number (got %q)", numArg)
+			return declareArgs{}, fmt.Errorf("--new files a NEW issue and takes no issue number (got %q)", numArg)
 		}
 		title, err := issuemeta.ValidateTitle(rawTitle)
 		if err != nil {
-			return declareArgs{}, fmt.Errorf("rein declare --new: %w", err)
+			return declareArgs{}, fmt.Errorf("--new: %w", err)
 		}
 		body, err := issuemeta.ValidateBody(rawBody)
 		if err != nil {
-			return declareArgs{}, fmt.Errorf("rein declare --new: %w", err)
+			return declareArgs{}, fmt.Errorf("--new: %w", err)
 		}
 		a.title, a.body = title, body
 		return a, nil
 	}
 
 	if sawBody {
-		return declareArgs{}, fmt.Errorf("rein declare: --body only applies to --new\n%s", declareUsage)
+		return declareArgs{}, fmt.Errorf("--body only applies to --new\n%s", declareUsage)
 	}
 	if numArg == "" {
 		return declareArgs{}, errors.New(declareUsage)
 	}
 	if !issueArgPattern.MatchString(numArg) {
-		return declareArgs{}, fmt.Errorf("rein declare: %q is not a valid issue number (positive decimal, no leading zeros)", numArg)
+		return declareArgs{}, fmt.Errorf("%q is not a valid issue number (positive decimal, no leading zeros)", numArg)
 	}
 	n, err := strconv.Atoi(numArg)
 	if err != nil {
-		return declareArgs{}, fmt.Errorf("rein declare: parse %q: %w", numArg, err)
+		return declareArgs{}, fmt.Errorf("parse %q: %w", numArg, err)
 	}
 	a.number = n
 	return a, nil
