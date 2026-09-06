@@ -156,9 +156,37 @@ func sandboxAllowReadPaths(home, srtPath string, cmdline []string) []string {
 		// pyenv-managed Python interpreters: read-mostly binary trees; a
 		// pyenv-selected python otherwise vanishes mid-run. No credentials.
 		filepath.Join(home, ".pyenv"),
+		// Host-installed Playwright browsers (`npx playwright install`): the
+		// headless Chromium a web-project agent renders/screenshots with. Binary
+		// tree, no credentials. Read-only on purpose: the HOST's playwright execs
+		// from the same dir, so a writable bind would be a host-exec vector.
+		filepath.Join(home, ".cache", "ms-playwright"),
 	)
 
 	return dedupePaths(out)
+}
+
+// playwrightBrowsersDir returns the host's Playwright browser dir (allowed back
+// read-only above) when the agent will actually find it at Playwright's default
+// path, else "" — the contract must not promise a browser that is not there.
+// resolvedHome is the symlink-resolved home the allow-back is derived from
+// (empty under the SHOW_HOME kill switch: no allow-back, no claim). A symlink
+// anywhere under home (~/.cache -> /mnt/cache) binds the TARGET while the link
+// itself stays hidden in the home tmpfs, so the default lookup fails; refuse
+// to advertise in that case.
+func playwrightBrowsersDir(home, resolvedHome string) string {
+	if home == "" || resolvedHome == "" {
+		return ""
+	}
+	want := filepath.Join(resolvedHome, ".cache", "ms-playwright")
+	got, err := proxy.ResolveAbs(filepath.Join(home, ".cache", "ms-playwright"))
+	if err != nil || got != want {
+		return ""
+	}
+	if fi, err := os.Stat(want); err != nil || !fi.IsDir() {
+		return ""
+	}
+	return want
 }
 
 // agentUnderClaudeDenyError detects the `claude migrate-installer` layout, where the

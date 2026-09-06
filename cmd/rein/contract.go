@@ -64,6 +64,11 @@ type contractParams struct {
 	// host list. Empty under `egress_preset: none`.
 	EgressPreset        string
 	EgressPresetSummary string
+	// PlaywrightBrowsers is the host's ~/.cache/ms-playwright when it exists
+	// (allowed back read-only): a headless Chromium the agent can render with.
+	// Empty when the host has none, so the contract never promises a browser
+	// that is not there.
+	PlaywrightBrowsers string
 }
 
 // buildAgentContract renders the contract. Terse and factual on purpose: this
@@ -103,6 +108,15 @@ func buildAgentContract(p contractParams) string {
 		b.WriteString("  writes fail with \"Read-only file system\". Caches work but start cold each run.\n")
 	} else if !p.WorkTreeEphemeral {
 		b.WriteString("  Write anything that must outlive this run THERE.\n")
+	}
+	// Only under the home deny: the "read-only" claim is false under the
+	// SHOW_HOME kill switch, where the dir is the host's real, writable one.
+	if p.HomeEphemeral && p.PlaywrightBrowsers != "" {
+		fmt.Fprintf(&b, "- A headless Chromium is available: Playwright browsers are host-installed under\n  %s (read-only; found automatically by playwright/playwright-core).\n", p.PlaywrightBrowsers)
+		b.WriteString("  Use it to render, screenshot, and test web UIs. Do NOT run `npx playwright install`\n")
+		b.WriteString("  (that dir is read-only). If Playwright reports a missing chromium-<rev>, the host's\n")
+		b.WriteString("  version differs from your pinned playwright: ask the human to run `npx playwright\n")
+		b.WriteString("  install chromium` on the host, or pin the playwright version the host has.\n")
 	}
 
 	b.WriteString("\nCREDENTIALS\n")

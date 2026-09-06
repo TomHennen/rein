@@ -30,6 +30,7 @@ func TestSandboxAllowReadPathsCuratedSet(t *testing.T) {
 		"/home/someone/.rustup",
 		"/home/someone/go",
 		"/home/someone/.pyenv",
+		"/home/someone/.cache/ms-playwright",
 	} {
 		if !set[want] {
 			t.Errorf("curated allow-back %q missing; got %v", want, got)
@@ -49,6 +50,67 @@ func TestSandboxAllowReadPathsCuratedSet(t *testing.T) {
 		if set[denied] {
 			t.Errorf("allow-back %q present; it must stay denied/minimal: %v", denied, got)
 		}
+	}
+}
+
+// TestPlaywrightBrowsersDir pins the existence gate behind the contract's
+// headless-browser line: only a real directory reachable at Playwright's default
+// path WITHOUT a symlink under home is advertised (a symlinked ~/.cache binds the
+// target but hides the link, so the default lookup fails in-sandbox); the
+// kill switch (empty resolvedHome) advertises nothing.
+func TestPlaywrightBrowsersDir(t *testing.T) {
+	base := t.TempDir()
+	base, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk := func(name string) string {
+		h := filepath.Join(base, name)
+		if err := os.MkdirAll(h, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+
+	ok := mk("ok")
+	okDir := filepath.Join(ok, ".cache", "ms-playwright")
+	if err := os.MkdirAll(okDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := playwrightBrowsersDir(ok, ok); got != okDir {
+		t.Errorf("real dir: got %q, want %q", got, okDir)
+	}
+	if got := playwrightBrowsersDir(ok, ""); got != "" {
+		t.Errorf("kill switch (empty resolvedHome): got %q, want \"\"", got)
+	}
+
+	absent := mk("absent")
+	if got := playwrightBrowsersDir(absent, absent); got != "" {
+		t.Errorf("absent dir: got %q, want \"\"", got)
+	}
+
+	file := mk("file")
+	if err := os.MkdirAll(filepath.Join(file, ".cache"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(file, ".cache", "ms-playwright"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := playwrightBrowsersDir(file, file); got != "" {
+		t.Errorf("regular file: got %q, want \"\"", got)
+	}
+
+	// ~/.cache -> elsewhere: the target would be bound, the link hidden.
+	linked := mk("linked")
+	target := mk("cache-target")
+	if err := os.MkdirAll(filepath.Join(target, "ms-playwright"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(linked, ".cache")); err != nil {
+		t.Fatal(err)
+	}
+	if got := playwrightBrowsersDir(linked, linked); got != "" {
+		t.Errorf("symlinked ~/.cache: got %q, want \"\" (unreachable at the default path in-sandbox)", got)
 	}
 }
 
