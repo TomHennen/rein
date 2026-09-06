@@ -247,8 +247,52 @@ type RunContext struct {
 	// gate ever consults it.
 	PendingNotice *PendingNotice `json:"pending_notice,omitempty"`
 
+	// NewIssueCeremonies counts how many file-a-new-issue ceremonies this
+	// run has STARTED (issue #180). It is the per-run cap's counter: the
+	// declare endpoint lets the agent synthesize approval prompts out of
+	// nothing (unlike `rein declare <n>`, which needs a real issue that
+	// fetches), so an unbounded path is a prompt-fatigue lever. Carried
+	// across snapshot writes by WritePending.
+	NewIssueCeremonies int `json:"new_issue_ceremonies,omitempty"`
+
 	// WrittenAt is when the helper wrote this snapshot.
 	WrittenAt time.Time `json:"written_at"`
+}
+
+// WritePending writes a ceremony's run-context snapshot WITHOUT dropping
+// pending records it does not itself set, and carries the new-issue
+// ceremony counter forward.
+//
+// Each ceremony builds a fresh RunContext from its own config, so a plain
+// WriteRunContext would silently clear another ceremony's pending record
+// (and reset the counter). Callers that mean to clear a record set it to
+// nil AND go through the dedicated clear helper instead.
+func WritePending(stateDir, runID string, rc RunContext) error {
+	if old, err := ReadRunContext(stateDir, runID); err == nil {
+		if rc.PendingIssue == nil {
+			rc.PendingIssue = old.PendingIssue
+		}
+		if rc.PendingNewIssue == nil {
+			rc.PendingNewIssue = old.PendingNewIssue
+		}
+		if rc.PendingNotice == nil {
+			rc.PendingNotice = old.PendingNotice
+		}
+		if rc.NewIssueCeremonies == 0 {
+			rc.NewIssueCeremonies = old.NewIssueCeremonies
+		}
+	}
+	return WriteRunContext(stateDir, runID, rc)
+}
+
+// NewIssueCeremonyCount reports how many new-issue ceremonies this run has
+// started. A missing/unreadable context reads as 0.
+func NewIssueCeremonyCount(stateDir, runID string) int {
+	rc, err := ReadRunContext(stateDir, runID)
+	if err != nil {
+		return 0
+	}
+	return rc.NewIssueCeremonies
 }
 
 // PendingNotice is a non-authorizing message awaiting the human's

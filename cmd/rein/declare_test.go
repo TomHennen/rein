@@ -36,17 +36,22 @@ func TestParseDeclareArgs(t *testing.T) {
 			declareArgs{isNew: true, title: "Add a thing", body: "why", repo: "o/r"}, ""},
 		{"new normalizes whitespace", []string{"--new", "  Add   a  thing  "},
 			declareArgs{isNew: true, title: "Add a thing"}, ""},
-		{"new keeps body newlines", []string{"--new", "T", "--body", "one\ntwo"},
-			declareArgs{isNew: true, title: "T", body: "one\ntwo"}, ""},
-		{"new rejects a number too", []string{"--new", "T", "73"}, declareArgs{}, "takes no issue number"},
+		{"new keeps body newlines", []string{"--new", "Title", "--body", "one\ntwo"},
+			declareArgs{isNew: true, title: "Title", body: "one\ntwo"}, ""},
+		{"new rejects a number too", []string{"--new", "Title", "73"}, declareArgs{}, "takes no issue number"},
 		{"new rejects an empty title", []string{"--new", "   "}, declareArgs{}, "must not be empty"},
-		{"new rejects a wordless title", []string{"--new", "--- ???"}, declareArgs{}, "at least one word"},
+		{"new rejects a wordless title", []string{"--new", "--- ???"}, declareArgs{}, "approval token"},
+		// The first word IS the token the human types, so it must be strong
+		// enough to be a deliberate act — and never a bare number, which
+		// collides with the `rein declare <n>` token.
+		{"new rejects a one-letter first word", []string{"--new", "a broken thing"}, declareArgs{}, "approval token"},
+		{"new rejects a numeric first word", []string{"--new", "42 is wrong"}, declareArgs{}, "approval token"},
 		{"new rejects an escape in the title", []string{"--new", "ok\x1b[2Jgone"}, declareArgs{}, "control character"},
 		{"new rejects a newline in the title", []string{"--new", "ok\nrein: approved"}, declareArgs{}, "control character"},
 		{"new rejects a bidi override", []string{"--new", "ok‮gnop"}, declareArgs{}, "format character"},
 		{"new rejects an over-long title", []string{"--new", strings.Repeat("x", 201)}, declareArgs{}, "exceeds the 200"},
-		{"new rejects an over-long body", []string{"--new", "T", "--body", strings.Repeat("x", 4001)}, declareArgs{}, "exceeds the 4000"},
-		{"new rejects an escape in the body", []string{"--new", "T", "--body", "a\x07b"}, declareArgs{}, "control character"},
+		{"new rejects an over-long body", []string{"--new", "Title", "--body", strings.Repeat("x", 4001)}, declareArgs{}, "exceeds the 4000"},
+		{"new rejects an escape in the body", []string{"--new", "Title", "--body", "a\x07b"}, declareArgs{}, "control character"},
 		{"body without new rejected", []string{"73", "--body", "x"}, declareArgs{}, "only applies to --new"},
 		{"dangling new flag", []string{"--new"}, declareArgs{}, "--new needs a value"},
 	}
@@ -69,14 +74,27 @@ func TestParseDeclareArgs(t *testing.T) {
 	}
 }
 
-// TestNewIssueBodyTrailer pins the attribution rein appends: the issue is
-// filed under the bot identity, so the body must name whose work it is.
-func TestNewIssueBodyTrailer(t *testing.T) {
-	if got := newIssueBody("", "octo"); got != "_Filed by rein on behalf of @octo._" {
-		t.Errorf("empty body: got %q", got)
+// TestNewIssueBody pins the attribution rein appends: the issue is filed
+// under the bot identity, so the body must say it was filed on a human's
+// behalf — and must @-mention nobody, because rein never learns the
+// operator's GitHub login and a guessed mention notifies the wrong account.
+func TestNewIssueBody(t *testing.T) {
+	const trailer = "_Filed by rein on behalf of the operator of this session._"
+	for _, tc := range []struct{ name, body, want string }{
+		{"empty", "", trailer},
+		{"blank", "   \n ", trailer},
+		{"plain", "why", "why\n\n" + trailer},
+		{"trailing newlines collapse", "why\n\n\n", "why\n\n" + trailer},
+		{"multiline preserved", "one\ntwo", "one\ntwo\n\n" + trailer},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := newIssueBody(tc.body); got != tc.want {
+				t.Errorf("newIssueBody(%q) = %q, want %q", tc.body, got, tc.want)
+			}
+		})
 	}
-	if got := newIssueBody("why\n", "octo"); got != "why\n\n_Filed by rein on behalf of @octo._" {
-		t.Errorf("with body: got %q", got)
+	if strings.Contains(newIssueBody("x"), "@") {
+		t.Error("the trailer must not @-mention anyone")
 	}
 }
 

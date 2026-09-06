@@ -279,7 +279,7 @@ func declareDirect(a declareArgs, runID string) (int, error) {
 				Repo: n.Repo, Issue: n.Issue, InstallURL: n.InstallURL, AppName: n.AppName,
 			})
 		},
-		CreateIssue: createIssueFunc(func() githubapp.Config { return appCfg }, ks, session.OwnerOf(sess), stateDir, runID, logger),
+		CreateIssue: createIssueFunc(func() githubapp.Config { return appCfg }, ks, stateDir, runID, logger),
 		Grant:       gcfg,
 		Logger:      logger,
 	}
@@ -339,6 +339,22 @@ func declareViaProxy(a declareArgs) (int, error) {
 		resp, err = client.Get(u.String())
 	}
 	if err != nil {
+		// A TIMEOUT is not "no rein here": the endpoint answered the CONNECT
+		// and is holding the request open while the human decides, and the
+		// broker's prompt has no such deadline. Saying "not inside a rein
+		// run" would be false AND would send the agent into a retry that can
+		// file the issue twice.
+		if os.IsTimeout(err) {
+			fmt.Fprintf(os.Stderr, "rein: the human has not answered yet (waited %s).\n", declareRequestTimeout)
+			if a.isNew {
+				fmt.Fprintln(os.Stderr, "      The issue MAY STILL BE FILED when they answer — check `gh issue list` before")
+				fmt.Fprintln(os.Stderr, "      retrying, or a retry can file it twice. If it is there, run `rein declare <n>` on it.")
+			} else {
+				fmt.Fprintln(os.Stderr, "      The declaration may still be confirmed when they answer. Re-running")
+				fmt.Fprintf(os.Stderr, "      `rein declare %d` is safe — it is idempotent.\n", a.number)
+			}
+			return 1, nil
+		}
 		return 1, fmt.Errorf("not inside a rein run (no REIN_RUN_ID and the declare endpoint is unreachable: %v). Launch your agent via `rein run -- <cmd>` and declare from within it", err)
 	}
 	defer resp.Body.Close()

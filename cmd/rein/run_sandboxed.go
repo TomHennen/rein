@@ -995,7 +995,7 @@ func buildDeclarationHooks(env declareEnv) *proxy.DeclarationHooks {
 				_, err := fetchRepoInstallationID(ctx, env.appCfg.ClientID, env.ks, config.AppKeystoreRole, owner, name)
 				return err
 			},
-			CreateIssue: createIssueFunc(env.scopedCfg, env.ks, session.OwnerOf(env.sess), env.stateDir, env.runID, env.logger),
+			CreateIssue: createIssueFunc(env.scopedCfg, env.ks, env.stateDir, env.runID, env.logger),
 			Notice: func(ctx context.Context, n declare.Notice) {
 				grant.ShowInstallNotice(ctx, gcfg, grant.InstallNotice{
 					Repo: n.Repo, Issue: n.Issue, InstallURL: n.InstallURL, AppName: n.AppName,

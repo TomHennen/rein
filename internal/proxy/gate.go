@@ -75,10 +75,13 @@ type DeclarationHooks struct {
 // host. POST, JSON body, bounded by declareNewBodyCap.
 const declareNewPath = "/v1/declare/new"
 
-// declareNewBodyCap bounds the JSON body the sandbox may POST. A title
-// (200) plus a body (4000) plus JSON overhead is far under this; anything
-// larger is refused unread rather than parsed.
-const declareNewBodyCap = 16 << 10
+// declareNewBodyCap bounds the JSON body the sandbox may POST. Derived
+// from the field limits rather than picked: 8 bytes per accepted rune
+// covers UTF-8's 4-byte maximum plus JSON's \uXXXX escaping, so a LEGAL
+// maximum-size title+body always fits and is refused on its own merits
+// (a length error naming the field) instead of being rejected as
+// oversized. Anything past this is refused unread rather than parsed.
+const declareNewBodyCap = 8 * (issuemeta.MaxTitleChars + issuemeta.MaxBodyChars)
 
 // Deny-path bounds (§5.4): before closing a connection on a
 // post-approval push deny, drain the client's in-flight upload so the

@@ -33,17 +33,54 @@ func TestFirstWord(t *testing.T) {
 	}
 }
 
-// TestValidateTitleAgreesWithFirstWord: validation and the prompt must
-// never disagree about what a word is — a title that validates must yield
-// a typeable word, and one that yields none must be refused.
-func TestValidateTitleAgreesWithFirstWord(t *testing.T) {
-	for _, in := range []string{"Add a thing", "--- ???", "  ", "[x]", "!!!", "42"} {
+// TestValidateTitleAgreesWithValidConfirmWord: validation and the prompt
+// must never disagree about what makes a usable token — a title that
+// validates must yield one, and one that does not must be refused.
+func TestValidateTitleAgreesWithValidConfirmWord(t *testing.T) {
+	for _, in := range []string{
+		"Add a thing", "--- ???", "  ", "[x]", "!!!", "42",
+		"a thing", "an apple", "42 things", "Fix: it", "日本語 の タイトル",
+	} {
 		got, err := ValidateTitle(in)
-		if err == nil && FirstWord(got) == "" {
-			t.Errorf("ValidateTitle(%q) accepted a title with no typeable word", in)
+		normalized := strings.Join(strings.Fields(in), " ")
+		if err == nil && !ValidConfirmWord(FirstWord(got)) {
+			t.Errorf("ValidateTitle(%q) accepted a title whose first word is not a usable token", in)
 		}
-		if err != nil && FirstWord(strings.Join(strings.Fields(in), " ")) != "" {
-			t.Errorf("ValidateTitle(%q) refused a title that has a word: %v", in, err)
+		if err != nil && ValidConfirmWord(FirstWord(normalized)) {
+			t.Errorf("ValidateTitle(%q) refused a title with a usable token: %v", in, err)
+		}
+	}
+}
+
+// TestValidConfirmWord pins the token floor. It is NOT a denylist of
+// affirmative words — "yes"/"ok" stay legal (settled: design §2.2 makes
+// the title's first word the token). It rules out tokens that are too
+// weak to be a deliberate act, and numeric ones that collide with the
+// `rein declare <n>` number token.
+func TestValidConfirmWord(t *testing.T) {
+	for _, ok := range []string{"Add", "fix", "bug", "yes", "okay", "Añadir", "日本語", "a1b", "sbom-action"} {
+		if !ValidConfirmWord(ok) {
+			t.Errorf("ValidConfirmWord(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"", "a", "an", "1", "42", "123", "---", "42x"[:2]} {
+		if ValidConfirmWord(bad) {
+			t.Errorf("ValidConfirmWord(%q) = true, want false", bad)
+		}
+	}
+}
+
+// TestValidateTitle_RejectsWeakTokens: the error must tell the agent to
+// rephrase, since it is the one who can fix it.
+func TestValidateTitle_RejectsWeakTokens(t *testing.T) {
+	for _, in := range []string{"a broken thing", "42 is wrong", "1 crash on save", "an error occurs"} {
+		_, err := ValidateTitle(in)
+		if err == nil {
+			t.Errorf("ValidateTitle(%q) accepted a weak approval token", in)
+			continue
+		}
+		if !strings.Contains(err.Error(), "rephrase") {
+			t.Errorf("ValidateTitle(%q) error should tell the agent to rephrase: %v", in, err)
 		}
 	}
 }

@@ -1,0 +1,183 @@
+$ rein run -- bash -c <sandbox declare-new script> /tmp/rein-declnew-tdiydw1q
+rein: sandbox preflight:
+  [ok]   srt present: /home/admin/.npm-global/bin/srt
+  [ok]   srt version: 0.0.63 (package.json; note `srt --version` misreports 1.0.0)
+  [ok]   seccomp: apply-seccomp present (unix-socket block available)
+  [ok]   bwrap userns: unprivileged user namespace works
+  [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
+rein: egress preset "dev" active (11 package-registry/advisory hosts; egress_preset: none in the session file turns it off)
+rein: verifying sandbox config applies (deny-read + seccomp self-test)…
+rein: sandbox self-test passed (credential stores hidden; unix sockets blocked; egress answered by rein).
+rein: launching SANDBOXED (srt) run:
+  session: sess_journey_declare_new (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-jhzmiyrc/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-Xqv4lT-KYM3QXh6QtfhW5g/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-declnew-tdiydw1q  [TomHennen/agentcreds-validation-a]
+  a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-533150661
+    (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
+     never inside the working tree, where a nested clone can be committed into it).
+    map it under `worktrees:` to use your own checkout on the NEXT run.
+  the agent sees NO real token; git/gh are injected at the proxy.
+  credential stores, ~/.ssh, on-disk keyrings, and keyring/agent sockets are hidden.
+  $HOME is HIDDEN in-sandbox. Three different behaviors — know which one you get:
+    READS of a hidden path FAIL LOUDLY: ENOENT, or an empty listing for a dir.
+    WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
+      DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
+    WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-declnew-tdiydw1q
+    => work the agent must keep has to be written INTO the working tree.
+    allowed back read-only: /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.local/bin, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv, /home/admin/.cache/ms-playwright
+    if a tool breaks on a hidden $HOME path, allow it back narrowly:
+      REIN_SANDBOX_ALLOW_READ=/abs/path[:/more] rein run --sandbox -- …
+    or (NOT recommended — exposes your whole home dir): REIN_SANDBOX_SHOW_HOME=1
+  extra egress ALLOWED (direct TLS, NOT injected, no rein token): *.crates.io, *.golang.org, *.npmjs.org, *.pypi.org, *.pythonhosted.org, *.rubygems.org, api.anthropic.com, crates.io, osv.dev, platform.claude.com, pypi.org, rubygems.org, vuln.go.dev
+  writes are LOCKED until the agent declares its issue:  rein declare <n>
+  then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.
+  to run bash WITHOUT rein for one command: `\bash` (bash/zsh) or `command bash` (fish)
+  agent contract PRINTED to the agent's output (this agent has no system-prompt channel, so it may or
+    may not reach the model's context; the REIN_IN_SANDBOX_* env vars carry the same facts machine-readably).
+rein: running: bash -c
+set +e
+emit() { printf '%s%s\n' 'SBX| ' "$*"; }
+run() {
+  printf '%s$ %s\n' 'SBX| ' "$*"
+  "$@" 2>&1 | tr '\r' '\n' | while IFS= read -r l; do printf '%s%s\n' 'SBX| ' "$l"; done
+  return ${PIPESTATUS[0]}
+}
+declare_new() {
+  printf '%s$ %s\n' 'SBX| ' "$*"
+  DECLARE_LAST_OUT=$("$@" 2>&1)
+  DECLARE_LAST_RC=$?
+  printf '%s\n' "$DECLARE_LAST_OUT" | while IFS= read -r l; do printf '%s%s\n' 'SBX| ' "$l"; done
+  return $DECLARE_LAST_RC
+}
+cd "$0"
+
+emit "@PHASE1_START  rein declare --new (agent PROPOSES filing the run's issue; blocks for the human)"
+declare_new rein declare --new 'JourneyDeclareNew: files this runs declared issue via Form A (safe to close)' --body 'Opened by journeys/declare_new/journey.py to prove that rein declare --new lets an agent PROPOSE an issue that the human approves via Form A, which rein then files under the App bot identity and makes this runs declared issue. Throwaway repo only; closed when the journey ends.'
+emit "@PHASE1_RC=$?"
+
+NEW_ISSUE=$(printf '%s' "$DECLARE_LAST_OUT" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+emit "@FILED_ISSUE=#$NEW_ISSUE"
+
+emit "@PHASE2_START  push agent/$NEW_ISSUE/declnew-20260906-210806-96f61e using the number rein just returned"
+run git checkout -b "agent/$NEW_ISSUE/declnew-20260906-210806-96f61e"
+echo "declare_new journey: probe commit for the newly filed issue" >> declare-new-probe.txt
+run git add -A
+run git commit -q -m "declare_new journey: probe for the newly filed issue"
+run git push origin HEAD:refs/heads/agent/$NEW_ISSUE/declnew-20260906-210806-96f61e
+emit "@PUSH_RC=$?"
+
+emit "@PHASE3_START  gh issue view (read) — the filed issue as seen from inside the sandbox"
+run gh issue view "$NEW_ISSUE" --repo TomHennen/agentcreds-validation-a --json number,title,author,url
+emit "@VIEW_RC=$?"
+
+emit "@PHASE4_START  rein declare --new AGAIN, answered with the WRONG word (expect: refused, nothing filed)"
+declare_new rein declare --new 'JourneyDeclareNewDeny: must be refused by a wrong first-word answer'
+emit "@PHASE4_RC=$?"
+emit "@SCRIPT_DONE"
+ /tmp/rein-declnew-tdiydw1q
+---
+rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
+
+FILES
+- Your work persists ONLY in the working tree: /tmp/rein-declnew-tdiydw1q
+  Write anything that must outlive this run THERE. Nothing else survives.
+- $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
+  DISCARDED when the run ends. You will get no error. Do not keep work there.
+- Most of $HOME reads as empty/missing; a few paths are re-exposed READ-ONLY, where
+  writes fail with "Read-only file system". Caches work but start cold each run.
+- A headless Chromium is available: Playwright browsers are host-installed under
+  /home/admin/.cache/ms-playwright (read-only; found automatically by playwright/playwright-core).
+  Use it to render, screenshot, and test web UIs. Do NOT run `npx playwright install`
+  (that dir is read-only). If Playwright reports a missing chromium-<rev>, the host's
+  version differs from your pinned playwright: ask the human to run `npx playwright
+  install chromium` on the host, or pin the playwright version the host has.
+
+CREDENTIALS
+- There are NO credentials in this environment. Tokens, keys, and credential stores
+  are hidden on purpose. Do not go looking for them, and do not ask the user for one.
+- git and gh still work anyway: a proxy OUTSIDE the sandbox injects a short-lived
+  GitHub token you never see. Just use them normally.
+
+GITHUB WRITES
+- Writes to GitHub (push, PRs, comments, any API mutation) are LOCKED until you
+  declare the issue this work is for:
+      rein declare <n>
+  That asks the human to approve, on their terminal. Reads work without it.
+- No issue exists for this work yet? Ask to file one:
+      rein declare --new "<title>" [--body "<text>"] [--repo owner/name]
+  The human approves, rein files it, and it becomes the declared issue.
+  (--repo is required when this session scopes more than one repo.)
+- Once confirmed, push ONLY to a branch named:
+      agent/<n>/<nonce>
+  where <n> is the declared issue number and <nonce> is a short name you choose
+  (letters/digits, then letters/digits/./_/-). Any other ref is rejected.
+- One issue per push.
+
+NETWORK
+- Egress is restricted to GitHub plus: *.crates.io, *.golang.org, *.npmjs.org, *.pypi.org, *.pythonhosted.org, *.rubygems.org, api.anthropic.com, crates.io, osv.dev, platform.claude.com, pypi.org, rubygems.org, vuln.go.dev
+- Package registries are OPEN by default (egress preset "dev"): Go modules, npm, PyPI, crates.io, RubyGems (plus the osv.dev / vuln.go.dev advisory feeds). Dependency installs work.
+- Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.
+- You CANNOT open a blocked host yourself. To reach one, ask the human to run this
+  single command, then restart rein (it applies to the NEXT run, not this one):
+      rein session allow-domain <host>
+
+SBX| @PHASE1_START  rein declare --new (agent PROPOSES filing the run's issue; blocks for the human)
+SBX| $ rein declare --new JourneyDeclareNew: files this runs declared issue via Form A (safe to close) --body Opened by journeys/declare_new/journey.py to prove that rein declare --new lets an agent PROPOSE an issue that the human approves via Form A, which rein then files under the App bot identity and makes this runs declared issue. Throwaway repo only; closed when the journey ends.
+
+=== rein: agent is requesting to file a new issue ===
+   repo:     TomHennen/agentcreds-validation-a
+   title:    "JourneyDeclareNew: files this runs declared issue via Form A (safe to close)"
+   body:     Opened by journeys/declare_new/journey.py to prove that rein declare --new lets an agent PROPOSE an issue that the human approves via Form A, which rein then files under the App bot identity and makes… (truncated — 77 more characters WILL be filed, unseen)
+             (rein appends an attribution line to the body when it files.)
+   session:  sess_journey_declare_new (role=implement, repos=[TomHennen/agentcreds-validation-a])
+   approving FILES this issue under rein's bot identity and makes it
+   this run's declared issue (all writes then flow).
+
+To approve, type the proposed title's first word (JourneyDeclareNew) and press enter.
+To deny, press Ctrl-C or type anything else.
+> JourneyDeclareNew
+  [approved]
+SBX| issue #546 filed and confirmed — writes are unlocked (push to agent/546/<nonce>)
+SBX| @PHASE1_RC=0
+SBX| @FILED_ISSUE=#546
+SBX| @PHASE2_START  push agent/546/declnew-20260906-210806-96f61e using the number rein just returned
+SBX| $ git checkout -b agent/546/declnew-20260906-210806-96f61e
+SBX| Switched to a new branch 'agent/546/declnew-20260906-210806-96f61e'
+SBX| $ git add -A
+SBX| $ git commit -q -m declare_new journey: probe for the newly filed issue
+SBX| $ git push origin HEAD:refs/heads/agent/546/declnew-20260906-210806-96f61e
+SBX| remote:
+SBX| remote: Create a pull request for 'agent/546/declnew-20260906-210806-96f61e' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/546/declnew-20260906-210806-96f61e
+SBX| remote:
+SBX| To https://github.com/TomHennen/agentcreds-validation-a.git
+SBX|  * [new branch]      HEAD -> agent/546/declnew-20260906-210806-96f61e
+SBX| @PUSH_RC=0
+SBX| @PHASE3_START  gh issue view (read) — the filed issue as seen from inside the sandbox
+SBX| $ gh issue view 546 --repo TomHennen/agentcreds-validation-a --json number,title,author,url
+SBX| {"author":{"is_bot":true,"login":"app/rein-primary-735a3bbe20"},"number":546,"title":"JourneyDeclareNew: files this runs declared issue via Form A (safe to close)","url":"https://github.com/TomHennen/agentcreds-validation-a/issues/546"}
+SBX| @VIEW_RC=0
+SBX| @PHASE4_START  rein declare --new AGAIN, answered with the WRONG word (expect: refused, nothing filed)
+SBX| $ rein declare --new JourneyDeclareNewDeny: must be refused by a wrong first-word answer
+
+=== rein: agent is requesting to file a new issue ===
+   repo:     TomHennen/agentcreds-validation-a
+   title:    "JourneyDeclareNewDeny: must be refused by a wrong first-word answer"
+   body:     (none)
+             (rein appends an attribution line to the body when it files.)
+   NOTE:     this run ALREADY confirmed #546 — approve only if this
+             is genuinely separate work.
+   session:  sess_journey_declare_new (role=implement, repos=[TomHennen/agentcreds-validation-a])
+   approving FILES this issue under rein's bot identity and makes it
+   this run's declared issue (all writes then flow).
+
+To approve, type the proposed title's first word (JourneyDeclareNewDeny) and press enter.
+To deny, press Ctrl-C or type anything else.
+> not-the-first-word
+  [denied: input did not match the title's first word]
+SBX| rein: filing a new issue in TomHennen/agentcreds-validation-a was NOT confirmed (denied, timed out, or no approval surface). Nothing was filed.
+SBX| @PHASE4_RC=1
+SBX| @SCRIPT_DONE
+rein: revoked 2 of 2 write token(s) on exit

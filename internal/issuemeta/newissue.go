@@ -45,10 +45,44 @@ func ValidateTitle(raw string) (string, error) {
 	if n := len([]rune(t)); n > MaxTitleChars {
 		return "", fmt.Errorf("title: %d characters exceeds the %d limit", n, MaxTitleChars)
 	}
-	if FirstWord(t) == "" {
-		return "", fmt.Errorf("title: must contain at least one word (letters or digits)")
+	if !ValidConfirmWord(FirstWord(t)) {
+		return "", fmt.Errorf("title: its first word %q cannot be used as the approval token — "+
+			"rephrase so the title starts with a word of at least %d characters containing a letter "+
+			"(the human approves by typing it)", FirstWord(t), minConfirmWordRunes)
 	}
 	return t, nil
+}
+
+// minConfirmWordRunes is the floor on the typed approval token.
+const minConfirmWordRunes = 3
+
+// ValidConfirmWord reports whether w can serve as the typed approval
+// token for filing a new issue. It is the single authority: ValidateTitle
+// refuses any title whose FirstWord fails here, so a title that validates
+// always yields a usable token.
+//
+// The floor is about the TOKEN, not the title's quality:
+//
+//   - Empty or letterless ("42", "---") is refused. A purely numeric
+//     first word is the worst case: it collides with the `rein declare
+//     <n>` token, so a human trained on "type the issue number" could
+//     approve a FILING while believing they confirmed an existing issue.
+//   - Under 3 runes ("a", "an") is refused: a one-character token is
+//     close to a keystroke, which is the property Form A exists to avoid.
+//
+// It is deliberately NOT a denylist of affirmative words: "yes"/"ok" as a
+// first word remain legal (settled decision — design §2.2 makes the
+// title's first word the token, and the human sees the whole title).
+func ValidConfirmWord(w string) bool {
+	if len([]rune(w)) < minConfirmWordRunes {
+		return false
+	}
+	for _, r := range w {
+		if unicode.IsLetter(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidateBody normalizes and checks a proposed issue body. Newlines and

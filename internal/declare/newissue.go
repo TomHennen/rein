@@ -13,6 +13,7 @@ package declare
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -30,7 +31,17 @@ const (
 	AuditNewDenied       = "refused-declare-new-denied"
 	AuditNewBadRequest   = "refused-declare-new-invalid"
 	AuditNewCreateFailed = "refused-declare-new-create-failed"
+	AuditNewBusy         = "refused-declare-new-busy"  // another ceremony is live
+	AuditNewLimit        = "refused-declare-new-limit" // per-run ceremony cap
 )
+
+// ErrBrokerLocal marks a CreateIssue failure that happened INSIDE the
+// broker — keystore, mint, App config — rather than at GitHub. Its text
+// can carry host paths and key locations, so RunNew relays a generic
+// message for it and leaves the detail in the host-side log. A GitHub
+// error, by contrast, is the useful half of the message ("Resource not
+// accessible by integration") and is passed through.
+var ErrBrokerLocal = errors.New("broker-side failure")
 
 // NewIssue is one request to file a new issue. Repo is the optional
 // --repo owner/name; Title/Body are agent-supplied and re-validated here.
@@ -68,6 +79,14 @@ func RunNew(ctx context.Context, d Deps, req NewIssue) Outcome {
 		return Outcome{Message: "rein: filing new issues is not available in this run", Audit: AuditNewBadRequest}
 	}
 
+	// resolveRepo's ambiguity message teaches `rein declare <n> --repo`,
+	// which is the wrong command here — answer in this path's own terms.
+	if req.Repo == "" && len(d.Session.Repos) > 1 {
+		return Outcome{Audit: AuditNewBadRequest, Message: fmt.Sprintf(
+			"rein: this session scopes multiple repos (%s); say which one to file in:\n"+
+				"      rein declare --new \"<title>\" --repo %s",
+			strings.Join(d.Session.Repos, ", "), d.Session.Repos[0])}
+	}
 	repo, expanding, err := resolveRepo(d.Session, req.Repo)
 	if err != nil {
 		return Outcome{Message: "rein: " + err.Error(), Audit: AuditNewBadRequest}
@@ -97,9 +116,20 @@ func RunNew(ctx context.Context, d Deps, req NewIssue) Outcome {
 	}
 
 	logger.Printf("declare --new: agent proposes filing %q in %s; prompting", title, repo)
-	if !grant.ObtainNewIssueApproval(ctx, grant.NewIssueRequest{
+	switch grant.ObtainNewIssueApproval(ctx, grant.NewIssueRequest{
 		Session: d.Session, Repo: repo, Title: title, Body: body,
 	}, gcfg) {
+	case grant.NewIssueConfirmed:
+		// fall through to the filing below
+	case grant.NewIssueBusy:
+		return Outcome{Repo: repo, Audit: AuditNewBusy, Message: "rein: another approval is already in front of the human; " +
+			"nothing was filed. Retry `rein declare --new` after that one is answered."}
+	case grant.NewIssueLimited:
+		return Outcome{Repo: repo, Audit: AuditNewLimit, Message: fmt.Sprintf(
+			"rein: this run has already asked the human to file %d new issues; no more will be requested.\n"+
+				"      Nothing was filed. Use an issue that already exists (`rein declare <n>`), or start a new run.",
+			grant.MaxNewIssueCeremonies)}
+	default:
 		return Outcome{Repo: repo, Audit: AuditNewDenied, Message: fmt.Sprintf(
 			"rein: filing a new issue in %s was NOT confirmed (denied, timed out, or no approval surface). Nothing was filed.", repo)}
 	}
@@ -112,6 +142,15 @@ func RunNew(ctx context.Context, d Deps, req NewIssue) Outcome {
 		// created. Only the local half is knowable — nothing is confirmed —
 		// and the retry can duplicate, so say to look first.
 		logger.Printf("declare --new: create in %s FAILED after approval: %v", repo, err)
+		if errors.Is(err, ErrBrokerLocal) {
+			// A broker-local failure's text names host paths (keystore, App
+			// config). The agent gets the fact, the human gets the detail.
+			return Outcome{Repo: repo, Audit: AuditNewCreateFailed, Message: fmt.Sprintf(
+				"rein: APPROVED, but rein could not file the issue in %s: a broker-side error.\n"+
+					"      The detail is on the human's terminal and in rein's log. Nothing is confirmed,\n"+
+					"      so writes stay locked; nothing was filed (the failure was before any GitHub call).",
+				repo)}
+		}
 		return Outcome{Repo: repo, Audit: AuditNewCreateFailed, Message: fmt.Sprintf(
 			"rein: APPROVED, but rein could not complete filing the issue in %s: %s\n"+
 				"      Nothing is confirmed, so writes stay locked. The issue MAY OR MAY NOT have been\n"+

@@ -311,7 +311,7 @@ func TestGate_DeclareNewRejectsBadInputs(t *testing.T) {
 		{"over-long body", `{"title":"ok","body":"` + strings.Repeat("x", 4001) + `"}`},
 		{"escape in body", `{"title":"ok","body":"a\u0000b"}`},
 		{"over-long repo", `{"title":"ok","repo":"` + strings.Repeat("x", 201) + `"}`},
-		{"oversized body", `{"title":"ok","body":"` + strings.Repeat("x", 17<<10) + `"}`},
+		{"oversized body", `{"title":"okay","body":"` + strings.Repeat("x", 40<<10) + `"}`},
 	} {
 		resp, _ := doPOST(t, c, declareNewURL, tc.body)
 		if resp.StatusCode != http.StatusBadRequest {
@@ -413,6 +413,46 @@ func approvedGateForRepo(repo string, n int) *gateState {
 	g.approved.Store(true)
 	g.rec.Issues = append(g.rec.Issues, approvals.ConfirmedIssue{Number: n, Repo: repo, Title: "t", State: "open"})
 	return g
+}
+
+// TestGate_DeclareNewUnlocksThePush is the end of the #180 promise: the
+// success message says "writes are unlocked (push to agent/N/<nonce>)",
+// and this is the only test that makes the FILED issue actually satisfy
+// the push-ref gate. The DeclareNew hook records the confirmed issue the
+// way declare.RunNew does, then the push is attempted against it.
+func TestGate_DeclareNewUnlocksThePush(t *testing.T) {
+	g := &gateState{declOut: DeclareOutcome{OK: true, Issue: 7, Audit: "confirmed-new-issue"}}
+	hooks := g.hooks()
+	hooks.DeclareNew = func(repo, title, body string) DeclareOutcome {
+		// What the broker does on approval: file, then record.
+		g.rec.Issues = append(g.rec.Issues, approvals.ConfirmedIssue{
+			Number: 7, Repo: "o/r", Title: title, State: "open"})
+		g.approved.Store(true)
+		return g.declOut
+	}
+	h := newHarness(t, harnessOpts{decl: hooks})
+	c := h.httpClient(false)
+
+	// Before the declare, the push is locked.
+	resp, body := postPush(t, c, pushBody("report-status", "refs/heads/agent/7/kx3q"))
+	if h.gh.count() != 0 {
+		t.Fatalf("a push before any declare must not relay: status=%d body=%q", resp.StatusCode, body)
+	}
+
+	if resp, _ := doPOST(t, c, declareNewURL, `{"title":"Add a thing","repo":"o/r"}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("declare --new status = %d", resp.StatusCode)
+	}
+
+	// The filed issue's number is now a valid push ref.
+	resp, body = postPush(t, c, pushBody("report-status", "refs/heads/agent/7/kx3q"))
+	if resp.StatusCode != http.StatusOK || h.gh.count() != 1 {
+		t.Fatalf("push to the filed issue's branch must relay: status=%d relays=%d body=%q",
+			resp.StatusCode, h.gh.count(), body)
+	}
+	// A DIFFERENT issue number is still refused — filing #7 unlocks #7.
+	if _, body := postPush(t, c, pushBody("report-status", "refs/heads/agent/8/kx3q")); !strings.Contains(body, "ng ") {
+		t.Errorf("a branch naming an unconfirmed issue must be refused: %q", body)
+	}
 }
 
 func TestGate_ConfirmedPushRelaysWithPackIntact(t *testing.T) {

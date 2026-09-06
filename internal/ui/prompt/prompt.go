@@ -122,6 +122,13 @@ type Request struct {
 	// terminal display (issuemeta.BodyExcerpt). Display only.
 	Body string
 
+	// AlreadyConfirmed lists the issue numbers this run has ALREADY
+	// confirmed. On a new-issue prompt it is the signal the declared-issue
+	// prompt gets from Expansion: the run is not starting from nothing, so
+	// filing another issue is usually not what was intended — a human who
+	// sees it can deny and tell the agent to use the issue it has.
+	AlreadyConfirmed []int
+
 	// ConfirmWord, when non-empty, REPLACES the issue number as the typed
 	// approval token (issue #180: a new issue has no number yet, so the
 	// human types the proposed title's first word). Compared
@@ -288,11 +295,24 @@ func writePrompt(w io.Writer, req Request) error {
 		if body == "" {
 			body = "(none)"
 		}
+		// The run already has issues: say so BEFORE the token line. A second
+		// filing usually means the agent forgot what it already declared.
+		already := ""
+		if len(req.AlreadyConfirmed) > 0 {
+			nums := make([]string, len(req.AlreadyConfirmed))
+			for i, n := range req.AlreadyConfirmed {
+				nums[i] = fmt.Sprintf("#%d", n)
+			}
+			already = fmt.Sprintf("   NOTE:     this run ALREADY confirmed %s — approve only if this\n"+
+				"             is genuinely separate work.\n", strings.Join(nums, ", "))
+		}
 		_, err := fmt.Fprintf(w, "\n"+
 			"=== rein: agent is requesting to file a new issue ===\n"+
 			"   repo:     %s\n"+
 			"   title:    %q\n"+
 			"   body:     %s\n"+
+			"             (rein appends an attribution line to the body when it files.)\n"+
+			"%s"+
 			"   session:  %s (role=%s, repos=[%s])\n"+
 			"   approving FILES this issue under rein's bot identity and makes it\n"+
 			"   this run's declared issue (all writes then flow).\n"+
@@ -301,6 +321,7 @@ func writePrompt(w io.Writer, req Request) error {
 			"To deny, press Ctrl-C or type anything else.\n"+
 			"> ",
 			req.IssueRepo, req.Title, body,
+			already,
 			req.SessionID, req.Role, strings.Join(req.Repos, ", "),
 			req.ConfirmWord,
 		)

@@ -96,10 +96,10 @@ func TestObtainNewIssueApproval_InlineDenyClearsPending(t *testing.T) {
 		TmuxRunner: func(context.Context, []string) error { return os.ErrNotExist },
 		Logger:     discardLogger(),
 	}
-	if ObtainNewIssueApproval(context.Background(), NewIssueRequest{
+	if got := ObtainNewIssueApproval(context.Background(), NewIssueRequest{
 		Session: sess, Repo: "o/r", Title: "Add a thing",
-	}, cfg) {
-		t.Fatal("a wrong answer must not approve")
+	}, cfg); got != NewIssueDenied {
+		t.Fatalf("a wrong answer must deny, got %v", got)
 	}
 	rc, err := approvals.ReadRunContext(stateDir, "X")
 	if err == nil && rc.PendingNewIssue != nil {
@@ -113,8 +113,8 @@ func TestObtainNewIssueApproval_NoRunIDFailsClosed(t *testing.T) {
 	t.Setenv("TMUX", "")
 	stub := &prompt.StubPrompter{Response: "Add"}
 	cfg := Config{StateDir: t.TempDir(), Stderr: &bytes.Buffer{}, Prompter: stub, Logger: discardLogger()}
-	if ObtainNewIssueApproval(context.Background(), NewIssueRequest{Repo: "o/r", Title: "Add a thing"}, cfg) {
-		t.Fatal("no run id must deny")
+	if got := ObtainNewIssueApproval(context.Background(), NewIssueRequest{Repo: "o/r", Title: "Add a thing"}, cfg); got != NewIssueDenied {
+		t.Fatalf("no run id must deny, got %v", got)
 	}
 	if stub.Calls != 0 {
 		t.Error("no prompt may fire without a run id")

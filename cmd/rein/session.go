@@ -230,6 +230,9 @@ func printSandboxSessionView(w io.Writer) {
 	fmt.Fprintf(w, "  repos:  %s\n", strings.Join(strings.Split(repos, ","), ", "))
 	fmt.Fprintln(w, "  issues: declare the one your work is for with `rein declare <n>`,")
 	fmt.Fprintln(w, "          or ask the human to file a new one with `rein declare --new \"<title>\"`.")
+	if strings.Contains(repos, ",") {
+		fmt.Fprintln(w, "          Both take `--repo owner/name`, required here because scope spans several repos.")
+	}
 	fmt.Fprintln(w, "  Scope and egress can only be changed by the human, on the host, before the next run.")
 }
 

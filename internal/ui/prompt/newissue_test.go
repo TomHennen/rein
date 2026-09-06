@@ -37,6 +37,37 @@ func TestWritePrompt_NewIssue(t *testing.T) {
 	}
 }
 
+// TestWritePrompt_NewIssueDisclosures: two things the human cannot infer
+// from the title and body alone — that rein adds an attribution line to
+// what gets filed, and that this run already has issues (so a second
+// filing is probably the agent losing the thread).
+func TestWritePrompt_NewIssueDisclosures(t *testing.T) {
+	var buf bytes.Buffer
+	req := Request{
+		NewIssue: true, IssueRepo: "o/r", Title: "Add a thing", ConfirmWord: "Add",
+		Body: "because reasons", AlreadyConfirmed: []int{41, 42},
+	}
+	if err := writePrompt(&buf, req); err != nil {
+		t.Fatalf("writePrompt: %v", err)
+	}
+	got := buf.String()
+	for _, want := range []string{"attribution line", "ALREADY confirmed", "#41, #42"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt missing %q:\n%s", want, got)
+		}
+	}
+
+	// With nothing confirmed the note must be absent, not empty-rendered.
+	buf.Reset()
+	req.AlreadyConfirmed = nil
+	if err := writePrompt(&buf, req); err != nil {
+		t.Fatalf("writePrompt: %v", err)
+	}
+	if strings.Contains(buf.String(), "ALREADY confirmed") {
+		t.Errorf("a first filing must not claim prior issues:\n%s", buf.String())
+	}
+}
+
 func TestWritePrompt_NewIssueEmptyBody(t *testing.T) {
 	var buf bytes.Buffer
 	if err := writePrompt(&buf, Request{NewIssue: true, IssueRepo: "o/r", Title: "T", ConfirmWord: "T"}); err != nil {
