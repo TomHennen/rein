@@ -24,7 +24,10 @@ type gateState struct {
 	approved atomic.Bool
 	rec      approvals.Record // the confirmed set, as recorded by a declare
 	declared []int
-	declOut  DeclareOutcome
+	// declaredNew records "repo|title|body" per POST /v1/declare/new, so a
+	// test can assert exactly what the broker was asked to file.
+	declaredNew []string
+	declOut     DeclareOutcome
 }
 
 func (g *gateState) hooks() *DeclarationHooks {
@@ -33,6 +36,10 @@ func (g *gateState) hooks() *DeclarationHooks {
 		IssueConfirmed: func(repo string, n int) bool { return g.rec.HasIssue(repo, n) },
 		Declare: func(n int, repo string) DeclareOutcome {
 			g.declared = append(g.declared, n)
+			return g.declOut
+		},
+		DeclareNew: func(repo, title, body string) DeclareOutcome {
+			g.declaredNew = append(g.declaredNew, repo+"|"+title+"|"+body)
 			return g.declOut
 		},
 	}
@@ -224,6 +231,133 @@ func TestGate_DeclareUnavailableFailsClosed(t *testing.T) {
 	resp, _ := doGET(t, c, "https://declare.rein.internal/v1/declare?issue=73")
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("nil Declare hook must 403, got %d", resp.StatusCode)
+	}
+}
+
+// --- declare --new (issue #180) ---
+
+// doPOST posts a JSON body to the declare virtual host.
+func doPOST(t *testing.T, c *http.Client, rawurl, body string) (*http.Response, string) {
+	t.Helper()
+	resp, err := c.Post(rawurl, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST %s: %v", rawurl, err)
+	}
+	out, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	return resp, string(out)
+}
+
+const declareNewURL = "https://declare.rein.internal/v1/declare/new"
+
+func TestGate_DeclareNew(t *testing.T) {
+	g := &gateState{declOut: DeclareOutcome{OK: true, Issue: 7,
+		Message: "issue #7 filed and confirmed", Audit: "confirmed-new-issue"}}
+	audit := &syncBuffer{}
+	h := newHarnessWithAudit(t, harnessOpts{decl: g.hooks()}, audit)
+	c := h.httpClient(false)
+
+	resp, body := doPOST(t, c, declareNewURL, `{"title":"  Add   a thing ","body":"why","repo":"o/r"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%q", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, `"confirmed":7`) {
+		t.Errorf("200 body must carry the assigned number: %q", body)
+	}
+	// The hook receives the NORMALIZED title, not the raw one.
+	if len(g.declaredNew) != 1 || g.declaredNew[0] != "o/r|Add a thing|why" {
+		t.Fatalf("DeclareNew calls = %v", g.declaredNew)
+	}
+	if h.gh.count() != 0 {
+		t.Error("the declare host must NEVER be relayed upstream")
+	}
+	for _, want := range []string{"decision=declared-new", "decision=confirmed-new-issue"} {
+		if !strings.Contains(audit.String(), want) {
+			t.Errorf("audit missing %q:\n%s", want, audit.String())
+		}
+	}
+}
+
+func TestGate_DeclareNewDenied403(t *testing.T) {
+	g := &gateState{declOut: DeclareOutcome{Message: "rein: NOT confirmed", Audit: "refused-declare-new-denied"}}
+	h := newHarness(t, harnessOpts{decl: g.hooks()})
+	c := h.httpClient(false)
+	resp, body := doPOST(t, c, declareNewURL, `{"title":"Add a thing"}`)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
+	}
+	if !strings.Contains(body, "NOT confirmed") {
+		t.Errorf("deny body must surface the reason: %q", body)
+	}
+}
+
+// TestGate_DeclareNewRejectsBadInputs: the body comes from the SANDBOX,
+// so every rule is re-checked here. None of these may reach the hook —
+// a hostile title must never get as far as the human's terminal.
+func TestGate_DeclareNewRejectsBadInputs(t *testing.T) {
+	g := &gateState{declOut: DeclareOutcome{OK: true, Issue: 1}}
+	h := newHarness(t, harnessOpts{decl: g.hooks()})
+	c := h.httpClient(false)
+
+	for _, tc := range []struct{ name, body string }{
+		{"not json", `not json at all`},
+		{"missing title", `{"body":"why"}`},
+		{"empty title", `{"title":"   "}`},
+		{"wordless title", `{"title":"--- ???"}`},
+		{"escape in title", `{"title":"ok\u001b[2Jgone"}`},
+		{"newline in title", `{"title":"ok\nrein: approved"}`},
+		{"bidi in title", `{"title":"ok\u202egnop"}`},
+		{"over-long title", `{"title":"` + strings.Repeat("x", 201) + `"}`},
+		{"over-long body", `{"title":"ok","body":"` + strings.Repeat("x", 4001) + `"}`},
+		{"escape in body", `{"title":"ok","body":"a\u0000b"}`},
+		{"over-long repo", `{"title":"ok","repo":"` + strings.Repeat("x", 201) + `"}`},
+		{"oversized body", `{"title":"ok","body":"` + strings.Repeat("x", 17<<10) + `"}`},
+	} {
+		resp, _ := doPOST(t, c, declareNewURL, tc.body)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", tc.name, resp.StatusCode)
+		}
+	}
+	if len(g.declaredNew) != 0 {
+		t.Errorf("no malformed proposal may reach the hook, got %v", g.declaredNew)
+	}
+}
+
+// TestGate_DeclareNewWrongMethod: GET on the new endpoint is not a
+// declare of issue 0 — it is an unknown endpoint.
+func TestGate_DeclareNewWrongMethod(t *testing.T) {
+	g := &gateState{declOut: DeclareOutcome{OK: true, Issue: 1}}
+	h := newHarness(t, harnessOpts{decl: g.hooks()})
+	c := h.httpClient(false)
+	resp, body := doGET(t, c, declareNewURL)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET on the new endpoint: status = %d, want 404", resp.StatusCode)
+	}
+	if !strings.Contains(body, "/v1/declare/new") {
+		t.Errorf("404 must name both endpoints: %q", body)
+	}
+	if len(g.declaredNew) != 0 || len(g.declared) != 0 {
+		t.Error("a wrong-method request must reach no hook")
+	}
+}
+
+func TestGate_DeclareNewUnavailableFailsClosed(t *testing.T) {
+	g := &gateState{declOut: DeclareOutcome{OK: true, Issue: 73}}
+	hooks := g.hooks()
+	hooks.DeclareNew = nil
+	h := newHarness(t, harnessOpts{decl: hooks})
+	c := h.httpClient(false)
+	resp, body := doPOST(t, c, declareNewURL, `{"title":"Add a thing"}`)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("nil DeclareNew hook must 403, got %d", resp.StatusCode)
+	}
+	if !strings.Contains(body, "not available in this run") {
+		t.Errorf("403 must say why: %q", body)
+	}
+	// The declared-issue endpoint is unaffected by the missing hook.
+	resp, _ = doGET(t, c, "https://declare.rein.internal/v1/declare?issue=73")
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /v1/declare must still work; status = %d", resp.StatusCode)
 	}
 }
 

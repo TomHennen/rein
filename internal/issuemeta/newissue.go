@@ -103,7 +103,7 @@ func FirstWord(title string) string {
 // like a title (no escapes, no bidi), all whitespace collapsed to single
 // spaces so it cannot forge prompt lines, and truncated with a marker.
 func BodyExcerpt(body string) string {
-	flat := strings.Join(strings.Fields(SanitizeTitle(body)), " ")
+	flat := strings.Join(strings.Fields(sanitizeForDisplay(body)), " ")
 	runes := []rune(flat)
 	if len(runes) <= bodyExcerptRunes {
 		return flat
