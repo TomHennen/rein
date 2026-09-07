@@ -83,6 +83,8 @@ one (a new dir + a new `golden.txt`). Each row links to the journey's own README
 | [git_author](journeys/git_author/) | delegated commit author "(via rein)", non-impersonating | COVERED |
 | [gh_write](journeys/gh_write/) | the in-sandbox `gh` REST + GraphQL write boundary (#91, #101) | COVERED |
 | [realagent_write](journeys/realagent_write/) | a REAL claude walks the whole write path (#101) | COVERED |
+| [idle_reattest](journeys/idle_reattest/) | idle expiry re-attests writes IN PLACE, no hard TTL: lock -> re-declare -> re-confirm -> push lands (#190) | COVERED |
+| [approval_ttl_reattest](journeys/approval_ttl_reattest/) | the approval-AGE bound re-attests writes IN PLACE, independent of activity: a BUSY run still locks once the confirmation is old enough (#190) | COVERED |
 
 Statuses: **COVERED** (a journey drives it), **PARTIAL**, **GAP** (real journey, no
 demo yet), **UNDRIVEABLE** (needs a browser). Some journeys **SKIP (exit 3)** when a

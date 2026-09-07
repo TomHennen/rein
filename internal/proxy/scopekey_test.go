@@ -16,7 +16,7 @@ import (
 func TestWriteTokenDroppedOnScopeChange(t *testing.T) {
 	var mints int32
 	scope := "a"
-	core := NewSessionCore(SessionConfig{
+	core, _ := NewSessionCore(SessionConfig{
 		ScopeKey: func() string { return scope },
 		MintWrite: func(context.Context) (string, time.Time, error) {
 			atomic.AddInt32(&mints, 1)

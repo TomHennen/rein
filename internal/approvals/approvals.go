@@ -656,8 +656,69 @@ func WriteRunContext(stateDir, runID string, rc RunContext) error {
 // approvals/<id>.json, and writes/<id>.jsonl. Missing files are not an
 // error; idempotent (safe to call twice).
 func ClearRun(stateDir, runID string) error {
+	return removeAll(RunContextPath(stateDir, runID), RunApprovalPath(stateDir, runID), WriteTokenLedgerPath(stateDir, runID))
+}
+
+// ClearConfirmedIssues withdraws the run's write approval WITHOUT ending
+// the run (#190 idle re-attestation): after it, ConfirmedIssues returns
+// nil, so every write gate refuses with the ordinary declare instruction
+// and the agent must re-declare through the full Form A ceremony.
+//
+// It removes approvals/<run-id>.json outright rather than rewriting the
+// record with an empty issue set. Record holds APPROVAL STATE ONLY
+// (signature, session id, issues, timestamps), so "no confirmed issues"
+// and "no record" are the same state — and absence is the more
+// fail-closed encoding: no consumer can mistake a signature-valid,
+// issue-less record for an approval. RunContext (session snapshot,
+// PendingIssue, PendingNotice, RunPID) is deliberately untouched, since
+// the out-of-process grant surfaces need it for the NEXT declare.
+//
+// The write-token ledger is separate (ClearWriteTokens) so the caller can
+// revoke before clearing it.
+func ClearConfirmedIssues(stateDir, runID string) error {
+	return removeAll(RunApprovalPath(stateDir, runID))
+}
+
+// ClearPendingDeclaration drops the run context's PendingIssue and
+// PendingNotice, keeping everything else (Session, SessionFile, Direct,
+// RunPID). It is the other half of an idle withdrawal (#190).
+//
+// Those two fields are TRANSPORT for the out-of-process surfaces: the tmux
+// popup and `rein approval grant --run-id X` render their prompt from the
+// snapshot rather than fetching. Left behind after a withdrawal, the stale
+// PendingIssue lets a grant re-open writes from the PRE-LOCK declaration —
+// the human confirms an issue nobody re-declared, which is exactly the
+// ceremony the withdrawal is supposed to force. A fresh declare repopulates
+// PendingIssue before it prompts, and Grant already errors helpfully when it
+// is nil, so clearing costs the legitimate path nothing.
+//
+// A missing run context is not an error: there is nothing stale to clear.
+func ClearPendingDeclaration(stateDir, runID string) error {
+	rc, err := ReadRunContext(stateDir, runID)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if rc.PendingIssue == nil && rc.PendingNotice == nil {
+		return nil
+	}
+	rc.PendingIssue, rc.PendingNotice = nil, nil
+	return WriteRunContext(stateDir, runID, rc)
+}
+
+// ClearWriteTokens removes writes/<run-id>.jsonl. Call it only AFTER
+// revoking the tokens it holds — the file is the only record of them.
+func ClearWriteTokens(stateDir, runID string) error {
+	return removeAll(WriteTokenLedgerPath(stateDir, runID))
+}
+
+// removeAll deletes each path, ignoring missing files, returning the first
+// real error.
+func removeAll(paths ...string) error {
 	var firstErr error
-	for _, p := range []string{RunContextPath(stateDir, runID), RunApprovalPath(stateDir, runID), WriteTokenLedgerPath(stateDir, runID)} {
+	for _, p := range paths {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
 			firstErr = err
 		}

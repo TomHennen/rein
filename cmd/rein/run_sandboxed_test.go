@@ -15,6 +15,7 @@ import (
 	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/proxy"
+	"github.com/TomHennen/rein/internal/runbroker"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/srt"
 	"github.com/TomHennen/rein/internal/worktree"
@@ -552,13 +553,72 @@ func TestCredentialDenyReadHidesReinOwnArtifacts(t *testing.T) {
 	}
 }
 
+// TestSandboxBannerIdleReattest: the launch banner must state the ONLY clock on
+// the run (#190) — writes re-lock on idle, the run itself does not end — and it
+// must name REIN_IDLE_TIMEOUT only when the operator actually overrode it.
+func TestSandboxBannerIdleReattest(t *testing.T) {
+	sess := session.Session{ID: "sess_test", Role: "implement", Repos: []string{"owner/repo"}}
+	render := func(b reattestBounds) string {
+		var buf bytes.Buffer
+		printSandboxBanner(&buf, sess, "file:/x", "/run/s.sock", "/work", nil, []string{"claude"}, false,
+			[]string{"/home/x/.claude"}, "", worktree.Result{}, "/tmp/clone", "", "", b)
+		return buf.String()
+	}
+
+	def := render(defaultBounds())
+	for _, want := range []string{
+		"after 30m0s with no GitHub traffic, or 4h0m0s after your last confirmation, writes",
+		"re-lock and the agent must declare again",
+		"the run itself keeps going",
+	} {
+		if !strings.Contains(def, want) {
+			t.Errorf("banner missing %q; got:\n%s", want, def)
+		}
+	}
+	// The bounds are on the APPROVAL, not the run: no wording may imply the run
+	// itself is capped.
+	for _, gone := range []string{"hard limit", "hard cap", "SESSION EXPIRED"} {
+		if strings.Contains(def, gone) {
+			t.Errorf("banner still mentions %q; both bounds withdraw the approval, not the run:\n%s", gone, def)
+		}
+	}
+	for _, knob := range []string{envIdleTimeout, envApprovalTTL} {
+		if strings.Contains(def, knob) {
+			t.Errorf("banner names %s without an override; got:\n%s", knob, def)
+		}
+	}
+
+	// Each knob is echoed only when it was actually set, with its default.
+	overIdle := render(reattestBounds{idle: 15 * time.Second, idleSet: true, ttl: runbroker.DefaultApprovalTTL})
+	if !strings.Contains(overIdle, envIdleTimeout+"=15s") || !strings.Contains(overIdle, "the default is 30m0s") {
+		t.Errorf("idle-overridden banner must show the active value AND the default; got:\n%s", overIdle)
+	}
+	if strings.Contains(overIdle, envApprovalTTL) {
+		t.Errorf("banner named %s though only the idle bound was overridden:\n%s", envApprovalTTL, overIdle)
+	}
+
+	overTTL := render(reattestBounds{idle: runbroker.DefaultIdleTimeout, ttl: 20 * time.Second, ttlSet: true})
+	if !strings.Contains(overTTL, envApprovalTTL+"=20s") || !strings.Contains(overTTL, "the default is 4h0m0s") {
+		t.Errorf("ttl-overridden banner must show the active value AND the default; got:\n%s", overTTL)
+	}
+	if !strings.Contains(overTTL, "or 20s after your last confirmation") {
+		t.Errorf("banner must quote the RESOLVED approval TTL; got:\n%s", overTTL)
+	}
+}
+
+// defaultBounds is the un-overridden pair, for banner tests that do not care
+// about the re-attestation wording.
+func defaultBounds() reattestBounds {
+	return reattestBounds{idle: runbroker.DefaultIdleTimeout, ttl: runbroker.DefaultApprovalTTL}
+}
+
 // TestSandboxBannerHintsAndEgress asserts the CP4.5 banner additions: the extra
 // egress hosts are surfaced, and the one-line "run without rein" bypass hint is
 // present (\claude for bash/zsh, command claude for fish).
 func TestSandboxBannerHintsAndEgress(t *testing.T) {
 	var buf bytes.Buffer
 	sess := session.Session{ID: "sess_test", Role: "implement", Repos: []string{"owner/repo"}}
-	printSandboxBanner(&buf, sess, "file:/x", "/run/s.sock", "/work", []string{"api.anthropic.com", "registry.npmjs.org"}, []string{"claude", "-p", "hi"}, false, []string{"/home/x/.claude", "/home/x/go"}, "", worktree.Result{}, "/tmp/clone", "", "")
+	printSandboxBanner(&buf, sess, "file:/x", "/run/s.sock", "/work", []string{"api.anthropic.com", "registry.npmjs.org"}, []string{"claude", "-p", "hi"}, false, []string{"/home/x/.claude", "/home/x/go"}, "", worktree.Result{}, "/tmp/clone", "", "", defaultBounds())
 	out := buf.String()
 
 	if !strings.Contains(out, "api.anthropic.com") || !strings.Contains(out, "registry.npmjs.org") {
@@ -582,7 +642,7 @@ func TestSandboxBannerHomeDenialUX(t *testing.T) {
 	sess := session.Session{ID: "sess_test", Role: "implement", Repos: []string{"owner/repo"}}
 
 	var buf bytes.Buffer
-	printSandboxBanner(&buf, sess, "file:/x", "/run/s.sock", "/work", nil, []string{"claude"}, false, []string{"/home/x/.claude", "/home/x/go"}, "", worktree.Result{}, "/tmp/clone", "", "")
+	printSandboxBanner(&buf, sess, "file:/x", "/run/s.sock", "/work", nil, []string{"claude"}, false, []string{"/home/x/.claude", "/home/x/go"}, "", worktree.Result{}, "/tmp/clone", "", "", defaultBounds())
 	out := buf.String()
 	for _, want := range []string{
 		"$HOME is HIDDEN",
@@ -612,7 +672,7 @@ func TestSandboxBannerHomeDenialUX(t *testing.T) {
 	}
 
 	buf.Reset()
-	printSandboxBanner(&buf, sess, "file:/x", "/run/s.sock", "/work", nil, []string{"claude"}, true, nil, "", worktree.Result{}, "/tmp/clone", "", "")
+	printSandboxBanner(&buf, sess, "file:/x", "/run/s.sock", "/work", nil, []string{"claude"}, true, nil, "", worktree.Result{}, "/tmp/clone", "", "", defaultBounds())
 	out = buf.String()
 	if !strings.Contains(out, "$HOME is VISIBLE") {
 		t.Errorf("show-home banner must warn $HOME is visible; got:\n%s", out)
@@ -720,7 +780,7 @@ func TestSandboxBannerListsWritableCheckouts(t *testing.T) {
 		},
 	}
 	printSandboxBanner(&buf, sess, "file:/x", "/run/s.sock", "/srv/dev/a",
-		nil, []string{"claude"}, false, []string{"/home/x/.claude"}, "", wt, "/tmp/rein-agent-tmp-1", "", "")
+		nil, []string{"claude"}, false, []string{"/home/x/.claude"}, "", wt, "/tmp/rein-agent-tmp-1", "", "", defaultBounds())
 	out := buf.String()
 
 	for _, want := range []string{
@@ -746,7 +806,7 @@ func TestSandboxBannerListsWritableCheckouts(t *testing.T) {
 	// the ephemeral-clone guidance still must (it is how a mid-run repo works).
 	buf.Reset()
 	printSandboxBanner(&buf, sess, "file:/x", "/run/s.sock", "/srv/dev/a",
-		nil, []string{"claude"}, false, nil, "", worktree.Result{}, "/tmp/rein-agent-tmp-1", "", "")
+		nil, []string{"claude"}, false, nil, "", worktree.Result{}, "/tmp/rein-agent-tmp-1", "", "", defaultBounds())
 	out = buf.String()
 	if strings.Contains(out, "AGENT-WRITABLE") {
 		t.Errorf("no checkouts mapped, but the banner cried wolf:\n%s", out)
@@ -801,7 +861,7 @@ func TestSandboxBannerEphemeralCwd(t *testing.T) {
 	sess := session.Session{ID: "sess_test", Role: "implement", Repos: []string{"owner/a"}}
 	printSandboxBanner(&buf, sess, "file:/x", "/run/s.sock", "/tmp/rein-ephemeral-work-9",
 		nil, []string{"claude"}, false, []string{"/home/x/.claude"}, "", worktree.Result{},
-		"/tmp/rein-agent-tmp-1", "/home/x/super", "owner/a")
+		"/tmp/rein-agent-tmp-1", "/home/x/super", "owner/a", defaultBounds())
 	out := buf.String()
 
 	for _, want := range []string{

@@ -1,0 +1,693 @@
+$ rein run -- bash -c <approval-ttl re-attestation script> /tmp/rein-itest-g_nbwyor
+rein: sandbox preflight:
+  [ok]   srt present: /home/admin/.npm-global/bin/srt
+  [ok]   srt version: 0.0.63 (package.json; note `srt --version` misreports 1.0.0)
+  [ok]   seccomp: apply-seccomp present (unix-socket block available)
+  [ok]   bwrap userns: unprivileged user namespace works
+  [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
+rein: egress preset "dev" active (11 package-registry/advisory hosts; egress_preset: none in the session file turns it off)
+rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-g_nbwyor (git -C /tmp/rein-itest-g_nbwyor rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
+rein: verifying sandbox config applies (deny-read + seccomp self-test)…
+rein: sandbox self-test passed (credential stores hidden; unix sockets blocked; egress answered by rein).
+rein: launching SANDBOXED (srt) run:
+  session: sess_journey_approval_ttl_reattest (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-mzlbz2jt/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-ofU25XxfQdcuS6tXOykSkw/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-itest-g_nbwyor
+  a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-197685410
+    (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
+     never inside the working tree, where a nested clone can be committed into it).
+    map it under `worktrees:` to use your own checkout on the NEXT run.
+  the agent sees NO real token; git/gh are injected at the proxy.
+  credential stores, ~/.ssh, on-disk keyrings, and keyring/agent sockets are hidden.
+  $HOME is HIDDEN in-sandbox. Three different behaviors — know which one you get:
+    READS of a hidden path FAIL LOUDLY: ENOENT, or an empty listing for a dir.
+    WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
+      DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
+    WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-itest-g_nbwyor
+    => work the agent must keep has to be written INTO the working tree.
+    allowed back read-only: /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.local/bin, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv, /home/admin/.cache/ms-playwright
+    if a tool breaks on a hidden $HOME path, allow it back narrowly:
+      REIN_SANDBOX_ALLOW_READ=/abs/path[:/more] rein run --sandbox -- …
+    or (NOT recommended — exposes your whole home dir): REIN_SANDBOX_SHOW_HOME=1
+  extra egress ALLOWED (direct TLS, NOT injected, no rein token): *.crates.io, *.golang.org, *.npmjs.org, *.pypi.org, *.pythonhosted.org, *.rubygems.org, api.anthropic.com, crates.io, osv.dev, platform.claude.com, pypi.org, rubygems.org, vuln.go.dev
+  writes are LOCKED until the agent declares its issue:  rein declare <n>
+  then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.
+  after 30m0s with no GitHub traffic, or 15s after your last confirmation, writes
+    re-lock and the agent must declare again; the run itself keeps going
+    (reads keep working) until the agent exits.
+    (REIN_APPROVAL_TTL=15s is set — the default is 4h0m0s.)
+  to run bash WITHOUT rein for one command: `\bash` (bash/zsh) or `command bash` (fish)
+  agent contract PRINTED to the agent's output (this agent has no system-prompt channel, so it may or
+    may not reach the model's context; the REIN_IN_SANDBOX_* env vars carry the same facts machine-readably).
+rein: running: bash -c
+set +e
+emit() { printf '%s%s\n' 'SBX| ' "$*"; }
+run() {
+  printf '%s$ %s\n' 'SBX| ' "$*"
+  "$@" 2>&1 | tr '\r' '\n' | while IFS= read -r l; do printf '%s%s\n' 'SBX| ' "$l"; done
+  return ${PIPESTATUS[0]}
+}
+cd "$0"
+rm -rf repo
+run git clone --progress https://github.com/TomHennen/agentcreds-validation-a repo
+cd repo || { emit "@CLONE_FAIL"; exit 3; }
+emit "@CLONE_OK"
+
+emit "@PHASE1_START  rein declare 598 (first Form A; blocks for the human)"
+run rein declare 598
+emit "@PHASE1_RC=$?"
+
+emit "@PHASE2_START  push agent/598/<nonce1> (expect: lands)"
+echo "approval-ttl-reattest: write #1, before the busy window" >> probe-1.txt
+run git add -A
+run git commit -q -m "approval-ttl-reattest: write #1, before the busy window"
+run git push --progress origin HEAD:refs/heads/agent/598/ttl1-20260907-190628-ae4052
+emit "@PHASE2_RC=$?"
+
+emit "@PHASE3_BUSY_START  busy window (~25s, GitHub traffic every ~5s) -- the approval AGE bound must still expire despite continuous activity"
+run git ls-remote origin
+run sleep 5
+run git ls-remote origin
+run sleep 5
+run git ls-remote origin
+run sleep 5
+run git ls-remote origin
+run sleep 5
+run git ls-remote origin
+emit "@PHASE3_BUSY_END"
+
+emit "@PHASE4_START  push agent/598/<nonce2> WITHOUT re-declaring (expect: locked -- the confirmation aged out)"
+echo "approval-ttl-reattest: write #2, after the busy window (should be refused)" >> probe-2.txt
+run git add -A
+run git commit -q -m "approval-ttl-reattest: write #2, after the busy window"
+run git push --progress origin HEAD:refs/heads/agent/598/ttl2-20260907-190628-2ec08e
+emit "@PHASE4_RC=$?"
+
+emit "@PHASE5_START  rein declare 598 again (second Form A; re-confirm required)"
+run rein declare 598
+emit "@PHASE5_RC=$?"
+
+emit "@PHASE6_START  push agent/598/<nonce2> again (expect: lands)"
+run git push --progress origin HEAD:refs/heads/agent/598/ttl2-20260907-190628-2ec08e
+emit "@PHASE6_RC=$?"
+emit "@SCRIPT_DONE"
+ /tmp/rein-itest-g_nbwyor
+---
+rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
+
+FILES
+- Your work persists ONLY in the working tree: /tmp/rein-itest-g_nbwyor
+  Write anything that must outlive this run THERE. Nothing else survives.
+- $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
+  DISCARDED when the run ends. You will get no error. Do not keep work there.
+- Most of $HOME reads as empty/missing; a few paths are re-exposed READ-ONLY, where
+  writes fail with "Read-only file system". Caches work but start cold each run.
+- A headless Chromium is available: Playwright browsers are host-installed under
+  /home/admin/.cache/ms-playwright (read-only; found automatically by playwright/playwright-core).
+  Use it to render, screenshot, and test web UIs. Do NOT run `npx playwright install`
+  (that dir is read-only). If Playwright reports a missing chromium-<rev>, the host's
+  version differs from your pinned playwright: ask the human to run `npx playwright
+  install chromium` on the host, or pin the playwright version the host has.
+
+CREDENTIALS
+- There are NO credentials in this environment. Tokens, keys, and credential stores
+  are hidden on purpose. Do not go looking for them, and do not ask the user for one.
+- git and gh still work anyway: a proxy OUTSIDE the sandbox injects a short-lived
+  GitHub token you never see. Just use them normally.
+
+GITHUB WRITES
+- Writes to GitHub (push, PRs, comments, any API mutation) are LOCKED until you
+  declare the issue this work is for:
+      rein declare <n>
+  That asks the human to approve, on their terminal. Reads work without it.
+- No issue exists for this work yet? Ask to file one:
+      rein declare --new "<title>" [--body "<text>"] [--repo owner/name]
+  The human approves, rein files it, and it becomes the declared issue.
+  (--repo is required when this session scopes more than one repo.)
+- Once confirmed, push ONLY to a branch named:
+      agent/<n>/<nonce>
+  where <n> is the declared issue number and <nonce> is a short name you choose
+  (letters/digits, then letters/digits/./_/-). Any other ref is rejected.
+- One issue per push.
+- After 30m0s with no GitHub traffic, or 15s after your last confirmation, your
+  write approval lapses: the next write is refused with the declare instruction;
+  declare again and the human re-confirms. Nothing else stops.
+
+NETWORK
+- Egress is restricted to GitHub plus: *.crates.io, *.golang.org, *.npmjs.org, *.pypi.org, *.pythonhosted.org, *.rubygems.org, api.anthropic.com, crates.io, osv.dev, platform.claude.com, pypi.org, rubygems.org, vuln.go.dev
+- Package registries are OPEN by default (egress preset "dev"): Go modules, npm, PyPI, crates.io, RubyGems (plus the osv.dev / vuln.go.dev advisory feeds). Dependency installs work.
+- Every other host is unreachable. A failed fetch is the sandbox, not a flaky network.
+- You CANNOT open a blocked host yourself. To reach one, ask the human to run this
+  single command, then restart rein (it applies to the NEXT run, not this one):
+      rein session allow-domain <host>
+
+SBX| $ git clone --progress https://github.com/TomHennen/agentcreds-validation-a repo
+SBX| Cloning into 'repo'...
+SBX| remote: Enumerating objects: 60, done.
+SBX| remote: Counting objects: 100% (5/5), done.
+SBX| remote: Compressing objects: 100% (3/3), done.
+SBX| remote: Total 60 (delta 3), reused 2 (delta 2), pack-reused 55 (from 1)
+SBX| Receiving objects: 100% (60/60), 5.30 KiB | 5.30 MiB/s, done.
+SBX| Resolving deltas: 100% (18/18), done.
+SBX| @CLONE_OK
+SBX| @PHASE1_START  rein declare 598 (first Form A; blocks for the human)
+SBX| $ rein declare 598
+
+=== rein: agent declares work on an issue ===
+   issue:    #598 "rein journey: approval-age re-attestation walkthrough (safe to close)"  [open]
+             in TomHennen/agentcreds-validation-a
+   session:  sess_journey_approval_ttl_reattest (role=implement, repos=[TomHennen/agentcreds-validation-a])
+   approving covers ALL writes for this run (git push, gh, API).
+
+To approve, type the issue number (598) and press enter.
+To deny, press Ctrl-C or type anything else.
+> 598
+  [approved]
+SBX| issue #598 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/598/<nonce>)
+SBX| @PHASE1_RC=0
+SBX| @PHASE2_START  push agent/598/<nonce1> (expect: lands)
+SBX| $ git add -A
+SBX| $ git commit -q -m approval-ttl-reattest: write #1, before the busy window
+SBX| $ git push --progress origin HEAD:refs/heads/agent/598/ttl1-20260907-190628-ae4052
+SBX| Enumerating objects: 4, done.
+SBX| Counting objects: 100% (4/4), done.
+SBX| Delta compression using up to 8 threads
+SBX| Compressing objects: 100% (3/3), done.
+SBX| Writing objects: 100% (3/3), 403 bytes | 403.00 KiB/s, done.
+SBX| Total 3 (delta 1), reused 0 (delta 0), pack-reused 0
+SBX| remote:
+SBX| remote: Create a pull request for 'agent/598/ttl1-20260907-190628-ae4052' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/598/ttl1-20260907-190628-ae4052
+SBX| remote:
+SBX| To https://github.com/TomHennen/agentcreds-validation-a
+SBX|  * [new branch]      HEAD -> agent/598/ttl1-20260907-190628-ae4052
+SBX| @PHASE2_RC=0
+SBX| @PHASE3_BUSY_START  busy window (~25s, GitHub traffic every ~5s) -- the approval AGE bound must still expire despite continuous activity
+SBX| $ git ls-remote origin
+SBX| e78b80096e4ca59ce7c27e57584faa52d6e40178	HEAD
+SBX| f2d9ce71c6e88c76431ec1b38089eb435ccb9bac	refs/heads/agent/483/up-20260906-131441-200593
+SBX| 98f82c9315ed6b8f06c26add6a09dd50606d08a2	refs/heads/agent/598/ttl1-20260907-190628-ae4052
+SBX| 56a677c92900a521d5dfd965e95887625517a343	refs/heads/cp3-manual-1783269161
+SBX| e78b80096e4ca59ce7c27e57584faa52d6e40178	refs/heads/main
+SBX| 54ead035747619e95e83a2f9facd6912c9f6ee6c	refs/heads/reincc-A
+SBX| 492834701f12880ebac965c1ec81afa41cb32fb5	refs/heads/reincc-B
+SBX| 01bdb8e6db5d26538138ec4d7f4543f0419e29ef	refs/pull/138/head
+SBX| 56f6ee08003b9786d3f284d2266481efc219ebdd	refs/pull/141/head
+SBX| 428056f141ffc8712710a8e40c564647a2cb24ff	refs/pull/143/head
+SBX| ac1d80c81b11f6744ab4c87ec96780d540f4b5d8	refs/pull/145/head
+SBX| a0cb364de1d162f396054c3b21365a326d56a3ea	refs/pull/155/head
+SBX| 75ba24036e3969e8be82423f7c336812969ee5e5	refs/pull/157/head
+SBX| ee3c0c41902ee23374b72461427199dbc6540db5	refs/pull/159/head
+SBX| c4dffa2aa3d6ce45ba98defa9a386836be2fc6dc	refs/pull/161/head
+SBX| d368e0584d6858ccafcfa36d3ef527bc4b05c776	refs/pull/163/head
+SBX| 818357e6f07e99e28e659c41e953919d9c947f4f	refs/pull/166/head
+SBX| df61be55ad98324f45d8325d9de32193e1ccf4a8	refs/pull/168/head
+SBX| 74e0bcab335ce77a2a7ff108b443453be5ba1003	refs/pull/170/head
+SBX| 78fc7d9ec8f85aa50ae5e92b52dce127bd25124d	refs/pull/175/head
+SBX| c8c72a4e462c8d271c63376864380e419dbdcf71	refs/pull/193/head
+SBX| 1c377ea606392e165693f70e086cd03af45ec9f5	refs/pull/195/head
+SBX| 1fd4f9cec3bb10dfc3d0328c877528fa34b0584b	refs/pull/197/head
+SBX| 10149bcad830f2bdcca7451ca82c58406cecb54d	refs/pull/200/head
+SBX| a07156b90737e27a0e0df4c9f7277c132f170369	refs/pull/203/head
+SBX| 3ac06d897857594a559833c9d44289e55feb0f54	refs/pull/207/head
+SBX| ac4ab68e5560dc1498337e791b318ff51f62d2b4	refs/pull/210/head
+SBX| fc5aa8a0e1eaa10793ac717696303f22bdcdfece	refs/pull/214/head
+SBX| dff9ef8bfa14beb663f150a7b8501b61b46ee090	refs/pull/219/head
+SBX| 36ea5c7d69683a9f69b6451362ba6d5d897a7dfc	refs/pull/222/head
+SBX| 1dedf2808698d9109bec520f0be81e511e3189ef	refs/pull/225/head
+SBX| 4be96adc23d20c73ac10611c4b6cd6e58b479c5f	refs/pull/227/head
+SBX| da774e2ab812d78d9183418e98e812bdba45c3de	refs/pull/229/head
+SBX| a62277cc2f44ed6087192cb33a6e23e451300dd5	refs/pull/232/head
+SBX| 6761536cad103f6a449a5e313124a932df4e178d	refs/pull/234/head
+SBX| 26f4c212b7158490b5870a75fb89aa892dbeacab	refs/pull/236/head
+SBX| 839b650d1346e592936f1e7dbab2be6e659034c1	refs/pull/238/head
+SBX| 65bfeeaada74ce98ffa96bc4216f6da690c1be67	refs/pull/240/head
+SBX| b03dd733a4ac53142cdab315080761d464ee3449	refs/pull/242/head
+SBX| f6e791aeb0ba9a51b9445bb7953f5cc1dda7a5b5	refs/pull/245/head
+SBX| e03403d98064ab850811ecb8ae6c67681a405c36	refs/pull/256/head
+SBX| d39b44cdaf64e4b6b1be811f2ec50258fef77560	refs/pull/265/head
+SBX| 91bf1cfe00ccfc9c36a15f912c607e877c8017d6	refs/pull/272/head
+SBX| bc7623ff1055c563c783a2bd94701b5bf7fbdd69	refs/pull/276/head
+SBX| 4929c99f9d7c796e4228daec7f8d01fdce7ac1da	refs/pull/283/head
+SBX| 9dfd649bf7ac73c54f850542f06e8830a1b0c00f	refs/pull/287/head
+SBX| 2fc4dbeede9bec890fa22ec0eeb7fb8f3e6d883a	refs/pull/294/head
+SBX| c6cbfb9448ca56baade633c085a3455002543f66	refs/pull/298/head
+SBX| 797b995972eec3de2151403a37786a98c4acccd7	refs/pull/307/head
+SBX| dafce0b9266cc5429daba5854d189ba7328f8766	refs/pull/311/head
+SBX| 9484c22c6c2d63bd3047a62eac827054f6b9eab9	refs/pull/319/head
+SBX| 6f88edf0856c26779184d339466f9accc93cd34a	refs/pull/329/head
+SBX| 9a057e3ac9f8fb053d8a2e934ccbf0a7ec1cee2d	refs/pull/335/head
+SBX| 815d4112ea20e1636b49a94e5a9e2c627d8694ba	refs/pull/359/head
+SBX| a6d856fa662df78c63fd749929d10a4318808ea2	refs/pull/361/head
+SBX| 513fccbeb654d21d1401a16b3befd3960906b3dd	refs/pull/370/head
+SBX| 3cb345a5177437db514171ce5b4604f8f589791e	refs/pull/376/head
+SBX| ecbb9bcfacdafdd432be28d2953e0388fab8fd72	refs/pull/383/head
+SBX| 29781306b4d4d92f2010ad180a2ff04a2de3d232	refs/pull/386/head
+SBX| c6d18e32c96ae676ffedcc13fcb62c25a9b37f74	refs/pull/396/head
+SBX| 6b7fc48ce34a45c2bb1c32b069c2eb73ec814f7f	refs/pull/406/head
+SBX| fa0437b6d7f149d27fee8f4af2f63a9d9d545229	refs/pull/418/head
+SBX| 4b7b822df2f674f581aab4c2872c50acabc6db3a	refs/pull/421/head
+SBX| d835531f4f0afc808273c4b083afc30c2262c9b3	refs/pull/426/head
+SBX| e73d50bbd3c60d4a74ec93776e7445bede7bfe0e	refs/pull/432/head
+SBX| 6693ab172d79e0063c6619c6ce2aaab300d2b8c0	refs/pull/437/head
+SBX| 818ecc56d9b5eb6750b81203c45f427d86e9f611	refs/pull/444/head
+SBX| 93649e984cd756dd6a6211ffff5cab209acb0e65	refs/pull/449/head
+SBX| f394ae419efd40d07b3096e5344939718549c4c4	refs/pull/458/head
+SBX| d452e0d2f1dee4d043d7dfb0454f85ed7806029d	refs/pull/463/head
+SBX| aec33e53ab36f924eef9c130d3b37d5b170134fa	refs/pull/469/head
+SBX| 6de69321299426e52225326ec07b29b20a8a4724	refs/pull/474/head
+SBX| ae96dcbd3a039708f39c812e984a5e7a6ce1adc4	refs/pull/480/head
+SBX| dd8f402b3195611e54fc12cea6956b1ca858e2c4	refs/pull/486/head
+SBX| 094571fc61c8f872fa0e1944116b62fb6d98e6cd	refs/pull/491/head
+SBX| 2a7b8bd435600beb9689fdaedfcdb2c48acc3946	refs/pull/497/head
+SBX| 6b2a756dfee22f1275cb5ab6ec569297163fedd9	refs/pull/502/head
+SBX| 39cff82e996432775a82129e1ce65e987d7b8c5d	refs/pull/507/head
+SBX| c143ce6605e0db003e825e4bb4c10cf9ef4baa37	refs/pull/510/head
+SBX| 15846f6bef3b84a658f90e3cd1b2183b2506e845	refs/pull/515/head
+SBX| 8fdf0888cd27238b548247f94a1bf626e6a8361a	refs/pull/521/head
+SBX| b8c2da626aaceb8fae7ee7aeca7e5337bed8a80f	refs/pull/526/head
+SBX| 72f6624c471348864109f8d40759cb7d3ae07aa7	refs/pull/532/head
+SBX| 4288ab831cf0029495a147d2e34746a3ae1df0a9	refs/pull/537/head
+SBX| 6412090b4be468e2f73f6baf7c12d3778dd9275c	refs/pull/552/head
+SBX| 95977c46702a9a04182aff63a3e66496490a0767	refs/pull/557/head
+SBX| f3d36d7533c7fc40fbb769fad5485e9a7b7fd5dd	refs/pull/567/head
+SBX| 471a0d0c2ab38ae833ccda128b07baa068c025b5	refs/pull/573/head
+SBX| f35c2d8d21616bf72572708f9b7eb776d444074e	refs/pull/582/head
+SBX| 9f92b9682aa49760392f9263eec1c68a8b1646e5	refs/pull/588/head
+SBX| $ sleep 5
+SBX| $ git ls-remote origin
+SBX| e78b80096e4ca59ce7c27e57584faa52d6e40178	HEAD
+SBX| f2d9ce71c6e88c76431ec1b38089eb435ccb9bac	refs/heads/agent/483/up-20260906-131441-200593
+SBX| 98f82c9315ed6b8f06c26add6a09dd50606d08a2	refs/heads/agent/598/ttl1-20260907-190628-ae4052
+SBX| 56a677c92900a521d5dfd965e95887625517a343	refs/heads/cp3-manual-1783269161
+SBX| e78b80096e4ca59ce7c27e57584faa52d6e40178	refs/heads/main
+SBX| 54ead035747619e95e83a2f9facd6912c9f6ee6c	refs/heads/reincc-A
+SBX| 492834701f12880ebac965c1ec81afa41cb32fb5	refs/heads/reincc-B
+SBX| 01bdb8e6db5d26538138ec4d7f4543f0419e29ef	refs/pull/138/head
+SBX| 56f6ee08003b9786d3f284d2266481efc219ebdd	refs/pull/141/head
+SBX| 428056f141ffc8712710a8e40c564647a2cb24ff	refs/pull/143/head
+SBX| ac1d80c81b11f6744ab4c87ec96780d540f4b5d8	refs/pull/145/head
+SBX| a0cb364de1d162f396054c3b21365a326d56a3ea	refs/pull/155/head
+SBX| 75ba24036e3969e8be82423f7c336812969ee5e5	refs/pull/157/head
+SBX| ee3c0c41902ee23374b72461427199dbc6540db5	refs/pull/159/head
+SBX| c4dffa2aa3d6ce45ba98defa9a386836be2fc6dc	refs/pull/161/head
+SBX| d368e0584d6858ccafcfa36d3ef527bc4b05c776	refs/pull/163/head
+SBX| 818357e6f07e99e28e659c41e953919d9c947f4f	refs/pull/166/head
+SBX| df61be55ad98324f45d8325d9de32193e1ccf4a8	refs/pull/168/head
+SBX| 74e0bcab335ce77a2a7ff108b443453be5ba1003	refs/pull/170/head
+SBX| 78fc7d9ec8f85aa50ae5e92b52dce127bd25124d	refs/pull/175/head
+SBX| c8c72a4e462c8d271c63376864380e419dbdcf71	refs/pull/193/head
+SBX| 1c377ea606392e165693f70e086cd03af45ec9f5	refs/pull/195/head
+SBX| 1fd4f9cec3bb10dfc3d0328c877528fa34b0584b	refs/pull/197/head
+SBX| 10149bcad830f2bdcca7451ca82c58406cecb54d	refs/pull/200/head
+SBX| a07156b90737e27a0e0df4c9f7277c132f170369	refs/pull/203/head
+SBX| 3ac06d897857594a559833c9d44289e55feb0f54	refs/pull/207/head
+SBX| ac4ab68e5560dc1498337e791b318ff51f62d2b4	refs/pull/210/head
+SBX| fc5aa8a0e1eaa10793ac717696303f22bdcdfece	refs/pull/214/head
+SBX| dff9ef8bfa14beb663f150a7b8501b61b46ee090	refs/pull/219/head
+SBX| 36ea5c7d69683a9f69b6451362ba6d5d897a7dfc	refs/pull/222/head
+SBX| 1dedf2808698d9109bec520f0be81e511e3189ef	refs/pull/225/head
+SBX| 4be96adc23d20c73ac10611c4b6cd6e58b479c5f	refs/pull/227/head
+SBX| da774e2ab812d78d9183418e98e812bdba45c3de	refs/pull/229/head
+SBX| a62277cc2f44ed6087192cb33a6e23e451300dd5	refs/pull/232/head
+SBX| 6761536cad103f6a449a5e313124a932df4e178d	refs/pull/234/head
+SBX| 26f4c212b7158490b5870a75fb89aa892dbeacab	refs/pull/236/head
+SBX| 839b650d1346e592936f1e7dbab2be6e659034c1	refs/pull/238/head
+SBX| 65bfeeaada74ce98ffa96bc4216f6da690c1be67	refs/pull/240/head
+SBX| b03dd733a4ac53142cdab315080761d464ee3449	refs/pull/242/head
+SBX| f6e791aeb0ba9a51b9445bb7953f5cc1dda7a5b5	refs/pull/245/head
+SBX| e03403d98064ab850811ecb8ae6c67681a405c36	refs/pull/256/head
+SBX| d39b44cdaf64e4b6b1be811f2ec50258fef77560	refs/pull/265/head
+SBX| 91bf1cfe00ccfc9c36a15f912c607e877c8017d6	refs/pull/272/head
+SBX| bc7623ff1055c563c783a2bd94701b5bf7fbdd69	refs/pull/276/head
+SBX| 4929c99f9d7c796e4228daec7f8d01fdce7ac1da	refs/pull/283/head
+SBX| 9dfd649bf7ac73c54f850542f06e8830a1b0c00f	refs/pull/287/head
+SBX| 2fc4dbeede9bec890fa22ec0eeb7fb8f3e6d883a	refs/pull/294/head
+SBX| c6cbfb9448ca56baade633c085a3455002543f66	refs/pull/298/head
+SBX| 797b995972eec3de2151403a37786a98c4acccd7	refs/pull/307/head
+SBX| dafce0b9266cc5429daba5854d189ba7328f8766	refs/pull/311/head
+SBX| 9484c22c6c2d63bd3047a62eac827054f6b9eab9	refs/pull/319/head
+SBX| 6f88edf0856c26779184d339466f9accc93cd34a	refs/pull/329/head
+SBX| 9a057e3ac9f8fb053d8a2e934ccbf0a7ec1cee2d	refs/pull/335/head
+SBX| 815d4112ea20e1636b49a94e5a9e2c627d8694ba	refs/pull/359/head
+SBX| a6d856fa662df78c63fd749929d10a4318808ea2	refs/pull/361/head
+SBX| 513fccbeb654d21d1401a16b3befd3960906b3dd	refs/pull/370/head
+SBX| 3cb345a5177437db514171ce5b4604f8f589791e	refs/pull/376/head
+SBX| ecbb9bcfacdafdd432be28d2953e0388fab8fd72	refs/pull/383/head
+SBX| 29781306b4d4d92f2010ad180a2ff04a2de3d232	refs/pull/386/head
+SBX| c6d18e32c96ae676ffedcc13fcb62c25a9b37f74	refs/pull/396/head
+SBX| 6b7fc48ce34a45c2bb1c32b069c2eb73ec814f7f	refs/pull/406/head
+SBX| fa0437b6d7f149d27fee8f4af2f63a9d9d545229	refs/pull/418/head
+SBX| 4b7b822df2f674f581aab4c2872c50acabc6db3a	refs/pull/421/head
+SBX| d835531f4f0afc808273c4b083afc30c2262c9b3	refs/pull/426/head
+SBX| e73d50bbd3c60d4a74ec93776e7445bede7bfe0e	refs/pull/432/head
+SBX| 6693ab172d79e0063c6619c6ce2aaab300d2b8c0	refs/pull/437/head
+SBX| 818ecc56d9b5eb6750b81203c45f427d86e9f611	refs/pull/444/head
+SBX| 93649e984cd756dd6a6211ffff5cab209acb0e65	refs/pull/449/head
+SBX| f394ae419efd40d07b3096e5344939718549c4c4	refs/pull/458/head
+SBX| d452e0d2f1dee4d043d7dfb0454f85ed7806029d	refs/pull/463/head
+SBX| aec33e53ab36f924eef9c130d3b37d5b170134fa	refs/pull/469/head
+SBX| 6de69321299426e52225326ec07b29b20a8a4724	refs/pull/474/head
+SBX| ae96dcbd3a039708f39c812e984a5e7a6ce1adc4	refs/pull/480/head
+SBX| dd8f402b3195611e54fc12cea6956b1ca858e2c4	refs/pull/486/head
+SBX| 094571fc61c8f872fa0e1944116b62fb6d98e6cd	refs/pull/491/head
+SBX| 2a7b8bd435600beb9689fdaedfcdb2c48acc3946	refs/pull/497/head
+SBX| 6b2a756dfee22f1275cb5ab6ec569297163fedd9	refs/pull/502/head
+SBX| 39cff82e996432775a82129e1ce65e987d7b8c5d	refs/pull/507/head
+SBX| c143ce6605e0db003e825e4bb4c10cf9ef4baa37	refs/pull/510/head
+SBX| 15846f6bef3b84a658f90e3cd1b2183b2506e845	refs/pull/515/head
+SBX| 8fdf0888cd27238b548247f94a1bf626e6a8361a	refs/pull/521/head
+SBX| b8c2da626aaceb8fae7ee7aeca7e5337bed8a80f	refs/pull/526/head
+SBX| 72f6624c471348864109f8d40759cb7d3ae07aa7	refs/pull/532/head
+SBX| 4288ab831cf0029495a147d2e34746a3ae1df0a9	refs/pull/537/head
+SBX| 6412090b4be468e2f73f6baf7c12d3778dd9275c	refs/pull/552/head
+SBX| 95977c46702a9a04182aff63a3e66496490a0767	refs/pull/557/head
+SBX| f3d36d7533c7fc40fbb769fad5485e9a7b7fd5dd	refs/pull/567/head
+SBX| 471a0d0c2ab38ae833ccda128b07baa068c025b5	refs/pull/573/head
+SBX| f35c2d8d21616bf72572708f9b7eb776d444074e	refs/pull/582/head
+SBX| 9f92b9682aa49760392f9263eec1c68a8b1646e5	refs/pull/588/head
+SBX| $ sleep 5
+SBX| $ git ls-remote origin
+SBX| e78b80096e4ca59ce7c27e57584faa52d6e40178	HEAD
+SBX| f2d9ce71c6e88c76431ec1b38089eb435ccb9bac	refs/heads/agent/483/up-20260906-131441-200593
+SBX| 98f82c9315ed6b8f06c26add6a09dd50606d08a2	refs/heads/agent/598/ttl1-20260907-190628-ae4052
+SBX| 56a677c92900a521d5dfd965e95887625517a343	refs/heads/cp3-manual-1783269161
+SBX| e78b80096e4ca59ce7c27e57584faa52d6e40178	refs/heads/main
+SBX| 54ead035747619e95e83a2f9facd6912c9f6ee6c	refs/heads/reincc-A
+SBX| 492834701f12880ebac965c1ec81afa41cb32fb5	refs/heads/reincc-B
+SBX| 01bdb8e6db5d26538138ec4d7f4543f0419e29ef	refs/pull/138/head
+SBX| 56f6ee08003b9786d3f284d2266481efc219ebdd	refs/pull/141/head
+SBX| 428056f141ffc8712710a8e40c564647a2cb24ff	refs/pull/143/head
+SBX| ac1d80c81b11f6744ab4c87ec96780d540f4b5d8	refs/pull/145/head
+SBX| a0cb364de1d162f396054c3b21365a326d56a3ea	refs/pull/155/head
+SBX| 75ba24036e3969e8be82423f7c336812969ee5e5	refs/pull/157/head
+SBX| ee3c0c41902ee23374b72461427199dbc6540db5	refs/pull/159/head
+SBX| c4dffa2aa3d6ce45ba98defa9a386836be2fc6dc	refs/pull/161/head
+SBX| d368e0584d6858ccafcfa36d3ef527bc4b05c776	refs/pull/163/head
+SBX| 818357e6f07e99e28e659c41e953919d9c947f4f	refs/pull/166/head
+SBX| df61be55ad98324f45d8325d9de32193e1ccf4a8	refs/pull/168/head
+SBX| 74e0bcab335ce77a2a7ff108b443453be5ba1003	refs/pull/170/head
+SBX| 78fc7d9ec8f85aa50ae5e92b52dce127bd25124d	refs/pull/175/head
+SBX| c8c72a4e462c8d271c63376864380e419dbdcf71	refs/pull/193/head
+SBX| 1c377ea606392e165693f70e086cd03af45ec9f5	refs/pull/195/head
+SBX| 1fd4f9cec3bb10dfc3d0328c877528fa34b0584b	refs/pull/197/head
+SBX| 10149bcad830f2bdcca7451ca82c58406cecb54d	refs/pull/200/head
+SBX| a07156b90737e27a0e0df4c9f7277c132f170369	refs/pull/203/head
+SBX| 3ac06d897857594a559833c9d44289e55feb0f54	refs/pull/207/head
+SBX| ac4ab68e5560dc1498337e791b318ff51f62d2b4	refs/pull/210/head
+SBX| fc5aa8a0e1eaa10793ac717696303f22bdcdfece	refs/pull/214/head
+SBX| dff9ef8bfa14beb663f150a7b8501b61b46ee090	refs/pull/219/head
+SBX| 36ea5c7d69683a9f69b6451362ba6d5d897a7dfc	refs/pull/222/head
+SBX| 1dedf2808698d9109bec520f0be81e511e3189ef	refs/pull/225/head
+SBX| 4be96adc23d20c73ac10611c4b6cd6e58b479c5f	refs/pull/227/head
+SBX| da774e2ab812d78d9183418e98e812bdba45c3de	refs/pull/229/head
+SBX| a62277cc2f44ed6087192cb33a6e23e451300dd5	refs/pull/232/head
+SBX| 6761536cad103f6a449a5e313124a932df4e178d	refs/pull/234/head
+SBX| 26f4c212b7158490b5870a75fb89aa892dbeacab	refs/pull/236/head
+SBX| 839b650d1346e592936f1e7dbab2be6e659034c1	refs/pull/238/head
+SBX| 65bfeeaada74ce98ffa96bc4216f6da690c1be67	refs/pull/240/head
+SBX| b03dd733a4ac53142cdab315080761d464ee3449	refs/pull/242/head
+SBX| f6e791aeb0ba9a51b9445bb7953f5cc1dda7a5b5	refs/pull/245/head
+SBX| e03403d98064ab850811ecb8ae6c67681a405c36	refs/pull/256/head
+SBX| d39b44cdaf64e4b6b1be811f2ec50258fef77560	refs/pull/265/head
+SBX| 91bf1cfe00ccfc9c36a15f912c607e877c8017d6	refs/pull/272/head
+SBX| bc7623ff1055c563c783a2bd94701b5bf7fbdd69	refs/pull/276/head
+SBX| 4929c99f9d7c796e4228daec7f8d01fdce7ac1da	refs/pull/283/head
+SBX| 9dfd649bf7ac73c54f850542f06e8830a1b0c00f	refs/pull/287/head
+SBX| 2fc4dbeede9bec890fa22ec0eeb7fb8f3e6d883a	refs/pull/294/head
+SBX| c6cbfb9448ca56baade633c085a3455002543f66	refs/pull/298/head
+SBX| 797b995972eec3de2151403a37786a98c4acccd7	refs/pull/307/head
+SBX| dafce0b9266cc5429daba5854d189ba7328f8766	refs/pull/311/head
+SBX| 9484c22c6c2d63bd3047a62eac827054f6b9eab9	refs/pull/319/head
+SBX| 6f88edf0856c26779184d339466f9accc93cd34a	refs/pull/329/head
+SBX| 9a057e3ac9f8fb053d8a2e934ccbf0a7ec1cee2d	refs/pull/335/head
+SBX| 815d4112ea20e1636b49a94e5a9e2c627d8694ba	refs/pull/359/head
+SBX| a6d856fa662df78c63fd749929d10a4318808ea2	refs/pull/361/head
+SBX| 513fccbeb654d21d1401a16b3befd3960906b3dd	refs/pull/370/head
+SBX| 3cb345a5177437db514171ce5b4604f8f589791e	refs/pull/376/head
+SBX| ecbb9bcfacdafdd432be28d2953e0388fab8fd72	refs/pull/383/head
+SBX| 29781306b4d4d92f2010ad180a2ff04a2de3d232	refs/pull/386/head
+SBX| c6d18e32c96ae676ffedcc13fcb62c25a9b37f74	refs/pull/396/head
+SBX| 6b7fc48ce34a45c2bb1c32b069c2eb73ec814f7f	refs/pull/406/head
+SBX| fa0437b6d7f149d27fee8f4af2f63a9d9d545229	refs/pull/418/head
+SBX| 4b7b822df2f674f581aab4c2872c50acabc6db3a	refs/pull/421/head
+SBX| d835531f4f0afc808273c4b083afc30c2262c9b3	refs/pull/426/head
+SBX| e73d50bbd3c60d4a74ec93776e7445bede7bfe0e	refs/pull/432/head
+SBX| 6693ab172d79e0063c6619c6ce2aaab300d2b8c0	refs/pull/437/head
+SBX| 818ecc56d9b5eb6750b81203c45f427d86e9f611	refs/pull/444/head
+SBX| 93649e984cd756dd6a6211ffff5cab209acb0e65	refs/pull/449/head
+SBX| f394ae419efd40d07b3096e5344939718549c4c4	refs/pull/458/head
+SBX| d452e0d2f1dee4d043d7dfb0454f85ed7806029d	refs/pull/463/head
+SBX| aec33e53ab36f924eef9c130d3b37d5b170134fa	refs/pull/469/head
+SBX| 6de69321299426e52225326ec07b29b20a8a4724	refs/pull/474/head
+SBX| ae96dcbd3a039708f39c812e984a5e7a6ce1adc4	refs/pull/480/head
+SBX| dd8f402b3195611e54fc12cea6956b1ca858e2c4	refs/pull/486/head
+SBX| 094571fc61c8f872fa0e1944116b62fb6d98e6cd	refs/pull/491/head
+SBX| 2a7b8bd435600beb9689fdaedfcdb2c48acc3946	refs/pull/497/head
+SBX| 6b2a756dfee22f1275cb5ab6ec569297163fedd9	refs/pull/502/head
+SBX| 39cff82e996432775a82129e1ce65e987d7b8c5d	refs/pull/507/head
+SBX| c143ce6605e0db003e825e4bb4c10cf9ef4baa37	refs/pull/510/head
+SBX| 15846f6bef3b84a658f90e3cd1b2183b2506e845	refs/pull/515/head
+SBX| 8fdf0888cd27238b548247f94a1bf626e6a8361a	refs/pull/521/head
+SBX| b8c2da626aaceb8fae7ee7aeca7e5337bed8a80f	refs/pull/526/head
+SBX| 72f6624c471348864109f8d40759cb7d3ae07aa7	refs/pull/532/head
+SBX| 4288ab831cf0029495a147d2e34746a3ae1df0a9	refs/pull/537/head
+SBX| 6412090b4be468e2f73f6baf7c12d3778dd9275c	refs/pull/552/head
+SBX| 95977c46702a9a04182aff63a3e66496490a0767	refs/pull/557/head
+SBX| f3d36d7533c7fc40fbb769fad5485e9a7b7fd5dd	refs/pull/567/head
+SBX| 471a0d0c2ab38ae833ccda128b07baa068c025b5	refs/pull/573/head
+SBX| f35c2d8d21616bf72572708f9b7eb776d444074e	refs/pull/582/head
+SBX| 9f92b9682aa49760392f9263eec1c68a8b1646e5	refs/pull/588/head
+SBX| $ sleep 5
+rein: revoked 1 of 1 write token(s) on re-attestation
+
+===============================================================
+rein: write approval is 15s old — writes LOCKED.
+  The agent keeps running; its next GitHub write will ask it to
+  declare its issue again, and you confirm once more.
+  Reads still work.
+===============================================================
+SBX| $ git ls-remote origin
+SBX| e78b80096e4ca59ce7c27e57584faa52d6e40178	HEAD
+SBX| f2d9ce71c6e88c76431ec1b38089eb435ccb9bac	refs/heads/agent/483/up-20260906-131441-200593
+SBX| 98f82c9315ed6b8f06c26add6a09dd50606d08a2	refs/heads/agent/598/ttl1-20260907-190628-ae4052
+SBX| 56a677c92900a521d5dfd965e95887625517a343	refs/heads/cp3-manual-1783269161
+SBX| e78b80096e4ca59ce7c27e57584faa52d6e40178	refs/heads/main
+SBX| 54ead035747619e95e83a2f9facd6912c9f6ee6c	refs/heads/reincc-A
+SBX| 492834701f12880ebac965c1ec81afa41cb32fb5	refs/heads/reincc-B
+SBX| 01bdb8e6db5d26538138ec4d7f4543f0419e29ef	refs/pull/138/head
+SBX| 56f6ee08003b9786d3f284d2266481efc219ebdd	refs/pull/141/head
+SBX| 428056f141ffc8712710a8e40c564647a2cb24ff	refs/pull/143/head
+SBX| ac1d80c81b11f6744ab4c87ec96780d540f4b5d8	refs/pull/145/head
+SBX| a0cb364de1d162f396054c3b21365a326d56a3ea	refs/pull/155/head
+SBX| 75ba24036e3969e8be82423f7c336812969ee5e5	refs/pull/157/head
+SBX| ee3c0c41902ee23374b72461427199dbc6540db5	refs/pull/159/head
+SBX| c4dffa2aa3d6ce45ba98defa9a386836be2fc6dc	refs/pull/161/head
+SBX| d368e0584d6858ccafcfa36d3ef527bc4b05c776	refs/pull/163/head
+SBX| 818357e6f07e99e28e659c41e953919d9c947f4f	refs/pull/166/head
+SBX| df61be55ad98324f45d8325d9de32193e1ccf4a8	refs/pull/168/head
+SBX| 74e0bcab335ce77a2a7ff108b443453be5ba1003	refs/pull/170/head
+SBX| 78fc7d9ec8f85aa50ae5e92b52dce127bd25124d	refs/pull/175/head
+SBX| c8c72a4e462c8d271c63376864380e419dbdcf71	refs/pull/193/head
+SBX| 1c377ea606392e165693f70e086cd03af45ec9f5	refs/pull/195/head
+SBX| 1fd4f9cec3bb10dfc3d0328c877528fa34b0584b	refs/pull/197/head
+SBX| 10149bcad830f2bdcca7451ca82c58406cecb54d	refs/pull/200/head
+SBX| a07156b90737e27a0e0df4c9f7277c132f170369	refs/pull/203/head
+SBX| 3ac06d897857594a559833c9d44289e55feb0f54	refs/pull/207/head
+SBX| ac4ab68e5560dc1498337e791b318ff51f62d2b4	refs/pull/210/head
+SBX| fc5aa8a0e1eaa10793ac717696303f22bdcdfece	refs/pull/214/head
+SBX| dff9ef8bfa14beb663f150a7b8501b61b46ee090	refs/pull/219/head
+SBX| 36ea5c7d69683a9f69b6451362ba6d5d897a7dfc	refs/pull/222/head
+SBX| 1dedf2808698d9109bec520f0be81e511e3189ef	refs/pull/225/head
+SBX| 4be96adc23d20c73ac10611c4b6cd6e58b479c5f	refs/pull/227/head
+SBX| da774e2ab812d78d9183418e98e812bdba45c3de	refs/pull/229/head
+SBX| a62277cc2f44ed6087192cb33a6e23e451300dd5	refs/pull/232/head
+SBX| 6761536cad103f6a449a5e313124a932df4e178d	refs/pull/234/head
+SBX| 26f4c212b7158490b5870a75fb89aa892dbeacab	refs/pull/236/head
+SBX| 839b650d1346e592936f1e7dbab2be6e659034c1	refs/pull/238/head
+SBX| 65bfeeaada74ce98ffa96bc4216f6da690c1be67	refs/pull/240/head
+SBX| b03dd733a4ac53142cdab315080761d464ee3449	refs/pull/242/head
+SBX| f6e791aeb0ba9a51b9445bb7953f5cc1dda7a5b5	refs/pull/245/head
+SBX| e03403d98064ab850811ecb8ae6c67681a405c36	refs/pull/256/head
+SBX| d39b44cdaf64e4b6b1be811f2ec50258fef77560	refs/pull/265/head
+SBX| 91bf1cfe00ccfc9c36a15f912c607e877c8017d6	refs/pull/272/head
+SBX| bc7623ff1055c563c783a2bd94701b5bf7fbdd69	refs/pull/276/head
+SBX| 4929c99f9d7c796e4228daec7f8d01fdce7ac1da	refs/pull/283/head
+SBX| 9dfd649bf7ac73c54f850542f06e8830a1b0c00f	refs/pull/287/head
+SBX| 2fc4dbeede9bec890fa22ec0eeb7fb8f3e6d883a	refs/pull/294/head
+SBX| c6cbfb9448ca56baade633c085a3455002543f66	refs/pull/298/head
+SBX| 797b995972eec3de2151403a37786a98c4acccd7	refs/pull/307/head
+SBX| dafce0b9266cc5429daba5854d189ba7328f8766	refs/pull/311/head
+SBX| 9484c22c6c2d63bd3047a62eac827054f6b9eab9	refs/pull/319/head
+SBX| 6f88edf0856c26779184d339466f9accc93cd34a	refs/pull/329/head
+SBX| 9a057e3ac9f8fb053d8a2e934ccbf0a7ec1cee2d	refs/pull/335/head
+SBX| 815d4112ea20e1636b49a94e5a9e2c627d8694ba	refs/pull/359/head
+SBX| a6d856fa662df78c63fd749929d10a4318808ea2	refs/pull/361/head
+SBX| 513fccbeb654d21d1401a16b3befd3960906b3dd	refs/pull/370/head
+SBX| 3cb345a5177437db514171ce5b4604f8f589791e	refs/pull/376/head
+SBX| ecbb9bcfacdafdd432be28d2953e0388fab8fd72	refs/pull/383/head
+SBX| 29781306b4d4d92f2010ad180a2ff04a2de3d232	refs/pull/386/head
+SBX| c6d18e32c96ae676ffedcc13fcb62c25a9b37f74	refs/pull/396/head
+SBX| 6b7fc48ce34a45c2bb1c32b069c2eb73ec814f7f	refs/pull/406/head
+SBX| fa0437b6d7f149d27fee8f4af2f63a9d9d545229	refs/pull/418/head
+SBX| 4b7b822df2f674f581aab4c2872c50acabc6db3a	refs/pull/421/head
+SBX| d835531f4f0afc808273c4b083afc30c2262c9b3	refs/pull/426/head
+SBX| e73d50bbd3c60d4a74ec93776e7445bede7bfe0e	refs/pull/432/head
+SBX| 6693ab172d79e0063c6619c6ce2aaab300d2b8c0	refs/pull/437/head
+SBX| 818ecc56d9b5eb6750b81203c45f427d86e9f611	refs/pull/444/head
+SBX| 93649e984cd756dd6a6211ffff5cab209acb0e65	refs/pull/449/head
+SBX| f394ae419efd40d07b3096e5344939718549c4c4	refs/pull/458/head
+SBX| d452e0d2f1dee4d043d7dfb0454f85ed7806029d	refs/pull/463/head
+SBX| aec33e53ab36f924eef9c130d3b37d5b170134fa	refs/pull/469/head
+SBX| 6de69321299426e52225326ec07b29b20a8a4724	refs/pull/474/head
+SBX| ae96dcbd3a039708f39c812e984a5e7a6ce1adc4	refs/pull/480/head
+SBX| dd8f402b3195611e54fc12cea6956b1ca858e2c4	refs/pull/486/head
+SBX| 094571fc61c8f872fa0e1944116b62fb6d98e6cd	refs/pull/491/head
+SBX| 2a7b8bd435600beb9689fdaedfcdb2c48acc3946	refs/pull/497/head
+SBX| 6b2a756dfee22f1275cb5ab6ec569297163fedd9	refs/pull/502/head
+SBX| 39cff82e996432775a82129e1ce65e987d7b8c5d	refs/pull/507/head
+SBX| c143ce6605e0db003e825e4bb4c10cf9ef4baa37	refs/pull/510/head
+SBX| 15846f6bef3b84a658f90e3cd1b2183b2506e845	refs/pull/515/head
+SBX| 8fdf0888cd27238b548247f94a1bf626e6a8361a	refs/pull/521/head
+SBX| b8c2da626aaceb8fae7ee7aeca7e5337bed8a80f	refs/pull/526/head
+SBX| 72f6624c471348864109f8d40759cb7d3ae07aa7	refs/pull/532/head
+SBX| 4288ab831cf0029495a147d2e34746a3ae1df0a9	refs/pull/537/head
+SBX| 6412090b4be468e2f73f6baf7c12d3778dd9275c	refs/pull/552/head
+SBX| 95977c46702a9a04182aff63a3e66496490a0767	refs/pull/557/head
+SBX| f3d36d7533c7fc40fbb769fad5485e9a7b7fd5dd	refs/pull/567/head
+SBX| 471a0d0c2ab38ae833ccda128b07baa068c025b5	refs/pull/573/head
+SBX| f35c2d8d21616bf72572708f9b7eb776d444074e	refs/pull/582/head
+SBX| 9f92b9682aa49760392f9263eec1c68a8b1646e5	refs/pull/588/head
+SBX| $ sleep 5
+SBX| $ git ls-remote origin
+SBX| e78b80096e4ca59ce7c27e57584faa52d6e40178	HEAD
+SBX| f2d9ce71c6e88c76431ec1b38089eb435ccb9bac	refs/heads/agent/483/up-20260906-131441-200593
+SBX| 98f82c9315ed6b8f06c26add6a09dd50606d08a2	refs/heads/agent/598/ttl1-20260907-190628-ae4052
+SBX| 56a677c92900a521d5dfd965e95887625517a343	refs/heads/cp3-manual-1783269161
+SBX| e78b80096e4ca59ce7c27e57584faa52d6e40178	refs/heads/main
+SBX| 54ead035747619e95e83a2f9facd6912c9f6ee6c	refs/heads/reincc-A
+SBX| 492834701f12880ebac965c1ec81afa41cb32fb5	refs/heads/reincc-B
+SBX| 01bdb8e6db5d26538138ec4d7f4543f0419e29ef	refs/pull/138/head
+SBX| 56f6ee08003b9786d3f284d2266481efc219ebdd	refs/pull/141/head
+SBX| 428056f141ffc8712710a8e40c564647a2cb24ff	refs/pull/143/head
+SBX| ac1d80c81b11f6744ab4c87ec96780d540f4b5d8	refs/pull/145/head
+SBX| a0cb364de1d162f396054c3b21365a326d56a3ea	refs/pull/155/head
+SBX| 75ba24036e3969e8be82423f7c336812969ee5e5	refs/pull/157/head
+SBX| ee3c0c41902ee23374b72461427199dbc6540db5	refs/pull/159/head
+SBX| c4dffa2aa3d6ce45ba98defa9a386836be2fc6dc	refs/pull/161/head
+SBX| d368e0584d6858ccafcfa36d3ef527bc4b05c776	refs/pull/163/head
+SBX| 818357e6f07e99e28e659c41e953919d9c947f4f	refs/pull/166/head
+SBX| df61be55ad98324f45d8325d9de32193e1ccf4a8	refs/pull/168/head
+SBX| 74e0bcab335ce77a2a7ff108b443453be5ba1003	refs/pull/170/head
+SBX| 78fc7d9ec8f85aa50ae5e92b52dce127bd25124d	refs/pull/175/head
+SBX| c8c72a4e462c8d271c63376864380e419dbdcf71	refs/pull/193/head
+SBX| 1c377ea606392e165693f70e086cd03af45ec9f5	refs/pull/195/head
+SBX| 1fd4f9cec3bb10dfc3d0328c877528fa34b0584b	refs/pull/197/head
+SBX| 10149bcad830f2bdcca7451ca82c58406cecb54d	refs/pull/200/head
+SBX| a07156b90737e27a0e0df4c9f7277c132f170369	refs/pull/203/head
+SBX| 3ac06d897857594a559833c9d44289e55feb0f54	refs/pull/207/head
+SBX| ac4ab68e5560dc1498337e791b318ff51f62d2b4	refs/pull/210/head
+SBX| fc5aa8a0e1eaa10793ac717696303f22bdcdfece	refs/pull/214/head
+SBX| dff9ef8bfa14beb663f150a7b8501b61b46ee090	refs/pull/219/head
+SBX| 36ea5c7d69683a9f69b6451362ba6d5d897a7dfc	refs/pull/222/head
+SBX| 1dedf2808698d9109bec520f0be81e511e3189ef	refs/pull/225/head
+SBX| 4be96adc23d20c73ac10611c4b6cd6e58b479c5f	refs/pull/227/head
+SBX| da774e2ab812d78d9183418e98e812bdba45c3de	refs/pull/229/head
+SBX| a62277cc2f44ed6087192cb33a6e23e451300dd5	refs/pull/232/head
+SBX| 6761536cad103f6a449a5e313124a932df4e178d	refs/pull/234/head
+SBX| 26f4c212b7158490b5870a75fb89aa892dbeacab	refs/pull/236/head
+SBX| 839b650d1346e592936f1e7dbab2be6e659034c1	refs/pull/238/head
+SBX| 65bfeeaada74ce98ffa96bc4216f6da690c1be67	refs/pull/240/head
+SBX| b03dd733a4ac53142cdab315080761d464ee3449	refs/pull/242/head
+SBX| f6e791aeb0ba9a51b9445bb7953f5cc1dda7a5b5	refs/pull/245/head
+SBX| e03403d98064ab850811ecb8ae6c67681a405c36	refs/pull/256/head
+SBX| d39b44cdaf64e4b6b1be811f2ec50258fef77560	refs/pull/265/head
+SBX| 91bf1cfe00ccfc9c36a15f912c607e877c8017d6	refs/pull/272/head
+SBX| bc7623ff1055c563c783a2bd94701b5bf7fbdd69	refs/pull/276/head
+SBX| 4929c99f9d7c796e4228daec7f8d01fdce7ac1da	refs/pull/283/head
+SBX| 9dfd649bf7ac73c54f850542f06e8830a1b0c00f	refs/pull/287/head
+SBX| 2fc4dbeede9bec890fa22ec0eeb7fb8f3e6d883a	refs/pull/294/head
+SBX| c6cbfb9448ca56baade633c085a3455002543f66	refs/pull/298/head
+SBX| 797b995972eec3de2151403a37786a98c4acccd7	refs/pull/307/head
+SBX| dafce0b9266cc5429daba5854d189ba7328f8766	refs/pull/311/head
+SBX| 9484c22c6c2d63bd3047a62eac827054f6b9eab9	refs/pull/319/head
+SBX| 6f88edf0856c26779184d339466f9accc93cd34a	refs/pull/329/head
+SBX| 9a057e3ac9f8fb053d8a2e934ccbf0a7ec1cee2d	refs/pull/335/head
+SBX| 815d4112ea20e1636b49a94e5a9e2c627d8694ba	refs/pull/359/head
+SBX| a6d856fa662df78c63fd749929d10a4318808ea2	refs/pull/361/head
+SBX| 513fccbeb654d21d1401a16b3befd3960906b3dd	refs/pull/370/head
+SBX| 3cb345a5177437db514171ce5b4604f8f589791e	refs/pull/376/head
+SBX| ecbb9bcfacdafdd432be28d2953e0388fab8fd72	refs/pull/383/head
+SBX| 29781306b4d4d92f2010ad180a2ff04a2de3d232	refs/pull/386/head
+SBX| c6d18e32c96ae676ffedcc13fcb62c25a9b37f74	refs/pull/396/head
+SBX| 6b7fc48ce34a45c2bb1c32b069c2eb73ec814f7f	refs/pull/406/head
+SBX| fa0437b6d7f149d27fee8f4af2f63a9d9d545229	refs/pull/418/head
+SBX| 4b7b822df2f674f581aab4c2872c50acabc6db3a	refs/pull/421/head
+SBX| d835531f4f0afc808273c4b083afc30c2262c9b3	refs/pull/426/head
+SBX| e73d50bbd3c60d4a74ec93776e7445bede7bfe0e	refs/pull/432/head
+SBX| 6693ab172d79e0063c6619c6ce2aaab300d2b8c0	refs/pull/437/head
+SBX| 818ecc56d9b5eb6750b81203c45f427d86e9f611	refs/pull/444/head
+SBX| 93649e984cd756dd6a6211ffff5cab209acb0e65	refs/pull/449/head
+SBX| f394ae419efd40d07b3096e5344939718549c4c4	refs/pull/458/head
+SBX| d452e0d2f1dee4d043d7dfb0454f85ed7806029d	refs/pull/463/head
+SBX| aec33e53ab36f924eef9c130d3b37d5b170134fa	refs/pull/469/head
+SBX| 6de69321299426e52225326ec07b29b20a8a4724	refs/pull/474/head
+SBX| ae96dcbd3a039708f39c812e984a5e7a6ce1adc4	refs/pull/480/head
+SBX| dd8f402b3195611e54fc12cea6956b1ca858e2c4	refs/pull/486/head
+SBX| 094571fc61c8f872fa0e1944116b62fb6d98e6cd	refs/pull/491/head
+SBX| 2a7b8bd435600beb9689fdaedfcdb2c48acc3946	refs/pull/497/head
+SBX| 6b2a756dfee22f1275cb5ab6ec569297163fedd9	refs/pull/502/head
+SBX| 39cff82e996432775a82129e1ce65e987d7b8c5d	refs/pull/507/head
+SBX| c143ce6605e0db003e825e4bb4c10cf9ef4baa37	refs/pull/510/head
+SBX| 15846f6bef3b84a658f90e3cd1b2183b2506e845	refs/pull/515/head
+SBX| 8fdf0888cd27238b548247f94a1bf626e6a8361a	refs/pull/521/head
+SBX| b8c2da626aaceb8fae7ee7aeca7e5337bed8a80f	refs/pull/526/head
+SBX| 72f6624c471348864109f8d40759cb7d3ae07aa7	refs/pull/532/head
+SBX| 4288ab831cf0029495a147d2e34746a3ae1df0a9	refs/pull/537/head
+SBX| 6412090b4be468e2f73f6baf7c12d3778dd9275c	refs/pull/552/head
+SBX| 95977c46702a9a04182aff63a3e66496490a0767	refs/pull/557/head
+SBX| f3d36d7533c7fc40fbb769fad5485e9a7b7fd5dd	refs/pull/567/head
+SBX| 471a0d0c2ab38ae833ccda128b07baa068c025b5	refs/pull/573/head
+SBX| f35c2d8d21616bf72572708f9b7eb776d444074e	refs/pull/582/head
+SBX| 9f92b9682aa49760392f9263eec1c68a8b1646e5	refs/pull/588/head
+SBX| @PHASE3_BUSY_END
+SBX| @PHASE4_START  push agent/598/<nonce2> WITHOUT re-declaring (expect: locked -- the confirmation aged out)
+SBX| $ git add -A
+SBX| $ git commit -q -m approval-ttl-reattest: write #2, after the busy window
+SBX| $ git push --progress origin HEAD:refs/heads/agent/598/ttl2-20260907-190628-2ec08e
+SBX| fatal: remote error: rein: writes are locked until you declare your issue. Run: rein declare <n> (then push to agent/<n>/<nonce>)
+SBX| @PHASE4_RC=128
+SBX| @PHASE5_START  rein declare 598 again (second Form A; re-confirm required)
+SBX| $ rein declare 598
+
+=== rein: agent declares work on an issue ===
+   issue:    #598 "rein journey: approval-age re-attestation walkthrough (safe to close)"  [open]
+             in TomHennen/agentcreds-validation-a
+   session:  sess_journey_approval_ttl_reattest (role=implement, repos=[TomHennen/agentcreds-validation-a])
+   approving covers ALL writes for this run (git push, gh, API).
+
+To approve, type the issue number (598) and press enter.
+To deny, press Ctrl-C or type anything else.
+> 598
+  [approved]
+SBX| issue #598 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/598/<nonce>)
+SBX| @PHASE5_RC=0
+SBX| @PHASE6_START  push agent/598/<nonce2> again (expect: lands)
+SBX| $ git push --progress origin HEAD:refs/heads/agent/598/ttl2-20260907-190628-2ec08e
+SBX| Enumerating objects: 4, done.
+SBX| Counting objects: 100% (4/4), done.
+SBX| Delta compression using up to 8 threads
+SBX| Compressing objects: 100% (3/3), done.
+SBX| Writing objects: 100% (3/3), 419 bytes | 419.00 KiB/s, done.
+SBX| Total 3 (delta 1), reused 0 (delta 0), pack-reused 0
+SBX| remote:
+SBX| remote: Create a pull request for 'agent/598/ttl2-20260907-190628-2ec08e' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/598/ttl2-20260907-190628-2ec08e
+SBX| remote:
+SBX| To https://github.com/TomHennen/agentcreds-validation-a
+SBX|  * [new branch]      HEAD -> agent/598/ttl2-20260907-190628-2ec08e
+SBX| @PHASE6_RC=0
+SBX| @SCRIPT_DONE
+rein: revoked 1 of 1 write token(s) on exit

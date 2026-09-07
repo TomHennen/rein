@@ -1,12 +1,30 @@
 package main
 
 import (
-	"github.com/TomHennen/rein/internal/srt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/TomHennen/rein/internal/runbroker"
+	"github.com/TomHennen/rein/internal/srt"
 )
+
+// TestBuildAgentContract_IdleBoundIsTheRealOne: the contract must state the
+// RESOLVED idle timeout. Hardcoding 30 minutes would tell an agent launched
+// under REIN_IDLE_TIMEOUT a bound that is not the one enforced on it.
+func TestBuildAgentContract_IdleBoundIsTheRealOne(t *testing.T) {
+	got := buildAgentContract(contractParams{WorkTree: "/w", IdleTimeout: 15 * time.Second, ApprovalTTL: 20 * time.Second})
+	if !strings.Contains(got, "After 15s with no GitHub traffic, or 20s after your last confirmation") {
+		t.Errorf("contract must quote BOTH resolved bounds; got:\n%s", got)
+	}
+	for _, gone := range []string{"30 minutes", "30m0s", "4h0m0s"} {
+		if strings.Contains(got, gone) {
+			t.Errorf("contract hardcodes %q despite 15s/20s bounds:\n%s", gone, got)
+		}
+	}
+}
 
 // TestBuildAgentContract_StatesTheEnforcedRules pins the facts the contract MUST
 // carry. Each assertion maps to a rule the agent would otherwise discover only by
@@ -23,6 +41,8 @@ func TestBuildAgentContract_StatesTheEnforcedRules(t *testing.T) {
 		WorkTree:      "/work/repo",
 		HomeEphemeral: true,
 		ExtraDomains:  []string{"api.anthropic.com", "registry.npmjs.org"},
+		IdleTimeout:   runbroker.DefaultIdleTimeout,
+		ApprovalTTL:   runbroker.DefaultApprovalTTL,
 	})
 
 	for _, want := range []string{
@@ -36,6 +56,12 @@ func TestBuildAgentContract_StatesTheEnforcedRules(t *testing.T) {
 		`rein declare --new "<title>"`, // #180: the bootstrap for a repo with no issues yet
 		"agent/<n>/<nonce>",            // exact #35 branch convention
 		"One issue per push",           // exact #35 push rule
+		// #190: the agent must know the ONE thing that changes under it mid-run
+		// — the approval lapses on idle — and that nothing else does.
+		"After 30m0s with no GitHub traffic, or 4h0m0s after your last confirmation, your",
+		"write approval lapses",
+		"declare again and the human",
+		"Nothing else stops.",
 		"api.anthropic.com, registry.npmjs.org",
 		// egress self-help: the ONE command the human runs, + the restart caveat
 		"CANNOT open a blocked host yourself",

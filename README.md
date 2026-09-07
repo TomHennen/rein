@@ -165,8 +165,16 @@ that sandbox:
   agent cannot reach or forge it — it has no controlling terminal), showing the
   fetched issue title + home repo. One confirmation covers the run; pushes must
   use `agent/<issue>/<nonce>` branches and are verified against what you
-  confirmed. The session also expires on idle (30m) or a hard cap (4h),
-  revoking the write token.
+  confirmed. Two bounds re-lock writes, and **neither ends the run** — it ends
+  when the agent exits. After **30 minutes with no GitHub traffic**, or once the
+  confirmation itself is **4 hours old** (activity does not extend that one),
+  rein revokes the write token and withdraws the confirmation *in place*: the
+  agent keeps running, reads keep working, and its next write asks it to declare
+  again for you to re-confirm. So you never restart the agent, and no run holds
+  write capability more than 4 hours past its most recent confirmation. Tune the bounds with
+  `REIN_IDLE_TIMEOUT` and `REIN_APPROVAL_TTL` (Go durations, minimum `10s`) —
+  test/demo knobs, read only from your launch environment and never passed into
+  the sandbox.
 - Commits the agent makes are authored as **`<your name> (via rein)`** with the
   App's identity, so a push is attributable to the rein App, not to you
   personally. (Configurable via `REIN_GIT_AUTHOR_TEMPLATE`.)
