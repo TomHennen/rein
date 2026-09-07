@@ -769,6 +769,10 @@ Mitigations:
 - **Mandatory under sandbox composition:** the agent's view of `~/.gitconfig` is sandbox-local; rewrites don't escape to the host. The proxy mediates all traffic regardless of what sandboxed git thinks it's doing. This makes the rewrite issue moot for Shape A (sandbox-composed) deployments.
 - **Acknowledged limitation for Shape B (credential-helper without sandbox):** a sufficiently determined or compromised agent can run `git config --global` to remove or substitute the helper. This is the same threat surface that exists today with PATs (a compromised agent can do anything the user can do). Shape B is meaningfully worse than Shape A here; production use should always go through Shape A.
 
+**TM-G9 Session expiry is not an adversarial bound (#190).** The idle bound is not a bound on a hostile agent. Activity is any handled request on the GitHub/virtual-host inject path, including refused ones, and the agent controls that clock: one cheap GET https://github.com/ every 29 minutes keeps a granted write approval alive indefinitely. With the hard TTL removed, the idle timer protects against an abandoned run, not a busy one; the effective bound on approved write capability is the agent process lifetime, i.e. until the human exits it.
+
+What does and does not tick the clock: the TLS-terminated inject path (`serveOne` — every handled request, allowed or refused) and the local-expose upgrade path do. **General egress through the raw-tunnel path does NOT count as activity** — a CONNECT that is spliced straight through (`internal/proxy/tcp.go`) never reaches `OnActivity`, so an agent doing nothing but fetching docs from allowed non-GitHub hosts still idles out. Narrowing activity to write-tier requests only would shrink the window an agent can hold an approval through cheap reads; that is a deliberate open decision, not an oversight.
+
 ### 5.4 What this design does NOT protect against
 
 - Stolen unlocked laptop. Disk encryption and screen lock are the user's responsibility.
