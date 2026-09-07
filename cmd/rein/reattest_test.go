@@ -57,6 +57,7 @@ func seedApprovedRun(t *testing.T, dir, runID string, sess session.Session) {
 	t.Helper()
 	if err := approvals.WriteRunContext(dir, runID, approvals.RunContext{
 		Session: sess, RunPID: os.Getpid(), WrittenAt: time.Now(),
+		PendingIssue: &approvals.ConfirmedIssue{Number: 7, Repo: "o/r", Title: "t", CanonicalURL: "u"},
 	}); err != nil {
 		t.Fatalf("write run context: %v", err)
 	}
@@ -89,12 +90,16 @@ func TestIdleReattestLocksWritesThenReDeclareUnlocks(t *testing.T) {
 
 	var out bytes.Buffer
 	revoked := 0
-	err := idleReattest(reattestDeps{
+	withdrawn, err := idleReattest(reattestDeps{
 		stateDir: dir, runID: runID, idle: 30 * time.Minute,
-		revoke: func() { revoked++ }, out: &out, logger: logger,
+		drainTokens: func() error { revoked++; return approvals.ClearWriteTokens(dir, runID) },
+		out:         &out, logger: logger,
 	})
 	if err != nil {
 		t.Fatalf("idleReattest: %v", err)
+	}
+	if !withdrawn {
+		t.Error("idleReattest must report that it withdrew an approval (the audit decision depends on it)")
 	}
 
 	if revoked != 1 {
@@ -109,9 +114,18 @@ func TestIdleReattestLocksWritesThenReDeclareUnlocks(t *testing.T) {
 	if hooks.IssueConfirmed("o/r", 7) {
 		t.Error("IssueConfirmed is still true after the idle lock: the push-ref cross-check would still pass")
 	}
-	// The run keeps everything the next declare needs.
-	if _, err := approvals.ReadRunContext(dir, runID); err != nil {
+	// The run keeps everything the next declare needs, MINUS the stale
+	// declaration snapshot an out-of-process grant could otherwise re-approve.
+	rc, err := approvals.ReadRunContext(dir, runID)
+	if err != nil {
 		t.Errorf("run context must survive the lock: %v", err)
+	} else {
+		if rc.Session.ID != sess.ID || rc.RunPID != os.Getpid() {
+			t.Errorf("run context lost state the next declare needs: %+v", rc)
+		}
+		if rc.PendingIssue != nil {
+			t.Errorf("stale PendingIssue survived the lock (%+v); `rein approval grant` could re-open writes with no fresh declare", rc.PendingIssue)
+		}
 	}
 	for _, want := range []string{"writes LOCKED", "keeps running", "declare its issue again", "Reads still work"} {
 		if !strings.Contains(out.String(), want) {
@@ -136,12 +150,16 @@ func TestIdleReattestQuietWhenNothingApproved(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer
 	revoked := 0
-	err := idleReattest(reattestDeps{
+	withdrawn, err := idleReattest(reattestDeps{
 		stateDir: dir, runID: "run-none", idle: time.Minute,
-		revoke: func() { revoked++ }, out: &out, logger: log.New(io.Discard, "", 0),
+		drainTokens: func() error { revoked++; return nil },
+		out:         &out, logger: log.New(io.Discard, "", 0),
 	})
 	if err != nil {
 		t.Fatalf("idleReattest on an unapproved run: %v", err)
+	}
+	if withdrawn {
+		t.Error("a run with nothing to withdraw must report withdrawn=false")
 	}
 	if revoked != 0 {
 		t.Errorf("revoke ran %d times for a run with no tokens, want 0", revoked)
@@ -172,9 +190,10 @@ func TestIdleReattestFailsClosedWhenRecordUnwritable(t *testing.T) {
 
 	var out bytes.Buffer
 	revoked := 0
-	err := idleReattest(reattestDeps{
+	_, err := idleReattest(reattestDeps{
 		stateDir: dir, runID: runID, idle: time.Minute,
-		revoke: func() { revoked++ }, out: &out, logger: log.New(io.Discard, "", 0),
+		drainTokens: func() error { revoked++; return approvals.ClearWriteTokens(dir, runID) },
+		out:         &out, logger: log.New(io.Discard, "", 0),
 	})
 	if err == nil {
 		t.Fatal("idleReattest must report an un-withdrawable approval so the host stops the proxy")

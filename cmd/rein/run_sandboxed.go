@@ -643,14 +643,16 @@ func runSandboxed(cmdline []string) (int, error) {
 		// revoke (here + the deferred exit-time revoke) is harmless: revoke is
 		// idempotent/best-effort.
 		IdleTimeout: idleTimeout,
-		OnExpire: func() error {
+		OnExpire: func() (bool, error) {
 			return idleReattest(reattestDeps{
 				stateDir: stateDir,
 				runID:    runID,
 				idle:     idleTimeout,
-				revoke:   func() { revokeRunWriteTokens(stateDir, runID, productionRevoke(sess), time.Now()) },
-				out:      os.Stderr,
-				logger:   logger,
+				drainTokens: func() error {
+					return drainRunWriteTokens(stateDir, runID, productionRevoke(sess), time.Now())
+				},
+				out:    os.Stderr,
+				logger: logger,
 			})
 		},
 	})
@@ -840,6 +842,7 @@ func runSandboxed(cmdline []string) (int, error) {
 		PlaywrightBrowsers:  playwrightBrowsersDir(home, homeDeny),
 		ExposePorts:         sess.ExposePorts,
 		OpenEgress:          sess.OpenEgress,
+		IdleTimeout:         idleTimeout,
 	})
 	contractOff := srt.DisableClaudeMCPFromEnv(os.Getenv(EnvDisableAgentContract))
 	agentArgv := cmdline

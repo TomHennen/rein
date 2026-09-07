@@ -67,6 +67,7 @@ import (
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
 	"github.com/TomHennen/rein/internal/session"
+	"github.com/TomHennen/rein/internal/tokencache"
 )
 
 // installIDTimeout caps the pre-launch installation-id lookups as a whole.
@@ -583,7 +584,32 @@ func productionRevoke(sess session.Session) revokeTokenFunc {
 // post-expiry or post-backoff re-mint).
 func revokeRunWriteTokens(stateDir, runID string, revoke revokeTokenFunc, now time.Time) {
 	entries, err := approvals.ReadWriteTokens(stateDir, runID)
-	if err != nil || len(entries) == 0 {
+	if err != nil {
+		return
+	}
+	revokeWriteTokens(entries, revoke, now, "on exit")
+}
+
+// drainRunWriteTokens is the idle-withdrawal (#190) variant: it SNAPSHOTS the
+// ledger, REMOVES it, and only then revokes from the snapshot. The order
+// matters — the run keeps going, so a write token minted while the revokes are
+// in flight would be deleted unrevoked if the file were cleared afterwards.
+// Removing first means such a token re-creates the ledger and is caught by the
+// exit-time revoke. It returns the ledger-removal error; the revokes are
+// best-effort and report themselves.
+func drainRunWriteTokens(stateDir, runID string, revoke revokeTokenFunc, now time.Time) error {
+	entries, readErr := approvals.ReadWriteTokens(stateDir, runID)
+	clearErr := approvals.ClearWriteTokens(stateDir, runID)
+	if readErr == nil {
+		revokeWriteTokens(entries, revoke, now, "on idle re-attestation")
+	}
+	return clearErr
+}
+
+// revokeWriteTokens best-effort revokes each distinct, still-valid token in
+// entries. phase names the occasion for the human-facing summary.
+func revokeWriteTokens(entries []tokencache.Entry, revoke revokeTokenFunc, now time.Time, phase string) {
+	if len(entries) == 0 {
 		return
 	}
 	var revoked, total int
@@ -601,13 +627,13 @@ func revokeRunWriteTokens(stateDir, runID string, revoke revokeTokenFunc, now ti
 		rerr := revoke(ctx, e.Token)
 		cancel()
 		if rerr != nil {
-			fmt.Fprintf(os.Stderr, "rein: warning: exit-revoke of a write token failed (best-effort; it expires on its own): %v\n", rerr)
+			fmt.Fprintf(os.Stderr, "rein: warning: revoke of a write token %s failed (best-effort; it expires on its own): %v\n", phase, rerr)
 			continue
 		}
 		revoked++
 	}
 	if total > 0 {
-		fmt.Fprintf(os.Stderr, "rein: revoked %d of %d write token(s) on exit\n", revoked, total)
+		fmt.Fprintf(os.Stderr, "rein: revoked %d of %d write token(s) %s\n", revoked, total, phase)
 	}
 }
 

@@ -17,7 +17,10 @@ func seedApprovedRun(t *testing.T, dir, runID string, sess session.Session) stri
 	sig := SignatureOf(sess)
 	if err := WriteRunContext(dir, runID, RunContext{
 		Session:       sess,
+		SessionFile:   "/etc/rein/dev-session.yaml",
+		Direct:        true,
 		RunPID:        os.Getpid(),
+		PendingIssue:  &ConfirmedIssue{Number: 7, Repo: "o/r", Title: "t", CanonicalURL: "u"},
 		PendingNotice: &PendingNotice{Repo: "o/r", Issue: 7},
 		WrittenAt:     time.Now(),
 	}); err != nil {
@@ -59,7 +62,7 @@ func TestClearConfirmedIssues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run context must survive an idle re-attestation: %v", err)
 	}
-	if rc.Session.ID != "s1" || rc.PendingNotice == nil {
+	if rc.Session.ID != "s1" {
 		t.Errorf("run context lost state across the clear: %+v", rc)
 	}
 	// The ledger is a SEPARATE artifact so the caller can revoke before clearing.
@@ -83,6 +86,52 @@ func TestClearConfirmedIssues(t *testing.T) {
 	}
 	if err := ClearWriteTokens(dir, "run-1"); err != nil {
 		t.Errorf("second ClearWriteTokens: %v", err)
+	}
+}
+
+// TestClearPendingDeclaration: the stale declaration snapshot is part of the
+// approval surface. `rein approval grant --run-id X` and the tmux popup render
+// their prompt FROM it without fetching, so a PendingIssue left behind after a
+// withdrawal would let the human re-open writes for an issue nobody
+// re-declared — skipping exactly the ceremony the withdrawal forces. Everything
+// the next declare needs (Session, SessionFile, Direct, RunPID) must survive.
+func TestClearPendingDeclaration(t *testing.T) {
+	dir := t.TempDir()
+	sess := session.Session{ID: "s1", Role: "implement", Repos: []string{"o/r"}}
+	seedApprovedRun(t, dir, "run-1", sess)
+
+	before, err := ReadRunContext(dir, "run-1")
+	if err != nil {
+		t.Fatalf("read seeded context: %v", err)
+	}
+	if before.PendingIssue == nil || before.PendingNotice == nil {
+		t.Fatal("setup: the seeded run context must carry a stale pending declaration")
+	}
+
+	if err := ClearPendingDeclaration(dir, "run-1"); err != nil {
+		t.Fatalf("ClearPendingDeclaration: %v", err)
+	}
+	got, err := ReadRunContext(dir, "run-1")
+	if err != nil {
+		t.Fatalf("run context must survive: %v", err)
+	}
+	if got.PendingIssue != nil {
+		t.Errorf("PendingIssue = %+v, want nil — a grant could re-open writes from it", got.PendingIssue)
+	}
+	if got.PendingNotice != nil {
+		t.Errorf("PendingNotice = %+v, want nil", got.PendingNotice)
+	}
+	if got.Session.ID != before.Session.ID || got.SessionFile != before.SessionFile ||
+		got.Direct != before.Direct || got.RunPID != before.RunPID {
+		t.Errorf("clearing the pending declaration dropped context the next declare needs:\n got %+v\nwant %+v", got, before)
+	}
+
+	// Idempotent, and a run with no context at all is not an error.
+	if err := ClearPendingDeclaration(dir, "run-1"); err != nil {
+		t.Errorf("second ClearPendingDeclaration: %v", err)
+	}
+	if err := ClearPendingDeclaration(dir, "run-absent"); err != nil {
+		t.Errorf("ClearPendingDeclaration on a run with no context: %v", err)
 	}
 }
 

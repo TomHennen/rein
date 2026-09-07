@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -45,9 +46,12 @@ type reattestDeps struct {
 	stateDir string
 	runID    string
 	idle     time.Duration
-	revoke   func() // this run's write-token revoke (ledger drain)
-	out      io.Writer
-	logger   *log.Logger
+	// drainTokens snapshots this run's write-token ledger, removes it, and
+	// revokes what it held. Returns the ledger-removal error only (the revokes
+	// themselves are best-effort and report on stderr).
+	drainTokens func() error
+	out         io.Writer
+	logger      *log.Logger
 }
 
 // idleReattest withdraws the run's WRITE APPROVAL after an idle period (#190)
@@ -55,23 +59,29 @@ type reattestDeps struct {
 // serving, and the agent's next write hits the ordinary "declare your issue"
 // refusal, which the human confirms through the full Form A ceremony again.
 //
-// Ordering is deliberate: withdraw the approval FIRST (no new write token can
-// be minted once the gate reads an empty confirmed set), then revoke the
-// tokens already minted (catching anything that raced the withdrawal), then
-// drop the ledger. clearErr is reported LAST so the tokens are revoked even on
-// the failure path.
+// Ordering is deliberate: withdraw the approval FIRST — the confirmed set and
+// the stale pending declaration, so neither the proxy gate nor an
+// out-of-process grant can re-open writes — then drain the ledger (which
+// removes it before revoking, so a token minted concurrently re-creates the
+// file and survives to the exit-time revoke instead of being deleted
+// unrevoked). clearErr is reported LAST so the tokens are revoked even on the
+// failure path.
 //
-// A non-nil return means the approval could not be withdrawn; the caller
-// (runbroker) then stops the proxy, which is the pre-#190 behavior and the
-// fail-closed answer.
-func idleReattest(d reattestDeps) error {
+// It reports whether it actually withdrew anything. A non-nil error means the
+// approval could not be withdrawn; the caller (runbroker) then stops the proxy,
+// which is the pre-#190 behavior and the fail-closed answer.
+func idleReattest(d reattestDeps) (bool, error) {
 	if !hasWriteCapability(d.stateDir, d.runID) {
 		d.logger.Printf("idle re-attestation: nothing approved and no write tokens to revoke; run continues untouched")
-		return nil
+		return false, nil
 	}
 	clearErr := approvals.ClearConfirmedIssues(d.stateDir, d.runID)
-	d.revoke()
-	if err := approvals.ClearWriteTokens(d.stateDir, d.runID); err != nil {
+	// The stale pending declaration is part of the approval surface: leaving it
+	// would let an out-of-process grant re-open writes without a fresh declare.
+	if err := approvals.ClearPendingDeclaration(d.stateDir, d.runID); err != nil && clearErr == nil {
+		clearErr = err
+	}
+	if err := d.drainTokens(); err != nil {
 		d.logger.Printf("idle re-attestation: clearing the write-token ledger failed (best-effort): %v", err)
 	}
 	if clearErr != nil {
@@ -85,10 +95,10 @@ func idleReattest(d reattestDeps) error {
 			d.logger.Printf("idle re-attestation: could not clear the run's state either (%v); it survives until the next launch sweep", err)
 		}
 		printExpiryHardStopBanner(d.out, clearErr)
-		return fmt.Errorf("withdraw write approval for run %s: %w", d.runID, clearErr)
+		return false, fmt.Errorf("withdraw write approval for run %s: %w", d.runID, clearErr)
 	}
 	printReattestBanner(d.out, d.idle)
-	return nil
+	return true, nil
 }
 
 // hasWriteCapability reports whether this run currently holds anything worth
@@ -96,12 +106,22 @@ func idleReattest(d reattestDeps) error {
 // neither, the re-attestation is a no-op and must stay SILENT — otherwise a
 // read-only agent that works and then idles would be banner-spammed about an
 // approval it never had.
+//
+// Only "the file is not there" answers NO. Any other read error (a torn write,
+// EACCES, a corrupt record) answers YES: the withdrawal is idempotent, so
+// running it needlessly costs a banner, while skipping it on a transient error
+// would leave a live approval standing — the fail-OPEN direction.
 func hasWriteCapability(stateDir, runID string) bool {
-	if rec, err := approvals.ReadApproval(stateDir, runID); err == nil && len(rec.Issues) > 0 {
+	switch rec, err := approvals.ReadApproval(stateDir, runID); {
+	case err == nil:
+		if len(rec.Issues) > 0 {
+			return true
+		}
+	case !errors.Is(err, os.ErrNotExist):
 		return true
 	}
 	_, err := os.Stat(approvals.WriteTokenLedgerPath(stateDir, runID))
-	return err == nil
+	return err == nil || !errors.Is(err, os.ErrNotExist)
 }
 
 // printReattestBanner is the human-facing notice for an idle write lock. The

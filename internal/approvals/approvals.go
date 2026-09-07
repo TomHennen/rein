@@ -541,6 +541,35 @@ func ClearConfirmedIssues(stateDir, runID string) error {
 	return removeAll(RunApprovalPath(stateDir, runID))
 }
 
+// ClearPendingDeclaration drops the run context's PendingIssue and
+// PendingNotice, keeping everything else (Session, SessionFile, Direct,
+// RunPID). It is the other half of an idle withdrawal (#190).
+//
+// Those two fields are TRANSPORT for the out-of-process surfaces: the tmux
+// popup and `rein approval grant --run-id X` render their prompt from the
+// snapshot rather than fetching. Left behind after a withdrawal, the stale
+// PendingIssue lets a grant re-open writes from the PRE-LOCK declaration —
+// the human confirms an issue nobody re-declared, which is exactly the
+// ceremony the withdrawal is supposed to force. A fresh declare repopulates
+// PendingIssue before it prompts, and Grant already errors helpfully when it
+// is nil, so clearing costs the legitimate path nothing.
+//
+// A missing run context is not an error: there is nothing stale to clear.
+func ClearPendingDeclaration(stateDir, runID string) error {
+	rc, err := ReadRunContext(stateDir, runID)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if rc.PendingIssue == nil && rc.PendingNotice == nil {
+		return nil
+	}
+	rc.PendingIssue, rc.PendingNotice = nil, nil
+	return WriteRunContext(stateDir, runID, rc)
+}
+
 // ClearWriteTokens removes writes/<run-id>.jsonl. Call it only AFTER
 // revoking the tokens it holds — the file is the only record of them.
 func ClearWriteTokens(stateDir, runID string) error {

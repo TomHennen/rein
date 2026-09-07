@@ -1,12 +1,28 @@
 package main
 
 import (
-	"github.com/TomHennen/rein/internal/srt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/TomHennen/rein/internal/runbroker"
+	"github.com/TomHennen/rein/internal/srt"
 )
+
+// TestBuildAgentContract_IdleBoundIsTheRealOne: the contract must state the
+// RESOLVED idle timeout. Hardcoding 30 minutes would tell an agent launched
+// under REIN_IDLE_TIMEOUT a bound that is not the one enforced on it.
+func TestBuildAgentContract_IdleBoundIsTheRealOne(t *testing.T) {
+	got := buildAgentContract(contractParams{WorkTree: "/w", IdleTimeout: 15 * time.Second})
+	if !strings.Contains(got, "After 15s with no GitHub traffic") {
+		t.Errorf("contract must quote the resolved idle bound; got:\n%s", got)
+	}
+	if strings.Contains(got, "30 minutes") {
+		t.Errorf("contract hardcodes 30 minutes despite a 15s bound:\n%s", got)
+	}
+}
 
 // TestBuildAgentContract_StatesTheEnforcedRules pins the facts the contract MUST
 // carry. Each assertion maps to a rule the agent would otherwise discover only by
@@ -23,6 +39,7 @@ func TestBuildAgentContract_StatesTheEnforcedRules(t *testing.T) {
 		WorkTree:      "/work/repo",
 		HomeEphemeral: true,
 		ExtraDomains:  []string{"api.anthropic.com", "registry.npmjs.org"},
+		IdleTimeout:   runbroker.DefaultIdleTimeout,
 	})
 
 	for _, want := range []string{
@@ -37,7 +54,7 @@ func TestBuildAgentContract_StatesTheEnforcedRules(t *testing.T) {
 		"One issue per push", // exact #35 push rule
 		// #190: the agent must know the ONE thing that changes under it mid-run
 		// — the approval lapses on idle — and that nothing else does.
-		"After 30 minutes with no GitHub traffic your write approval lapses",
+		"After 30m0s with no GitHub traffic your write approval lapses",
 		"declare again and the human",
 		"Nothing else stops.",
 		"api.anthropic.com, registry.npmjs.org",
