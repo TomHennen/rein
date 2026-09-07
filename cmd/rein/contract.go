@@ -75,10 +75,11 @@ type contractParams struct {
 	ExposePorts []int
 	// OpenEgress (#185) swaps the NETWORK section for the open-mode facts.
 	OpenEgress bool
-	// IdleTimeout is the run's RESOLVED idle bound (#190) — the real one, not
-	// the 30m default, so a run launched with REIN_IDLE_TIMEOUT does not tell
-	// the agent a bound that is not enforced.
+	// IdleTimeout / ApprovalTTL are the run's RESOLVED re-attestation bounds
+	// (#190) — the real ones, not the defaults, so a run launched with an
+	// override does not tell the agent a bound that is not enforced.
 	IdleTimeout time.Duration
+	ApprovalTTL time.Duration
 }
 
 // buildAgentContract renders the contract. Terse and factual on purpose: this
@@ -156,9 +157,9 @@ func buildAgentContract(p contractParams) string {
 	b.WriteString("  where <n> is the declared issue number and <nonce> is a short name you choose\n")
 	b.WriteString("  (letters/digits, then letters/digits/./_/-). Any other ref is rejected.\n")
 	b.WriteString("- One issue per push.\n")
-	fmt.Fprintf(&b, "- After %s with no GitHub traffic your write approval lapses: the next\n", p.IdleTimeout)
-	b.WriteString("  write is refused with the declare instruction; declare again and the human\n")
-	b.WriteString("  re-confirms. Nothing else stops.\n")
+	fmt.Fprintf(&b, "- After %s with no GitHub traffic, or %s after your last confirmation, your\n", p.IdleTimeout, p.ApprovalTTL)
+	b.WriteString("  write approval lapses: the next write is refused with the declare instruction;\n")
+	b.WriteString("  declare again and the human re-confirms. Nothing else stops.\n")
 
 	b.WriteString("\nNETWORK\n")
 	if p.OpenEgress {

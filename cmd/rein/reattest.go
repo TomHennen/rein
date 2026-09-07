@@ -10,42 +10,85 @@ import (
 
 	"github.com/TomHennen/rein/internal/approvals"
 	"github.com/TomHennen/rein/internal/runbroker"
+	"github.com/TomHennen/rein/internal/session"
 )
 
-// envIdleTimeout overrides the idle re-attestation bound (#190). It is a
-// TEST/TUNING knob: the journey suite sets it to a few seconds so the lock is
-// observable inside a test. Read ONLY from the human's launch environment —
-// srt's env allowlist (PATH/HOME/LANG/TERM/LC_*) never carries it into the
-// sandbox, so the agent can neither read nor set it.
-const envIdleTimeout = "REIN_IDLE_TIMEOUT"
+// The two re-attestation bounds are overridable for tests and demos (#190).
+// Both are read ONLY from the human's launch environment — srt's env allowlist
+// (PATH/HOME/LANG/TERM/LC_*) never carries them into the sandbox, so the agent
+// can neither read nor set them. The journey suite sets them to a few seconds
+// so a lock is observable inside a test.
+const (
+	envIdleTimeout = "REIN_IDLE_TIMEOUT"
+	envApprovalTTL = "REIN_APPROVAL_TTL"
+)
 
-// minIdleTimeout floors the override. Anything shorter would re-lock faster
-// than a single git fetch + declare round trip, which is a footgun, not a test
-// knob.
-const minIdleTimeout = 10 * time.Second
+// minBound floors both overrides. Anything shorter would re-lock faster than a
+// single git fetch + declare round trip, which is a footgun, not a test knob.
+const minBound = 10 * time.Second
 
-// resolveIdleTimeout returns the run's idle bound and whether it was
-// overridden. An unparseable or too-small value is a hard error (fail closed on
-// a misspelled knob rather than silently using the default).
+// resolveIdleTimeout / resolveApprovalTTL return the run's bound and whether it
+// was overridden.
 func resolveIdleTimeout(raw string) (time.Duration, bool, error) {
+	return resolveBound(envIdleTimeout, raw, runbroker.DefaultIdleTimeout)
+}
+
+func resolveApprovalTTL(raw string) (time.Duration, bool, error) {
+	return resolveBound(envApprovalTTL, raw, runbroker.DefaultApprovalTTL)
+}
+
+// resolveBound parses one override. An unparseable or too-small value is a hard
+// error: fail closed on a misspelled knob rather than silently running with the
+// default the operator thought they had replaced.
+func resolveBound(name, raw string, def time.Duration) (time.Duration, bool, error) {
 	if raw == "" {
-		return runbroker.DefaultIdleTimeout, false, nil
+		return def, false, nil
 	}
 	d, err := time.ParseDuration(raw)
 	if err != nil {
-		return 0, false, fmt.Errorf("%s=%q is not a Go duration (e.g. 30m, 45s): %w", envIdleTimeout, raw, err)
+		return 0, false, fmt.Errorf("%s=%q is not a Go duration (e.g. 30m, 45s): %w", name, raw, err)
 	}
-	if d < minIdleTimeout {
-		return 0, false, fmt.Errorf("%s=%q is below the %s minimum", envIdleTimeout, raw, minIdleTimeout)
+	if d < minBound {
+		return 0, false, fmt.Errorf("%s=%q is below the %s minimum", name, raw, minBound)
 	}
 	return d, true, nil
 }
 
-// reattestDeps is what one idle re-attestation needs.
+// lastApprovalHook builds runbroker.Config.LastApproval for a run: when the
+// human most recently confirmed an issue, and whether anything is confirmed at
+// all. It reads the SIGNATURE-VALIDATED set — the same read the write gate
+// makes — so a record the gate already treats as invalid is not something the
+// approval-age bound needs to expire.
+func lastApprovalHook(sess session.Session, stateDir, runID string) func() (time.Time, bool) {
+	sig := approvals.SignatureOf(sess)
+	return func() (time.Time, bool) {
+		var newest time.Time
+		for _, ci := range approvals.ConfirmedIssues(stateDir, runID, sig) {
+			if ci.ConfirmedAt.After(newest) {
+				newest = ci.ConfirmedAt
+			}
+		}
+		return newest, !newest.IsZero()
+	}
+}
+
+// reattestBounds is the launch banner's view of the two re-attestation bounds:
+// the resolved values plus whether each came from an override, so the banner
+// can name the knob only when the operator actually used it. Grouped because
+// printSandboxBanner's positional arg list is already long.
+type reattestBounds struct {
+	idle, ttl       time.Duration
+	idleSet, ttlSet bool
+}
+
+// reattestDeps is what one re-attestation needs.
 type reattestDeps struct {
 	stateDir string
 	runID    string
-	idle     time.Duration
+	// idle and approvalTTL are the resolved bounds, quoted in whichever banner
+	// the trip's reason selects.
+	idle        time.Duration
+	approvalTTL time.Duration
 	// drainTokens snapshots this run's write-token ledger, removes it, and
 	// revokes what it held. Returns the ledger-removal error only (the revokes
 	// themselves are best-effort and report on stderr).
@@ -54,7 +97,7 @@ type reattestDeps struct {
 	logger      *log.Logger
 }
 
-// idleReattest withdraws the run's WRITE APPROVAL after an idle period (#190)
+// reattest withdraws the run's WRITE APPROVAL when either bound trips (#190)
 // without ending the run: the proxy, the read path and the expose tunnel keep
 // serving, and the agent's next write hits the ordinary "declare your issue"
 // refusal, which the human confirms through the full Form A ceremony again.
@@ -70,9 +113,12 @@ type reattestDeps struct {
 // It reports whether it actually withdrew anything. A non-nil error means the
 // approval could not be withdrawn; the caller (runbroker) then stops the proxy,
 // which is the pre-#190 behavior and the fail-closed answer.
-func idleReattest(d reattestDeps) (bool, error) {
+//
+// The two bounds differ only in what tripped them and which banner says so, so
+// there is exactly one withdrawal, not one per bound.
+func reattest(d reattestDeps, reason runbroker.ExpireReason) (bool, error) {
 	if !hasWriteCapability(d.stateDir, d.runID) {
-		d.logger.Printf("idle re-attestation: nothing approved and no write tokens to revoke; run continues untouched")
+		d.logger.Printf("re-attestation (%s): nothing approved and no write tokens to revoke; run continues untouched", reason)
 		return false, nil
 	}
 	clearErr := approvals.ClearConfirmedIssues(d.stateDir, d.runID)
@@ -87,19 +133,19 @@ func idleReattest(d reattestDeps) (bool, error) {
 		clearErr = err
 	}
 	if clearErr != nil {
-		d.logger.Printf("idle re-attestation: could not withdraw the write approval: %v", clearErr)
+		d.logger.Printf("re-attestation (%s): could not withdraw the write approval: %v", reason, clearErr)
 		// This branch ends the run's credential path rather than re-attesting
 		// it, so tear ALL the per-run state down right now — the pre-#190
 		// behavior. Without it the standing approval would sit on disk until
 		// the deferred exit-time ClearRun, which a SIGKILL skips entirely,
 		// leaving it to the next launch's Sweep.
 		if err := approvals.ClearRun(d.stateDir, d.runID); err != nil {
-			d.logger.Printf("idle re-attestation: could not clear the run's state either (%v); it survives until the next launch sweep", err)
+			d.logger.Printf("re-attestation: could not clear the run's state either (%v); it survives until the next launch sweep", err)
 		}
 		printExpiryHardStopBanner(d.out, clearErr)
 		return false, fmt.Errorf("withdraw write approval for run %s: %w", d.runID, clearErr)
 	}
-	printReattestBanner(d.out, d.idle)
+	printReattestBanner(d.out, reason, d.idle, d.approvalTTL)
 	return true, nil
 }
 
@@ -126,12 +172,18 @@ func hasWriteCapability(stateDir, runID string) bool {
 	return err == nil || !errors.Is(err, os.ErrNotExist)
 }
 
-// printReattestBanner is the human-facing notice for an idle write lock. The
-// agent is NOT killed and the proxy is NOT stopped — only the write approval is
-// withdrawn, so the message must say what still works.
-func printReattestBanner(w io.Writer, idle time.Duration) {
+// printReattestBanner is the human-facing notice for a write lock. The agent is
+// NOT killed and the proxy is NOT stopped — only the write approval is
+// withdrawn, so the message must say what still works. The two bounds get
+// different first lines because the remedy differs in the operator's head: idle
+// means "nothing was happening", approval age means "this confirmation is old".
+func printReattestBanner(w io.Writer, reason runbroker.ExpireReason, idle, approvalTTL time.Duration) {
 	fmt.Fprintln(w, "\n===============================================================")
-	fmt.Fprintf(w, "rein: idle for %s — writes LOCKED.\n", idle)
+	if reason == runbroker.ExpireApprovalAge {
+		fmt.Fprintf(w, "rein: write approval is %s old — writes LOCKED.\n", approvalTTL)
+	} else {
+		fmt.Fprintf(w, "rein: idle for %s — writes LOCKED.\n", idle)
+	}
 	fmt.Fprintln(w, "  The agent keeps running; its next GitHub write will ask it to")
 	fmt.Fprintln(w, "  declare its issue again, and you confirm once more.")
 	fmt.Fprintln(w, "  Reads still work.")

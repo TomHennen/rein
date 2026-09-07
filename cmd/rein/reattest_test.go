@@ -17,6 +17,69 @@ import (
 	"github.com/TomHennen/rein/internal/tokencache"
 )
 
+func TestResolveApprovalTTL(t *testing.T) {
+	if got, over, err := resolveApprovalTTL(""); err != nil || over || got != runbroker.DefaultApprovalTTL {
+		t.Errorf("default = (%s,%v,%v), want (%s,false,nil)", got, over, err, runbroker.DefaultApprovalTTL)
+	}
+	if got, over, err := resolveApprovalTTL("45s"); err != nil || !over || got != 45*time.Second {
+		t.Errorf("45s = (%s,%v,%v), want (45s,true,nil)", got, over, err)
+	}
+	// Same floor and same fail-closed parse as the idle knob, under its OWN name
+	// so the error tells the operator which variable to fix.
+	for _, raw := range []string{"9s", "0", "30", "soon"} {
+		_, _, err := resolveApprovalTTL(raw)
+		if err == nil {
+			t.Errorf("resolveApprovalTTL(%q) accepted a bad value", raw)
+			continue
+		}
+		if !strings.Contains(err.Error(), envApprovalTTL) {
+			t.Errorf("resolveApprovalTTL(%q) error %q must name %s", raw, err, envApprovalTTL)
+		}
+	}
+}
+
+// TestLastApprovalHook is the ApprovalTTL clock's only input: the NEWEST
+// confirmation across the run's issues, and false when nothing is confirmed.
+func TestLastApprovalHook(t *testing.T) {
+	dir := t.TempDir()
+	sess := session.Session{ID: "s1", Role: "implement", Repos: []string{"o/r"}}
+	sig := approvals.SignatureOf(sess)
+	hook := lastApprovalHook(sess, dir, "run-1")
+
+	if _, ok := hook(); ok {
+		t.Error("a run with no approval record must report no confirmation")
+	}
+
+	older := time.Now().Add(-2 * time.Hour).Round(0)
+	newer := time.Now().Add(-time.Minute).Round(0)
+	for _, ci := range []approvals.ConfirmedIssue{
+		{Number: 7, Repo: "o/r", CanonicalURL: "u7", ConfirmedAt: older},
+		{Number: 9, Repo: "o/r", CanonicalURL: "u9", ConfirmedAt: newer},
+	} {
+		if err := approvals.AppendConfirmedIssue(dir, "run-1", sig, sess.ID, ci, time.Hour); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+	}
+
+	// The clock runs from the LATEST confirmation: a re-declare must buy a full
+	// fresh TTL, not inherit the first declare's age.
+	got, ok := hook()
+	if !ok {
+		t.Fatal("hook must report a confirmation once one exists")
+	}
+	if !got.Equal(newer) {
+		t.Errorf("hook = %s, want the newest confirmation %s", got, newer)
+	}
+
+	// After a withdrawal there is nothing to age out.
+	if err := approvals.ClearConfirmedIssues(dir, "run-1"); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if _, ok := hook(); ok {
+		t.Error("after the confirmed set is cleared the hook must report no confirmation")
+	}
+}
+
 func TestResolveIdleTimeout(t *testing.T) {
 	cases := []struct {
 		raw        string
@@ -90,11 +153,11 @@ func TestIdleReattestLocksWritesThenReDeclareUnlocks(t *testing.T) {
 
 	var out bytes.Buffer
 	revoked := 0
-	withdrawn, err := idleReattest(reattestDeps{
+	withdrawn, err := reattest(reattestDeps{
 		stateDir: dir, runID: runID, idle: 30 * time.Minute,
 		drainTokens: func() error { revoked++; return approvals.ClearWriteTokens(dir, runID) },
 		out:         &out, logger: logger,
-	})
+	}, runbroker.ExpireIdle)
 	if err != nil {
 		t.Fatalf("idleReattest: %v", err)
 	}
@@ -143,6 +206,66 @@ func TestIdleReattestLocksWritesThenReDeclareUnlocks(t *testing.T) {
 	}
 }
 
+// TestApprovalAgeReattestSharesTheWithdrawal: the age bound performs the SAME
+// in-place withdrawal as the idle bound — only the banner's first line differs,
+// because the operator needs to know which bound tripped.
+func TestApprovalAgeReattestSharesTheWithdrawal(t *testing.T) {
+	dir := t.TempDir()
+	runID := "run-1"
+	sess := session.Session{ID: "s1", Role: "implement", Repos: []string{"o/r"}}
+	logger := log.New(io.Discard, "", 0)
+	seedApprovedRun(t, dir, runID, sess)
+
+	approve := buildSandboxApprove(sess, dir, runID, logger)
+	hooks := buildDeclarationHooks(declareEnv{sess: sess, stateDir: dir, runID: runID, approve: approve, logger: logger})
+
+	var out bytes.Buffer
+	withdrawn, err := reattest(reattestDeps{
+		stateDir: dir, runID: runID, idle: 30 * time.Minute, approvalTTL: 4 * time.Hour,
+		drainTokens: func() error { return approvals.ClearWriteTokens(dir, runID) },
+		out:         &out, logger: logger,
+	}, runbroker.ExpireApprovalAge)
+	if err != nil || !withdrawn {
+		t.Fatalf("reattest(approval-age) = (%v,%v), want (true,nil)", withdrawn, err)
+	}
+
+	// Same withdrawal as the idle path.
+	if hooks.WriteApproved("o/r") || hooks.IssueConfirmed("o/r", 7) {
+		t.Error("the approval-age withdrawal must lock writes exactly like the idle one")
+	}
+	if _, err := approvals.ReadWriteTokens(dir, runID); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("write-token ledger after the age lock: %v, want cleared", err)
+	}
+	if rc, err := approvals.ReadRunContext(dir, runID); err != nil {
+		t.Errorf("run context must survive: %v", err)
+	} else if rc.PendingIssue != nil {
+		t.Error("the stale pending declaration must be cleared by the age lock too")
+	}
+
+	// Different first line, same reassurance.
+	got := out.String()
+	if !strings.Contains(got, "write approval is 4h0m0s old — writes LOCKED") {
+		t.Errorf("age banner must say the approval aged out; got:\n%s", got)
+	}
+	if strings.Contains(got, "idle for") {
+		t.Errorf("age banner must not blame idleness; got:\n%s", got)
+	}
+	for _, want := range []string{"keeps running", "declare its issue again", "Reads still work"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("age banner missing %q; got:\n%s", want, got)
+		}
+	}
+
+	// And a re-confirmation unlocks writes again, same as the idle path.
+	next := approvals.ConfirmedIssue{Number: 7, Repo: "o/r", CanonicalURL: "u", ConfirmedAt: time.Now()}
+	if err := approvals.AppendConfirmedIssue(dir, runID, approvals.SignatureOf(sess), sess.ID, next, time.Hour); err != nil {
+		t.Fatalf("re-confirm: %v", err)
+	}
+	if !hooks.WriteApproved("o/r") || !hooks.IssueConfirmed("o/r", 7) {
+		t.Error("a re-declared, re-confirmed issue must unlock writes after an age lock")
+	}
+}
+
 // TestIdleReattestQuietWhenNothingApproved: a run that never declared has
 // nothing to withdraw. It must not revoke, not print, and not fail — otherwise
 // a read-only agent gets banner-spammed about an approval it never had.
@@ -150,11 +273,11 @@ func TestIdleReattestQuietWhenNothingApproved(t *testing.T) {
 	dir := t.TempDir()
 	var out bytes.Buffer
 	revoked := 0
-	withdrawn, err := idleReattest(reattestDeps{
+	withdrawn, err := reattest(reattestDeps{
 		stateDir: dir, runID: "run-none", idle: time.Minute,
 		drainTokens: func() error { revoked++; return nil },
 		out:         &out, logger: log.New(io.Discard, "", 0),
-	})
+	}, runbroker.ExpireIdle)
 	if err != nil {
 		t.Fatalf("idleReattest on an unapproved run: %v", err)
 	}
@@ -190,11 +313,11 @@ func TestIdleReattestFailsClosedWhenRecordUnwritable(t *testing.T) {
 
 	var out bytes.Buffer
 	revoked := 0
-	_, err := idleReattest(reattestDeps{
+	_, err := reattest(reattestDeps{
 		stateDir: dir, runID: runID, idle: time.Minute,
 		drainTokens: func() error { revoked++; return approvals.ClearWriteTokens(dir, runID) },
 		out:         &out, logger: log.New(io.Discard, "", 0),
-	})
+	}, runbroker.ExpireIdle)
 	if err == nil {
 		t.Fatal("idleReattest must report an un-withdrawable approval so the host stops the proxy")
 	}

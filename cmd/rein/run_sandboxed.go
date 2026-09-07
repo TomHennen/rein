@@ -101,10 +101,14 @@ func runSandboxed(cmdline []string) (int, error) {
 	}
 	srtPath := preflightSrtPath(pf)
 
-	// Idle re-attestation bound (#190). Resolved before anything else is built
-	// so a misspelled REIN_IDLE_TIMEOUT fails the launch rather than silently
+	// The two re-attestation bounds (#190). Resolved before anything else is
+	// built so a misspelled override fails the launch rather than silently
 	// reverting to the default.
 	idleTimeout, idleOverridden, err := resolveIdleTimeout(os.Getenv(envIdleTimeout))
+	if err != nil {
+		return 1, err
+	}
+	approvalTTL, ttlOverridden, err := resolveApprovalTTL(os.Getenv(envApprovalTTL))
 	if err != nil {
 		return 1, err
 	}
@@ -634,26 +638,31 @@ func runSandboxed(cmdline []string) (int, error) {
 		CAKeystore: caKeystore,
 		Audit:      auditW,
 		Logger:     logger,
-		// Idle re-attestation (#190, design §5.3): after IdleTimeout with no
-		// proxy traffic the run's WRITE APPROVAL is withdrawn in place — tokens
-		// revoked, confirmed issues cleared — while the proxy, the read path and
-		// the expose tunnel keep serving. The agent is not killed and the session
-		// is not ended; its next write gets the ordinary declare instruction and
-		// the human confirms again. There is no hard wall-clock TTL. The double
-		// revoke (here + the deferred exit-time revoke) is harmless: revoke is
+		// Re-attestation (#190, design §5.3). Two bounds on the APPROVAL, not on
+		// the run: IdleTimeout (no proxy traffic) and ApprovalTTL (age since the
+		// human's last confirmation, which activity does NOT extend). On either,
+		// the WRITE APPROVAL is withdrawn in place — tokens revoked, confirmed
+		// issues and the pending declaration cleared — while the proxy, the read
+		// path and the expose tunnel keep serving. The agent is not killed and
+		// the session is not ended; its next write gets the ordinary declare
+		// instruction and the human confirms again. The double revoke (here +
+		// the deferred exit-time revoke) is harmless: revoke is
 		// idempotent/best-effort.
-		IdleTimeout: idleTimeout,
-		OnExpire: func() (bool, error) {
-			return idleReattest(reattestDeps{
-				stateDir: stateDir,
-				runID:    runID,
-				idle:     idleTimeout,
+		IdleTimeout:  idleTimeout,
+		ApprovalTTL:  approvalTTL,
+		LastApproval: lastApprovalHook(sess, stateDir, runID),
+		OnExpire: func(reason runbroker.ExpireReason) (bool, error) {
+			return reattest(reattestDeps{
+				stateDir:    stateDir,
+				runID:       runID,
+				idle:        idleTimeout,
+				approvalTTL: approvalTTL,
 				drainTokens: func() error {
 					return drainRunWriteTokens(stateDir, runID, productionRevoke(sess), time.Now())
 				},
 				out:    os.Stderr,
 				logger: logger,
-			})
+			}, reason)
 		},
 	})
 	if err != nil {
@@ -843,6 +852,7 @@ func runSandboxed(cmdline []string) (int, error) {
 		ExposePorts:         sess.ExposePorts,
 		OpenEgress:          sess.OpenEgress,
 		IdleTimeout:         idleTimeout,
+		ApprovalTTL:         approvalTTL,
 	})
 	contractOff := srt.DisableClaudeMCPFromEnv(os.Getenv(EnvDisableAgentContract))
 	agentArgv := cmdline
@@ -857,7 +867,8 @@ func runSandboxed(cmdline []string) (int, error) {
 	agentArgv = sandboxExecArgv(reinBin, sess.ExposePorts, agentArgv)
 
 	printSandboxBanner(os.Stderr, sess, sessSource, socketPath, workTree, extraDomains, cmdline, showHome, allowReadPaths,
-		contractStatus(contractOff, injected), wt, agentTmp, ephemeralCwdPath, cwdRepo, idleTimeout, idleOverridden)
+		contractStatus(contractOff, injected), wt, agentTmp, ephemeralCwdPath, cwdRepo,
+		reattestBounds{idle: idleTimeout, idleSet: idleOverridden, ttl: approvalTTL, ttlSet: ttlOverridden})
 
 	// Non-claude agents: print the contract where the AGENT's own output goes, so
 	// it lands in its transcript/scrollback rather than only on the human's side.
@@ -1453,7 +1464,7 @@ func contractStatus(off, injected bool) string {
 	}
 }
 
-func printSandboxBanner(w io.Writer, sess session.Session, sessSource, socketPath, workTree string, extraDomains, cmdline []string, showHome bool, allowReadPaths []string, contractLine string, wt worktree.Result, cloneDir, ephemeralCwdPath, cwdRepo string, idleTimeout time.Duration, idleOverridden bool) {
+func printSandboxBanner(w io.Writer, sess session.Session, sessSource, socketPath, workTree string, extraDomains, cmdline []string, showHome bool, allowReadPaths []string, contractLine string, wt worktree.Result, cloneDir, ephemeralCwdPath, cwdRepo string, bounds reattestBounds) {
 	fmt.Fprintln(w, "rein: launching SANDBOXED (srt) run:")
 	fmt.Fprintf(w, "  session: %s (role=%s, repos=%v) [source=%s]\n",
 		sess.ID, sess.Role, sess.Repos, sessSource)
@@ -1507,12 +1518,16 @@ func printSandboxBanner(w io.Writer, sess session.Session, sessSource, socketPat
 	sess.WarnIgnoredIssue(w)
 	fmt.Fprintln(w, "  writes are LOCKED until the agent declares its issue:  rein declare <n>")
 	fmt.Fprintln(w, "  then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.")
-	// #190: no hard TTL. The ONLY clock is idle re-attestation, and it takes
-	// away nothing but the write approval.
-	fmt.Fprintf(w, "  after %s with no GitHub traffic, writes re-lock and the agent must declare again;\n", idleTimeout)
-	fmt.Fprintln(w, "    the run itself keeps going (reads keep working) until the agent exits.")
-	if idleOverridden {
-		fmt.Fprintf(w, "    (%s=%s is set — the default is %s.)\n", envIdleTimeout, idleTimeout, runbroker.DefaultIdleTimeout)
+	// #190: the two bounds are on the APPROVAL, not the run. Say both, with the
+	// resolved values, and say what does NOT stop.
+	fmt.Fprintf(w, "  after %s with no GitHub traffic, or %s after your last confirmation, writes\n", bounds.idle, bounds.ttl)
+	fmt.Fprintln(w, "    re-lock and the agent must declare again; the run itself keeps going")
+	fmt.Fprintln(w, "    (reads keep working) until the agent exits.")
+	if bounds.idleSet {
+		fmt.Fprintf(w, "    (%s=%s is set — the default is %s.)\n", envIdleTimeout, bounds.idle, runbroker.DefaultIdleTimeout)
+	}
+	if bounds.ttlSet {
+		fmt.Fprintf(w, "    (%s=%s is set — the default is %s.)\n", envApprovalTTL, bounds.ttl, runbroker.DefaultApprovalTTL)
 	}
 	if len(cmdline) > 0 {
 		agent := filepath.Base(cmdline[0])
