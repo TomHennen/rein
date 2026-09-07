@@ -1595,8 +1595,9 @@ def split_at_agent_launch(transcript: str, launch_needle: str) -> tuple[list[str
       tail    — from there on, ONLY rein's own lines (REIN_LINE_RE, a column-0
                 `rein: …` / `=== rein: …`). That is rein's exit token accounting, and
                 any line rein prints to its own terminal WHILE the agent runs — the
-                `rein: SESSION EXPIRED` banner (cmd/rein/run_sandboxed.go
-                printExpiryBanner) and the install NOTICE (internal/ui/grant/notice.go).
+                `rein: idle for <d> — writes LOCKED` re-attestation banner
+                (cmd/rein/reattest.go printReattestBanner) and the install NOTICE
+                (internal/ui/grant/notice.go).
                 A real claude never paints flush-left with rein's prefix (its output
                 sits behind box art / glyphs / indentation — verified on captured pty
                 streams), so this catches rein and only rein.
