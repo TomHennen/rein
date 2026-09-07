@@ -90,7 +90,7 @@ func (h *Host) monitor(ctx context.Context, idle, approvalTTL, interval time.Dur
 			return
 		case <-ticker.C:
 			n := now()
-			reason, ok := dueExpiry(dueInput{
+			reason, actedAt, ok := dueExpiry(dueInput{
 				now:           n,
 				lastActivity:  time.Unix(0, h.lastActivity.Load()),
 				idle:          idle,
@@ -107,8 +107,11 @@ func (h *Host) monitor(ctx context.Context, idle, approvalTTL, interval time.Dur
 			// an idle trip, double-bannering one moment.
 			lastLock = n
 			if reason == ExpireApprovalAge {
-				at, _ := lastApproval()
-				actedApproval = at
+				// The timestamp dueExpiry actually judged, NOT a second call to
+				// lastApproval: a re-confirmation landing between the two reads
+				// would otherwise be recorded as already acted on, and the
+				// confirmation the human just gave would never age out.
+				actedApproval = actedAt
 			}
 			// BEFORE the caller revokes: forget the proxy's memoized write
 			// token. It is in-memory, so no on-disk withdrawal reaches it — and
@@ -148,21 +151,23 @@ type dueInput struct {
 }
 
 // dueExpiry is the pure "should we withdraw, and why" decision — the whole
-// policy, testable without timers or a proxy.
+// policy, testable without timers or a proxy. It also returns the confirmation
+// timestamp it judged, so the caller records exactly what it acted on instead
+// of re-reading a clock that may have moved.
 //
 // Approval age is checked FIRST: it is the bound that does not move, so when
 // both trip it is the more informative reason to report.
-func dueExpiry(in dueInput) (ExpireReason, bool) {
+func dueExpiry(in dueInput) (ExpireReason, time.Time, bool) {
 	if in.lastApproval != nil {
 		// A run with no confirmed issue has nothing to expire.
 		if at, ok := in.lastApproval(); ok && approvalExpired(at, in.now, in.approvalTTL) && at.After(in.actedApproval) {
-			return ExpireApprovalAge, true
+			return ExpireApprovalAge, at, true
 		}
 	}
 	if expired(in.lastActivity, in.now, in.idle) && (in.lastLock.IsZero() || in.lastActivity.After(in.lastLock)) {
-		return ExpireIdle, true
+		return ExpireIdle, time.Time{}, true
 	}
-	return "", false
+	return "", time.Time{}, false
 }
 
 // dropWrite forgets the proxy's memoized write token, if the host has the seam.

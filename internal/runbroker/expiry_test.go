@@ -91,7 +91,7 @@ func TestDueExpiry(t *testing.T) {
 	const ttl = 4 * time.Hour
 
 	// Busy run, fresh approval: nothing is due.
-	if _, ok := dueExpiry(dueInput{
+	if _, _, ok := dueExpiry(dueInput{
 		now: base.Add(time.Hour), lastActivity: base.Add(time.Hour), idle: idle, approvalTTL: ttl,
 		lastApproval: approvedAt(base.Add(time.Hour), true),
 	}); ok {
@@ -100,7 +100,7 @@ func TestDueExpiry(t *testing.T) {
 
 	// Busy run, OLD approval: the age bound trips even though activity never
 	// stopped. This is the whole point of the bound.
-	reason, ok := dueExpiry(dueInput{
+	reason, _, ok := dueExpiry(dueInput{
 		now: base.Add(5 * time.Hour), lastActivity: base.Add(5 * time.Hour), idle: idle, approvalTTL: ttl,
 		lastApproval: approvedAt(base, true),
 	})
@@ -109,7 +109,7 @@ func TestDueExpiry(t *testing.T) {
 	}
 
 	// Nothing confirmed: the age bound has no clock, so only idle can fire.
-	reason, ok = dueExpiry(dueInput{
+	reason, _, ok = dueExpiry(dueInput{
 		now: base.Add(5 * time.Hour), lastActivity: base.Add(5 * time.Hour), idle: idle, approvalTTL: ttl,
 		lastApproval: approvedAt(time.Time{}, false),
 	})
@@ -120,14 +120,14 @@ func TestDueExpiry(t *testing.T) {
 	// Age re-arm: the confirmation already acted on must not trip again, but a
 	// FRESHER one (the human re-confirmed) must.
 	old := base
-	if _, ok := dueExpiry(dueInput{
+	if _, _, ok := dueExpiry(dueInput{
 		now: base.Add(5 * time.Hour), lastActivity: base.Add(5 * time.Hour), idle: idle, approvalTTL: ttl,
 		lastApproval: approvedAt(old, true), actedApproval: old,
 	}); ok {
 		t.Error("the same confirmation must not trip the age bound twice")
 	}
 	renewed := base.Add(30 * time.Minute)
-	if reason, ok := dueExpiry(dueInput{
+	if reason, _, ok := dueExpiry(dueInput{
 		now: renewed.Add(5 * time.Hour), lastActivity: renewed.Add(5 * time.Hour), idle: idle, approvalTTL: ttl,
 		lastApproval: approvedAt(renewed, true), actedApproval: old,
 	}); !ok || reason != ExpireApprovalAge {
@@ -136,13 +136,13 @@ func TestDueExpiry(t *testing.T) {
 
 	// Idle re-arm is unchanged, and a lock of EITHER kind arms it.
 	lock := base.Add(time.Hour)
-	if _, ok := dueExpiry(dueInput{
+	if _, _, ok := dueExpiry(dueInput{
 		now: lock.Add(2 * time.Hour), lastActivity: base, idle: idle, approvalTTL: 0,
 		lastLock: lock,
 	}); ok {
 		t.Error("no activity since the last lock: idle must not re-fire")
 	}
-	if reason, ok := dueExpiry(dueInput{
+	if reason, _, ok := dueExpiry(dueInput{
 		now: lock.Add(2 * time.Hour), lastActivity: lock.Add(time.Minute), idle: idle, approvalTTL: 0,
 		lastLock: lock,
 	}); !ok || reason != ExpireIdle {
@@ -332,6 +332,10 @@ func TestHostApprovalAgeQuietWhenNothingConfirmed(t *testing.T) {
 
 // TestHostApprovalAgeResetsOnReconfirmation: a fresh confirmation restarts the
 // clock, so the run gets another full TTL rather than being re-locked at once.
+//
+// OnExpire clears the approval exactly as the real withdrawal does, so what is
+// under test is the CLOCK RESET — not the same-timestamp re-arm gate, which is
+// covered in TestDueExpiry.
 func TestHostApprovalAgeResetsOnReconfirmation(t *testing.T) {
 	fired := make(chan ExpireReason, 8)
 	var mu sync.Mutex
@@ -349,7 +353,13 @@ func TestHostApprovalAgeResetsOnReconfirmation(t *testing.T) {
 			defer mu.Unlock()
 			return confirmedAt, approved
 		},
-		OnExpire: func(r ExpireReason) (bool, error) { fired <- r; return true, nil },
+		OnExpire: func(r ExpireReason) (bool, error) {
+			mu.Lock()
+			approved = false // the withdrawal clears the confirmed set
+			mu.Unlock()
+			fired <- r
+			return true, nil
+		},
 	})
 
 	select {
@@ -358,9 +368,10 @@ func TestHostApprovalAgeResetsOnReconfirmation(t *testing.T) {
 		t.Fatal("the approval-age bound did not fire")
 	}
 
-	// The human re-declares and re-confirms: the clock restarts from now.
+	// The human re-declares and re-confirms: a NEW confirmation, clock from now.
 	mu.Lock()
 	confirmedAt = time.Now()
+	approved = true
 	mu.Unlock()
 
 	// Well inside the new TTL, nothing may fire again...
