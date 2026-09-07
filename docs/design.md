@@ -240,7 +240,8 @@ This will allow the agent to:
   - Comment on issues and PRs in tomh/wrangle
   - Push only commits it has signed
 
-For 4 hours (or until you close the agent).
+For this run (until you close the agent). After 30 minutes with no GitHub
+traffic, writes re-lock and the agent has to declare again.
 
 To approve, type the issue number: ___
 To deny, press Ctrl+C.
@@ -288,7 +289,7 @@ The pattern: the user always confirms with non-replayable input (issue number, f
 
 - Pick a session up front. The session forms itself as the agent encounters work.
 - Pick a role for each thing. The role is implied by what the agent is doing (the first action requiring write access starts an `implement` session; a session that only reads stays in `scan`).
-- End the session. Sessions expire when the agent process exits, after an idle timeout (30 min default), or after a hard TTL (4 hours default). Manual `rein session end` exists but is for the careful user.
+- End the session. Sessions end when the agent process exits; there is no wall-clock cap. After an idle timeout (30 min default) the run is not ended — its WRITE APPROVAL is withdrawn in place and the agent must declare and be re-confirmed before its next write (#190). Manual `rein session end` exists but is for the careful user.
 - Edit any GitHub PATs. The PAT pattern is replaced entirely.
 - Configure git. Once `rein run` wraps the agent, all git operations route through the sandbox proxy.
 
@@ -550,7 +551,7 @@ Sessions are formed and modified during agent operation, not configured up front
 5. **Session active.** Subsequent requests within the same scope ceiling proceed without new prompts. The broker mints tokens as needed (read tokens for read operations, JIT write tokens for `git push` and similar).
 6. **Scope expansion.** If the agent needs something outside the current ceiling — another issue, another repo — a new confirmation prompt.
 7. **Issue creation.** If the agent wants to file a new issue mid-session (e.g., found a bug), the broker prompts the human, creates the issue using the audit App's identity attributed "on behalf of @tomh," and adds the new issue to the session's scope.
-8. **Session ends.** Automatically on any of: agent process exit, idle timeout (default 30 min), hard TTL (default 4 hours), explicit `rein session end`. The human does not have to remember to end the session.
+8. **Session ends.** Automatically on agent process exit, or explicitly via `rein session end`. There is no hard TTL: a long, busy session is never interrupted. The idle timeout (default 30 min) does not end the session either — it re-attests in place, withdrawing the write approval while reads and the run continue, so the next write goes through the declare + confirm ceremony again (#190). The human does not have to remember to end the session.
 
 Multi-issue sessions are first-class: a single session can be bound to issues 73, 74, 75 (scope ceiling = union of their repos), and audit comments are cross-posted to all three with mutual cross-references.
 
@@ -897,7 +898,7 @@ Real v0:
 - **Evaluate Claude Code hooks as a complementary guard/audit layer** (issue #21): PreToolUse to deny the Shape B self-bypass patterns (`gh auth setup-git`, `git config credential.helper`, self-`rein approval grant`), PostToolUse for git/gh audit. Honest scope: harness-enforced but agent-overridable (`.claude/settings.local.json`), no `/dev/tty` so it can't host the approval prompt, and Claude-Code-only — so it's policy surface above the broker, never the boundary (the `srt` sandbox / daemon is). Decided here because it's a defense layer, not the broker itself.
 - Ambient session model with human confirmation prompts.
 - Single-use write tokens; HEAD pinning; REST URL 301-redirect chain as TM-G6 anchor.
-- Automatic session expiry (idle, hard TTL, agent process exit).
+- Automatic session end on agent process exit; idle re-attestation of the write approval (no hard TTL).
 - Audit App ships with a fixed avatar (uploaded during `rein init`).
 
 **Hypothesis:** Tom uses it on `wrangle` for two weeks without reverting to a PAT under deadline pressure.

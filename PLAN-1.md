@@ -199,8 +199,11 @@ validation-beef[bot]@users.noreply.github.com>`** (host ~/.gitconfig not the
 source); /dev/tty unopenable in-sandbox (ENXIO); `--direct` prints the loud
 reduced-protection banner. Expiry (idle 30m / hard TTL 4h, revoke-before-close)
 + concurrent isolation are unit+`-race` covered (no fast-timeout override for a
-live expiry test). **Tom's decisions:** default-flip to sandbox ACCEPTED ("no one
-is using this yet"); commit-author identity = his name + "(via rein)" + App-bot
+live expiry test). **Superseded by #190:** the hard TTL is gone and idle expiry
+re-attests in place (write approval withdrawn, run keeps serving);
+`REIN_IDLE_TIMEOUT` is the fast-timeout override CP4 lacked.
+**Tom's decisions:** default-flip to sandbox ACCEPTED ("no one is using this
+yet"); commit-author identity = his name + "(via rein)" + App-bot
 noreply. **Surfaced/deferred:** `--direct` uses an informational banner (no
 confirm) — a user can footgun direct on a real repo; that's the hard-constraint-#1
 trust model (rein can't detect a throwaway). A harder gate (confirm prompt /
@@ -221,11 +224,12 @@ trust model (rein can't detect a throwaway). A harder gate (confirm prompt /
   `githubapp.BotUserID` (UNAUTHENTICATED GET /users/<slug>[bot] — JWT 401s
   there). Leak fix: managed GIT_CONFIG_GLOBAL + GIT_CONFIG_SYSTEM=/dev/null +
   ~/.gitconfig added to deny-read.
-- **Session expiry:** `internal/runbroker` idle (30m) + hard-TTL (4h, = the
-  approvalTTL sweep backstop) monitor. Proxy `OnActivity` feeds an atomic
-  last-activity clock; on expiry rein revokes the run's write tokens and stops
-  the proxy (agent then fails closed) with a loud banner — the agent process is
-  NOT killed.
+- **Session expiry:** `internal/runbroker` idle (30m) monitor; the hard TTL was
+  removed by #190 (the approvalTTL sweep backstop is a separate mechanism and
+  stays). Proxy `OnActivity` feeds an atomic last-activity clock; on idle rein
+  revokes the run's write tokens and withdraws its confirmed issues while the
+  proxy KEEPS SERVING (#190 — the next write is refused with the declare
+  instruction), with a loud banner — the agent process is NOT killed.
 - **Default-mode UX (user-visible change — supervisor to surface to Tom):**
   `rein run -- <cmd>` is now SANDBOXED by default. If srt is unhealthy it fails
   closed with a `rein doctor` pointer (no silent unsandboxed fallback). Direct
@@ -281,7 +285,8 @@ from the bot noreply email.
 - Reuse run-scoped approvals (#20/0a02043) under the daemon; clear on
   agent exit; revoke write tokens on exit (the #20 intent, now native in
   the daemon — closes the loop #20 left for Phase 1).
-- Automatic session expiry: idle, hard TTL, agent-process exit.
+- Automatic session end on agent-process exit; idle re-attestation of the write
+  approval (no hard TTL, #190).
 - Default-mode UX: sandboxed becomes the `rein run` default where srt is
   healthy; direct mode behind an explicit flag with a loud banner.
 
