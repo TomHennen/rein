@@ -226,6 +226,24 @@ func (c *Client) MintGhSessionToken(ctx context.Context) (token string, expiresA
 	return c.mint(ctx, perms)
 }
 
+// MintIssueWriteToken returns an installation token permitted to do ONE
+// thing: file/edit issues (issues:write + metadata:read). It backs
+// `rein declare --new` (issue #180), where the human approved "file this
+// issue" and nothing else.
+//
+// It exists so that ceremony does not have to borrow MintGhSessionToken,
+// which additionally carries contents:write and pull_requests:write
+// across the whole session scope — a token that could push and merge,
+// minted at the one moment in a run when writes are still locked and no
+// issue is confirmed. The narrow tier keeps the credential's capability
+// equal to what the human was actually shown.
+func (c *Client) MintIssueWriteToken(ctx context.Context) (token string, expiresAt time.Time, err error) {
+	return c.mint(ctx, &githubauth.InstallationPermissions{
+		Issues:   githubauth.Ptr("write"),
+		Metadata: githubauth.Ptr("read"),
+	})
+}
+
 // RevokeToken calls DELETE /installation/token authenticated as the supplied
 // installation token, which revokes that exact token server-side. Used to
 // tighten the effective write-token TTL — design §4.2.5 asks for ~5min;

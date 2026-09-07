@@ -9,11 +9,11 @@ rein: egress preset "dev" active (11 package-registry/advisory hosts; egress_pre
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked; egress answered by rein).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_claude_resume (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-62r86o07/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-DNE-wpD6YjLOAZWs-MXrmw/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-claude-resume-quiz5clu  [TomHennen/agentcreds-validation-a]
+  session: sess_journey_claude_resume (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-vzypfgnh/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-Cz-fj_awzTFIFoq0_3E5Uw/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-claude-resume-zcckwrsj  [TomHennen/agentcreds-validation-a]
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-1398070805
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-2417899437
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -24,7 +24,7 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-claude-resume-quiz5clu
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-claude-resume-zcckwrsj
     => work the agent must keep has to be written INTO the working tree.
     allowed back read-only: /home/admin/.local/bin, /home/admin/.local/share/claude/versions, /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv, /home/admin/.cache/ms-playwright
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
@@ -33,9 +33,6 @@ rein: launching SANDBOXED (srt) run:
   extra egress ALLOWED (direct TLS, NOT injected, no rein token): *.crates.io, *.golang.org, *.npmjs.org, *.pypi.org, *.pythonhosted.org, *.rubygems.org, api.anthropic.com, crates.io, osv.dev, platform.claude.com, pypi.org, rubygems.org, vuln.go.dev
   writes are LOCKED until the agent declares its issue:  rein declare <n>
   then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.
-  after 30m0s with no GitHub traffic, or 4h0m0s after your last confirmation, writes
-    re-lock and the agent must declare again; the run itself keeps going
-    (reads keep working) until the agent exits.
   to run claude WITHOUT rein for one command: `\claude` (bash/zsh) or `command claude` (fish)
   agent contract injected via --append-system-prompt (claude): $HOME is ephemeral, no creds, declare-then-push.
 rein: running: claude -p Remember this exact token for later, I will ask for it: quokka-overlay-persists-1994. Reply with just the word 'ok'.
@@ -51,11 +48,11 @@ rein: egress preset "dev" active (11 package-registry/advisory hosts; egress_pre
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked; egress answered by rein).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_claude_resume (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-62r86o07/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-VpjTgmDa4q91jxFs6dfFeg/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-claude-resume-quiz5clu  [TomHennen/agentcreds-validation-a]
+  session: sess_journey_claude_resume (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-vzypfgnh/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-u_StqlJVFQiNt9Gm4pGmXg/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-claude-resume-zcckwrsj  [TomHennen/agentcreds-validation-a]
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-640408890
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-3280006974
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -66,7 +63,7 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-claude-resume-quiz5clu
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-claude-resume-zcckwrsj
     => work the agent must keep has to be written INTO the working tree.
     allowed back read-only: /home/admin/.local/bin, /home/admin/.local/share/claude/versions, /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv, /home/admin/.cache/ms-playwright
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
@@ -75,9 +72,6 @@ rein: launching SANDBOXED (srt) run:
   extra egress ALLOWED (direct TLS, NOT injected, no rein token): *.crates.io, *.golang.org, *.npmjs.org, *.pypi.org, *.pythonhosted.org, *.rubygems.org, api.anthropic.com, crates.io, osv.dev, platform.claude.com, pypi.org, rubygems.org, vuln.go.dev
   writes are LOCKED until the agent declares its issue:  rein declare <n>
   then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.
-  after 30m0s with no GitHub traffic, or 4h0m0s after your last confirmation, writes
-    re-lock and the agent must declare again; the run itself keeps going
-    (reads keep working) until the agent exits.
   to run claude WITHOUT rein for one command: `\claude` (bash/zsh) or `command claude` (fish)
   agent contract injected via --append-system-prompt (claude): $HOME is ephemeral, no creds, declare-then-push.
 rein: running: claude -c -p Earlier in this conversation I gave you an exact token to remember. Reply with ONLY that token, nothing else.
@@ -93,11 +87,11 @@ rein: egress preset "dev" active (11 package-registry/advisory hosts; egress_pre
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked; egress answered by rein).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_claude_resume (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-62r86o07/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-jHe-i2Ri_AcuG6MK-jrZMQ/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-claude-resume-quiz5clu  [TomHennen/agentcreds-validation-a]
+  session: sess_journey_claude_resume (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-vzypfgnh/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-wRHFbHOejblSvZF5Mh7PPQ/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-claude-resume-zcckwrsj  [TomHennen/agentcreds-validation-a]
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-4113238257
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-2396780351
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -108,7 +102,7 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-claude-resume-quiz5clu
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-claude-resume-zcckwrsj
     => work the agent must keep has to be written INTO the working tree.
     allowed back read-only: /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.local/bin, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv, /home/admin/.cache/ms-playwright
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
@@ -117,9 +111,6 @@ rein: launching SANDBOXED (srt) run:
   extra egress ALLOWED (direct TLS, NOT injected, no rein token): *.crates.io, *.golang.org, *.npmjs.org, *.pypi.org, *.pythonhosted.org, *.rubygems.org, api.anthropic.com, crates.io, osv.dev, platform.claude.com, pypi.org, rubygems.org, vuln.go.dev
   writes are LOCKED until the agent declares its issue:  rein declare <n>
   then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.
-  after 30m0s with no GitHub traffic, or 4h0m0s after your last confirmation, writes
-    re-lock and the agent must declare again; the run itself keeps going
-    (reads keep working) until the agent exits.
   to run bash WITHOUT rein for one command: `\bash` (bash/zsh) or `command bash` (fish)
   agent contract PRINTED to the agent's output (this agent has no system-prompt channel, so it may or
     may not reach the model's context; the REIN_IN_SANDBOX_* env vars carry the same facts machine-readably).
@@ -140,12 +131,12 @@ emit "@HOST_CLAUDE_WRITABLE=[$(for e in $(ls -A ~/.claude 2>/dev/null | sort); d
 emit "@HOST_NPM_LOGS_WRITABLE=$(touch ~/.npm/_logs/.rein-write-probe 2>/dev/null && rm -f ~/.npm/_logs/.rein-write-probe && echo YES-PERSISTS || echo no)"
 emit "@OVERLAY_CREDS_SEEDED=$(test -s "$CLAUDE_CONFIG_DIR/.credentials.json" && echo yes || echo no)"
 emit "@OVERLAY_FORCES_SKIPDANGEROUS=$(grep -rqs skipDangerousModePermissionPrompt "$CLAUDE_CONFIG_DIR" && echo YES-BYPASS || echo no)"
- /tmp/rein-claude-resume-quiz5clu
+ /tmp/rein-claude-resume-zcckwrsj
 ---
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/rein-claude-resume-quiz5clu
+- Your work persists ONLY in the working tree: /tmp/rein-claude-resume-zcckwrsj
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
@@ -169,14 +160,15 @@ GITHUB WRITES
   declare the issue this work is for:
       rein declare <n>
   That asks the human to approve, on their terminal. Reads work without it.
+- No issue exists for this work yet? Ask to file one:
+      rein declare --new "<title>" [--body "<text>"] [--repo owner/name]
+  The human approves, rein files it, and it becomes the declared issue.
+  (--repo is required when this session scopes more than one repo.)
 - Once confirmed, push ONLY to a branch named:
       agent/<n>/<nonce>
   where <n> is the declared issue number and <nonce> is a short name you choose
   (letters/digits, then letters/digits/./_/-). Any other ref is rejected.
 - One issue per push.
-- After 30m0s with no GitHub traffic, or 4h0m0s after your last confirmation, your
-  write approval lapses: the next write is refused with the declare instruction;
-  declare again and the human re-confirms. Nothing else stops.
 
 NETWORK
 - Egress is restricted to GitHub plus: *.crates.io, *.golang.org, *.npmjs.org, *.pypi.org, *.pythonhosted.org, *.rubygems.org, api.anthropic.com, crates.io, osv.dev, platform.claude.com, pypi.org, rubygems.org, vuln.go.dev
@@ -186,7 +178,7 @@ NETWORK
   single command, then restart rein (it applies to the NEXT run, not this one):
       rein session allow-domain <host>
 
-SBX| @CLAUDE_CONFIG_DIR=/tmp/rein-journey-cfg-cy0t54_c/rein-sandbox-home/.claude
+SBX| @CLAUDE_CONFIG_DIR=/tmp/rein-journey-cfg-jpciqxvy/rein-sandbox-home/.claude
 SBX| @HOST_CLAUDE_ENTRIES=[claude.json debug ]
 SBX| @HOST_HISTORY_JSONL_READABLE=no
 SBX| @HOST_CLAUDE_JSON_READABLE=no

@@ -52,9 +52,10 @@ func TestBuildAgentContract_StatesTheEnforcedRules(t *testing.T) {
 		"no error", // the silent-failure warning: writes SUCCEED, so nothing else warns it
 		"Read-only file system",
 		"NO credentials",
-		"rein declare <n>",   // exact #35 vocabulary (gate.go deny messages)
-		"agent/<n>/<nonce>",  // exact #35 branch convention
-		"One issue per push", // exact #35 push rule
+		"rein declare <n>",             // exact #35 vocabulary (gate.go deny messages)
+		`rein declare --new "<title>"`, // #180: the bootstrap for a repo with no issues yet
+		"agent/<n>/<nonce>",            // exact #35 branch convention
+		"One issue per push",           // exact #35 push rule
 		// #190: the agent must know the ONE thing that changes under it mid-run
 		// — the approval lapses on idle — and that nothing else does.
 		"After 30m0s with no GitHub traffic, or 4h0m0s after your last confirmation, your",

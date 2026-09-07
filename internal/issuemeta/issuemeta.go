@@ -205,16 +205,23 @@ func CheckCanonical(ctx context.Context, token, canonicalURL string) error {
 //
 // The result is truncated to maxTitleRunes.
 func SanitizeTitle(s string) string {
+	runes := []rune(sanitizeForDisplay(s))
+	if len(runes) <= maxTitleRunes {
+		return string(runes)
+	}
+	return string(runes[:maxTitleRunes]) + "…"
+}
+
+// sanitizeForDisplay is SanitizeTitle's substitution pass without the
+// truncation — the part callers with a different length budget (the
+// new-issue body excerpt) need.
+func sanitizeForDisplay(s string) string {
 	out := make([]rune, 0, len(s))
 	for _, r := range s {
 		if r < 0x20 || r == 0x7f || unicode.Is(unicode.Cf, r) {
 			r = ' '
 		}
 		out = append(out, r)
-		if len(out) >= maxTitleRunes {
-			out = append(out, '…')
-			break
-		}
 	}
 	return string(out)
 }
