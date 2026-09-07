@@ -182,6 +182,15 @@ func TestIdleReattestFailsClosedWhenRecordUnwritable(t *testing.T) {
 	if revoked != 1 {
 		t.Errorf("revoke ran %d times, want 1 — tokens must be revoked even on the failure path", revoked)
 	}
+	// This branch ends the run's credential path, so it must tear the rest of
+	// the per-run state down NOW rather than leave it to the deferred exit-time
+	// clear (which a SIGKILL skips) or the next launch's sweep.
+	if _, err := approvals.ReadRunContext(dir, runID); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("run context after the fail-closed teardown: %v, want not-exist", err)
+	}
+	if _, err := approvals.ReadWriteTokens(dir, runID); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("write-token ledger after the fail-closed teardown: %v, want not-exist", err)
+	}
 	for _, want := range []string{"SESSION STOPPED", "STOPPED the credential proxy"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("fail-closed banner missing %q; got:\n%s", want, out.String())

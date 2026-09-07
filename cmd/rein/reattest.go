@@ -76,6 +76,14 @@ func idleReattest(d reattestDeps) error {
 	}
 	if clearErr != nil {
 		d.logger.Printf("idle re-attestation: could not withdraw the write approval: %v", clearErr)
+		// This branch ends the run's credential path rather than re-attesting
+		// it, so tear ALL the per-run state down right now — the pre-#190
+		// behavior. Without it the standing approval would sit on disk until
+		// the deferred exit-time ClearRun, which a SIGKILL skips entirely,
+		// leaving it to the next launch's Sweep.
+		if err := approvals.ClearRun(d.stateDir, d.runID); err != nil {
+			d.logger.Printf("idle re-attestation: could not clear the run's state either (%v); it survives until the next launch sweep", err)
+		}
 		printExpiryHardStopBanner(d.out, clearErr)
 		return fmt.Errorf("withdraw write approval for run %s: %w", d.runID, clearErr)
 	}
