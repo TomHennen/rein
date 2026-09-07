@@ -5,15 +5,15 @@ rein: sandbox preflight:
   [ok]   bwrap userns: unprivileged user namespace works
   [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
 rein: egress preset "dev" active (11 package-registry/advisory hosts; egress_preset: none in the session file turns it off)
-rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-raln_wzl (git -C /tmp/rein-itest-raln_wzl rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
+rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-169gid56 (git -C /tmp/rein-itest-169gid56 rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked; egress answered by rein).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_expansion (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-b-_yw4bzb2/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-WKzrsUdk_nVApd1hUEw6WA/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-itest-raln_wzl
+  session: sess_journey_expansion (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-b-el7vy7tw/session.yaml]
+  proxy socket (out of sandbox): /run/user/1000/rein/run-OvDbLoFGm5qzYYmROLxP_w/proxy.sock
+  working tree (writable in sandbox): /tmp/rein-itest-169gid56
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-435685099
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-1278213852
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -24,7 +24,7 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-itest-raln_wzl
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-itest-169gid56
     => work the agent must keep has to be written INTO the working tree.
     allowed back read-only: /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.local/bin, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv, /home/admin/.cache/ms-playwright
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
@@ -33,8 +33,9 @@ rein: launching SANDBOXED (srt) run:
   extra egress ALLOWED (direct TLS, NOT injected, no rein token): *.crates.io, *.golang.org, *.npmjs.org, *.pypi.org, *.pythonhosted.org, *.rubygems.org, api.anthropic.com, crates.io, osv.dev, platform.claude.com, pypi.org, rubygems.org, vuln.go.dev
   writes are LOCKED until the agent declares its issue:  rein declare <n>
   then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.
-  after 30m0s with no GitHub traffic, writes re-lock and the agent must declare again;
-    the run itself keeps going (reads keep working) until the agent exits.
+  after 30m0s with no GitHub traffic, or 4h0m0s after your last confirmation, writes
+    re-lock and the agent must declare again; the run itself keeps going
+    (reads keep working) until the agent exits.
   to run bash WITHOUT rein for one command: `\bash` (bash/zsh) or `command bash` (fish)
   agent contract PRINTED to the agent's output (this agent has no system-prompt channel, so it may or
     may not reach the model's context; the REIN_IN_SANDBOX_* env vars carry the same facts machine-readably).
@@ -67,15 +68,15 @@ emit "@PHASE3_START  push agent/2/<nonce> to repo B (expect: lands)"
 echo "scope-expansion probe $(date -u +%FT%TZ)" >> expansion-probe.txt
 run git add -A
 run git commit -q -m "scope-expansion journey: push to repo B"
-run git push --progress origin HEAD:refs/heads/agent/2/exp-20260907-122902-60c080
+run git push --progress origin HEAD:refs/heads/agent/2/exp-20260907-165237-4c50c2
 emit "@PHASE3_RC=$?"
 emit "@SCRIPT_DONE"
- /tmp/rein-itest-raln_wzl
+ /tmp/rein-itest-169gid56
 ---
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/rein-itest-raln_wzl
+- Your work persists ONLY in the working tree: /tmp/rein-itest-169gid56
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
@@ -104,9 +105,9 @@ GITHUB WRITES
   where <n> is the declared issue number and <nonce> is a short name you choose
   (letters/digits, then letters/digits/./_/-). Any other ref is rejected.
 - One issue per push.
-- After 30m0s with no GitHub traffic your write approval lapses: the next
-  write is refused with the declare instruction; declare again and the human
-  re-confirms. Nothing else stops.
+- After 30m0s with no GitHub traffic, or 4h0m0s after your last confirmation, your
+  write approval lapses: the next write is refused with the declare instruction;
+  declare again and the human re-confirms. Nothing else stops.
 
 NETWORK
 - Egress is restricted to GitHub plus: *.crates.io, *.golang.org, *.npmjs.org, *.pypi.org, *.pythonhosted.org, *.rubygems.org, api.anthropic.com, crates.io, osv.dev, platform.claude.com, pypi.org, rubygems.org, vuln.go.dev
@@ -154,8 +155,8 @@ SBX|       working tree, where a nested repo can end up committed into the other
 SBX|       ephemeral; the durable artifact is the PUSH.
 SBX| @PHASE1_RC=0
 SBX| @PHASE2_START  clone repo B into scratch (scope grew, binds did not: use TMPDIR, not the working tree)
-SBX| $ git clone --progress https://github.com/TomHennen/agentcreds-validation-b /tmp/rein-agent-tmp-435685099/rein-expansion-b
-SBX| Cloning into '/tmp/rein-agent-tmp-435685099/rein-expansion-b'...
+SBX| $ git clone --progress https://github.com/TomHennen/agentcreds-validation-b /tmp/rein-agent-tmp-1278213852/rein-expansion-b
+SBX| Cloning into '/tmp/rein-agent-tmp-1278213852/rein-expansion-b'...
 SBX| remote: Enumerating objects: 3, done.
 SBX| remote: Counting objects: 100% (1/1), done.
 SBX| remote: Total 3 (delta 0), reused 0 (delta 0), pack-reused 2 (from 1)
@@ -164,19 +165,19 @@ SBX| @PHASE2_RC=0
 SBX| @PHASE3_START  push agent/2/<nonce> to repo B (expect: lands)
 SBX| $ git add -A
 SBX| $ git commit -q -m scope-expansion journey: push to repo B
-SBX| $ git push --progress origin HEAD:refs/heads/agent/2/exp-20260907-122902-60c080
+SBX| $ git push --progress origin HEAD:refs/heads/agent/2/exp-20260907-165237-4c50c2
 SBX| Enumerating objects: 5, done.
 SBX| Counting objects: 100% (5/5), done.
 SBX| Delta compression using up to 8 threads
 SBX| Compressing objects: 100% (2/2), done.
-SBX| Writing objects: 100% (3/3), 377 bytes | 377.00 KiB/s, done.
+SBX| Writing objects: 100% (3/3), 376 bytes | 376.00 KiB/s, done.
 SBX| Total 3 (delta 0), reused 0 (delta 0), pack-reused 0
 SBX| remote:
-SBX| remote: Create a pull request for 'agent/2/exp-20260907-122902-60c080' on GitHub by visiting:
-SBX| remote:      https://github.com/TomHennen/agentcreds-validation-b/pull/new/agent/2/exp-20260907-122902-60c080
+SBX| remote: Create a pull request for 'agent/2/exp-20260907-165237-4c50c2' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-b/pull/new/agent/2/exp-20260907-165237-4c50c2
 SBX| remote:
 SBX| To https://github.com/TomHennen/agentcreds-validation-b
-SBX|  * [new branch]      HEAD -> agent/2/exp-20260907-122902-60c080
+SBX|  * [new branch]      HEAD -> agent/2/exp-20260907-165237-4c50c2
 SBX| @PHASE3_RC=0
 SBX| @SCRIPT_DONE
 rein: revoked 1 of 1 write token(s) on exit
