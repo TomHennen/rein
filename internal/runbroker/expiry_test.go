@@ -43,14 +43,110 @@ func TestExpiredPure(t *testing.T) {
 func TestDeriveCheckInterval(t *testing.T) {
 	// Capped at 30s for a large bound; a quarter of the bound otherwise;
 	// floored at 1s.
-	if got := deriveCheckInterval(30 * time.Minute); got != 30*time.Second {
+	if got := deriveCheckInterval(30*time.Minute, 4*time.Hour); got != 30*time.Second {
 		t.Errorf("30m bound interval = %s, want 30s", got)
 	}
-	if got := deriveCheckInterval(40 * time.Second); got != 10*time.Second {
+	if got := deriveCheckInterval(40*time.Second, 0); got != 10*time.Second {
 		t.Errorf("40s idle interval = %s, want 10s", got)
 	}
-	if got := deriveCheckInterval(2 * time.Second); got != time.Second {
+	if got := deriveCheckInterval(2*time.Second, 0); got != time.Second {
 		t.Errorf("tiny bound interval = %s, want the 1s floor", got)
+	}
+}
+
+// TestApprovalExpiredPure pins the age bound's policy: measured from the
+// human's last confirmation, unaffected by anything the agent does.
+func TestApprovalExpiredPure(t *testing.T) {
+	base := time.Unix(1_000_000, 0)
+	cases := []struct {
+		name        string
+		confirmedAt time.Time
+		now         time.Time
+		ttl         time.Duration
+		want        bool
+	}{
+		{"fresh confirmation", base, base.Add(time.Hour), 4 * time.Hour, false},
+		{"aged out", base, base.Add(4 * time.Hour), 4 * time.Hour, true},
+		{"exactly at the bound trips", base, base.Add(4 * time.Hour), 4 * time.Hour, true},
+		{"zero ttl disables", base, base.Add(100 * time.Hour), 0, false},
+		{"no confirmation never expires", time.Time{}, base.Add(100 * time.Hour), 4 * time.Hour, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := approvalExpired(tc.confirmedAt, tc.now, tc.ttl); got != tc.want {
+				t.Errorf("approvalExpired = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDueExpiry covers the whole policy without timers: which bound wins, and
+// the two re-arm gates.
+func TestDueExpiry(t *testing.T) {
+	base := time.Unix(1_000_000, 0)
+	approvedAt := func(at time.Time, ok bool) func() (time.Time, bool) {
+		return func() (time.Time, bool) { return at, ok }
+	}
+	const idle = 30 * time.Minute
+	const ttl = 4 * time.Hour
+
+	// Busy run, fresh approval: nothing is due.
+	if _, ok := dueExpiry(dueInput{
+		now: base.Add(time.Hour), lastActivity: base.Add(time.Hour), idle: idle, approvalTTL: ttl,
+		lastApproval: approvedAt(base.Add(time.Hour), true),
+	}); ok {
+		t.Error("a busy run with a fresh approval must not expire")
+	}
+
+	// Busy run, OLD approval: the age bound trips even though activity never
+	// stopped. This is the whole point of the bound.
+	reason, ok := dueExpiry(dueInput{
+		now: base.Add(5 * time.Hour), lastActivity: base.Add(5 * time.Hour), idle: idle, approvalTTL: ttl,
+		lastApproval: approvedAt(base, true),
+	})
+	if !ok || reason != ExpireApprovalAge {
+		t.Errorf("busy run with a 5h-old approval = (%q,%v), want approval-age", reason, ok)
+	}
+
+	// Nothing confirmed: the age bound has no clock, so only idle can fire.
+	reason, ok = dueExpiry(dueInput{
+		now: base.Add(5 * time.Hour), lastActivity: base.Add(5 * time.Hour), idle: idle, approvalTTL: ttl,
+		lastApproval: approvedAt(time.Time{}, false),
+	})
+	if ok {
+		t.Errorf("a run with no confirmed issue has nothing to expire; got %q", reason)
+	}
+
+	// Age re-arm: the confirmation already acted on must not trip again, but a
+	// FRESHER one (the human re-confirmed) must.
+	old := base
+	if _, ok := dueExpiry(dueInput{
+		now: base.Add(5 * time.Hour), lastActivity: base.Add(5 * time.Hour), idle: idle, approvalTTL: ttl,
+		lastApproval: approvedAt(old, true), actedApproval: old,
+	}); ok {
+		t.Error("the same confirmation must not trip the age bound twice")
+	}
+	renewed := base.Add(30 * time.Minute)
+	if reason, ok := dueExpiry(dueInput{
+		now: renewed.Add(5 * time.Hour), lastActivity: renewed.Add(5 * time.Hour), idle: idle, approvalTTL: ttl,
+		lastApproval: approvedAt(renewed, true), actedApproval: old,
+	}); !ok || reason != ExpireApprovalAge {
+		t.Errorf("a re-confirmation restarts the clock and can trip again; got (%q,%v)", reason, ok)
+	}
+
+	// Idle re-arm is unchanged, and a lock of EITHER kind arms it.
+	lock := base.Add(time.Hour)
+	if _, ok := dueExpiry(dueInput{
+		now: lock.Add(2 * time.Hour), lastActivity: base, idle: idle, approvalTTL: 0,
+		lastLock: lock,
+	}); ok {
+		t.Error("no activity since the last lock: idle must not re-fire")
+	}
+	if reason, ok := dueExpiry(dueInput{
+		now: lock.Add(2 * time.Hour), lastActivity: lock.Add(time.Minute), idle: idle, approvalTTL: 0,
+		lastLock: lock,
+	}); !ok || reason != ExpireIdle {
+		t.Errorf("activity since the last lock re-arms idle; got (%q,%v)", reason, ok)
 	}
 }
 
@@ -85,7 +181,7 @@ func TestHostIdleExpiryKeepsServing(t *testing.T) {
 		IdleTimeout:    40 * time.Millisecond,
 		checkInterval:  5 * time.Millisecond,
 		Audit:          &audit,
-		OnExpire:       func() (bool, error) { fired <- struct{}{}; return true, nil },
+		OnExpire:       func(ExpireReason) (bool, error) { fired <- struct{}{}; return true, nil },
 	})
 	waitFired(t, fired, "idle expiry")
 
@@ -118,7 +214,7 @@ func TestHostIdleAuditsNoopOutcome(t *testing.T) {
 		IdleTimeout:    40 * time.Millisecond,
 		checkInterval:  5 * time.Millisecond,
 		Audit:          &audit,
-		OnExpire:       func() (bool, error) { fired <- struct{}{}; return false, nil },
+		OnExpire:       func(ExpireReason) (bool, error) { fired <- struct{}{}; return false, nil },
 	})
 	waitFired(t, fired, "idle expiry")
 
@@ -132,6 +228,155 @@ func TestHostIdleAuditsNoopOutcome(t *testing.T) {
 	}
 	if strings.Contains(audit.String(), "expired-idle-withdrawn") {
 		t.Error("a no-op trip must not be audited as a withdrawal")
+	}
+}
+
+// TestHostApprovalAgeExpiryWhileBusy is the age bound's reason for existing: a
+// run that never idles still has its approval withdrawn once the confirmation
+// is old enough. Traffic flows throughout, so the idle bound can never be what
+// fires — and the host keeps serving, exactly like the idle path.
+func TestHostApprovalAgeExpiryWhileBusy(t *testing.T) {
+	fired := make(chan ExpireReason, 4)
+	var audit syncBuffer
+	var mu sync.Mutex
+	confirmedAt := time.Now()
+	approved := true
+
+	h, _ := startHost(t, Config{
+		SessionID:      "s",
+		EmptyPathScope: "allow",
+		IdleTimeout:    time.Hour, // far away: only the age bound can fire
+		ApprovalTTL:    60 * time.Millisecond,
+		checkInterval:  5 * time.Millisecond,
+		Audit:          &audit,
+		LastApproval: func() (time.Time, bool) {
+			mu.Lock()
+			defer mu.Unlock()
+			return confirmedAt, approved
+		},
+		OnExpire: func(r ExpireReason) (bool, error) {
+			// The real withdrawal clears the confirmed set; mirror that so the
+			// hook stops reporting an approval, as production does.
+			mu.Lock()
+			approved = false
+			mu.Unlock()
+			fired <- r
+			return true, nil
+		},
+	})
+	c := clientThrough(t, h)
+
+	// Keep the run BUSY the whole time: activity must not defer the age bound.
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			getOK(t, c, "https://api.github.com/repos/o/r")
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	var got ExpireReason
+	select {
+	case got = <-fired:
+	case <-time.After(3 * time.Second):
+		close(stop)
+		<-done
+		t.Fatal("the approval-age bound did not fire on a busy run")
+	}
+	close(stop)
+	<-done
+	if got != ExpireApprovalAge {
+		t.Errorf("expiry reason = %q, want approval-age (the run was never idle)", got)
+	}
+
+	// Same in-place semantics as the idle path: reads keep working.
+	resp, err := c.Get("https://api.github.com/repos/o/r")
+	if err != nil {
+		t.Fatalf("read through the proxy failed after the approval-age lock: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	if got := audit.String(); !strings.Contains(got, "decision=expired-approval-withdrawn") {
+		t.Errorf("audit log missing the expired-approval-withdrawn entry; got:\n%s", got)
+	}
+}
+
+// TestHostApprovalAgeQuietWhenNothingConfirmed: with no confirmed issue there
+// is no clock, so the age bound must never fire no matter how long the run
+// lives. Without the ok=false guard, a zero ConfirmedAt would read as
+// infinitely old and lock a run that never had an approval.
+func TestHostApprovalAgeQuietWhenNothingConfirmed(t *testing.T) {
+	fired := make(chan ExpireReason, 4)
+	startHost(t, Config{
+		SessionID:      "s",
+		EmptyPathScope: "allow",
+		IdleTimeout:    time.Hour,
+		ApprovalTTL:    20 * time.Millisecond,
+		checkInterval:  5 * time.Millisecond,
+		LastApproval:   func() (time.Time, bool) { return time.Time{}, false },
+		OnExpire:       func(r ExpireReason) (bool, error) { fired <- r; return true, nil },
+	})
+	select {
+	case r := <-fired:
+		t.Fatalf("expiry fired (%q) for a run with nothing confirmed", r)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestHostApprovalAgeResetsOnReconfirmation: a fresh confirmation restarts the
+// clock, so the run gets another full TTL rather than being re-locked at once.
+func TestHostApprovalAgeResetsOnReconfirmation(t *testing.T) {
+	fired := make(chan ExpireReason, 8)
+	var mu sync.Mutex
+	confirmedAt := time.Now()
+	approved := true
+
+	startHost(t, Config{
+		SessionID:      "s",
+		EmptyPathScope: "allow",
+		IdleTimeout:    time.Hour,
+		ApprovalTTL:    60 * time.Millisecond,
+		checkInterval:  5 * time.Millisecond,
+		LastApproval: func() (time.Time, bool) {
+			mu.Lock()
+			defer mu.Unlock()
+			return confirmedAt, approved
+		},
+		OnExpire: func(r ExpireReason) (bool, error) { fired <- r; return true, nil },
+	})
+
+	select {
+	case <-fired:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the approval-age bound did not fire")
+	}
+
+	// The human re-declares and re-confirms: the clock restarts from now.
+	mu.Lock()
+	confirmedAt = time.Now()
+	mu.Unlock()
+
+	// Well inside the new TTL, nothing may fire again...
+	select {
+	case r := <-fired:
+		t.Fatalf("expiry fired (%q) immediately after a fresh confirmation; the clock did not reset", r)
+	case <-time.After(30 * time.Millisecond):
+	}
+	// ...and once the NEW confirmation ages out, it locks again.
+	select {
+	case r := <-fired:
+		if r != ExpireApprovalAge {
+			t.Errorf("second expiry reason = %q, want approval-age", r)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the age bound did not re-fire after the re-confirmation aged out")
 	}
 }
 
@@ -156,7 +401,7 @@ func TestHostIdleDropsMemoizedWriteToken(t *testing.T) {
 			// for the rest of the run, which is the bug.
 			return fmt.Sprintf("WRITE-%d", mints.Add(1)), time.Now().Add(time.Hour), nil
 		},
-		OnExpire: func() (bool, error) { fired <- struct{}{}; return true, nil },
+		OnExpire: func(ExpireReason) (bool, error) { fired <- struct{}{}; return true, nil },
 	})
 	c := clientThrough(t, h)
 	const pushURL = "https://github.com/o/r.git/info/refs?service=git-receive-pack"
@@ -205,7 +450,7 @@ func TestHostIdleDropsWriteTokenMintedDuringWithdrawal(t *testing.T) {
 		MintWrite: func(context.Context) (string, time.Time, error) {
 			return fmt.Sprintf("WRITE-%d", mints.Add(1)), time.Now().Add(time.Hour), nil
 		},
-		OnExpire: func() (bool, error) {
+		OnExpire: func(ExpireReason) (bool, error) {
 			<-ready // c is published; the channel gives the happens-before
 			getStatus(t, c, pushURL)
 			fired <- struct{}{}
@@ -246,7 +491,7 @@ func TestHostActivityDefersIdleThenExpires(t *testing.T) {
 		EmptyPathScope: "allow",
 		IdleTimeout:    150 * time.Millisecond,
 		checkInterval:  10 * time.Millisecond,
-		OnExpire:       func() (bool, error) { fired <- struct{}{}; return true, nil },
+		OnExpire:       func(ExpireReason) (bool, error) { fired <- struct{}{}; return true, nil },
 	})
 	c := clientThrough(t, h)
 
@@ -277,7 +522,7 @@ func TestHostIdleRelocksAfterActivity(t *testing.T) {
 		EmptyPathScope: "allow",
 		IdleTimeout:    40 * time.Millisecond,
 		checkInterval:  5 * time.Millisecond,
-		OnExpire:       func() (bool, error) { fired <- struct{}{}; return true, nil },
+		OnExpire:       func(ExpireReason) (bool, error) { fired <- struct{}{}; return true, nil },
 	})
 	waitFired(t, fired, "first idle lock")
 
@@ -297,7 +542,7 @@ func TestHostIdleDoesNotRelockWithoutActivity(t *testing.T) {
 		EmptyPathScope: "allow",
 		IdleTimeout:    30 * time.Millisecond,
 		checkInterval:  5 * time.Millisecond,
-		OnExpire:       func() (bool, error) { count.Add(1); fired <- struct{}{}; return true, nil },
+		OnExpire:       func(ExpireReason) (bool, error) { count.Add(1); fired <- struct{}{}; return true, nil },
 	})
 	waitFired(t, fired, "idle lock")
 
@@ -319,7 +564,7 @@ func TestHostExpireErrorStopsProxy(t *testing.T) {
 		EmptyPathScope: "allow",
 		IdleTimeout:    40 * time.Millisecond,
 		checkInterval:  5 * time.Millisecond,
-		OnExpire: func() (bool, error) {
+		OnExpire: func(ExpireReason) (bool, error) {
 			fired <- struct{}{}
 			return false, errors.New("cannot rewrite the approval record")
 		},

@@ -111,14 +111,29 @@ type Config struct {
 	// CP1-recipe transport (HTTP/1.1, system roots). Tests inject a fake.
 	Upstream http.RoundTripper
 
-	// IdleTimeout bounds the run's live approved-write capability (design
-	// §5.3): after this long with NO proxy activity, OnExpire fires. Zero
-	// disables expiry; cmd/rein wires DefaultIdleTimeout. There is no hard
-	// wall-clock TTL (#190).
+	// IdleTimeout / ApprovalTTL are the two bounds on a live write approval
+	// (design §5.3). IdleTimeout trips after this long with NO proxy activity;
+	// ApprovalTTL trips this long after the human's most recent confirmation,
+	// and activity does NOT extend it. Either zero disables that bound;
+	// cmd/rein wires DefaultIdleTimeout / DefaultApprovalTTL. Neither ends the
+	// run (#190): both withdraw the approval in place.
 	IdleTimeout time.Duration
+	ApprovalTTL time.Duration
 
-	// OnExpire, if set, runs on each idle trip: the caller revokes the run's
-	// write tokens, withdraws the write approval, and prints a loud message.
+	// LastApproval reports when the run's approval was most recently confirmed
+	// (the newest ConfirmedAt across its confirmed issues) and whether there is
+	// one at all — false means nothing is approved, so nothing can age out. It
+	// is the ApprovalTTL clock's only input.
+	//
+	// A HOOK rather than an approvals import: the on-disk approval record is
+	// cmd/rein's business, and runbroker stays free of it. Called once per poll
+	// tick, so it must be cheap (a small file read is fine) and must not block.
+	// Nil disables the ApprovalTTL bound.
+	LastApproval func() (time.Time, bool)
+
+	// OnExpire, if set, runs on each trip of either bound (reason says which):
+	// the caller revokes the run's write tokens, withdraws the write approval,
+	// and prints a loud message.
 	// The host KEEPS SERVING afterwards (#190 re-attestation in place) — reads,
 	// the expose tunnel and the declare gate all stay up, and the agent's next
 	// write is refused with the declare instruction. It must NOT kill the agent
@@ -130,7 +145,7 @@ type Config struct {
 	// error means the approval could NOT be withdrawn; the host then falls back
 	// to the pre-#190 behavior and stops the proxy (fail closed). It can fire
 	// more than once per run — see monitor's re-arm rule.
-	OnExpire func() (withdrawn bool, err error)
+	OnExpire func(reason ExpireReason) (withdrawn bool, err error)
 
 	// checkInterval overrides the expiry poll cadence (tests set it small).
 	// Zero derives a sane value from the bounds. Unexported: production never
@@ -319,14 +334,18 @@ func Start(cfg Config) (*Host, error) {
 	// Expiry monitor: only when a bound is configured. It shares ctx with Serve,
 	// so Close (which cancels ctx) also stops the monitor. Close joins
 	// monitorDone; pre-close it when no monitor runs so Close never blocks.
-	if cfg.IdleTimeout > 0 {
+	approvalTTL := cfg.ApprovalTTL
+	if cfg.LastApproval == nil {
+		approvalTTL = 0 // no clock input, no bound
+	}
+	if cfg.IdleTimeout > 0 || approvalTTL > 0 {
 		interval := cfg.checkInterval
 		if interval <= 0 {
-			interval = deriveCheckInterval(cfg.IdleTimeout)
+			interval = deriveCheckInterval(cfg.IdleTimeout, approvalTTL)
 		}
 		go func() {
 			defer h.markMonitorDone()
-			h.monitor(ctx, cfg.IdleTimeout, interval, now, cfg.OnExpire)
+			h.monitor(ctx, cfg.IdleTimeout, approvalTTL, interval, now, cfg.LastApproval, cfg.OnExpire)
 		}()
 	} else {
 		h.markMonitorDone()

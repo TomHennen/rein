@@ -35,6 +35,11 @@ func TestBuildEnvIsStrictAllowlist(t *testing.T) {
 		"GIT_AUTHOR_NAME=Attacker",
 		"GIT_AUTHOR_EMAIL=attacker@evil.test",
 		"GIT_CONFIG_GLOBAL=/parent/wrong-gitconfig",
+		// #190 re-attestation knobs: HOST-side only. If either reached the
+		// sandbox the agent could read (or, with a writable env, set) the bound
+		// on its own write approval.
+		"REIN_IDLE_TIMEOUT=99h",
+		"REIN_APPROVAL_TTL=99h",
 	}
 	env := BuildEnv(EnvParams{
 		Parent:       dirty,
@@ -60,6 +65,9 @@ func TestBuildEnvIsStrictAllowlist(t *testing.T) {
 		// No identity supplied -> author vars absent; a parent GIT_CONFIG_GLOBAL
 		// must never leak through (rein owns it).
 		"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_CONFIG_GLOBAL",
+		// #190: the re-attestation bounds are the human's knobs, never the
+		// agent's.
+		"REIN_IDLE_TIMEOUT", "REIN_APPROVAL_TTL",
 	}
 	for _, name := range forbidden {
 		if _, ok := got[name]; ok {
