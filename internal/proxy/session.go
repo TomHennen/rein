@@ -114,7 +114,15 @@ type sessionState struct {
 //     minted token already covers the full session set (#10).
 //   - backoff: after a GitHub rate-limit/abuse mint failure, write mints are
 //     suppressed for MintBackoff so the proxy doesn't hammer the API.
-func NewSessionCore(cfg SessionConfig) *brokercore.Core {
+//
+// The second return value DROPS the memoized write token (#190). The memo is
+// in-memory and outlives any on-disk change, so a caller that REVOKES this
+// run's write tokens must call it — otherwise the next write serves the
+// just-revoked token from cache and GitHub answers 401. It is the explicit
+// seam for that: no scope-key trick, which would log a misleading "scope
+// changed". Safe to call at any time and from any goroutine; the next write
+// re-mints.
+func NewSessionCore(cfg SessionConfig) (*brokercore.Core, func()) {
 	st := &sessionState{}
 	backoff := cfg.MintBackoff
 	if backoff <= 0 {
@@ -190,6 +198,21 @@ func NewSessionCore(cfg SessionConfig) *brokercore.Core {
 	// and thus never revoked — the fail-OPEN direction. The duplicates are
 	// deduped by token value at the consumer instead (revokeRunWriteTokens), which
 	// keys on what the ledger actually contains.
+	// dropWriteToken forgets the memoized write token so the next write-tier
+	// request mints a fresh one. Callers use it when the token has been revoked
+	// out from under the memo (#190's idle withdrawal).
+	dropWriteToken := func() {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if st.writeToken == "" {
+			return
+		}
+		st.writeToken, st.writeExpiry, st.writeScope = "", time.Time{}, ""
+		if cfg.Logger != nil {
+			cfg.Logger.Printf("dropped the memoized write token; the next write mints a fresh one")
+		}
+	}
+
 	return &brokercore.Core{
 		MintRead:       cfg.MintRead,
 		MintWrite:      mintWrite,
@@ -200,7 +223,7 @@ func NewSessionCore(cfg SessionConfig) *brokercore.Core {
 		ConfirmWrite:   confirm,
 		RecordWrite:    cfg.RecordWrite,
 		Logger:         cfg.Logger,
-	}
+	}, dropWriteToken
 }
 
 // scopedReadCache wraps a ReadCache so a cached READ token minted at an

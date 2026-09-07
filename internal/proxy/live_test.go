@@ -146,7 +146,7 @@ func newLiveHarness(t *testing.T) *liveHarness {
 		t.Fatal("append CA cert to pool failed")
 	}
 
-	core := NewSessionCore(SessionConfig{
+	core, _ := NewSessionCore(SessionConfig{
 		SessionID:      "sess_cp2_live",
 		MintRead:       mintRead,
 		MintWrite:      mintWrite,

@@ -208,7 +208,7 @@ func newHarness(t *testing.T, opts harnessOpts) *harness {
 		return true
 	}
 
-	core := NewSessionCore(SessionConfig{
+	core, _ := NewSessionCore(SessionConfig{
 		SessionID:      "sess_test",
 		MintRead:       mintRead,
 		MintWrite:      mintWrite,

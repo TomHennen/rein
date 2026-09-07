@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -84,7 +85,7 @@ func TestHostIdleExpiryKeepsServing(t *testing.T) {
 		IdleTimeout:    40 * time.Millisecond,
 		checkInterval:  5 * time.Millisecond,
 		Audit:          &audit,
-		OnExpire:       func() error { fired <- struct{}{}; return nil },
+		OnExpire:       func() (bool, error) { fired <- struct{}{}; return true, nil },
 	})
 	waitFired(t, fired, "idle expiry")
 
@@ -98,8 +99,86 @@ func TestHostIdleExpiryKeepsServing(t *testing.T) {
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
-	if got := audit.String(); !strings.Contains(got, "decision=expired-idle") {
-		t.Errorf("audit log missing the expired-idle entry; got:\n%s", got)
+	// The audit records the OUTCOME, not just that the monitor fired: a real
+	// withdrawal must be distinguishable from a trip that found nothing.
+	if got := audit.String(); !strings.Contains(got, "decision=expired-idle-withdrawn") {
+		t.Errorf("audit log missing the expired-idle-withdrawn entry; got:\n%s", got)
+	}
+}
+
+// TestHostIdleAuditsNoopOutcome: a trip where the caller withdrew nothing is
+// recorded as such, so the audit trail never implies an approval was revoked
+// when none existed.
+func TestHostIdleAuditsNoopOutcome(t *testing.T) {
+	fired := make(chan struct{}, 4)
+	var audit syncBuffer
+	startHost(t, Config{
+		SessionID:      "s",
+		EmptyPathScope: "allow",
+		IdleTimeout:    40 * time.Millisecond,
+		checkInterval:  5 * time.Millisecond,
+		Audit:          &audit,
+		OnExpire:       func() (bool, error) { fired <- struct{}{}; return false, nil },
+	})
+	waitFired(t, fired, "idle expiry")
+
+	// The record is written after OnExpire returns; poll briefly for it.
+	deadline := time.Now().Add(3 * time.Second)
+	for !strings.Contains(audit.String(), "decision=expired-idle-noop") {
+		if time.Now().After(deadline) {
+			t.Fatalf("audit log missing the expired-idle-noop entry; got:\n%s", audit.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if strings.Contains(audit.String(), "expired-idle-withdrawn") {
+		t.Error("a no-op trip must not be audited as a withdrawal")
+	}
+}
+
+// TestHostIdleDropsMemoizedWriteToken is the #190 blocker regression, caught by
+// the idle_reattest journey: the withdrawal REVOKES this run's write tokens,
+// but the proxy memoizes one write token in memory for the whole run. Without
+// an explicit drop, the human re-confirms, the agent's next push replays the
+// just-revoked token, and GitHub answers 401 ("could not read Username") — a
+// working approval that cannot write. The next write after an idle trip must
+// therefore mint a FRESH token.
+func TestHostIdleDropsMemoizedWriteToken(t *testing.T) {
+	fired := make(chan struct{}, 4)
+	var mints atomic.Int32
+	h, up := startHost(t, Config{
+		SessionID:      "s",
+		EmptyPathScope: "allow",
+		IdleTimeout:    60 * time.Millisecond,
+		checkInterval:  5 * time.Millisecond,
+		Approve:        func(string) bool { return true },
+		MintWrite: func(context.Context) (string, time.Time, error) {
+			// Long-lived on purpose: the memo would happily serve this token
+			// for the rest of the run, which is the bug.
+			return fmt.Sprintf("WRITE-%d", mints.Add(1)), time.Now().Add(time.Hour), nil
+		},
+		OnExpire: func() (bool, error) { fired <- struct{}{}; return true, nil },
+	})
+	c := clientThrough(t, h)
+	const pushURL = "https://github.com/o/r.git/info/refs?service=git-receive-pack"
+
+	getStatus(t, c, pushURL)
+	first := up.lastAuth()
+	if got := mints.Load(); got != 1 {
+		t.Fatalf("write mints before the idle trip = %d, want 1", got)
+	}
+	if first == "" {
+		t.Fatal("setup: the first write did not reach upstream with an injected credential")
+	}
+
+	waitFired(t, fired, "idle lock")
+
+	// The human re-confirms and the agent pushes again.
+	getStatus(t, c, pushURL)
+	if got := mints.Load(); got != 2 {
+		t.Errorf("write mints after the idle trip = %d, want 2 — the revoked token was served from the memo", got)
+	}
+	if second := up.lastAuth(); second == first {
+		t.Errorf("the write after the idle trip injected the SAME credential as before it (%q); it was revoked and GitHub will 401", second)
 	}
 }
 
@@ -116,7 +195,7 @@ func TestHostActivityDefersIdleThenExpires(t *testing.T) {
 		EmptyPathScope: "allow",
 		IdleTimeout:    150 * time.Millisecond,
 		checkInterval:  10 * time.Millisecond,
-		OnExpire:       func() error { fired <- struct{}{}; return nil },
+		OnExpire:       func() (bool, error) { fired <- struct{}{}; return true, nil },
 	})
 	c := clientThrough(t, h)
 
@@ -147,7 +226,7 @@ func TestHostIdleRelocksAfterActivity(t *testing.T) {
 		EmptyPathScope: "allow",
 		IdleTimeout:    40 * time.Millisecond,
 		checkInterval:  5 * time.Millisecond,
-		OnExpire:       func() error { fired <- struct{}{}; return nil },
+		OnExpire:       func() (bool, error) { fired <- struct{}{}; return true, nil },
 	})
 	waitFired(t, fired, "first idle lock")
 
@@ -167,7 +246,7 @@ func TestHostIdleDoesNotRelockWithoutActivity(t *testing.T) {
 		EmptyPathScope: "allow",
 		IdleTimeout:    30 * time.Millisecond,
 		checkInterval:  5 * time.Millisecond,
-		OnExpire:       func() error { count.Add(1); fired <- struct{}{}; return nil },
+		OnExpire:       func() (bool, error) { count.Add(1); fired <- struct{}{}; return true, nil },
 	})
 	waitFired(t, fired, "idle lock")
 
@@ -189,7 +268,10 @@ func TestHostExpireErrorStopsProxy(t *testing.T) {
 		EmptyPathScope: "allow",
 		IdleTimeout:    40 * time.Millisecond,
 		checkInterval:  5 * time.Millisecond,
-		OnExpire:       func() error { fired <- struct{}{}; return errors.New("cannot rewrite the approval record") },
+		OnExpire: func() (bool, error) {
+			fired <- struct{}{}
+			return false, errors.New("cannot rewrite the approval record")
+		},
 	})
 	waitFired(t, fired, "idle expiry")
 

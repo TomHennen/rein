@@ -17,7 +17,7 @@ import (
 // (run -race). Reads are served throughout.
 func TestConcurrentWriteDedup(t *testing.T) {
 	var writeMints, approvals int32
-	core := NewSessionCore(SessionConfig{
+	core, _ := NewSessionCore(SessionConfig{
 		MintRead: func(context.Context) (string, time.Time, error) {
 			return "rtok", time.Now().Add(time.Hour), nil
 		},
@@ -63,7 +63,7 @@ func TestConcurrentWriteDedup(t *testing.T) {
 // requests within the run (until expiry).
 func TestWriteMintCachedAcrossRequests(t *testing.T) {
 	var mints int32
-	core := NewSessionCore(SessionConfig{
+	core, _ := NewSessionCore(SessionConfig{
 		MintWrite: func(ctx context.Context) (string, time.Time, error) {
 			atomic.AddInt32(&mints, 1)
 			return "wtok", time.Now().Add(time.Hour), nil
@@ -99,7 +99,7 @@ func TestWriteMintCachedAcrossRequests(t *testing.T) {
 func TestRecordWriteIsAtLeastOncePerServedToken(t *testing.T) {
 	var mints int32
 	var recorded []string
-	core := NewSessionCore(SessionConfig{
+	core, _ := NewSessionCore(SessionConfig{
 		MintWrite: func(ctx context.Context) (string, time.Time, error) {
 			// Token 1 expires inside the cache skew, so serve 2 re-mints; every
 			// later serve is a cache hit on token 2.
@@ -143,7 +143,7 @@ func TestRecordWriteIsAtLeastOncePerServedToken(t *testing.T) {
 // window so the proxy stops hammering the API.
 func TestMintBackoffAfterRateLimit(t *testing.T) {
 	var mints int32
-	core := NewSessionCore(SessionConfig{
+	core, _ := NewSessionCore(SessionConfig{
 		MintWrite: func(ctx context.Context) (string, time.Time, error) {
 			atomic.AddInt32(&mints, 1)
 			return "", time.Time{}, fmt.Errorf("403 secondary rate limit exceeded")
@@ -176,7 +176,7 @@ func TestApprovalHookConsultedPerWrite(t *testing.T) {
 	var consults int32
 	gateOpen := atomic.Bool{}
 	gateOpen.Store(true)
-	core := NewSessionCore(SessionConfig{
+	core, _ := NewSessionCore(SessionConfig{
 		MintWrite: func(ctx context.Context) (string, time.Time, error) {
 			return "wtok", time.Now().Add(time.Hour), nil
 		},
@@ -210,7 +210,7 @@ func TestApprovalHookConsultedPerWrite(t *testing.T) {
 // token memo, not the approval hook, is what dedupes.
 func TestOnePushOneMint(t *testing.T) {
 	var mints int32
-	core := NewSessionCore(SessionConfig{
+	core, _ := NewSessionCore(SessionConfig{
 		MintWrite: func(ctx context.Context) (string, time.Time, error) {
 			atomic.AddInt32(&mints, 1)
 			return "wtok", time.Now().Add(time.Hour), nil

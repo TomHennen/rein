@@ -122,12 +122,15 @@ type Config struct {
 	// The host KEEPS SERVING afterwards (#190 re-attestation in place) — reads,
 	// the expose tunnel and the declare gate all stay up, and the agent's next
 	// write is refused with the declare instruction. It must NOT kill the agent
-	// process.
+	// process. The host has already dropped the proxy's memoized write token by
+	// the time it runs, so the caller's revoke cannot strand a cached token.
 	//
-	// Returning an error means the approval could NOT be withdrawn; the host
-	// then falls back to the pre-#190 behavior and stops the proxy (fail
-	// closed). It can fire more than once per run — see monitor's re-arm rule.
-	OnExpire func() error
+	// It reports whether it actually withdrew anything (false = the run held no
+	// approval and no tokens), which the audit entry records. Returning an
+	// error means the approval could NOT be withdrawn; the host then falls back
+	// to the pre-#190 behavior and stops the proxy (fail closed). It can fire
+	// more than once per run — see monitor's re-arm rule.
+	OnExpire func() (withdrawn bool, err error)
 
 	// checkInterval overrides the expiry poll cadence (tests set it small).
 	// Zero derives a sane value from the bounds. Unexported: production never
@@ -167,6 +170,11 @@ type Host struct {
 	audit     *proxy.AuditLog
 	sessionID string
 	logger    *log.Logger
+
+	// dropWriteToken forgets the proxy's memoized write token. The idle
+	// withdrawal REVOKES this run's tokens, and the memo is in-memory: without
+	// this the next write would serve the dead token and GitHub would 401.
+	dropWriteToken func()
 
 	// lastActivity is the atomic unixnano of the last proxy request (the idle
 	// base), updated lock-free from the request path via markActivity.
@@ -211,7 +219,7 @@ func Start(cfg Config) (*Host, error) {
 		return nil, err
 	}
 
-	core := proxy.NewSessionCore(proxy.SessionConfig{
+	core, dropWriteToken := proxy.NewSessionCore(proxy.SessionConfig{
 		SessionID:      cfg.SessionID,
 		MintRead:       cfg.MintRead,
 		MintWrite:      cfg.MintWrite,
@@ -235,12 +243,13 @@ func Start(cfg Config) (*Host, error) {
 	}
 
 	h := &Host{
-		socketPath:  cfg.SocketPath,
-		done:        make(chan struct{}),
-		monitorDone: make(chan struct{}),
-		audit:       audit,
-		sessionID:   cfg.SessionID,
-		logger:      cfg.Logger,
+		socketPath:     cfg.SocketPath,
+		done:           make(chan struct{}),
+		monitorDone:    make(chan struct{}),
+		audit:          audit,
+		sessionID:      cfg.SessionID,
+		logger:         cfg.Logger,
+		dropWriteToken: dropWriteToken,
 	}
 	h.lastActivity.Store(now().UnixNano()) // count idle from launch, not epoch
 

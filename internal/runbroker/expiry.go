@@ -50,7 +50,7 @@ func deriveCheckInterval(idle time.Duration) time.Duration {
 // Fail closed: if onExpire reports it could NOT withdraw the approval, we fall
 // back to the pre-#190 behavior — tear the host down so the next in-sandbox
 // request fails closed rather than run on with an approval we cannot revoke.
-func (h *Host) monitor(ctx context.Context, idle, interval time.Duration, now func() time.Time, onExpire func() error) {
+func (h *Host) monitor(ctx context.Context, idle, interval time.Duration, now func() time.Time, onExpire func() (bool, error)) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	var lastLock time.Time
@@ -67,11 +67,20 @@ func (h *Host) monitor(ctx context.Context, idle, interval time.Duration, now fu
 				continue // already locked and nothing has happened since
 			}
 			lastLock = now()
-			h.audit.Record(auditExpiredIdle(h.sessionID))
+			// BEFORE the caller revokes: forget the proxy's memoized write
+			// token. It is in-memory, so no on-disk withdrawal reaches it — and
+			// a re-confirmed agent whose next push replayed the revoked token
+			// would get a bare 401 from GitHub instead of a working push (#190).
+			if h.dropWriteToken != nil {
+				h.dropWriteToken()
+			}
 			if onExpire == nil {
+				h.audit.Record(auditExpiredIdle(h.sessionID, "expired-idle-noop"))
 				continue
 			}
-			if err := onExpire(); err != nil {
+			withdrawn, err := onExpire()
+			h.audit.Record(auditExpiredIdle(h.sessionID, expiryDecision(withdrawn, err)))
+			if err != nil {
 				h.logger.Printf("idle re-attestation could not withdraw the write approval (%v); stopping the proxy instead", err)
 				// Close joins monitorDone — which is THIS goroutine — so mark it
 				// done first or the join self-deadlocks.
@@ -84,9 +93,23 @@ func (h *Host) monitor(ctx context.Context, idle, interval time.Duration, now fu
 }
 
 // auditExpiredIdle is the audit record for one idle re-attestation: no host,
-// no upstream request, no token — only the fact that writes were locked.
-func auditExpiredIdle(sessionID string) proxy.AuditEntry {
-	return proxy.AuditEntry{Session: sessionID, Host: "-", Method: "IDLE", Decision: "expired-idle"}
+// no upstream request, no token — only what the trip actually did.
+func auditExpiredIdle(sessionID, decision string) proxy.AuditEntry {
+	return proxy.AuditEntry{Session: sessionID, Host: "-", Method: "IDLE", Decision: decision}
+}
+
+// expiryDecision names what the idle trip achieved, so the audit trail
+// distinguishes a real withdrawal from a trip that found nothing approved and
+// from one that could not withdraw at all.
+func expiryDecision(withdrawn bool, err error) string {
+	switch {
+	case err != nil:
+		return "expired-idle-failed"
+	case withdrawn:
+		return "expired-idle-withdrawn"
+	default:
+		return "expired-idle-noop"
+	}
 }
 
 // markActivity records the current time as the last proxy activity (the idle
