@@ -200,21 +200,30 @@ def main() -> int:
         def idx(needle: str) -> int:
             return text.find(needle)
 
-        pre_sleep, post_sleep = idx("@PHASE3_PRE_SLEEP"), idx("@PHASE3_POST_SLEEP")
-        phase4_start, phase5_start = idx("@PHASE4_START"), idx("@PHASE5_START")
+        # rein echoes the WHOLE script source verbatim under "rein: running:"
+        # before executing it, so every @PHASE.. sentinel LITERAL appears
+        # TWICE — once in that echo, once for real. rfind gets the real one.
+        # (The _RC=$? markers are immune: the echo has a literal "$?", not
+        # digits, so _rc()'s regex only matches the evaluated, real line.)
+        pre_sleep, post_sleep = text.rfind("@PHASE3_PRE_SLEEP"), text.rfind("@PHASE3_POST_SLEEP")
+        phase4_start, phase5_start = text.rfind("@PHASE4_START"), text.rfind("@PHASE5_START")
         banner_at = idx(BANNER_LINE)
-        # "rein: revoked <N> of <N> write token(s) on exit" — the wording says
-        # "on exit" even when fired from the idle path (cmd/rein/run.go
-        # revokeRunWriteTokens); it is the only transcript evidence that tokens
-        # were revoked AT EXPIRY rather than only at the run's real exit, so pin
-        # it to the idle window, not just "appears somewhere".
-        revoke_at = idx("rein: revoked")
+        # "rein: revoked <N> of <N> write token(s) on idle re-attestation" —
+        # phase-tagged (cmd/rein/run.go revokeWriteTokens) distinctly from the
+        # "... on exit" print the deferred exit-time revoke also makes, so
+        # this match is unambiguous transcript evidence that tokens were
+        # revoked AT EXPIRY, not just at the run's real exit.
+        m_revoke = re.search(r"rein: revoked \d+ of \d+ write token\(s\) on idle re-attestation", text)
+        revoke_at = m_revoke.start() if m_revoke else -1
         locked_err_at = idx(LOCKED_PUSH_ERR)
 
         landed = {br: H.branch_exists(repo, br, env) for br in branches}
         audit_text = _run_audit_log(env, text)
         confirmed_positions = [m.start() for m in re.finditer(r"decision=confirmed-issue", audit_text)]
-        expired_at = audit_text.find("decision=expired-idle")
+        # expired-idle-withdrawn (internal/runbroker/expiry.go expiryDecision):
+        # the idle trip actually found and withdrew a write approval, as
+        # opposed to -noop (nothing to withdraw) or -failed (fail-closed).
+        expired_at = audit_text.find("decision=expired-idle-withdrawn")
 
         invariants = [
             (rc1 == 0, "phase 1 (first declare) must succeed after confirmation"),
@@ -238,7 +247,7 @@ def main() -> int:
             (landed.get(good1) is True, f"the pre-idle branch must LAND ({good1})"),
             (landed.get(good2) is True, f"the post-re-declare branch must LAND ({good2})"),
             (bool(audit_text), "this run's own audit log (state-dir/audit/sandbox-<runID>.log) must be found and non-empty"),
-            (expired_at != -1, "the audit log must record the expiry decision tag (decision=expired-idle)"),
+            (expired_at != -1, "the audit log must record the expiry decision tag (decision=expired-idle-withdrawn)"),
             (len(confirmed_positions) >= 2, "the audit log must record TWO confirmed-issue decisions (initial + re-declare)"),
             (bool(confirmed_positions) and confirmed_positions[0] < expired_at < confirmed_positions[-1],
              "the audit log's expiry tag must land BETWEEN the first and the (later) second confirmed-issue"),

@@ -82,15 +82,13 @@ one (a new dir + a new `golden.txt`). Each row links to the journey's own README
 | [git_author](journeys/git_author/) | delegated commit author "(via rein)", non-impersonating | COVERED |
 | [gh_write](journeys/gh_write/) | the in-sandbox `gh` REST + GraphQL write boundary (#91, #101) | COVERED |
 | [realagent_write](journeys/realagent_write/) | a REAL claude walks the whole write path (#101) | COVERED |
-| [idle_reattest](journeys/idle_reattest/) | idle expiry re-attests writes IN PLACE, no hard TTL: lock -> re-declare -> re-confirm -> push lands (#190) | BLOCKED |
+| [idle_reattest](journeys/idle_reattest/) | idle expiry re-attests writes IN PLACE, no hard TTL: lock -> re-declare -> re-confirm -> push lands (#190) | COVERED |
 
 Statuses: **COVERED** (a journey drives it), **PARTIAL**, **GAP** (real journey, no
-demo yet), **UNDRIVEABLE** (needs a browser), **BLOCKED** (the journey exists and runs
-live but currently fails on a known code bug, not yet COVERED — see its own README for
-the failure). Some journeys **SKIP (exit 3)** when a prerequisite is absent —
-`credential_boundary` (bagel), `tmux_popup_approval` (tmux / pyte), `realagent_write`
-(claude / tmux / pyte), `init_then_run` (no configured App); a skip is not a pass.
-Details in each dir's README.
+demo yet), **UNDRIVEABLE** (needs a browser). Some journeys **SKIP (exit 3)** when a
+prerequisite is absent — `credential_boundary` (bagel), `tmux_popup_approval` (tmux /
+pyte), `realagent_write` (claude / tmux / pyte), `init_then_run` (no configured App); a
+skip is not a pass. Details in each dir's README.
 
 **Not yet a journey** (no dir): the interactive `rein init` half is covered by the
 plain `test_init_interactive.py` (8 live specs) — App *creation* is **UNDRIVEABLE**
