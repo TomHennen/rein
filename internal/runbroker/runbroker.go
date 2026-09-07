@@ -65,7 +65,8 @@ type Config struct {
 	EmptyPathScope string
 
 	// Approve is the write-approval hook (design §5.5) — the human write
-	// control. The proxy memoizes its result per repo for the run. A nil
+	// control, consulted on every write (deliberately NOT memoized, #35, so a
+	// withdrawn approval takes effect at once). A nil
 	// Approve means "no human gate," which is FAIL-OPEN: Start rejects it
 	// unless allowAutoApprove is explicitly set. cmd/rein run must always
 	// wire a real Approve.

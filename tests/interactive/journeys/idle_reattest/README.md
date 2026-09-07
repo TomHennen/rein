@@ -32,7 +32,7 @@ Form-A prompts.
 - **Host-side invariants (independent of the golden, exit 2 on break):** both
   branches land on GitHub; the idle-lock banner (`rein: idle for 15s — writes
   LOCKED.`) and the write-token revoke line (`rein: revoked <N> of <N> write
-  token(s) on idle re-attestation`) both print DURING the idle window (phases
+  token(s) on re-attestation`) both print DURING the idle window (phases
   3→4), proving the lock and the revoke fired AT EXPIRY, not just at the run's
   real exit; the post-idle push is refused with the exact locked-writes ERR;
   **phase 6's push (after the second re-declare) must LAND**; exactly two Form A

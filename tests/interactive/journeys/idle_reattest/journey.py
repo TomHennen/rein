@@ -208,12 +208,12 @@ def main() -> int:
         pre_sleep, post_sleep = text.rfind("@PHASE3_PRE_SLEEP"), text.rfind("@PHASE3_POST_SLEEP")
         phase4_start, phase5_start = text.rfind("@PHASE4_START"), text.rfind("@PHASE5_START")
         banner_at = idx(BANNER_LINE)
-        # "rein: revoked <N> of <N> write token(s) on idle re-attestation" —
+        # "rein: revoked <N> of <N> write token(s) on re-attestation" —
         # phase-tagged (cmd/rein/run.go revokeWriteTokens) distinctly from the
         # "... on exit" print the deferred exit-time revoke also makes, so
         # this match is unambiguous transcript evidence that tokens were
         # revoked AT EXPIRY, not just at the run's real exit.
-        m_revoke = re.search(r"rein: revoked \d+ of \d+ write token\(s\) on idle re-attestation", text)
+        m_revoke = re.search(r"rein: revoked \d+ of \d+ write token\(s\) on re-attestation", text)
         revoke_at = m_revoke.start() if m_revoke else -1
         locked_err_at = idx(LOCKED_PUSH_ERR)
 

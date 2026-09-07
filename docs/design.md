@@ -290,7 +290,7 @@ The pattern: the user always confirms with non-replayable input (issue number, f
 
 - Pick a session up front. The session forms itself as the agent encounters work.
 - Pick a role for each thing. The role is implied by what the agent is doing (the first action requiring write access starts an `implement` session; a session that only reads stays in `scan`).
-- End the session. Sessions end when the agent process exits. Neither expiry bound ends a run: after an idle timeout (30 min default) OR once the approval itself is 4 hours old (default, measured from the last human confirmation and NOT extended by activity), the WRITE APPROVAL is withdrawn in place and the agent must declare and be re-confirmed before its next write (#190). Manual `rein session end` exists but is for the careful user.
+- End the session. Sessions end when the agent process exits. In sandboxed mode (direct mode has no expiry monitor; its one confirmation lasts the run) neither expiry bound ends a run: after an idle timeout (30 min default) OR once the approval itself is 4 hours old (default, measured from the last human confirmation and NOT extended by activity), the WRITE APPROVAL is withdrawn in place and the agent must declare and be re-confirmed before its next write (#190). Manual `rein session end` exists but is for the careful user.
 - Edit any GitHub PATs. The PAT pattern is replaced entirely.
 - Configure git. Once `rein run` wraps the agent, all git operations route through the sandbox proxy.
 
@@ -552,7 +552,7 @@ Sessions are formed and modified during agent operation, not configured up front
 5. **Session active.** Subsequent requests within the same scope ceiling proceed without new prompts. The broker mints tokens as needed (read tokens for read operations, JIT write tokens for `git push` and similar).
 6. **Scope expansion.** If the agent needs something outside the current ceiling — another issue, another repo — a new confirmation prompt.
 7. **Issue creation.** If the agent wants to file a new issue mid-session (e.g., found a bug), the broker prompts the human, creates the issue using the audit App's identity attributed "on behalf of @tomh," and adds the new issue to the session's scope.
-8. **Session ends.** Automatically on agent process exit, or explicitly via `rein session end` — those are the only two things that END a run. Two bounds RE-ATTEST it in place instead, withdrawing the write approval while reads and the run continue so the next write goes through the declare + confirm ceremony again (#190): the idle timeout (default 30 min, reset by proxy traffic) and the approval's own age (default 4h since the last human confirmation, which activity does not extend). The human does not have to remember to end the session.
+8. **Session ends.** Automatically on agent process exit, or explicitly via `rein session end` — those are the only two things that END a run. In sandboxed mode two bounds RE-ATTEST it in place instead, withdrawing the write approval while reads and the run continue so the next write goes through the declare + confirm ceremony again (#190): the idle timeout (default 30 min, reset by proxy traffic) and the approval's own age (default 4h since the last human confirmation, which activity does not extend). The human does not have to remember to end the session.
 
 Multi-issue sessions are first-class: a single session can be bound to issues 73, 74, 75 (scope ceiling = union of their repos), and audit comments are cross-posted to all three with mutual cross-references.
 

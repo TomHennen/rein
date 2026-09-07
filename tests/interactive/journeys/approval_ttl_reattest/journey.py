@@ -218,12 +218,12 @@ def main() -> int:
         busy_start, busy_end = text.rfind("@PHASE3_BUSY_START"), text.rfind("@PHASE3_BUSY_END")
         phase4_start, phase5_start = text.rfind("@PHASE4_START"), text.rfind("@PHASE5_START")
         banner_at = idx(BANNER_LINE)
-        # "rein: revoked <N> of <N> write token(s) on idle re-attestation" —
+        # "rein: revoked <N> of <N> write token(s) on re-attestation" —
         # cmd/rein/run.go's drainRunWriteTokens always logs this exact phase
         # text, EVEN for an approval-age trip (the drain helper is shared and
         # was never made reason-aware). Documented as a wording quirk in this
         # journey's README rather than "fixed" here (no Go changes).
-        m_revoke = re.search(r"rein: revoked \d+ of \d+ write token\(s\) on idle re-attestation", text)
+        m_revoke = re.search(r"rein: revoked \d+ of \d+ write token\(s\) on re-attestation", text)
         revoke_at = m_revoke.start() if m_revoke else -1
         locked_err_at = idx(LOCKED_PUSH_ERR)
 

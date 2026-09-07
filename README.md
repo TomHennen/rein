@@ -170,8 +170,8 @@ that sandbox:
   confirmation itself is **4 hours old** (activity does not extend that one),
   rein revokes the write token and withdraws the confirmation *in place*: the
   agent keeps running, reads keep working, and its next write asks it to declare
-  again for you to re-confirm. So you never restart the agent, and no single
-  confirmation authorizes writes for longer than 4 hours. Tune the bounds with
+  again for you to re-confirm. So you never restart the agent, and no run holds
+  write capability more than 4 hours past its most recent confirmation. Tune the bounds with
   `REIN_IDLE_TIMEOUT` and `REIN_APPROVAL_TTL` (Go durations, minimum `10s`) —
   test/demo knobs, read only from your launch environment and never passed into
   the sandbox.

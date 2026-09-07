@@ -108,7 +108,7 @@ func runSandboxed(cmdline []string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	approvalTTL, ttlOverridden, err := resolveApprovalTTL(os.Getenv(envApprovalTTL))
+	approvalAgeTTL, ttlOverridden, err := resolveApprovalTTL(os.Getenv(envApprovalTTL))
 	if err != nil {
 		return 1, err
 	}
@@ -649,14 +649,14 @@ func runSandboxed(cmdline []string) (int, error) {
 		// the deferred exit-time revoke) is harmless: revoke is
 		// idempotent/best-effort.
 		IdleTimeout:  idleTimeout,
-		ApprovalTTL:  approvalTTL,
+		ApprovalTTL:  approvalAgeTTL,
 		LastApproval: lastApprovalHook(sess, stateDir, runID),
 		OnExpire: func(reason runbroker.ExpireReason) (bool, error) {
 			return reattest(reattestDeps{
 				stateDir:    stateDir,
 				runID:       runID,
 				idle:        idleTimeout,
-				approvalTTL: approvalTTL,
+				approvalTTL: approvalAgeTTL,
 				drainTokens: func() error {
 					return drainRunWriteTokens(stateDir, runID, productionRevoke(sess), time.Now())
 				},
@@ -852,7 +852,7 @@ func runSandboxed(cmdline []string) (int, error) {
 		ExposePorts:         sess.ExposePorts,
 		OpenEgress:          sess.OpenEgress,
 		IdleTimeout:         idleTimeout,
-		ApprovalTTL:         approvalTTL,
+		ApprovalTTL:         approvalAgeTTL,
 	})
 	contractOff := srt.DisableClaudeMCPFromEnv(os.Getenv(EnvDisableAgentContract))
 	agentArgv := cmdline
@@ -868,7 +868,7 @@ func runSandboxed(cmdline []string) (int, error) {
 
 	printSandboxBanner(os.Stderr, sess, sessSource, socketPath, workTree, extraDomains, cmdline, showHome, allowReadPaths,
 		contractStatus(contractOff, injected), wt, agentTmp, ephemeralCwdPath, cwdRepo,
-		reattestBounds{idle: idleTimeout, idleSet: idleOverridden, ttl: approvalTTL, ttlSet: ttlOverridden})
+		reattestBounds{idle: idleTimeout, idleSet: idleOverridden, ttl: approvalAgeTTL, ttlSet: ttlOverridden})
 
 	// Non-claude agents: print the contract where the AGENT's own output goes, so
 	// it lands in its transcript/scrollback rather than only on the human's side.

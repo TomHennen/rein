@@ -612,7 +612,9 @@ func drainRunWriteTokens(stateDir, runID string, revoke revokeTokenFunc, now tim
 		// only costs the exit-time revoke some redundant 404s.
 		fmt.Fprintf(os.Stderr, "rein: warning: could not clear the write-token ledger (best-effort): %v\n", cerr)
 	}
-	revokeWriteTokens(entries, revoke, now, "on idle re-attestation")
+	// Both bounds (idle, approval age) drain through here; the banner names
+	// which one tripped.
+	revokeWriteTokens(entries, revoke, now, "on re-attestation")
 	return nil
 }
 

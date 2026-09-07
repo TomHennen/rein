@@ -53,7 +53,7 @@ worth a Go change, just documented so nobody "fixes" the journey to hide them):*
   echoes the whole in-sandbox script source verbatim before executing it, so
   every sentinel literal appears twice. The journey uses `str.rfind`, not
   `find`. See `idle_reattest/README.md` for the full story.
-- The write-token revoke line always reads `"...on idle re-attestation"`
+- The write-token revoke line always reads `"...on re-attestation"`
   (`cmd/rein/run.go`'s `drainRunWriteTokens`/`revokeWriteTokens`), even on an
   approval-AGE trip — that helper is shared between both bounds and was never
   made reason-aware. The journey matches that literal text on purpose; it is

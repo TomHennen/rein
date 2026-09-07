@@ -19,7 +19,8 @@ import (
 //     human's MOST RECENT confirmation. Activity does NOT extend it — that is
 //     the point: it bounds how long one ceremony can authorize writes, so a
 //     busy agent cannot hold a granted approval forever by staying busy. A
-//     re-declare resets the clock.
+//     declare AFTER the withdrawal starts a fresh clock (a new confirmation);
+//     re-declaring an already-confirmed issue is a no-op and extends nothing.
 const (
 	DefaultIdleTimeout = 30 * time.Minute
 	DefaultApprovalTTL = 4 * time.Hour
