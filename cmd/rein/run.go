@@ -598,12 +598,22 @@ func revokeRunWriteTokens(stateDir, runID string, revoke revokeTokenFunc, now ti
 // exit-time revoke. It returns the ledger-removal error; the revokes are
 // best-effort and report themselves.
 func drainRunWriteTokens(stateDir, runID string, revoke revokeTokenFunc, now time.Time) error {
-	entries, readErr := approvals.ReadWriteTokens(stateDir, runID)
-	clearErr := approvals.ClearWriteTokens(stateDir, runID)
-	if readErr == nil {
-		revokeWriteTokens(entries, revoke, now, "on idle re-attestation")
+	entries, err := approvals.ReadWriteTokens(stateDir, runID)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Deliberately do NOT remove a ledger we could not read: it is the only
+		// record of those tokens, so deleting it would make them unrevokable.
+		// Leave it for the exit-time revoke and report — the caller fails
+		// closed, which is the right answer to "live write tokens we cannot
+		// revoke".
+		return fmt.Errorf("read write-token ledger: %w", err)
 	}
-	return clearErr
+	if cerr := approvals.ClearWriteTokens(stateDir, runID); cerr != nil {
+		// Not fail-closed: the entries below ARE revoked, so a surviving ledger
+		// only costs the exit-time revoke some redundant 404s.
+		fmt.Fprintf(os.Stderr, "rein: warning: could not clear the write-token ledger (best-effort): %v\n", cerr)
+	}
+	revokeWriteTokens(entries, revoke, now, "on idle re-attestation")
+	return nil
 }
 
 // revokeWriteTokens best-effort revokes each distinct, still-valid token in

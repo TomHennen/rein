@@ -81,8 +81,10 @@ func idleReattest(d reattestDeps) (bool, error) {
 	if err := approvals.ClearPendingDeclaration(d.stateDir, d.runID); err != nil && clearErr == nil {
 		clearErr = err
 	}
-	if err := d.drainTokens(); err != nil {
-		d.logger.Printf("idle re-attestation: clearing the write-token ledger failed (best-effort): %v", err)
+	// A drain failure means live write tokens we could not revoke, which is the
+	// one thing this must never leave behind — fail closed with the rest.
+	if err := d.drainTokens(); err != nil && clearErr == nil {
+		clearErr = err
 	}
 	if clearErr != nil {
 		d.logger.Printf("idle re-attestation: could not withdraw the write approval: %v", clearErr)

@@ -182,6 +182,57 @@ func TestHostIdleDropsMemoizedWriteToken(t *testing.T) {
 	}
 }
 
+// TestHostIdleDropsWriteTokenMintedDuringWithdrawal closes the re-entrant half
+// of the same bug. The gate does not close until partway through OnExpire, so a
+// write that races the withdrawal still mints — re-populating the memo with a
+// token the SAME withdrawal then revokes. One drop before OnExpire would leave
+// that dead token cached until the next idle trip, so the host drops again
+// after. Here OnExpire issues that racing write itself, making the window
+// deterministic.
+func TestHostIdleDropsWriteTokenMintedDuringWithdrawal(t *testing.T) {
+	const pushURL = "https://github.com/o/r.git/info/refs?service=git-receive-pack"
+	fired := make(chan struct{}, 4)
+	ready := make(chan struct{})
+	var mints atomic.Int32
+	var c *http.Client
+
+	h, _ := startHost(t, Config{
+		SessionID:      "s",
+		EmptyPathScope: "allow",
+		IdleTimeout:    60 * time.Millisecond,
+		checkInterval:  5 * time.Millisecond,
+		Approve:        func(string) bool { return true },
+		MintWrite: func(context.Context) (string, time.Time, error) {
+			return fmt.Sprintf("WRITE-%d", mints.Add(1)), time.Now().Add(time.Hour), nil
+		},
+		OnExpire: func() (bool, error) {
+			<-ready // c is published; the channel gives the happens-before
+			getStatus(t, c, pushURL)
+			fired <- struct{}{}
+			return true, nil
+		},
+	})
+	c = clientThrough(t, h)
+	close(ready)
+
+	getStatus(t, c, pushURL)
+	if got := mints.Load(); got != 1 {
+		t.Fatalf("mints after the first write = %d, want 1", got)
+	}
+
+	waitFired(t, fired, "idle lock")
+	if got := mints.Load(); got != 2 {
+		t.Fatalf("the write racing the withdrawal did not mint (mints = %d, want 2); the test no longer exercises the window", got)
+	}
+
+	// That raced token was revoked by the same withdrawal. The next write must
+	// not serve it from the memo.
+	getStatus(t, c, pushURL)
+	if got := mints.Load(); got != 3 {
+		t.Errorf("mints after the post-withdrawal write = %d, want 3 — the memo kept the token minted during the withdrawal, which was revoked", got)
+	}
+}
+
 // TestHostActivityDefersIdleThenExpires is the end-to-end guard on the idle-
 // clock WIRING (proxy OnActivity -> markActivity -> idle deferral): while
 // requests flow faster than the idle bound, OnExpire must NOT fire; once traffic

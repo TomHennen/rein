@@ -79,6 +79,14 @@ func (h *Host) monitor(ctx context.Context, idle, interval time.Duration, now fu
 				continue
 			}
 			withdrawn, err := onExpire()
+			// AGAIN, after: the gate only closed partway through onExpire, so a
+			// write that raced the first drop could have minted a fresh token,
+			// stored it in the memo, and had it revoked by the same onExpire —
+			// leaving the memo holding a dead token, which is the very bug the
+			// first drop exists to prevent. Idempotent when nothing is memoized.
+			if h.dropWriteToken != nil {
+				h.dropWriteToken()
+			}
 			h.audit.Record(auditExpiredIdle(h.sessionID, expiryDecision(withdrawn, err)))
 			if err != nil {
 				h.logger.Printf("idle re-attestation could not withdraw the write approval (%v); stopping the proxy instead", err)
