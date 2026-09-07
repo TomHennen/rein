@@ -35,6 +35,11 @@ func TestBuildAgentContract_StatesTheEnforcedRules(t *testing.T) {
 		"rein declare <n>",   // exact #35 vocabulary (gate.go deny messages)
 		"agent/<n>/<nonce>",  // exact #35 branch convention
 		"One issue per push", // exact #35 push rule
+		// #190: the agent must know the ONE thing that changes under it mid-run
+		// — the approval lapses on idle — and that nothing else does.
+		"After 30 minutes with no GitHub traffic your write approval lapses",
+		"declare again and the human",
+		"Nothing else stops.",
 		"api.anthropic.com, registry.npmjs.org",
 		// egress self-help: the ONE command the human runs, + the restart caveat
 		"CANNOT open a blocked host yourself",

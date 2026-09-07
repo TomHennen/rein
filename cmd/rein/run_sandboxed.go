@@ -101,6 +101,14 @@ func runSandboxed(cmdline []string) (int, error) {
 	}
 	srtPath := preflightSrtPath(pf)
 
+	// Idle re-attestation bound (#190). Resolved before anything else is built
+	// so a misspelled REIN_IDLE_TIMEOUT fails the launch rather than silently
+	// reverting to the default.
+	idleTimeout, idleOverridden, err := resolveIdleTimeout(os.Getenv(envIdleTimeout))
+	if err != nil {
+		return 1, err
+	}
+
 	// (2) Session + scope.
 	sess, sessSource, err := session.LoadOrFallback(os.Getenv("REIN_TEST_REPO_A"))
 	if err != nil {
@@ -626,29 +634,24 @@ func runSandboxed(cmdline []string) (int, error) {
 		CAKeystore: caKeystore,
 		Audit:      auditW,
 		Logger:     logger,
-		// Proactive session expiry (design §5.3): bound how long a granted
-		// approval + cached write token can stay live if the agent idles or runs
-		// forever. On expiry we revoke the run's write tokens and stop the proxy
-		// (the agent's next GitHub request then fails closed) but DO NOT kill the
-		// agent — it keeps running credential-less with a loud message. The
-		// double revoke (here + the deferred exit-time revoke) is harmless:
-		// revoke is idempotent/best-effort.
-		IdleTimeout: runbroker.DefaultIdleTimeout,
-		HardTTL:     runbroker.DefaultHardTTL,
-		OnExpire: func(reason string) {
-			logger.Printf("session expired (%s): revoking write tokens and stopping the proxy", reason)
-			revokeRunWriteTokens(stateDir, runID, productionRevoke(sess), time.Now())
-			// Clear the ledger now that its tokens are revoked, so the deferred
-			// exit-time revokeRunWriteTokens reads an empty ledger and is a clean
-			// no-op — otherwise it would re-revoke already-dead tokens and print a
-			// spurious "exit-revoke of a write token failed" per token (F1). The
-			// deferred ClearRun still runs at exit (idempotent). A write approved
-			// in the brief window before the proxy stops re-appends to the ledger
-			// and is caught by that deferred exit-time revoke.
-			if err := approvals.ClearRun(stateDir, runID); err != nil {
-				logger.Printf("expiry: clear write-token ledger failed (best-effort): %v", err)
-			}
-			printExpiryBanner(os.Stderr, reason)
+		// Idle re-attestation (#190, design §5.3): after IdleTimeout with no
+		// proxy traffic the run's WRITE APPROVAL is withdrawn in place — tokens
+		// revoked, confirmed issues cleared — while the proxy, the read path and
+		// the expose tunnel keep serving. The agent is not killed and the session
+		// is not ended; its next write gets the ordinary declare instruction and
+		// the human confirms again. There is no hard wall-clock TTL. The double
+		// revoke (here + the deferred exit-time revoke) is harmless: revoke is
+		// idempotent/best-effort.
+		IdleTimeout: idleTimeout,
+		OnExpire: func() error {
+			return idleReattest(reattestDeps{
+				stateDir: stateDir,
+				runID:    runID,
+				idle:     idleTimeout,
+				revoke:   func() { revokeRunWriteTokens(stateDir, runID, productionRevoke(sess), time.Now()) },
+				out:      os.Stderr,
+				logger:   logger,
+			})
 		},
 	})
 	if err != nil {
@@ -851,7 +854,7 @@ func runSandboxed(cmdline []string) (int, error) {
 	agentArgv = sandboxExecArgv(reinBin, sess.ExposePorts, agentArgv)
 
 	printSandboxBanner(os.Stderr, sess, sessSource, socketPath, workTree, extraDomains, cmdline, showHome, allowReadPaths,
-		contractStatus(contractOff, injected), wt, agentTmp, ephemeralCwdPath, cwdRepo)
+		contractStatus(contractOff, injected), wt, agentTmp, ephemeralCwdPath, cwdRepo, idleTimeout, idleOverridden)
 
 	// Non-claude agents: print the contract where the AGENT's own output goes, so
 	// it lands in its transcript/scrollback rather than only on the human's side.
@@ -1300,29 +1303,6 @@ func preflightSrtPath(checks []srt.Check) string {
 	return "srt" // fall back to PATH lookup by exec
 }
 
-// printExpiryBanner is the loud, human-facing notice when a session hits its
-// idle or hard-TTL bound. The agent process is deliberately NOT killed (that
-// would abruptly drop the user's work); instead it keeps running but can no
-// longer reach GitHub. reason is "idle" or "hard-ttl".
-func printExpiryBanner(w io.Writer, reason string) {
-	var why string
-	switch reason {
-	case "idle":
-		why = fmt.Sprintf("no proxy activity for %s (idle timeout)", runbroker.DefaultIdleTimeout)
-	case "hard-ttl":
-		why = fmt.Sprintf("run exceeded the %s hard limit", runbroker.DefaultHardTTL)
-	default:
-		why = reason
-	}
-	fmt.Fprintln(w, "\n===============================================================")
-	fmt.Fprintf(w, "rein: SESSION EXPIRED — %s.\n", why)
-	fmt.Fprintln(w, "  Revoked this run's write tokens and STOPPED the credential proxy.")
-	fmt.Fprintln(w, "  The agent is still running but can no longer reach GitHub — its")
-	fmt.Fprintln(w, "  git/gh requests will now fail. Exit it and re-run `rein run` to")
-	fmt.Fprintln(w, "  continue with a fresh, re-authorized session.")
-	fmt.Fprintln(w, "===============================================================")
-}
-
 // printShowHomeWarning is the unmissable notice for the REIN_SANDBOX_SHOW_HOME
 // kill switch (issue #59): the operator explicitly opted OUT of hiding $HOME,
 // so every credential store NOT on the targeted denylist is readable by the
@@ -1470,7 +1450,7 @@ func contractStatus(off, injected bool) string {
 	}
 }
 
-func printSandboxBanner(w io.Writer, sess session.Session, sessSource, socketPath, workTree string, extraDomains, cmdline []string, showHome bool, allowReadPaths []string, contractLine string, wt worktree.Result, cloneDir, ephemeralCwdPath, cwdRepo string) {
+func printSandboxBanner(w io.Writer, sess session.Session, sessSource, socketPath, workTree string, extraDomains, cmdline []string, showHome bool, allowReadPaths []string, contractLine string, wt worktree.Result, cloneDir, ephemeralCwdPath, cwdRepo string, idleTimeout time.Duration, idleOverridden bool) {
 	fmt.Fprintln(w, "rein: launching SANDBOXED (srt) run:")
 	fmt.Fprintf(w, "  session: %s (role=%s, repos=%v) [source=%s]\n",
 		sess.ID, sess.Role, sess.Repos, sessSource)
@@ -1524,6 +1504,13 @@ func printSandboxBanner(w io.Writer, sess session.Session, sessSource, socketPat
 	sess.WarnIgnoredIssue(w)
 	fmt.Fprintln(w, "  writes are LOCKED until the agent declares its issue:  rein declare <n>")
 	fmt.Fprintln(w, "  then push to agent/<n>/<nonce>. The declaration will prompt on THIS terminal.")
+	// #190: no hard TTL. The ONLY clock is idle re-attestation, and it takes
+	// away nothing but the write approval.
+	fmt.Fprintf(w, "  after %s with no GitHub traffic, writes re-lock and the agent must declare again;\n", idleTimeout)
+	fmt.Fprintln(w, "    the run itself keeps going (reads keep working) until the agent exits.")
+	if idleOverridden {
+		fmt.Fprintf(w, "    (%s=%s is set — the default is %s.)\n", envIdleTimeout, idleTimeout, runbroker.DefaultIdleTimeout)
+	}
 	if len(cmdline) > 0 {
 		agent := filepath.Base(cmdline[0])
 		fmt.Fprintf(w, "  to run %s WITHOUT rein for one command: `\\%s` (bash/zsh) or `command %s` (fish)\n", agent, agent, agent)

@@ -151,6 +151,9 @@ func buildAgentContract(p contractParams) string {
 	b.WriteString("  where <n> is the declared issue number and <nonce> is a short name you choose\n")
 	b.WriteString("  (letters/digits, then letters/digits/./_/-). Any other ref is rejected.\n")
 	b.WriteString("- One issue per push.\n")
+	b.WriteString("- After 30 minutes with no GitHub traffic your write approval lapses: the next\n")
+	b.WriteString("  write is refused with the declare instruction; declare again and the human\n")
+	b.WriteString("  re-confirms. Nothing else stops.\n")
 
 	b.WriteString("\nNETWORK\n")
 	if p.OpenEgress {
