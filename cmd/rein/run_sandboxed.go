@@ -727,6 +727,7 @@ func runSandboxed(cmdline []string) (int, error) {
 		CABundlePath:        bundlePath,
 		StubGHToken:         stubGHToken,
 		ExposePorts:         exposePortsCSV(sess.ExposePorts),
+		Repos:               strings.Join(sess.Repos, ","),
 		ProxyAuth:           proxySecret,
 		GitAuthorName:       gitID.Name,
 		GitAuthorEmail:      gitID.Email,
@@ -978,6 +979,42 @@ type declareEnv struct {
 func buildDeclarationHooks(env declareEnv) *proxy.DeclarationHooks {
 	sig := approvals.SignatureOf(env.sess)
 	appName, installURL := appInstallHints(env.appCfg)
+	// One Deps builder for both declare paths — the wiring is identical
+	// except for what the prompt asks.
+	deps := func(gcfg grant.Config) declare.Deps {
+		return declare.Deps{
+			StateDir:   env.stateDir,
+			RunID:      env.runID,
+			RunPID:     os.Getpid(),
+			Session:    env.sess,
+			InstallURL: installURL,
+			AppName:    appName,
+			Fetch:      env.fetchIssue,
+			ProbeInstall: func(ctx context.Context, repo string) error {
+				owner, name, _ := strings.Cut(repo, "/")
+				_, err := fetchRepoInstallationID(ctx, env.appCfg.ClientID, env.ks, config.AppKeystoreRole, owner, name)
+				return err
+			},
+			CreateIssue: createIssueFunc(env.scopedCfg, env.ks, env.stateDir, env.runID, env.logger),
+			Notice: func(ctx context.Context, n declare.Notice) {
+				grant.ShowInstallNotice(ctx, gcfg, grant.InstallNotice{
+					Repo: n.Repo, Issue: n.Issue, InstallURL: n.InstallURL, AppName: n.AppName,
+				})
+			},
+			Grant:  gcfg,
+			Logger: env.logger,
+		}
+	}
+	grantCfg := func() grant.Config {
+		return grant.Config{
+			TTL:         approvalTTL,
+			PreferPopup: grant.PopupPreferenceFromEnv(),
+			StateDir:    env.stateDir,
+			RunID:       env.runID,
+			SessionFile: env.sessionFile,
+			Logger:      env.logger,
+		}
+	}
 	return &proxy.DeclarationHooks{
 		WriteApproved: env.approve,
 		IssueConfirmed: func(repo string, n int) bool {
@@ -985,35 +1022,13 @@ func buildDeclarationHooks(env declareEnv) *proxy.DeclarationHooks {
 			return err == nil && approvals.Valid(rec, sig) && rec.HasIssue(repo, n)
 		},
 		Declare: func(issue int, repoArg string) proxy.DeclareOutcome {
-			gcfg := grant.Config{
-				TTL:         approvalTTL,
-				PreferPopup: grant.PopupPreferenceFromEnv(),
-				StateDir:    env.stateDir,
-				RunID:       env.runID,
-				SessionFile: env.sessionFile,
-				Logger:      env.logger,
-			}
-			out := declare.Run(context.Background(), declare.Deps{
-				StateDir:   env.stateDir,
-				RunID:      env.runID,
-				RunPID:     os.Getpid(),
-				Session:    env.sess,
-				InstallURL: installURL,
-				AppName:    appName,
-				Fetch:      env.fetchIssue,
-				ProbeInstall: func(ctx context.Context, repo string) error {
-					owner, name, _ := strings.Cut(repo, "/")
-					_, err := fetchRepoInstallationID(ctx, env.appCfg.ClientID, env.ks, config.AppKeystoreRole, owner, name)
-					return err
-				},
-				Notice: func(ctx context.Context, n declare.Notice) {
-					grant.ShowInstallNotice(ctx, gcfg, grant.InstallNotice{
-						Repo: n.Repo, Issue: n.Issue, InstallURL: n.InstallURL, AppName: n.AppName,
-					})
-				},
-				Grant:  gcfg,
-				Logger: env.logger,
-			}, issue, repoArg)
+			gcfg := grantCfg()
+			out := declare.Run(context.Background(), deps(gcfg), issue, repoArg)
+			return proxy.DeclareOutcome{OK: out.Confirmed, Issue: out.Issue, Message: out.Message, Audit: out.Audit}
+		},
+		DeclareNew: func(repoArg, title, body string) proxy.DeclareOutcome {
+			gcfg := grantCfg()
+			out := declare.RunNew(context.Background(), deps(gcfg), declare.NewIssue{Repo: repoArg, Title: title, Body: body})
 			return proxy.DeclareOutcome{OK: out.Confirmed, Issue: out.Issue, Message: out.Message, Audit: out.Audit}
 		},
 	}

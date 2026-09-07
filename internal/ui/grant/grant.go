@@ -611,6 +611,12 @@ func Grant(ctx context.Context, cfg Config) error {
 		}
 		return fmt.Errorf("read run context for run-id %s: %w", cfg.RunID, err)
 	}
+	// A pending FILE-A-NEW-ISSUE request (issue #180) is answered
+	// differently: there is no number to record, so this surface only
+	// marks the request approved and the broker files it.
+	if rc.PendingNewIssue != nil {
+		return grantNewIssue(ctx, cfg, rc)
+	}
 	if rc.PendingIssue == nil {
 		return fmt.Errorf("run %s has no pending issue declaration to confirm; have the wrapped agent run `rein declare <n>` first", cfg.RunID)
 	}

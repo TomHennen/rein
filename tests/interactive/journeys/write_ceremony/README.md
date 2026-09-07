@@ -34,3 +34,10 @@ Run (from repo root):
 python3 -m tests.interactive.journeys.write_ceremony.journey                   # exit 0 == matches golden
 REIN_UPDATE_GOLDEN=1 python3 -m tests.interactive.journeys.write_ceremony.journey   # regenerate the RAW golden
 ```
+
+**No issue to declare yet?** This journey (and `rein declare <n>`) assumes one
+already exists. `rein declare --new "<title>" [--body "<text>"]` (issue #180,
+[declare_new](../declare_new/)) is the bootstrap for a repo/run with none: the agent
+PROPOSES a title, the human approves Form A by typing the proposed title's FIRST
+WORD (there is no number yet to type), and on approval rein files the issue itself
+and it becomes the run's declared issue — same ceremony shape, a different token.

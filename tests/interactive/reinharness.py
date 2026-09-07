@@ -83,6 +83,13 @@ PROMPT_HINT = "type the issue number"
 # TTYPrompter.Confirm outcome markers (host tty).
 APPROVED_MARK = "[approved]"
 DENIED_MARK = "[denied"  # "[denied: input did not match the issue number]"
+# The distinctive first line of the FILE-A-NEW-ISSUE Form A prompt (issue
+# #180, internal/ui/prompt writePrompt, NewIssue branch): no GitHub-assigned
+# number exists yet, so this is a DISTINCT ceremony from PROMPT_BANNER above.
+NEW_ISSUE_PROMPT_BANNER = "agent is requesting to file a new issue"
+# The line telling the human what to type: the proposed title's FIRST WORD
+# (issuemeta.FirstWord), not a number.
+NEW_ISSUE_PROMPT_HINT = "type the proposed title's first word"
 # The pre-declaration deny git prints after `fatal: remote error: ` (the
 # proxy's synthesized pkt-line ERR advertisement, issue #35 §5.3).
 PRE_DECLARE_LOCKED = "writes are locked until you declare your issue"
@@ -469,6 +476,42 @@ def pr_author(repo: str, number: int, env: dict | None = None) -> dict:
         cwd=REPO_ROOT, env=env, text=True,
     ).strip()
     return _json.loads(out) if out else {}
+
+
+def issue_author(repo: str, number: int, env: dict | None = None) -> dict:
+    """HOST-side: an issue's author as {"login": str, "is_bot": bool} via the
+    operator's OWN authed gh — the `pr_author` twin for ISSUES (issue #180
+    `rein declare --new`: a filed issue must be authored by the App's bot,
+    NEVER the developer). Unlike `gh pr view`, `gh issue view --json author`
+    carries no `is_bot` field, so this reads the REST `user` object directly
+    via `gh api` and derives is_bot the way GitHub itself marks a bot actor:
+    `user.type == "Bot"`, or (belt-and-suspenders) the login ending `[bot]`.
+    """
+    env = env or rein_env()
+    import json as _json
+
+    out = subprocess.check_output(
+        ["gh", "api", f"repos/{repo}/issues/{number}",
+         "--jq", "{login: .user.login, type: .user.type}"],
+        cwd=REPO_ROOT, env=env, text=True,
+    ).strip()
+    data = _json.loads(out) if out else {}
+    login = data.get("login", "")
+    is_bot = data.get("type") == "Bot" or login.endswith("[bot]")
+    return {"login": login, "is_bot": is_bot}
+
+
+def issue_body(repo: str, number: int, env: dict | None = None) -> str:
+    """HOST-side: an issue's current body, via the operator's OWN authed gh —
+    the ground truth for the `_Filed by rein on behalf of @<owner>._` trailer
+    `newIssueBody` (cmd/rein/declare_new.go) appends to every filed issue."""
+    env = env or rein_env()
+    out = subprocess.check_output(
+        ["gh", "issue", "view", str(number), "--repo", repo,
+         "--json", "body", "--jq", ".body"],
+        cwd=REPO_ROOT, env=env, text=True,
+    )
+    return out.rstrip("\n")
 
 
 def close_pr(repo: str, number: int, env: dict | None = None) -> bool:
@@ -1683,6 +1726,16 @@ _NORMALIZE_RULES = [
     (r"/pull/\d+", "/pull/<PR>"),
     (r"\bdeclare \d+", "declare <ISSUE>"),
     (r"issue number \(\d+\)", "issue number (<ISSUE>)"),
+    # the bare issue/PR number `gh issue view`/`gh pr view` take as their
+    # first positional arg (no leading `#`, unlike every other occurrence
+    # above) — e.g. the declare_new journey's in-sandbox read of the issue
+    # it just filed.
+    (r"\bgh (issue|pr) view \d+", r"gh \1 view <ISSUE>"),
+    # the bare `number` field a `gh ... --json number,...` read prints,
+    # e.g. `gh issue view --json number` — generic across any journey that
+    # reads a JSON `number` field back (quote style covers both bare and
+    # jq-escaped JSON output).
+    (r'"number":\s*\d+', '"number":<ISSUE>'),
     (r"(?m)^> \d+$", "> <ISSUE>"),
     # the issue number the human typed into the tmux popup's Form A prompt,
     # folded into the transcript as `POPUP| > <n>` (see fold_popup).

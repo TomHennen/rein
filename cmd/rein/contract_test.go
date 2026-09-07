@@ -32,9 +32,10 @@ func TestBuildAgentContract_StatesTheEnforcedRules(t *testing.T) {
 		"no error", // the silent-failure warning: writes SUCCEED, so nothing else warns it
 		"Read-only file system",
 		"NO credentials",
-		"rein declare <n>",   // exact #35 vocabulary (gate.go deny messages)
-		"agent/<n>/<nonce>",  // exact #35 branch convention
-		"One issue per push", // exact #35 push rule
+		"rein declare <n>",             // exact #35 vocabulary (gate.go deny messages)
+		`rein declare --new "<title>"`, // #180: the bootstrap for a repo with no issues yet
+		"agent/<n>/<nonce>",            // exact #35 branch convention
+		"One issue per push",           // exact #35 push rule
 		"api.anthropic.com, registry.npmjs.org",
 		// egress self-help: the ONE command the human runs, + the restart caveat
 		"CANNOT open a blocked host yourself",

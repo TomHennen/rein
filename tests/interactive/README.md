@@ -78,6 +78,7 @@ one (a new dir + a new `golden.txt`). Each row links to the journey's own README
 | [init_steady_state](journeys/init_steady_state/) | `rein init` re-run resolves the App from `state.json`, no `REIN_APP_*` (#128) | COVERED |
 | [init_then_run](journeys/init_then_run/) | `rein init` (real mint, no env) then a real `rein run` clone, direct + sandboxed (#128) | COVERED |
 | [session_commands](journeys/session_commands/) | the human-side `rein session show` / `add-repo` (#69) | COVERED |
+| [declare_new](journeys/declare_new/) | `rein declare --new "<title>"`: the agent FILES the run's issue via a human-approved Form A prompt on a repo with none declared yet, then denies a wrong first-word answer (#180) | COVERED |
 | [expansion_404](journeys/expansion_404/) | the 404-at-expansion install NOTICE (#69) | COVERED |
 | [git_author](journeys/git_author/) | delegated commit author "(via rein)", non-impersonating | COVERED |
 | [gh_write](journeys/gh_write/) | the in-sandbox `gh` REST + GraphQL write boundary (#91, #101) | COVERED |
