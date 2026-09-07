@@ -240,8 +240,9 @@ This will allow the agent to:
   - Comment on issues and PRs in tomh/wrangle
   - Push only commits it has signed
 
-For this run (until you close the agent). After 30 minutes with no GitHub
-traffic, writes re-lock and the agent has to declare again.
+For this run (until you close the agent). Writes re-lock after 30 minutes with
+no GitHub traffic, or 4 hours after this confirmation, and the agent has to
+declare again.
 
 To approve, type the issue number: ___
 To deny, press Ctrl+C.
@@ -289,7 +290,7 @@ The pattern: the user always confirms with non-replayable input (issue number, f
 
 - Pick a session up front. The session forms itself as the agent encounters work.
 - Pick a role for each thing. The role is implied by what the agent is doing (the first action requiring write access starts an `implement` session; a session that only reads stays in `scan`).
-- End the session. Sessions end when the agent process exits; there is no wall-clock cap. After an idle timeout (30 min default) the run is not ended — its WRITE APPROVAL is withdrawn in place and the agent must declare and be re-confirmed before its next write (#190). Manual `rein session end` exists but is for the careful user.
+- End the session. Sessions end when the agent process exits. Neither expiry bound ends a run: after an idle timeout (30 min default) OR once the approval itself is 4 hours old (default, measured from the last human confirmation and NOT extended by activity), the WRITE APPROVAL is withdrawn in place and the agent must declare and be re-confirmed before its next write (#190). Manual `rein session end` exists but is for the careful user.
 - Edit any GitHub PATs. The PAT pattern is replaced entirely.
 - Configure git. Once `rein run` wraps the agent, all git operations route through the sandbox proxy.
 
@@ -551,7 +552,7 @@ Sessions are formed and modified during agent operation, not configured up front
 5. **Session active.** Subsequent requests within the same scope ceiling proceed without new prompts. The broker mints tokens as needed (read tokens for read operations, JIT write tokens for `git push` and similar).
 6. **Scope expansion.** If the agent needs something outside the current ceiling — another issue, another repo — a new confirmation prompt.
 7. **Issue creation.** If the agent wants to file a new issue mid-session (e.g., found a bug), the broker prompts the human, creates the issue using the audit App's identity attributed "on behalf of @tomh," and adds the new issue to the session's scope.
-8. **Session ends.** Automatically on agent process exit, or explicitly via `rein session end`. There is no hard TTL: a long, busy session is never interrupted. The idle timeout (default 30 min) does not end the session either — it re-attests in place, withdrawing the write approval while reads and the run continue, so the next write goes through the declare + confirm ceremony again (#190). The human does not have to remember to end the session.
+8. **Session ends.** Automatically on agent process exit, or explicitly via `rein session end` — those are the only two things that END a run. Two bounds RE-ATTEST it in place instead, withdrawing the write approval while reads and the run continue so the next write goes through the declare + confirm ceremony again (#190): the idle timeout (default 30 min, reset by proxy traffic) and the approval's own age (default 4h since the last human confirmation, which activity does not extend). The human does not have to remember to end the session.
 
 Multi-issue sessions are first-class: a single session can be bound to issues 73, 74, 75 (scope ceiling = union of their repos), and audit comments are cross-posted to all three with mutual cross-references.
 
@@ -769,9 +770,11 @@ Mitigations:
 - **Mandatory under sandbox composition:** the agent's view of `~/.gitconfig` is sandbox-local; rewrites don't escape to the host. The proxy mediates all traffic regardless of what sandboxed git thinks it's doing. This makes the rewrite issue moot for Shape A (sandbox-composed) deployments.
 - **Acknowledged limitation for Shape B (credential-helper without sandbox):** a sufficiently determined or compromised agent can run `git config --global` to remove or substitute the helper. This is the same threat surface that exists today with PATs (a compromised agent can do anything the user can do). Shape B is meaningfully worse than Shape A here; production use should always go through Shape A.
 
-**TM-G9 Session expiry is not an adversarial bound (#190).** The idle bound is not a bound on a hostile agent. Activity is any handled request on the GitHub/virtual-host inject path, including refused ones, and the agent controls that clock: one cheap GET https://github.com/ every 29 minutes keeps a granted write approval alive indefinitely. With the hard TTL removed, the idle timer protects against an abandoned run, not a busy one; the effective bound on approved write capability is the agent process lifetime, i.e. until the human exits it.
+**TM-G9 The IDLE bound is not an adversarial bound; the APPROVAL TTL is (#190).** The idle timer alone is not a bound on a hostile agent. Activity is any handled request on the GitHub/virtual-host inject path, including refused ones, and the agent controls that clock: one cheap GET https://github.com/ every 29 minutes defers the idle bound indefinitely. The idle timer therefore protects against an ABANDONED run, not a busy one.
 
-What does and does not tick the clock: the TLS-terminated inject path (`serveOne` — every handled request, allowed or refused) and the local-expose upgrade path do. **General egress through the raw-tunnel path does NOT count as activity** — a CONNECT that is spliced straight through (`internal/proxy/tcp.go`) never reaches `OnActivity`, so an agent doing nothing but fetching docs from allowed non-GitHub hosts still idles out. Narrowing activity to write-tier requests only would shrink the window an agent can hold an approval through cheap reads; that is a deliberate open decision, not an oversight.
+What actually bounds a busy agent is the approval TTL: 4h from the human's most recent confirmation, which no amount of agent activity extends. So approved write capability is **bounded by the approval TTL since the last human confirmation, not by the run lifetime** — a run may live for days, but every 4h of it costs the agent a fresh declare and the human a fresh Form A confirmation. The residual is the TTL window itself: within it, a compromised agent has whatever writes the confirmed issue authorizes.
+
+What does and does not tick the idle clock: the TLS-terminated inject path (`serveOne` — every handled request, allowed or refused) and the local-expose upgrade path do. **General egress through the raw-tunnel path does NOT count as activity** — a CONNECT that is spliced straight through (`internal/proxy/tcp.go`) never reaches `OnActivity`, so an agent doing nothing but fetching docs from allowed non-GitHub hosts still idles out. Narrowing activity to write-tier requests only would shrink the window an agent can defer the IDLE bound through cheap reads; that is a deliberate open decision, not an oversight, and it does not affect the approval TTL.
 
 ### 5.4 What this design does NOT protect against
 
@@ -902,7 +905,7 @@ Real v0:
 - **Evaluate Claude Code hooks as a complementary guard/audit layer** (issue #21): PreToolUse to deny the Shape B self-bypass patterns (`gh auth setup-git`, `git config credential.helper`, self-`rein approval grant`), PostToolUse for git/gh audit. Honest scope: harness-enforced but agent-overridable (`.claude/settings.local.json`), no `/dev/tty` so it can't host the approval prompt, and Claude-Code-only — so it's policy surface above the broker, never the boundary (the `srt` sandbox / daemon is). Decided here because it's a defense layer, not the broker itself.
 - Ambient session model with human confirmation prompts.
 - Single-use write tokens; HEAD pinning; REST URL 301-redirect chain as TM-G6 anchor.
-- Automatic session end on agent process exit; idle re-attestation of the write approval (no hard TTL).
+- Automatic session end on agent process exit; re-attestation of the write approval on idle (30 min) and on approval age (4h).
 - Audit App ships with a fixed avatar (uploaded during `rein init`).
 
 **Hypothesis:** Tom uses it on `wrangle` for two weeks without reverting to a PAT under deadline pressure.

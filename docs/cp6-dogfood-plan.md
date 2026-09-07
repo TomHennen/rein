@@ -63,12 +63,14 @@ From inside the sandbox, attempt to self-approve: open `/dev/tty` (ENXIO),
 attempt to write the approval file under stateDir (deny-read + not writable).
 Both must fail. (Re-confirms the CP4 tty-severing finding under a real run.)
 
-### A7. Idle re-attestation — [me]
-Idle past the idle timeout, then attempt a write → must be refused with the
-declare instruction (tokens revoked, approval withdrawn) while READS still work
-and the run keeps going, with a loud message. Declare again → the human
-re-confirms → writes flow. Set `REIN_IDLE_TIMEOUT=10s` on the launch (host side
-only) instead of waiting 30m.
+### A7. Re-attestation — [me]
+Two bounds, same in-place withdrawal. (a) Idle past the idle timeout, and (b)
+stay BUSY past the approval TTL. Either way the next write must be refused with
+the declare instruction (tokens revoked, approval withdrawn) while READS still
+work and the run keeps going, with a loud message. Declare again → the human
+re-confirms → writes flow, and the TTL clock restarts. Set
+`REIN_IDLE_TIMEOUT=10s` / `REIN_APPROVAL_TTL=10s` on the launch (host side only)
+instead of waiting 30m/4h.
 
 ### A8. Failure modes / loud-degrade — [me]
 - Break a sandbox prereq (e.g. rename `srt` on PATH) → `rein run` fails closed

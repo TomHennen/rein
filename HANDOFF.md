@@ -206,8 +206,8 @@ healthy. Details in `PLAN-1.md` Notes (2026-07-05) + the correction banner atop
 CP4 added **session & approval integration**: git author identity
 (`internal/gitidentity` — sandboxed commits author as "<name> (via rein)" + the
 App-bot noreply email, not the developer; `~/.gitconfig` leak closed), session
-expiry (`internal/runbroker/expiry.go` — idle 30m, no hard TTL; on idle the
-write approval is withdrawn in place and the run keeps serving, #190), the **default-mode flip** (`rein run` sandboxes by
+expiry (`internal/runbroker/expiry.go` — idle 30m + approval age 4h; on either
+the write approval is withdrawn in place and the run keeps serving, #190), the **default-mode flip** (`rein run` sandboxes by
 default; `--direct`/`--no-sandbox` for direct behind a loud banner; fail closed
 if srt unhealthy), and the approval-non-replayability verification (srt
 `--new-session` severs the controlling tty → in-sandbox /dev/tty unopenable, a

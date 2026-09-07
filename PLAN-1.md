@@ -199,9 +199,11 @@ validation-beef[bot]@users.noreply.github.com>`** (host ~/.gitconfig not the
 source); /dev/tty unopenable in-sandbox (ENXIO); `--direct` prints the loud
 reduced-protection banner. Expiry (idle 30m / hard TTL 4h, revoke-before-close)
 + concurrent isolation are unit+`-race` covered (no fast-timeout override for a
-live expiry test). **Superseded by #190:** the hard TTL is gone and idle expiry
-re-attests in place (write approval withdrawn, run keeps serving);
-`REIN_IDLE_TIMEOUT` is the fast-timeout override CP4 lacked.
+live expiry test). **Superseded by #190:** both bounds now re-attest in place
+(write approval withdrawn, run keeps serving) and the 4h cap moved from the RUN
+to the APPROVAL, measured from the last confirmation;
+`REIN_IDLE_TIMEOUT`/`REIN_APPROVAL_TTL` are the fast-timeout overrides CP4
+lacked.
 **Tom's decisions:** default-flip to sandbox ACCEPTED ("no one is using this
 yet"); commit-author identity = his name + "(via rein)" + App-bot
 noreply. **Surfaced/deferred:** `--direct` uses an informational banner (no
@@ -224,9 +226,10 @@ trust model (rein can't detect a throwaway). A harder gate (confirm prompt /
   `githubapp.BotUserID` (UNAUTHENTICATED GET /users/<slug>[bot] — JWT 401s
   there). Leak fix: managed GIT_CONFIG_GLOBAL + GIT_CONFIG_SYSTEM=/dev/null +
   ~/.gitconfig added to deny-read.
-- **Session expiry:** `internal/runbroker` idle (30m) monitor; the hard TTL was
-  removed by #190 (the approvalTTL sweep backstop is a separate mechanism and
-  stays). Proxy `OnActivity` feeds an atomic last-activity clock; on idle rein
+- **Session expiry:** `internal/runbroker` idle (30m) + approval-age (4h)
+  monitor; #190 moved the 4h cap off the RUN and onto the APPROVAL, measured
+  from the human's last confirmation and not extended by activity (the
+  approvalTTL sweep backstop is a separate mechanism and stays). Proxy `OnActivity` feeds an atomic last-activity clock; on idle rein
   revokes the run's write tokens and withdraws its confirmed issues while the
   proxy KEEPS SERVING (#190 — the next write is refused with the declare
   instruction), with a loud banner — the agent process is NOT killed.
@@ -285,8 +288,8 @@ from the bot noreply email.
 - Reuse run-scoped approvals (#20/0a02043) under the daemon; clear on
   agent exit; revoke write tokens on exit (the #20 intent, now native in
   the daemon — closes the loop #20 left for Phase 1).
-- Automatic session end on agent-process exit; idle re-attestation of the write
-  approval (no hard TTL, #190).
+- Automatic session end on agent-process exit; re-attestation of the write
+  approval on idle (30m) and on approval age (4h) (#190).
 - Default-mode UX: sandboxed becomes the `rein run` default where srt is
   healthy; direct mode behind an explicit flag with a loud banner.
 
