@@ -111,20 +111,23 @@ type Config struct {
 	// CP1-recipe transport (HTTP/1.1, system roots). Tests inject a fake.
 	Upstream http.RoundTripper
 
-	// IdleTimeout / HardTTL bound the run's live approved-write capability
-	// (design §5.3). After IdleTimeout with NO proxy activity, or HardTTL of
-	// wall-clock regardless of activity, OnExpire fires and the proxy is torn
-	// down (subsequent GitHub requests then fail closed). Zero disables that
-	// bound; cmd/rein wires DefaultIdleTimeout / DefaultHardTTL.
+	// IdleTimeout bounds the run's live approved-write capability (design
+	// §5.3): after this long with NO proxy activity, OnExpire fires. Zero
+	// disables expiry; cmd/rein wires DefaultIdleTimeout. There is no hard
+	// wall-clock TTL (#190).
 	IdleTimeout time.Duration
-	HardTTL     time.Duration
 
-	// OnExpire, if set, runs once when idle/hard expiry trips, BEFORE the proxy
-	// is stopped — the caller revokes the run's write tokens and prints a loud
-	// message here. reason is "idle" or "hard-ttl". It must NOT kill the agent
-	// process (the run tears its own credential path down; the agent keeps
-	// running credential-less).
-	OnExpire func(reason string)
+	// OnExpire, if set, runs on each idle trip: the caller revokes the run's
+	// write tokens, withdraws the write approval, and prints a loud message.
+	// The host KEEPS SERVING afterwards (#190 re-attestation in place) — reads,
+	// the expose tunnel and the declare gate all stay up, and the agent's next
+	// write is refused with the declare instruction. It must NOT kill the agent
+	// process.
+	//
+	// Returning an error means the approval could NOT be withdrawn; the host
+	// then falls back to the pre-#190 behavior and stops the proxy (fail
+	// closed). It can fire more than once per run — see monitor's re-arm rule.
+	OnExpire func() error
 
 	// checkInterval overrides the expiry poll cadence (tests set it small).
 	// Zero derives a sane value from the bounds. Unexported: production never
@@ -154,17 +157,20 @@ type Host struct {
 	// monitorDone is closed when the expiry monitor goroutine has returned (or
 	// immediately if none was started). Close joins it so no expiry callback
 	// (a network revoke) can run after Close returns. monitorOnce guards the
-	// close so the monitor's normal exit and the expire path can't double-close.
+	// close so the monitor's normal exit and the fail-closed teardown can't
+	// double-close.
 	monitorDone chan struct{}
 	monitorOnce sync.Once
 
-	// Expiry state (design §5.3). start is the launch instant (hard-TTL base);
-	// lastActivity is the atomic unixnano of the last proxy request (idle base),
-	// updated lock-free from the request path via markActivity. expireOnce
-	// guards the one-shot revoke+teardown.
-	start        time.Time
+	// audit/sessionID let the monitor record the idle re-attestation on the
+	// SAME log (one mutex, one file) as every proxy decision.
+	audit     *proxy.AuditLog
+	sessionID string
+	logger    *log.Logger
+
+	// lastActivity is the atomic unixnano of the last proxy request (the idle
+	// base), updated lock-free from the request path via markActivity.
 	lastActivity atomic.Int64
-	expireOnce   sync.Once
 }
 
 // Start builds the core + proxy, creates the socket, and begins serving. On any
@@ -232,7 +238,9 @@ func Start(cfg Config) (*Host, error) {
 		socketPath:  cfg.SocketPath,
 		done:        make(chan struct{}),
 		monitorDone: make(chan struct{}),
-		start:       now(),
+		audit:       audit,
+		sessionID:   cfg.SessionID,
+		logger:      cfg.Logger,
 	}
 	h.lastActivity.Store(now().UnixNano()) // count idle from launch, not epoch
 
@@ -302,14 +310,14 @@ func Start(cfg Config) (*Host, error) {
 	// Expiry monitor: only when a bound is configured. It shares ctx with Serve,
 	// so Close (which cancels ctx) also stops the monitor. Close joins
 	// monitorDone; pre-close it when no monitor runs so Close never blocks.
-	if cfg.IdleTimeout > 0 || cfg.HardTTL > 0 {
+	if cfg.IdleTimeout > 0 {
 		interval := cfg.checkInterval
 		if interval <= 0 {
-			interval = deriveCheckInterval(cfg.IdleTimeout, cfg.HardTTL)
+			interval = deriveCheckInterval(cfg.IdleTimeout)
 		}
 		go func() {
 			defer h.markMonitorDone()
-			h.monitor(ctx, cfg.IdleTimeout, cfg.HardTTL, interval, now, cfg.OnExpire)
+			h.monitor(ctx, cfg.IdleTimeout, interval, now, cfg.OnExpire)
 		}()
 	} else {
 		h.markMonitorDone()
@@ -318,7 +326,7 @@ func Start(cfg Config) (*Host, error) {
 }
 
 // markMonitorDone closes monitorDone exactly once (idempotent across the
-// monitor's normal exit and the expire path).
+// monitor's normal exit and the fail-closed teardown).
 func (h *Host) markMonitorDone() {
 	h.monitorOnce.Do(func() { close(h.monitorDone) })
 }
@@ -336,8 +344,8 @@ func (h *Host) CACertPEM() []byte { return h.ca.CertPEM() }
 // Close stops the proxy and releases the socket. Idempotent; blocks until the
 // serve loop AND the expiry monitor have returned, so on return the socket is
 // gone and no expiry callback (a network revoke) can still fire. When Close is
-// invoked FROM the expire path (on the monitor goroutine), expire has already
-// marked monitorDone, so the <-h.monitorDone join does not self-deadlock.
+// invoked FROM the monitor's fail-closed teardown (on the monitor goroutine),
+// that path has already marked monitorDone, so the join does not self-deadlock.
 func (h *Host) Close() error {
 	h.closeOnce.Do(func() {
 		h.cancel()

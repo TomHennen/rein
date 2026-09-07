@@ -518,8 +518,40 @@ func WriteRunContext(stateDir, runID string, rc RunContext) error {
 // approvals/<id>.json, and writes/<id>.jsonl. Missing files are not an
 // error; idempotent (safe to call twice).
 func ClearRun(stateDir, runID string) error {
+	return removeAll(RunContextPath(stateDir, runID), RunApprovalPath(stateDir, runID), WriteTokenLedgerPath(stateDir, runID))
+}
+
+// ClearConfirmedIssues withdraws the run's write approval WITHOUT ending
+// the run (#190 idle re-attestation): after it, ConfirmedIssues returns
+// nil, so every write gate refuses with the ordinary declare instruction
+// and the agent must re-declare through the full Form A ceremony.
+//
+// It removes approvals/<run-id>.json outright rather than rewriting the
+// record with an empty issue set. Record holds APPROVAL STATE ONLY
+// (signature, session id, issues, timestamps), so "no confirmed issues"
+// and "no record" are the same state — and absence is the more
+// fail-closed encoding: no consumer can mistake a signature-valid,
+// issue-less record for an approval. RunContext (session snapshot,
+// PendingIssue, PendingNotice, RunPID) is deliberately untouched, since
+// the out-of-process grant surfaces need it for the NEXT declare.
+//
+// The write-token ledger is separate (ClearWriteTokens) so the caller can
+// revoke before clearing it.
+func ClearConfirmedIssues(stateDir, runID string) error {
+	return removeAll(RunApprovalPath(stateDir, runID))
+}
+
+// ClearWriteTokens removes writes/<run-id>.jsonl. Call it only AFTER
+// revoking the tokens it holds — the file is the only record of them.
+func ClearWriteTokens(stateDir, runID string) error {
+	return removeAll(WriteTokenLedgerPath(stateDir, runID))
+}
+
+// removeAll deletes each path, ignoring missing files, returning the first
+// real error.
+func removeAll(paths ...string) error {
 	var firstErr error
-	for _, p := range []string{RunContextPath(stateDir, runID), RunApprovalPath(stateDir, runID), WriteTokenLedgerPath(stateDir, runID)} {
+	for _, p := range paths {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
 			firstErr = err
 		}

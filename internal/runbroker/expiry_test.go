@@ -1,10 +1,13 @@
 package runbroker
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,40 +16,39 @@ import (
 func TestExpiredPure(t *testing.T) {
 	base := time.Unix(1_000_000, 0)
 	cases := []struct {
-		name             string
-		last, start, now time.Time
-		idle, hard       time.Duration
-		wantReason       string
-		wantExpired      bool
+		name        string
+		last, now   time.Time
+		idle        time.Duration
+		wantExpired bool
 	}{
-		{"fresh", base, base, base, time.Minute, time.Hour, "", false},
-		{"idle trips", base, base, base.Add(2 * time.Minute), time.Minute, time.Hour, "idle", true},
-		{"recent activity defers idle", base.Add(90 * time.Second), base, base.Add(2 * time.Minute), time.Minute, time.Hour, "", false},
-		{"hard trips (idle disabled)", base.Add(119 * time.Minute), base, base.Add(2 * time.Hour), 0, time.Hour, "hard-ttl", true},
-		{"hard beats idle when both trip", base, base, base.Add(2 * time.Hour), time.Minute, time.Hour, "hard-ttl", true},
-		{"both disabled never expires", base, base, base.Add(10 * time.Hour), 0, 0, "", false},
-		{"exactly at idle boundary trips", base, base, base.Add(time.Minute), time.Minute, 0, "idle", true},
+		{"fresh", base, base, time.Minute, false},
+		{"idle trips", base, base.Add(2 * time.Minute), time.Minute, true},
+		{"recent activity defers idle", base.Add(90 * time.Second), base.Add(2 * time.Minute), time.Minute, false},
+		{"zero idle never expires", base, base.Add(10 * time.Hour), 0, false},
+		{"exactly at idle boundary trips", base, base.Add(time.Minute), time.Minute, true},
+		// #190: there is no wall-clock cap — a run that has been alive for
+		// hours but is still busy must NOT expire.
+		{"long-lived but active never expires", base.Add(10 * time.Hour), base.Add(10 * time.Hour), 30 * time.Minute, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			reason, exp := expired(tc.last, tc.start, tc.now, tc.idle, tc.hard)
-			if exp != tc.wantExpired || reason != tc.wantReason {
-				t.Errorf("expired = (%q,%v), want (%q,%v)", reason, exp, tc.wantReason, tc.wantExpired)
+			if got := expired(tc.last, tc.now, tc.idle); got != tc.wantExpired {
+				t.Errorf("expired = %v, want %v", got, tc.wantExpired)
 			}
 		})
 	}
 }
 
 func TestDeriveCheckInterval(t *testing.T) {
-	// Capped at 30s for large bounds; a quarter of the tighter bound otherwise;
+	// Capped at 30s for a large bound; a quarter of the bound otherwise;
 	// floored at 1s.
-	if got := deriveCheckInterval(30*time.Minute, 4*time.Hour); got != 30*time.Second {
-		t.Errorf("large bounds interval = %s, want 30s", got)
+	if got := deriveCheckInterval(30 * time.Minute); got != 30*time.Second {
+		t.Errorf("30m bound interval = %s, want 30s", got)
 	}
-	if got := deriveCheckInterval(40*time.Second, 0); got != 10*time.Second {
+	if got := deriveCheckInterval(40 * time.Second); got != 10*time.Second {
 		t.Errorf("40s idle interval = %s, want 10s", got)
 	}
-	if got := deriveCheckInterval(2*time.Second, 0); got != time.Second {
+	if got := deriveCheckInterval(2 * time.Second); got != time.Second {
 		t.Errorf("tiny bound interval = %s, want the 1s floor", got)
 	}
 }
@@ -55,43 +57,49 @@ func TestDeriveCheckInterval(t *testing.T) {
 // depends on: markActivity updates lastActivity, and a recent activity defers
 // the idle bound (no timers involved).
 func TestMarkActivityFeedsExpiry(t *testing.T) {
-	h := &Host{start: time.Unix(1000, 0)}
-	h.lastActivity.Store(h.start.UnixNano())
-	now := h.start.Add(10 * time.Minute)
+	h := &Host{}
+	start := time.Unix(1000, 0)
+	h.lastActivity.Store(start.UnixNano())
+	now := start.Add(10 * time.Minute)
 
-	if _, exp := expired(time.Unix(0, h.lastActivity.Load()), h.start, now, 5*time.Minute, time.Hour); !exp {
+	if !expired(time.Unix(0, h.lastActivity.Load()), now, 5*time.Minute) {
 		t.Error("no activity since start under a 5m idle bound should expire")
 	}
 	h.markActivity(now.Add(-time.Minute)) // activity 1m ago
-	if _, exp := expired(time.Unix(0, h.lastActivity.Load()), h.start, now, 5*time.Minute, time.Hour); exp {
+	if expired(time.Unix(0, h.lastActivity.Load()), now, 5*time.Minute) {
 		t.Error("activity 1m ago must defer a 5m idle bound")
 	}
 }
 
-// TestHostIdleExpiry drives the real monitor goroutine with a tiny idle bound
-// and asserts OnExpire fires with reason "idle" and the proxy is torn down.
-func TestHostIdleExpiry(t *testing.T) {
-	fired := make(chan string, 1)
+// TestHostIdleExpiryKeepsServing is the #190 regression guard: on an idle trip
+// the host fires OnExpire (where the caller withdraws the write approval) but
+// KEEPS SERVING — the agent's reads must still flow through the proxy. Before
+// #190 this same moment tore the proxy down.
+func TestHostIdleExpiryKeepsServing(t *testing.T) {
+	fired := make(chan struct{}, 4)
+	var audit syncBuffer
 	h, _ := startHost(t, Config{
 		SessionID:      "s",
 		EmptyPathScope: "allow",
 		IdleTimeout:    40 * time.Millisecond,
 		checkInterval:  5 * time.Millisecond,
-		OnExpire:       func(reason string) { fired <- reason },
+		Audit:          &audit,
+		OnExpire:       func() error { fired <- struct{}{}; return nil },
 	})
-	select {
-	case r := <-fired:
-		if r != "idle" {
-			t.Errorf("expiry reason = %q, want idle", r)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("idle expiry did not fire")
-	}
-	// Proxy is torn down: a fresh request must now fail (fail closed).
+	waitFired(t, fired, "idle expiry")
+
+	// The read path must still work: this is the whole point of re-attesting
+	// in place rather than ending the session.
 	c := clientThrough(t, h)
-	if resp, err := c.Get("https://api.github.com/repos/o/r"); err == nil {
-		resp.Body.Close()
-		t.Error("request succeeded after idle expiry; proxy was not stopped")
+	resp, err := c.Get("https://api.github.com/repos/o/r")
+	if err != nil {
+		t.Fatalf("read through the proxy failed after the idle lock; the host must keep serving: %v", err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	if got := audit.String(); !strings.Contains(got, "decision=expired-idle") {
+		t.Errorf("audit log missing the expired-idle entry; got:\n%s", got)
 	}
 }
 
@@ -102,13 +110,13 @@ func TestHostIdleExpiry(t *testing.T) {
 // proxy request path (lastActivity would stay pinned at launch and expiry would
 // fire mid-traffic).
 func TestHostActivityDefersIdleThenExpires(t *testing.T) {
-	fired := make(chan string, 1)
+	fired := make(chan struct{}, 4)
 	h, _ := startHost(t, Config{
 		SessionID:      "s",
 		EmptyPathScope: "allow",
 		IdleTimeout:    150 * time.Millisecond,
 		checkInterval:  10 * time.Millisecond,
-		OnExpire:       func(reason string) { fired <- reason },
+		OnExpire:       func() error { fired <- struct{}{}; return nil },
 	})
 	c := clientThrough(t, h)
 
@@ -118,8 +126,8 @@ func TestHostActivityDefersIdleThenExpires(t *testing.T) {
 	deadline := time.Now().Add(350 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		select {
-		case r := <-fired:
-			t.Fatalf("idle expiry fired (%s) WHILE traffic was flowing — proxy activity is not resetting the idle clock", r)
+		case <-fired:
+			t.Fatal("idle expiry fired WHILE traffic was flowing — proxy activity is not resetting the idle clock")
 		default:
 		}
 		getOK(t, c, "https://api.github.com/repos/o/r")
@@ -127,34 +135,109 @@ func TestHostActivityDefersIdleThenExpires(t *testing.T) {
 	}
 
 	// Phase 2: go quiet — expiry must now fire.
-	select {
-	case r := <-fired:
-		if r != "idle" {
-			t.Errorf("expiry reason = %q, want idle", r)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("idle expiry did not fire after traffic stopped")
-	}
+	waitFired(t, fired, "idle expiry after traffic stopped")
 }
 
-// TestHostHardTTLExpiry asserts the hard cap trips regardless of activity.
-func TestHostHardTTLExpiry(t *testing.T) {
-	fired := make(chan string, 1)
+// TestHostIdleRelocksAfterActivity pins the RE-ARM half of #190: the monitor is
+// no longer one-shot. Lock, then work, then go quiet again ⇒ lock again.
+func TestHostIdleRelocksAfterActivity(t *testing.T) {
+	fired := make(chan struct{}, 4)
+	h, _ := startHost(t, Config{
+		SessionID:      "s",
+		EmptyPathScope: "allow",
+		IdleTimeout:    40 * time.Millisecond,
+		checkInterval:  5 * time.Millisecond,
+		OnExpire:       func() error { fired <- struct{}{}; return nil },
+	})
+	waitFired(t, fired, "first idle lock")
+
+	// One request re-arms the monitor; going quiet must lock a SECOND time.
+	getOK(t, clientThrough(t, h), "https://api.github.com/repos/o/r")
+	waitFired(t, fired, "second idle lock after activity")
+}
+
+// TestHostIdleDoesNotRelockWithoutActivity is the other half of the re-arm
+// rule, and the guard against banner-spam: a run that stays quiet after its
+// lock must NOT be locked again every idle period.
+func TestHostIdleDoesNotRelockWithoutActivity(t *testing.T) {
+	var count atomic.Int32
+	fired := make(chan struct{}, 8)
 	startHost(t, Config{
 		SessionID:      "s",
 		EmptyPathScope: "allow",
-		HardTTL:        40 * time.Millisecond,
+		IdleTimeout:    30 * time.Millisecond,
 		checkInterval:  5 * time.Millisecond,
-		OnExpire:       func(reason string) { fired <- reason },
+		OnExpire:       func() error { count.Add(1); fired <- struct{}{}; return nil },
 	})
-	select {
-	case r := <-fired:
-		if r != "hard-ttl" {
-			t.Errorf("expiry reason = %q, want hard-ttl", r)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("hard-ttl expiry did not fire")
+	waitFired(t, fired, "idle lock")
+
+	// Stay quiet for several more idle periods. Exactly one lock must have
+	// happened: no activity, nothing new to withdraw.
+	time.Sleep(200 * time.Millisecond)
+	if got := count.Load(); got != 1 {
+		t.Errorf("OnExpire fired %d times while the run stayed quiet, want 1", got)
 	}
+}
+
+// TestHostExpireErrorStopsProxy is the fail-closed fallback: when the caller
+// cannot withdraw the write approval, the host reverts to the pre-#190
+// behavior and tears the proxy down so the next request fails closed.
+func TestHostExpireErrorStopsProxy(t *testing.T) {
+	fired := make(chan struct{}, 4)
+	h, _ := startHost(t, Config{
+		SessionID:      "s",
+		EmptyPathScope: "allow",
+		IdleTimeout:    40 * time.Millisecond,
+		checkInterval:  5 * time.Millisecond,
+		OnExpire:       func() error { fired <- struct{}{}; return errors.New("cannot rewrite the approval record") },
+	})
+	waitFired(t, fired, "idle expiry")
+
+	// The teardown races the callback's return; poll briefly for the socket to
+	// stop serving rather than assume it is already gone.
+	c := clientThrough(t, h)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		resp, err := c.Get("https://api.github.com/repos/o/r")
+		if err != nil {
+			return // proxy is down: fail closed as intended
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("proxy still serving after OnExpire reported it could not withdraw the approval")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitFired waits for one OnExpire firing, failing with what was expected.
+func waitFired(t *testing.T, fired <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-fired:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("%s did not fire", what)
+	}
+}
+
+// syncBuffer is a mutex-guarded bytes.Buffer: the audit log is written from the
+// monitor goroutine and read by the test.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // TestConcurrentRunsIsolated is the CP4 concurrent-isolation invariant: two

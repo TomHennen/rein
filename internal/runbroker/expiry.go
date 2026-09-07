@@ -3,52 +3,33 @@ package runbroker
 import (
 	"context"
 	"time"
+
+	"github.com/TomHennen/rein/internal/proxy"
 )
 
-// expiry constants: the proactive bounds on a granted approval + cached write
-// token (design §5.3's run-lifetime capability). Agent-process-exit teardown
-// (the deferred revoke in cmd/rein) already covers the normal case; these bound
-// the pathological ones — an agent that idles forever, or one that runs forever.
+// DefaultIdleTimeout is the only expiry bound (#190): after this long with NO
+// proxy traffic the run's WRITE APPROVAL is withdrawn in place — the run keeps
+// serving, the agent keeps running, and its next write is refused with the
+// ordinary declare instruction. 30m is comfortably above git's own pauses and
+// any realistic think-time between GitHub calls.
 //
-//   - Idle 30m: no proxy traffic at all for half an hour ⇒ the agent is wedged,
-//     waiting on a human, or done. Revoke + stop rather than leave an approved
-//     write path live indefinitely. Comfortably above git's own pauses and any
-//     realistic think-time between GitHub calls.
-//   - Hard TTL 4h: the absolute wall-clock cap, deliberately equal to
-//     cmd/rein's approvalTTL (the orphan-sweep backstop). Write tokens re-mint
-//     on GitHub's ~1h native TTL, so the hard cap is what actually bounds
-//     SUSTAINED approved-write capability for a long-running agent. A dogfood
-//     coding session fits well inside 4h; a run that exceeds it should
-//     re-authorize.
-const (
-	DefaultIdleTimeout = 30 * time.Minute
-	DefaultHardTTL     = 4 * time.Hour
-)
+// There is deliberately NO hard TTL: a session ends on agent exit or idle
+// re-attestation, never on a wall-clock cap that would interrupt live work.
+const DefaultIdleTimeout = 30 * time.Minute
 
-// expired is the pure expiry decision, split out so the policy is unit-testable
-// without any timers. hard is checked before idle so a run that is both idle AND
-// past its hard cap reports "hard-ttl" (the stronger reason). A zero idle or
-// hard disables that bound. Returns ("", false) when the run may continue.
-func expired(last, start, now time.Time, idle, hard time.Duration) (reason string, isExpired bool) {
-	if hard > 0 && now.Sub(start) >= hard {
-		return "hard-ttl", true
-	}
-	if idle > 0 && now.Sub(last) >= idle {
-		return "idle", true
-	}
-	return "", false
+// expired is the pure idle decision, split out so the policy is unit-testable
+// without any timers. A zero idle disables expiry entirely.
+func expired(last, now time.Time, idle time.Duration) bool {
+	return idle > 0 && now.Sub(last) >= idle
 }
 
-// deriveCheckInterval picks the expiry poll cadence from the configured bounds:
-// frequent enough to detect expiry promptly (a quarter of the tighter bound),
-// capped at 30s so a 4h TTL doesn't poll only every hour, floored at 1s so a
-// tiny test bound doesn't spin. Only reached when at least one bound is set.
-func deriveCheckInterval(idle, hard time.Duration) time.Duration {
+// deriveCheckInterval picks the expiry poll cadence: a quarter of the idle
+// bound, capped at 30s so the 30m default doesn't poll only every 7 minutes,
+// floored at 1s so a tiny test bound doesn't spin.
+func deriveCheckInterval(idle time.Duration) time.Duration {
 	interval := 30 * time.Second
-	for _, b := range []time.Duration{idle, hard} {
-		if b > 0 && b/4 < interval {
-			interval = b / 4
-		}
+	if idle > 0 && idle/4 < interval {
+		interval = idle / 4
 	}
 	if interval < time.Second {
 		interval = time.Second
@@ -56,43 +37,56 @@ func deriveCheckInterval(idle, hard time.Duration) time.Duration {
 	return interval
 }
 
-// monitor polls the expiry decision until ctx is cancelled or a bound trips. On
-// expiry it fires OnExpire (the caller's revoke + loud message) and then tears
-// the host down so the next in-sandbox GitHub request fails closed. It runs at
-// most once per host (expireOnce), and Close/OnExpire double-firing with the
-// deferred exit-time revoke is harmless (revoke is idempotent/best-effort).
-func (h *Host) monitor(ctx context.Context, idle, hard, interval time.Duration, now func() time.Time, onExpire func(reason string)) {
+// monitor polls the idle decision until ctx is cancelled. On a trip it fires
+// onExpire (the caller's revoke + withdraw-approval + banner) and KEEPS
+// RUNNING: the proxy, the read path and the expose tunnel stay up, so the
+// agent's next write re-declares while everything else continues.
+//
+// Re-arm: a second lock requires ACTIVITY since the last one. Without that
+// gate a wedged agent would re-fire (and re-banner) every idle period forever;
+// with it, "work, then go quiet again" locks again, and a run that stays quiet
+// locks exactly once.
+//
+// Fail closed: if onExpire reports it could NOT withdraw the approval, we fall
+// back to the pre-#190 behavior — tear the host down so the next in-sandbox
+// request fails closed rather than run on with an approval we cannot revoke.
+func (h *Host) monitor(ctx context.Context, idle, interval time.Duration, now func() time.Time, onExpire func() error) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	var lastLock time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			last := time.Unix(0, h.lastActivity.Load())
-			if reason, isExp := expired(last, h.start, now(), idle, hard); isExp {
-				h.expire(reason, onExpire)
+			if !expired(last, now(), idle) {
+				continue
+			}
+			if !lastLock.IsZero() && !last.After(lastLock) {
+				continue // already locked and nothing has happened since
+			}
+			lastLock = now()
+			h.audit.Record(auditExpiredIdle(h.sessionID))
+			if onExpire == nil {
+				continue
+			}
+			if err := onExpire(); err != nil {
+				h.logger.Printf("idle re-attestation could not withdraw the write approval (%v); stopping the proxy instead", err)
+				// Close joins monitorDone — which is THIS goroutine — so mark it
+				// done first or the join self-deadlocks.
+				h.markMonitorDone()
+				_ = h.Close()
 				return
 			}
 		}
 	}
 }
 
-// expire fires the caller's OnExpire (BEFORE teardown, so tokens are revoked
-// while the proxy still holds them) then Closes the host, stopping the proxy.
-// Guarded so it happens exactly once even if a later manual Close races it.
-//
-// It runs on the monitor goroutine, so it marks the monitor done BEFORE calling
-// Close — otherwise Close's <-monitorDone join (which waits for THIS goroutine)
-// would deadlock. The monitor's own deferred markMonitorDone is then a no-op.
-func (h *Host) expire(reason string, onExpire func(reason string)) {
-	h.expireOnce.Do(func() {
-		if onExpire != nil {
-			onExpire(reason)
-		}
-		h.markMonitorDone()
-		_ = h.Close()
-	})
+// auditExpiredIdle is the audit record for one idle re-attestation: no host,
+// no upstream request, no token — only the fact that writes were locked.
+func auditExpiredIdle(sessionID string) proxy.AuditEntry {
+	return proxy.AuditEntry{Session: sessionID, Host: "-", Method: "IDLE", Decision: "expired-idle"}
 }
 
 // markActivity records the current time as the last proxy activity (the idle
