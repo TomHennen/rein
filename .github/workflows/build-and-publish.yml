@@ -30,7 +30,7 @@ jobs:
       attestations: write     # attest writes GitHub-issued SLSA provenance
       actions: read           # Scorecard reads the Actions API; SLSA generator inspects the run
       security-events: write  # scan SARIF -> Security tab
-    uses: TomHennen/wrangle/.github/workflows/build_and_publish_go.yml@v0.4.0 # zizmor: ignore[unpinned-uses] - immutable
+    uses: TomHennen/wrangle/.github/workflows/build_and_publish_go.yml@v0.4.1 # zizmor: ignore[unpinned-uses] - immutable
     with:
       path: '.'
       # Everything else is wrangle's default. rein carried two overrides while
