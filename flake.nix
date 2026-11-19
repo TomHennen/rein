@@ -50,11 +50,12 @@
           # the Go toolchain. Refresh after any go.mod/go.sum change (CLAUDE.md).
           vendorHash = "sha256-mg/0jfgVYgsOrUNtVcycikjx8Ncasnw/NxAu52ytZJQ=";
 
-          # rein init copies rein-git and rein-gh from next to the rein binary.
-          subPackages = [
-            "cmd/rein"
-            "cmd/rein-git"
-            "cmd/rein-gh"
+          # Build and test every package; only these two test-helper commands are
+          # left out, so bin/ holds rein, rein-git and rein-gh (rein init copies
+          # the last two from next to rein).
+          excludedPackages = [
+            "tests/containment/cmd/classify"
+            "tests/interactive/seedghread"
           ];
 
           env.CGO_ENABLED = "0";
@@ -69,13 +70,6 @@
           # rein is Linux-only for now (design 5.4), so darwin builds without it.
           doCheck = pkgs.stdenv.hostPlatform.isLinux;
           nativeCheckInputs = [ pkgs.git ];
-          # subPackages would limit tests to cmd/; test the whole module.
-          checkPhase = ''
-            runHook preCheck
-            export GOFLAGS=''${GOFLAGS//-trimpath/}
-            go test -p $NIX_BUILD_CORES ./...
-            runHook postCheck
-          '';
 
           meta = {
             description = "Local credential broker issuing short-lived, scoped GitHub credentials to AI coding agents";
