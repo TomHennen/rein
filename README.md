@@ -32,8 +32,8 @@ recorded live, and reproducible ([`demo/`](demo/)).*
 **Core:**
 - **Go** — the version in [`go.mod`](go.mod) (currently 1.26.5+). Contributors can
   instead run `nix develop` (see [`flake.nix`](flake.nix)) for the dev toolchain
-  and test deps; Nix is optional, and the sandbox stack below stays host-installed
-  either way.
+  and test deps, plus (on Linux) the pinned `srt` with its node/socat/ripgrep.
+  Nix is optional; `bubblewrap` and `tmux` stay host-installed either way.
 - A **GitHub account** that can create GitHub Apps (any personal account can).
 - One or more **throwaway repositories** to point the agent at. Do not use a
   real repo yet. Clone them over **HTTPS** (`https://github.com/...`) — rein
@@ -46,7 +46,8 @@ recorded live, and reproducible ([`demo/`](demo/)).*
 doctor` checks all of these and tells you exactly what's missing:
 - **`srt`** — pin `@anthropic-ai/sandbox-runtime@0.0.63` (rein re-verifies on
   bump; other versions may move the injection hook). Needs Node 20+:
-  `npm install -g @anthropic-ai/sandbox-runtime@0.0.63`
+  `npm install -g @anthropic-ai/sandbox-runtime@0.0.63` (already provided under
+  `nix develop`, along with its node, `ripgrep` and `socat`)
 - **`bubblewrap`, `ripgrep`, `socat`** — `sudo apt-get install -y bubblewrap ripgrep socat`
   (or your distro's equivalent). The `apply-seccomp` helper that blocks the
   agent from reaching keyring/agent sockets ships with `srt`.
