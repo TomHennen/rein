@@ -85,8 +85,9 @@ go build -o bin/ ./...
    (used to inject on the wire) is generated on first `rein run` and stored the
    same way. **No `REIN_APP_*` environment variables are needed** — rein reads
    `state.json` and fetches the installation id automatically on first use.
-3. **Wire up your shell.** rein installs its git/`gh` shims and puts `rein` on
-   your `PATH` (`~/.local/bin/rein`). The `alias claude='rein run -- claude'`
+3. **Wire up your shell.** rein installs its git/`gh` shims (a persistent copy
+   for manual `PATH` use; `rein run` stages fresh ones on every launch) and puts
+   `rein` on your `PATH` (`~/.local/bin/rein`). The `alias claude='rein run -- claude'`
    convenience is **opt-in** and is **not installed by default**. On a real
    terminal init asks *"Add alias claude='rein run -- claude' to <rc>? [y/N]"*
    (defaulting to **No**); pass `--alias` to install it non-interactively, or

@@ -21,7 +21,8 @@ WHAT THE HELPERS GIVE YOU
                           home get it from ``init_app_env()`` (the real rein-init
                           App, else a synthetic one) so ``rein init`` never routes
                           into the 25-minute manifest flow.
-- ``build_binaries()``  — ``go build -o bin/ ./...`` + ``rein install-shim``.
+- ``build_binaries()``  — ``go build -o bin/ ./...`` + ``rein install-shim`` (keeps doctor's
+  shim-freshness row green; ``rein run`` itself stages fresh shims from ``bin/``).
 - ``unique_branch()``   — a timestamped disposable branch name (throwaway repo).
 - ``ReinRun``           — a pexpect wrapper around ``rein run`` with a captured
                           transcript, prompt matchers, and both-sides sentinels.

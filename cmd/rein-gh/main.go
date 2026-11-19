@@ -17,8 +17,8 @@
 // 403 from GitHub rather than silently using a write-capable token.
 // Cannot exceed the token's permission ceiling either way.
 //
-// Installed at the front of $PATH alongside rein-git by `rein
-// install-shim`.
+// Staged as `gh` at the front of PATH alongside rein-git by `rein run`
+// (and placed persistently by `rein install-shim`).
 package main
 
 import (
@@ -42,6 +42,7 @@ import (
 	"github.com/TomHennen/rein/internal/ghsession"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
+	"github.com/TomHennen/rein/internal/realbin"
 	"github.com/TomHennen/rein/internal/runscope"
 	"github.com/TomHennen/rein/internal/session"
 )
@@ -90,7 +91,7 @@ func main() {
 	}
 	defer closeLog()
 
-	realGh, err := findRealGh(os.Args[0])
+	realGh, err := realbin.Find("gh", "REIN_REAL_GH", os.Args[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rein-gh: %v\n", err)
 		os.Exit(127)
@@ -570,46 +571,6 @@ func exitCodeFromRunErr(err error) int {
 		return ee.ExitCode()
 	}
 	return 127
-}
-
-// findRealGh returns the system `gh` executable, deliberately excluding
-// this shim's directory. REIN_REAL_GH env overrides.
-func findRealGh(shimPath string) (string, error) {
-	if override := os.Getenv("REIN_REAL_GH"); override != "" {
-		if _, err := os.Stat(override); err == nil {
-			return override, nil
-		}
-		return "", fmt.Errorf("REIN_REAL_GH=%q does not exist", override)
-	}
-	shimAbs, err := filepath.Abs(shimPath)
-	if err != nil {
-		shimAbs = shimPath
-	}
-	if resolved, err := filepath.EvalSymlinks(shimAbs); err == nil {
-		shimAbs = resolved
-	}
-	shimDir := filepath.Dir(shimAbs)
-
-	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
-		if dir == "" {
-			continue
-		}
-		abs, err := filepath.Abs(dir)
-		if err != nil {
-			continue
-		}
-		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-			abs = resolved
-		}
-		if abs == shimDir {
-			continue
-		}
-		cand := filepath.Join(dir, "gh")
-		if info, err := os.Stat(cand); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return cand, nil
-		}
-	}
-	return "", errors.New("no gh binary found on PATH (excluding rein-gh's own directory)")
 }
 
 func openLog(stateDir string) (*log.Logger, func(), error) {

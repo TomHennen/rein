@@ -6,17 +6,19 @@
 //
 // What it does:
 //
-//   - Validates that the shim dir (~/.local/state/rein/shim) exists and
-//     contains the git, gh, and rein binaries (placed by install-shim).
-//     Errors out helpfully if not — does NOT auto-install.
+//   - Locates rein-git and rein-gh next to the running rein binary and
+//     fails closed (127) if either is missing.
 //
-//   - Allocates a tempdir + writes a per-process git config there. The
+//   - Allocates a tempdir, stages fresh copies of rein, rein-git (as git)
+//     and rein-gh (as gh) into it, and writes a per-process git config
+//     there. Fresh per launch, so an upgraded rein never runs behind a
+//     stale persistent shim. The
 //     config `include.path = ~/.gitconfig` so the user's preferences
 //     (aliases, editor, signing config) layer in; rein's
 //     credential.https://github.com.helper and useHttpPath override.
 //
 //   - Sets the child's env so it sees:
-//       PATH=<shim-dir>:<inherited PATH>     (intercepts git/gh)
+//       PATH=<tempdir>:<inherited PATH>      (intercepts git/gh)
 //       GIT_CONFIG_GLOBAL=<tempdir>/gitconfig (rein's overrides)
 //       GIT_CONFIG_SYSTEM=/dev/null           (no system /etc/gitconfig)
 //     REIN_* env vars are inherited as-is (App auth, test repo).
@@ -25,7 +27,8 @@
 //     reaches both rein and the child naturally. SIGTERM to rein is
 //     forwarded to the child explicitly via a relay goroutine.
 //
-//   - Cleans the tempdir on exit (deferred + signal-handled).
+//   - Cleans the tempdir on exit and on forwarded SIGTERM; a dir left by
+//     Ctrl-C/SIGKILL is swept by a later launch.
 //
 // What you should NOT expect:
 //
@@ -66,6 +69,7 @@ import (
 	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
+	"github.com/TomHennen/rein/internal/realbin"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/tokencache"
 )
@@ -95,11 +99,13 @@ func runWrapped(argv []string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	shimDir := filepath.Join(stateDir, "shim")
-	for _, name := range []string{"git", "gh", "rein"} {
-		if _, err := os.Stat(filepath.Join(shimDir, name)); err != nil {
-			return 127, fmt.Errorf("shim binary %s/%s not found — run 'rein install-shim' first", shimDir, name)
-		}
+	self, err := resolveSelf()
+	if err != nil {
+		return 1, err
+	}
+	shimSrcs, err := locateShimSources(self)
+	if err != nil {
+		return 127, err
 	}
 
 	// Best-effort sweep of orphaned per-run approval/run-context files
@@ -113,6 +119,8 @@ func runWrapped(argv []string) (int, error) {
 	// Migration: silently remove any pre-upgrade global approval.json.
 	// Nothing reads it anymore (approvals are per-run now).
 	_ = os.Remove(filepath.Join(stateDir, "approval.json"))
+	// Same backstop for the per-run shim dirs of killed direct runs.
+	sweepStaleRunDirs(os.TempDir(), runDirSweepMinAge, time.Now())
 
 	// Validate session — same loader used elsewhere, so the same
 	// REIN_SESSION_FILE override and env-fallback rules apply.
@@ -155,8 +163,8 @@ func runWrapped(argv []string) (int, error) {
 		return 1, err
 	}
 
-	// Allocate tempdir for the per-process git config.
-	tempDir, err := os.MkdirTemp("", "rein-run-*")
+	// Allocate tempdir for the per-process git config and staged shims.
+	tempDir, err := os.MkdirTemp("", runDirPrefix+"*")
 	if err != nil {
 		return 1, fmt.Errorf("create temp dir: %w", err)
 	}
@@ -164,10 +172,29 @@ func runWrapped(argv []string) (int, error) {
 		os.RemoveAll(tempDir)
 		return 1, err
 	}
-	// Deferred cleanup is the happy path. Signal handler below also
-	// cleans up on early termination.
+	// Removed on normal exit and forwarded SIGTERM (cmd.Wait returns, defers
+	// run); Ctrl-C/SIGKILL skip it and a later launch's sweep reaps it. A
+	// grandchild that outlives the child loses its shims and gitconfig here:
+	// its git then runs unshimmed with no rein credential helper (no token),
+	// and its gh resolves to the real gh.
 	defer os.RemoveAll(tempDir)
+	// Held for the run's lifetime and inherited by the child (fd 3), so the
+	// sweep never reaps a dir while rein or anything it launched is alive.
+	runLock, err := lockRunDir(tempDir)
+	if err != nil {
+		return 1, fmt.Errorf("lock run dir: %w", err)
+	}
+	if runLock != nil {
+		defer runLock.Close()
+	}
 
+	shimDir := tempDir
+	if err := placeShims(shimSrcs, shimDir); err != nil {
+		return 1, fmt.Errorf("stage shims: %w", err)
+	}
+	if err := probeShims(shimDir); err != nil {
+		return 1, err
+	}
 	gitConfigPath := filepath.Join(tempDir, "gitconfig")
 	reinBin := filepath.Join(shimDir, "rein")
 	if err := writeRunGitConfig(gitConfigPath, reinBin); err != nil {
@@ -197,6 +224,11 @@ func runWrapped(argv []string) (int, error) {
 	// Build the wrapped child's env.
 	env := os.Environ()
 	env = setEnv(env, "PATH", shimDir+":"+os.Getenv("PATH"))
+	shimDirs, err := realbin.AppendShimDir(os.Getenv(realbin.EnvShimDirs), realbin.Canonical(shimDir))
+	if err != nil {
+		return 1, err
+	}
+	env = setEnv(env, realbin.EnvShimDirs, shimDirs)
 	env = setEnv(env, "GIT_CONFIG_GLOBAL", gitConfigPath)
 	env = setEnv(env, "GIT_CONFIG_SYSTEM", "/dev/null")
 	// Per-run approval scoping: the child's credential helper and rein-gh
@@ -225,6 +257,9 @@ func runWrapped(argv []string) (int, error) {
 
 	cmd := exec.Command(cmdline[0], cmdline[1:]...)
 	cmd.Env = env
+	if runLock != nil {
+		cmd.ExtraFiles = []*os.File{runLock}
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
