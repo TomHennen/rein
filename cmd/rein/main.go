@@ -26,7 +26,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
@@ -1157,18 +1156,13 @@ func installShimFiles() (shimDir string, installed []string, err error) {
 	if err != nil {
 		return "", nil, err
 	}
-	selfDir := filepath.Dir(self)
 
 	// rein itself rides along so adding the shim dir to PATH gives you
 	// `rein` (e.g. `rein approval grant` from a fresh terminal), and so that
 	// rein can stage a run from here (its siblings are rein-git/rein-gh).
-	srcs := map[string]string{"rein": self}
-	for _, name := range shimSources[1:] {
-		src, err := locateBinary(name, selfDir)
-		if err != nil {
-			return "", nil, err
-		}
-		srcs[name] = src
+	srcs, err := locateShimSources(self)
+	if err != nil {
+		return "", nil, err
 	}
 	if err := placeShims(srcs, shimDir); err != nil {
 		return "", nil, fmt.Errorf("install shims: %w", err)
@@ -1199,17 +1193,6 @@ func printShimActivationHelp(shimDir string) {
 	fmt.Println("`rein run` does not use this dir: it stages fresh shims and sets PATH +")
 	fmt.Println("git config per wrapped process. This dir is for manual activation only;")
 	fmt.Println("re-run `rein install-shim` after upgrading rein (`rein doctor` checks it).")
-}
-
-func locateBinary(name, selfDir string) (string, error) {
-	candidate := filepath.Join(selfDir, name)
-	if _, err := os.Stat(candidate); err == nil {
-		return candidate, nil
-	}
-	if p, err := exec.LookPath(name); err == nil {
-		return p, nil
-	}
-	return "", fmt.Errorf("%s binary not found next to %s or on PATH; build it first (go build -o bin/%s ./cmd/%s)", name, filepath.Join(selfDir, "rein"), name, name)
 }
 
 func copyFile(src, dst string, mode os.FileMode) error {

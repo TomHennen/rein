@@ -794,8 +794,10 @@ func runSandboxed(cmdline []string) (int, error) {
 	// `git push -u` resolves to it (strip -u + record intent, #102/#119). Bound
 	// checkouts only. Fail-open: unshimmed just means the old harmless EBUSY.
 	if upstreamIntentFile != "" {
-		if src, err := locateBinary("rein-git", filepath.Dir(self)); err != nil {
-			logger.Printf("git upstream: rein-git shim not found (%v); -u pushes will show the harmless .git/config EBUSY", err)
+		// Sibling only: a rein-git found on PATH may be a different version.
+		src := filepath.Join(filepath.Dir(self), "rein-git")
+		if _, err := os.Stat(src); err != nil {
+			logger.Printf("git upstream: rein-git shim not found next to %s (%v); -u pushes will show the harmless .git/config EBUSY", self, err)
 		} else if err := copyFile(src, filepath.Join(runTmp, "git"), 0o700); err != nil {
 			logger.Printf("git upstream: staging rein-git shim failed (%v); continuing unshimmed", err)
 		}
