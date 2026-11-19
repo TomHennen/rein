@@ -49,7 +49,7 @@ doctor` checks all of these and tells you exactly what's missing:
   `npm install -g @anthropic-ai/sandbox-runtime@0.0.63` (already provided under
   `nix develop`, along with its node, `ripgrep` and `socat`)
 - **`bubblewrap`, `ripgrep`, `socat`** — `sudo apt-get install -y bubblewrap ripgrep socat`
-  (or your distro's equivalent). The `apply-seccomp` helper that blocks the
+  (or your distro's equivalent; under `nix develop` only `bubblewrap` is needed). The `apply-seccomp` helper that blocks the
   agent from reaching keyring/agent sockets ships with `srt`.
 - **Ubuntu 24.04+ only:** an AppArmor profile granting `userns` to `bwrap`, or
   the sandbox won't start. Check with

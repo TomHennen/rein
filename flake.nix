@@ -19,11 +19,16 @@
 
       # srt is Linux-only here: rein's sandboxed mode is Linux-only today.
       srtFor = pkgs: pkgs.callPackage ./nix/sandbox-runtime { };
-      pinnedSrtVersion = lib.head (
-        builtins.match ''.*const PinnedVersion = "([^"]+)".*'' (
-          builtins.readFile ./internal/srt/preflight.go
-        )
-      );
+      pinnedSrtVersion =
+        let
+          m = builtins.match ''.*const PinnedVersion = "([^"]+)".*'' (
+            builtins.readFile ./internal/srt/preflight.go
+          );
+        in
+        if m == null then
+          throw "flake.nix: PinnedVersion not found in internal/srt/preflight.go"
+        else
+          lib.head m;
     in
     {
       packages = forSystems linuxSystems (pkgs: {

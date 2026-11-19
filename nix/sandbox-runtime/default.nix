@@ -31,6 +31,7 @@ importNpmLock.buildNodeModules {
     inherit version;
     nativeBuildInputs = [ makeWrapper ];
     # npmConfigHook runs `npm rebuild` after install; no dep needs a script.
+    # Only the first element reaches the hook, so keep this to one flag.
     npmFlags = [ "--ignore-scripts" ];
     # apply-seccomp is a stripped static ELF: leave its bytes as published.
     dontStrip = true;
