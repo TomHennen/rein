@@ -40,6 +40,18 @@
         ];
       };
 
+      # One formatter for `nix fmt` and the fmt check: nixfmt for *.nix, gofmt for *.go.
+      treefmtFor =
+        pkgs:
+        pkgs.nixfmt-tree.override {
+          runtimeInputs = [ pkgs.go_1_26 ];
+          settings.formatter.gofmt = {
+            command = "gofmt";
+            options = [ "-w" ];
+            includes = [ "*.go" ];
+          };
+        };
+
       mkRein =
         pkgs:
         pkgs.buildGo126Module {
@@ -97,29 +109,12 @@
         pkgs:
         {
           rein = self.packages.${pkgs.stdenv.hostPlatform.system}.rein;
-          fmt =
-            pkgs.runCommand "rein-fmt-check"
-              {
-                nativeBuildInputs = [
-                  pkgs.go_1_26
-                  pkgs.nixfmt
-                ];
-                src = lib.fileset.toSource {
-                  root = ./.;
-                  fileset = lib.fileset.fileFilter (f: f.hasExt "go" || f.hasExt "nix") ./.;
-                };
-              }
-              ''
-                cd "$src"
-                find . -name '*.nix' -exec nixfmt --check {} +
-                unformatted=$(gofmt -l .)
-                if [ -n "$unformatted" ]; then
-                  echo "gofmt -l reports unformatted files:" >&2
-                  echo "$unformatted" >&2
-                  exit 1
-                fi
-                touch "$out"
-              '';
+          fmt = (treefmtFor pkgs).check (
+            lib.fileset.toSource {
+              root = ./.;
+              fileset = lib.fileset.fileFilter (f: f.hasExt "go" || f.hasExt "nix") ./.;
+            }
+          );
         }
         # The built srt runs and still carries its seccomp helper. Its version is
         # held to rein's PinnedVersion by a Go test (internal/srt/nixpin_test.go).
@@ -157,6 +152,6 @@
         };
       });
 
-      formatter = forAllSystems (pkgs: pkgs.nixfmt-tree);
+      formatter = forAllSystems treefmtFor;
     };
 }

@@ -53,7 +53,7 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 - The GitHub App private key is at `$REIN_APP_PRIVATE_KEY_PATH` (`~/.config/rein-credentials/app.pem`).
 - Secure Enclave is not available on Linux. Phase 0/1 use the `internal/keystore` file backend. Phase 1's hardware-backed work would require TPM2 (if this VM has one) or shift to a Mac host.
 - srt sandbox is out of scope for Phase 0.
-- run `gofmt -w .` before all commits.
+- run `gofmt -w .` before all commits (`nix fmt` does this and formats the `.nix` files too).
 - `flake.nix` also packages rein (`nix build`; an optional install route, never required). Its `vendorHash` covers the vendored dependency tree: after any `go.mod`/`go.sum` change or first import of another package from a dependency (Dependabot gomod PRs included; the nix workflow fails until it is updated) set it to `lib.fakeHash`, run `nix build`, and paste the `got:` hash. `flake.lock` pins the Go toolchain linked into Nix builds and nothing bumps it automatically (Dependabot does not cover it): refresh with `nix flake update nixpkgs` in its own PR at least monthly and on every Go security release, and move the `nixos-YY.MM` ref within a month of each NixOS release.
 
 ## CI/CD
