@@ -100,13 +100,13 @@ nix run github:TomHennen/rein -- --help  # try it without installing
 nix build github:TomHennen/rein          # or `nix build` in a checkout; binaries in ./result/bin
 ```
 
-The Nix package contains only rein's own binaries. It does not bundle or wrap
-the sandbox stack (`srt`, `bwrap`, `socat`, `ripgrep`, Node): those stay
-host-installed and version-pinned as described above. On Linux the flake
-also offers the pinned `srt` (with its own node, `socat` and `ripgrep`) as a
-separate package, `nix profile add github:TomHennen/rein#sandbox-runtime`;
-`bubblewrap` must still come from the host. Two caveats with how
-`rein init` currently behaves under Nix:
+On Linux this installs rein together with the pinned `srt` 0.0.63, which
+carries its own Node, `socat` and `ripgrep`, so of the sandbox stack only
+**`bubblewrap`** is left for you to install on the host (plus its AppArmor
+profile on Ubuntu 24.04+; a Nix-store `bwrap` would not match that profile).
+`nix run` does not put `srt` on your `PATH`, so use it for a look, not for
+sandboxed runs. `github:TomHennen/rein#rein` is rein alone, if you manage `srt`
+yourself. Two caveats with how `rein init` currently behaves under Nix:
 
 - **Re-run `rein init` after every upgrade.** init *copies* `rein`, `rein-git`
   and `rein-gh` into its shim dir, and `rein run --direct` (plus anything you

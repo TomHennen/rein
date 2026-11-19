@@ -102,7 +102,20 @@
           inherit rein;
           default = rein;
         }
-        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux { sandbox-runtime = srtFor pkgs; }
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux rec {
+          sandbox-runtime = srtFor pkgs;
+          # What `nix profile add` installs on Linux: rein plus the pinned srt (which
+          # carries its own node/socat/rg). bwrap is not included (HANDOFF.md 1b).
+          default = pkgs.buildEnv {
+            name = "rein-with-srt-${version}";
+            paths = [
+              rein
+              sandbox-runtime
+            ];
+            pathsToLink = [ "/bin" ];
+            meta = rein.meta;
+          };
+        }
       );
 
       checks = forAllSystems (
