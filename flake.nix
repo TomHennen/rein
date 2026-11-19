@@ -13,7 +13,23 @@
         "aarch64-linux"
         "aarch64-darwin"
       ];
-      forAllSystems = f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      linuxSystems = lib.filter (lib.hasSuffix "-linux") systems;
+      forSystems = ss: f: lib.genAttrs ss (system: f nixpkgs.legacyPackages.${system});
+      forAllSystems = forSystems systems;
+
+      # srt is Linux-only here: rein's sandboxed mode is Linux-only today.
+      srtFor = pkgs: pkgs.callPackage ./nix/sandbox-runtime { };
+      pinnedSrtVersion =
+        let
+          m = builtins.match ''.*const PinnedVersion = "([^"]+)".*'' (
+            builtins.readFile ./internal/srt/preflight.go
+          );
+        in
+        if m == null then
+          throw "flake.nix: PinnedVersion not found in internal/srt/preflight.go"
+        else
+          lib.head m;
+      seccompArch = pkgs: if pkgs.stdenv.hostPlatform.isAarch64 then "arm64" else "x64";
 
       # Date, not rev: commits on the same day share a store path.
       d = self.lastModifiedDate;
@@ -75,37 +91,61 @@
         };
     in
     {
-      packages = forAllSystems (pkgs: rec {
-        rein = mkRein pkgs;
-        default = rein;
-      });
+      packages = forAllSystems (
+        pkgs:
+        let
+          rein = mkRein pkgs;
+        in
+        {
+          inherit rein;
+          default = rein;
+        }
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux { sandbox-runtime = srtFor pkgs; }
+      );
 
-      checks = forAllSystems (pkgs: {
-        rein = self.packages.${pkgs.stdenv.hostPlatform.system}.rein;
-        fmt =
-          pkgs.runCommand "rein-fmt-check"
-            {
-              nativeBuildInputs = [
-                pkgs.go_1_26
-                pkgs.nixfmt
-              ];
-              src = lib.fileset.toSource {
-                root = ./.;
-                fileset = lib.fileset.fileFilter (f: f.hasExt "go" || f.hasExt "nix") ./.;
-              };
-            }
-            ''
-              cd "$src"
-              find . -name '*.nix' -exec nixfmt --check {} +
-              unformatted=$(gofmt -l .)
-              if [ -n "$unformatted" ]; then
-                echo "gofmt -l reports unformatted files:" >&2
-                echo "$unformatted" >&2
-                exit 1
-              fi
-              touch "$out"
-            '';
-      });
+      checks = forAllSystems (
+        pkgs:
+        {
+          rein = self.packages.${pkgs.stdenv.hostPlatform.system}.rein;
+          fmt =
+            pkgs.runCommand "rein-fmt-check"
+              {
+                nativeBuildInputs = [
+                  pkgs.go_1_26
+                  pkgs.nixfmt
+                ];
+                src = lib.fileset.toSource {
+                  root = ./.;
+                  fileset = lib.fileset.fileFilter (f: f.hasExt "go" || f.hasExt "nix") ./.;
+                };
+              }
+              ''
+                cd "$src"
+                find . -name '*.nix' -exec nixfmt --check {} +
+                unformatted=$(gofmt -l .)
+                if [ -n "$unformatted" ]; then
+                  echo "gofmt -l reports unformatted files:" >&2
+                  echo "$unformatted" >&2
+                  exit 1
+                fi
+                touch "$out"
+              '';
+        }
+        # Fails if the Nix srt drifts from rein's PinnedVersion or loses seccomp.
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          srt-pin = pkgs.runCommand "srt-pin-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
+            pkg=$(dirname "$(dirname "$(readlink -f ${srtFor pkgs}/bin/srt)")")
+            v=$(jq -r .version "$pkg/package.json")
+            if [ "$v" != "${pinnedSrtVersion}" ]; then
+              echo "nix srt is $v, internal/srt PinnedVersion is ${pinnedSrtVersion}" >&2
+              exit 1
+            fi
+            test -x "$pkg/vendor/seccomp/${seccompArch pkgs}/apply-seccomp"
+            ${srtFor pkgs}/bin/srt --help > /dev/null
+            touch $out
+          '';
+        }
+      );
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
@@ -121,10 +161,12 @@
               ps.pexpect
               ps.pyte
             ]))
-          ];
-          # The sandbox stack (bwrap, srt and its node/socat/rg) and tmux stay
-          # host-provided: srt resolves them by PATH, and a store copy would swap
-          # out the hand-verified stack (and miss the AppArmor profile, HANDOFF.md 1b).
+          ]
+          # srt carries its own node/socat/rg on its wrapper PATH. bwrap and tmux
+          # stay host-provided: the AppArmor userns profile is keyed to
+          # /usr/bin/bwrap (HANDOFF.md 1b), and the approval popup talks to the
+          # user's running tmux server.
+          ++ lib.optional pkgs.stdenv.hostPlatform.isLinux (srtFor pkgs);
           GOTOOLCHAIN = "local";
         };
       });

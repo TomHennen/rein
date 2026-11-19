@@ -33,8 +33,8 @@ recorded live, and reproducible ([`demo/`](demo/)).*
 - **Go** — the version in [`go.mod`](go.mod) (currently 1.26.5+), unless you
   install with Nix (see [Install](#install)). Contributors can instead run
   `nix develop` (see [`flake.nix`](flake.nix)) for the dev toolchain and test
-  deps; Nix is optional, and the sandbox stack below stays host-installed either
-  way.
+  deps, plus (on Linux) the pinned `srt` with its node/socat/ripgrep. Nix is
+  optional; `bubblewrap` and `tmux` stay host-installed either way.
 - A **GitHub account** that can create GitHub Apps (any personal account can).
 - One or more **throwaway repositories** to point the agent at. Do not use a
   real repo yet. Clone them over **HTTPS** (`https://github.com/...`) — rein
@@ -47,9 +47,10 @@ recorded live, and reproducible ([`demo/`](demo/)).*
 doctor` checks all of these and tells you exactly what's missing:
 - **`srt`** — pin `@anthropic-ai/sandbox-runtime@0.0.63` (rein re-verifies on
   bump; other versions may move the injection hook). Needs Node 20+:
-  `npm install -g @anthropic-ai/sandbox-runtime@0.0.63`
+  `npm install -g @anthropic-ai/sandbox-runtime@0.0.63` (already provided under
+  `nix develop`, along with its node, `ripgrep` and `socat`)
 - **`bubblewrap`, `ripgrep`, `socat`** — `sudo apt-get install -y bubblewrap ripgrep socat`
-  (or your distro's equivalent). The `apply-seccomp` helper that blocks the
+  (or your distro's equivalent; under `nix develop` only `bubblewrap` is needed). The `apply-seccomp` helper that blocks the
   agent from reaching keyring/agent sockets ships with `srt`.
 - **Ubuntu 24.04+ only:** an AppArmor profile granting `userns` to `bwrap`, or
   the sandbox won't start. Check with
@@ -101,7 +102,10 @@ nix build github:TomHennen/rein          # or `nix build` in a checkout; binarie
 
 The Nix package contains only rein's own binaries. It does not bundle or wrap
 the sandbox stack (`srt`, `bwrap`, `socat`, `ripgrep`, Node): those stay
-host-installed and version-pinned as described above. Two caveats with how
+host-installed and version-pinned as described above. On Linux the flake
+also offers the pinned `srt` (with its own node, `socat` and `ripgrep`) as a
+separate package, `nix profile add github:TomHennen/rein#sandbox-runtime`;
+`bubblewrap` must still come from the host. Two caveats with how
 `rein init` currently behaves under Nix:
 
 - **Re-run `rein init` after every upgrade.** init *copies* `rein`, `rein-git`
