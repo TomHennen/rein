@@ -1142,11 +1142,13 @@ func installShim() error {
 // init's other steps) while standalone `rein install-shim` keeps its
 // full operator-friendly explanation.
 func installShimFiles() (shimDir string, installed []string, err error) {
-	stateDir, err := config.StateDir()
+	if _, err := config.StateDir(); err != nil {
+		return "", nil, err
+	}
+	shimDir, err = config.ShimDir()
 	if err != nil {
 		return "", nil, err
 	}
-	shimDir = filepath.Join(stateDir, "shim")
 	if err := os.MkdirAll(shimDir, 0o700); err != nil {
 		return "", nil, fmt.Errorf("create shim dir: %w", err)
 	}
@@ -1201,7 +1203,9 @@ func printShimActivationHelp(shimDir string) {
 	fmt.Println("will defer to the token's server-side scope check (still safe; less")
 	fmt.Println("informative when an out-of-scope request is refused).")
 	fmt.Println()
-	fmt.Println("CP6's `rein run` wrapper will set PATH + git config per-wrapped-process.")
+	fmt.Println("`rein run` does not use this dir: it stages fresh shims and sets PATH +")
+	fmt.Println("git config per wrapped process. This dir is for manual activation only;")
+	fmt.Println("re-run `rein install-shim` after upgrading rein (`rein doctor` checks it).")
 }
 
 func locateBinary(name, selfDir string) (string, error) {

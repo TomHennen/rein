@@ -19,9 +19,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -219,56 +221,86 @@ func checkReinOnPath() checkResult {
 	return checkResult{"rein on PATH", statusOK, found}
 }
 
-// checkShimFreshness compares each shim binary's mtime to the source
-// binary it was copied from. Stale shims happen when the developer
-// rebuilds the rein source but forgets to re-run `rein install-shim`
-// (or `rein init`) — the wrapped agent then runs the old shim.
-//
-// Missing source binaries (e.g. user installed globally without keeping
-// a build tree) yields a warn — we can't verify freshness, but the
-// shim itself is present.
+// checkShimFreshness compares each persistent shim (installed by `rein
+// install-shim` / `rein init`) byte-for-byte against the binary it was copied
+// from. Content, not mtime: Nix store paths all carry the epoch mtime, and a
+// copy's mtime says nothing about which build it came from. `rein run` stages
+// its own fresh copies per launch, so a stale or missing persistent shim only
+// affects a shell that put the shim dir on PATH by hand.
 func checkShimFreshness() checkResult {
-	stateDir, err := config.StateDir()
+	shimDir, err := config.ShimDir()
 	if err != nil {
 		return checkResult{"shim freshness", statusFail, fmt.Sprintf("state dir: %v", err)}
 	}
-	shimDir := filepath.Join(stateDir, "shim")
 	self, err := resolveSelf()
 	if err != nil {
 		return checkResult{"shim freshness", statusFail, fmt.Sprintf("cannot locate self: %v", err)}
 	}
-	selfDir := filepath.Dir(self)
+	return shimFreshness(shimDir, self)
+}
 
-	// (source-binary, installed-shim-name).
-	pairs := []struct{ src, shim string }{
-		{"rein", "rein"},
-		{"rein-git", "git"},
-		{"rein-gh", "gh"},
-	}
+const shimScopeNote = "only matters if you put the shim dir on PATH yourself; `rein run` stages fresh copies"
+
+func shimFreshness(shimDir, self string) checkResult {
 	var stale []string
 	var noSrc bool
-	for _, p := range pairs {
-		shimPath := filepath.Join(shimDir, p.shim)
-		shimStat, err := os.Stat(shimPath)
-		if err != nil {
-			return checkResult{"shim freshness", statusFail, fmt.Sprintf("shim %s missing; run `rein install-shim`", shimPath)}
+	for _, p := range directShims {
+		shimPath := filepath.Join(shimDir, p.dst)
+		if _, err := os.Stat(shimPath); err != nil {
+			return checkResult{"shim freshness", statusWarn, fmt.Sprintf("shim %s missing (%s); run `rein install-shim`", shimPath, shimScopeNote)}
 		}
-		srcStat, err := os.Stat(filepath.Join(selfDir, p.src))
-		if err != nil {
+		src := self
+		if p.src != "rein" {
+			src = filepath.Join(filepath.Dir(self), p.src)
+		}
+		if _, err := os.Stat(src); err != nil {
 			noSrc = true
 			continue
 		}
-		if shimStat.ModTime().Before(srcStat.ModTime()) {
-			stale = append(stale, p.shim)
+		same, err := sameContent(shimPath, src)
+		if err != nil {
+			return checkResult{"shim freshness", statusWarn, fmt.Sprintf("compare %s: %v", shimPath, err)}
+		}
+		if !same {
+			stale = append(stale, p.dst)
 		}
 	}
 	if len(stale) > 0 {
-		return checkResult{"shim freshness", statusWarn, fmt.Sprintf("shims %v older than source; re-run `rein install-shim`", stale)}
+		return checkResult{"shim freshness", statusWarn, fmt.Sprintf("shims %v under %s differ from the running rein's binaries (%s); re-run `rein install-shim`", stale, shimDir, shimScopeNote)}
 	}
 	if noSrc {
 		return checkResult{"shim freshness", statusWarn, fmt.Sprintf("source binaries not next to %s; can't verify freshness", self)}
 	}
-	return checkResult{"shim freshness", statusOK, fmt.Sprintf("3 shims under %s up to date", shimDir)}
+	return checkResult{"shim freshness", statusOK, fmt.Sprintf("%d shims under %s up to date", len(directShims), shimDir)}
+}
+
+// sameContent reports whether two files have identical bytes.
+func sameContent(a, b string) (bool, error) {
+	ha, na, err := fileDigest(a)
+	if err != nil {
+		return false, err
+	}
+	hb, nb, err := fileDigest(b)
+	if err != nil {
+		return false, err
+	}
+	return na == nb && ha == hb, nil
+}
+
+func fileDigest(path string) ([sha256.Size]byte, int64, error) {
+	var sum [sha256.Size]byte
+	f, err := os.Open(path)
+	if err != nil {
+		return sum, 0, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := io.Copy(h, f)
+	if err != nil {
+		return sum, 0, err
+	}
+	copy(sum[:], h.Sum(nil))
+	return sum, n, nil
 }
 
 // checkAppKeyReadable verifies REIN_APP_PRIVATE_KEY_PATH points at a

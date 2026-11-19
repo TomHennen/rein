@@ -6,17 +6,19 @@
 //
 // What it does:
 //
-//   - Validates that the shim dir (~/.local/state/rein/shim) exists and
-//     contains the git, gh, and rein binaries (placed by install-shim).
-//     Errors out helpfully if not — does NOT auto-install.
+//   - Locates rein-git and rein-gh next to the running rein binary and
+//     fails closed (127) if either is missing.
 //
-//   - Allocates a tempdir + writes a per-process git config there. The
+//   - Allocates a tempdir, stages fresh copies of rein, rein-git (as git)
+//     and rein-gh (as gh) into it, and writes a per-process git config
+//     there. Fresh per launch, so an upgraded rein never runs behind a
+//     stale persistent shim. The
 //     config `include.path = ~/.gitconfig` so the user's preferences
 //     (aliases, editor, signing config) layer in; rein's
 //     credential.https://github.com.helper and useHttpPath override.
 //
 //   - Sets the child's env so it sees:
-//       PATH=<shim-dir>:<inherited PATH>     (intercepts git/gh)
+//       PATH=<tempdir>:<inherited PATH>      (intercepts git/gh)
 //       GIT_CONFIG_GLOBAL=<tempdir>/gitconfig (rein's overrides)
 //       GIT_CONFIG_SYSTEM=/dev/null           (no system /etc/gitconfig)
 //     REIN_* env vars are inherited as-is (App auth, test repo).
@@ -95,11 +97,13 @@ func runWrapped(argv []string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	shimDir := filepath.Join(stateDir, "shim")
-	for _, name := range []string{"git", "gh", "rein"} {
-		if _, err := os.Stat(filepath.Join(shimDir, name)); err != nil {
-			return 127, fmt.Errorf("shim binary %s/%s not found — run 'rein install-shim' first", shimDir, name)
-		}
+	self, err := resolveSelf()
+	if err != nil {
+		return 1, err
+	}
+	shimSrcs, err := locateDirectShims(self)
+	if err != nil {
+		return 127, err
 	}
 
 	// Best-effort sweep of orphaned per-run approval/run-context files
@@ -155,7 +159,7 @@ func runWrapped(argv []string) (int, error) {
 		return 1, err
 	}
 
-	// Allocate tempdir for the per-process git config.
+	// Allocate tempdir for the per-process git config and staged shims.
 	tempDir, err := os.MkdirTemp("", "rein-run-*")
 	if err != nil {
 		return 1, fmt.Errorf("create temp dir: %w", err)
@@ -168,6 +172,10 @@ func runWrapped(argv []string) (int, error) {
 	// cleans up on early termination.
 	defer os.RemoveAll(tempDir)
 
+	shimDir := tempDir
+	if err := stageDirectShims(shimSrcs, shimDir); err != nil {
+		return 1, err
+	}
 	gitConfigPath := filepath.Join(tempDir, "gitconfig")
 	reinBin := filepath.Join(shimDir, "rein")
 	if err := writeRunGitConfig(gitConfigPath, reinBin); err != nil {
@@ -672,6 +680,49 @@ func parseRunArgs(argv []string) ([]string, error) {
 		return nil, fmt.Errorf("usage: rein run -- <cmd> [args...] (no command supplied)")
 	}
 	return argv[1:], nil
+}
+
+// directShims maps each binary `rein run --direct` stages (source name, next
+// to the running rein) to its name on the wrapped process's PATH.
+var directShims = []struct{ src, dst string }{
+	{"rein", "rein"},
+	{"rein-git", "git"},
+	{"rein-gh", "gh"},
+}
+
+// locateDirectShims resolves each directShims source as a sibling of self (the
+// resolved running binary; "rein" is self itself). Siblings only, no PATH
+// fallback: a rein-git found elsewhere may be a different version, which is
+// the staleness this staging exists to remove.
+func locateDirectShims(self string) (map[string]string, error) {
+	srcs := map[string]string{"rein": self}
+	for _, s := range directShims {
+		if s.src == "rein" {
+			continue
+		}
+		p := filepath.Join(filepath.Dir(self), s.src)
+		info, err := os.Stat(p)
+		if err != nil || info.IsDir() {
+			return nil, fmt.Errorf("%s binary not found next to %s; rein, rein-git and rein-gh must be installed side by side (go build -o bin/ ./...)", s.src, self)
+		}
+		srcs[s.src] = p
+	}
+	return srcs, nil
+}
+
+// stageDirectShims copies the located sources into dir under their PATH names
+// (mode 0700). Any failure aborts the launch: never run the agent unshimmed.
+func stageDirectShims(srcs map[string]string, dir string) error {
+	for _, s := range directShims {
+		src, ok := srcs[s.src]
+		if !ok {
+			return fmt.Errorf("stage %s: source not located", s.dst)
+		}
+		if err := copyFile(src, filepath.Join(dir, s.dst), 0o700); err != nil {
+			return fmt.Errorf("stage %s shim: %w", s.dst, err)
+		}
+	}
+	return nil
 }
 
 // writeRunGitConfig writes the per-process git config to path.
