@@ -39,12 +39,13 @@ except this repo.
 Arch note: the origin machine is **aarch64** (Apple VZ guest). Commands
 below are arch-agnostic except where noted.
 
-**Dev toolchain (recommended): `nix develop`** (or direnv: `direnv allow`). The
-flake provides Go (with `GOTOOLCHAIN=local`), gopls, goreleaser, python3 +
-pexpect + pyte, tmux, socat, ripgrep, node, git and gh. Nix is optional: the
-apt/host steps below remain valid. It does NOT provide `bwrap` or `srt` — install
-those on the host per 1a/1b either way (a nix-store `bwrap` would not match the
-path-keyed AppArmor profile in 1b).
+**Dev toolchain (recommended): `nix develop`.** The flake provides Go (with
+`GOTOOLCHAIN=local`), gopls, goreleaser, python3 + pexpect + pyte, git and gh.
+Nix is optional: the apt/host steps below remain valid. It does NOT provide the
+sandbox stack (`bwrap`, `srt`, node, `socat`, `ripgrep`) or `tmux` — install
+those on the host per 1a/1b either way, so srt keeps running on the stack it was
+verified against (and a nix-store `bwrap` would not match the path-keyed
+AppArmor profile in 1b).
 
 ### 1a. System deps for `srt`
 

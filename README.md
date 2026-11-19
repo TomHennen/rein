@@ -30,7 +30,7 @@ recorded live, and reproducible ([`demo/`](demo/)).*
 ## Prerequisites
 
 **Core:**
-- **Go** — the version in [`go.mod`](go.mod) (currently 1.26+). Contributors can
+- **Go** — the version in [`go.mod`](go.mod) (currently 1.26.5+). Contributors can
   instead run `nix develop` (see [`flake.nix`](flake.nix)) for the dev toolchain
   and test deps; Nix is optional, and the sandbox stack below stays host-installed
   either way.
@@ -418,7 +418,7 @@ Three layers, from hermetic to live:
   a real-agent (`claude`) end-to-end run. Prereqs: a machine set up via
   `rein init` (the suite resolves your App from `state.json` and its throwaway
   from the dev-session), the sandbox stack, host `gh` authed, and `python3` +
-  `pexpect` (all but the sandbox stack come with `nix develop`). See
+  `pexpect` (`nix develop` provides the Python deps and `gh`). See
   [`tests/interactive/README.md`](tests/interactive/README.md).
 
   ```bash

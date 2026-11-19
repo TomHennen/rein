@@ -10,7 +10,6 @@
       systems = [
         "x86_64-linux"
         "aarch64-linux"
-        "x86_64-darwin"
         "aarch64-darwin"
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
@@ -25,18 +24,15 @@
             pkgs.goreleaser
             pkgs.git
             pkgs.gh
-            pkgs.tmux
-            pkgs.socat
-            pkgs.ripgrep
-            pkgs.nodejs
             # pyte (LGPLv3) is test-only: dev shell only, never a package closure.
             (pkgs.python3.withPackages (ps: [
               ps.pexpect
               ps.pyte
             ]))
           ];
-          # bubblewrap and srt are deliberately absent: a store bwrap on PATH would
-          # shadow the host one the AppArmor userns profile (HANDOFF.md 1b) is keyed to.
+          # The sandbox stack (bwrap, srt and its node/socat/rg) and tmux stay
+          # host-provided: srt resolves them by PATH, and a store copy would swap
+          # out the hand-verified stack (and miss the AppArmor profile, HANDOFF.md 1b).
           GOTOOLCHAIN = "local";
         };
       });
