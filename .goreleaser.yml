@@ -15,10 +15,9 @@ before:
     - go mod tidy
 
 # rein init copies rein-git and rein-gh from next to the rein binary, so all
-# three ship in one archive. The shared settings are a YAML anchor.
+# three ship in one archive. Keep the three builds' settings identical.
 builds:
-  - &build
-    id: rein
+  - id: rein
     main: ./cmd/rein
     binary: rein
     env:
@@ -41,14 +40,42 @@ builds:
       - -X main.version={{.Version}}
       - -X main.commit={{.Commit}}
       - -X main.date={{.Date}}
-  - <<: *build
-    id: rein-git
+  - id: rein-git
     main: ./cmd/rein-git
     binary: rein-git
-  - <<: *build
-    id: rein-gh
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+  - id: rein-gh
     main: ./cmd/rein-gh
     binary: rein-gh
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
 
 archives:
   - ids: [rein, rein-git, rein-gh]
