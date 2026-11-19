@@ -51,7 +51,8 @@ builds:
     binary: rein-gh
 
 archives:
-  - formats: [tar.gz]
+  - ids: [rein, rein-git, rein-gh]
+    formats: [tar.gz]
     name_template: >-
       {{ .ProjectName }}_
       {{- .Version }}_
