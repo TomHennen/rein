@@ -17,9 +17,16 @@ import (
 // boundary: whoever can set it can equally call the real binary directly.
 const EnvShimDirs = "REIN_SHIM_DIRS"
 
-// maxShimDirs bounds how much of EnvShimDirs is honoured or kept; deeper
-// nesting than this is not a real configuration.
-const maxShimDirs = 64
+// Bounds on EnvShimDirs. Exceeding either is an error, never a truncation:
+// dropping visited dirs would re-open the loop. The length bound keeps the
+// variable far below the kernel's per-string env limit (E2BIG on exec).
+const (
+	maxShimDirs    = 64
+	maxShimDirsLen = 32 << 10
+)
+
+// ErrTooManyShimDirs means EnvShimDirs is at its bound.
+var ErrTooManyShimDirs = errors.New("too many nested rein shim dirs (" + EnvShimDirs + " is full); refusing to continue rather than risk an exec loop")
 
 // Find returns the first executable `name` on PATH that is not in a rein shim
 // dir: the calling shim's own dir, the persistent shim dir (config.ShimDir),
@@ -38,7 +45,11 @@ func Find(name, overrideEnv, argv0 string) (string, error) {
 	}
 	own := Canonical(filepath.Dir(self))
 	visited := os.Getenv(EnvShimDirs)
-	_ = os.Setenv(EnvShimDirs, AppendShimDir(visited, own))
+	updated, err := AppendShimDir(visited, own)
+	if err != nil {
+		return "", err
+	}
+	_ = os.Setenv(EnvShimDirs, updated)
 
 	if override := os.Getenv(overrideEnv); override != "" {
 		if _, err := os.Stat(override); err == nil {
@@ -47,10 +58,12 @@ func Find(name, overrideEnv, argv0 string) (string, error) {
 		return "", fmt.Errorf("%s=%q does not exist", overrideEnv, override)
 	}
 	persistent, _ := config.ShimDir()
-	return find(name, os.Getenv("PATH"), own, persistent, visited)
+	return find(name, os.Getenv("PATH"), own, persistent, visited, Canonical(self))
 }
 
-func find(name, path, own, persistent, visited string) (string, error) {
+// find skips shim dirs and, as a backstop, any candidate that resolves to
+// selfExe itself (e.g. a symlink to the shim from an unlisted dir).
+func find(name, path, own, persistent, visited, selfExe string) (string, error) {
 	skip := map[string]bool{own: true}
 	if persistent != "" {
 		skip[Canonical(persistent)] = true
@@ -64,30 +77,38 @@ func find(name, path, own, persistent, visited string) (string, error) {
 		}
 		cand := filepath.Join(dir, name)
 		if info, err := os.Stat(cand); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			if selfExe != "" && Canonical(cand) == selfExe {
+				continue
+			}
 			return cand, nil
 		}
 	}
 	return "", errors.New("no " + name + " binary found on PATH (excluding rein's shim directories)")
 }
 
-// AppendShimDir returns list with dir appended (deduplicated, at most the last
-// maxShimDirs entries). Malformed entries in list are dropped.
-func AppendShimDir(list, dir string) string {
+// AppendShimDir returns list with dir appended (deduplicated; malformed
+// entries dropped), or ErrTooManyShimDirs if that would exceed the bounds.
+func AppendShimDir(list, dir string) (string, error) {
+	if len(list) > maxShimDirsLen {
+		return "", ErrTooManyShimDirs
+	}
 	dirs := parseShimDirs(list)
 	dir = filepath.Clean(dir)
+	present := false
 	for _, d := range dirs {
-		if d == dir {
-			return strings.Join(dirs, string(os.PathListSeparator))
-		}
+		present = present || d == dir
 	}
-	dirs = append(dirs, dir)
-	if len(dirs) > maxShimDirs {
-		dirs = dirs[len(dirs)-maxShimDirs:]
+	if !present {
+		dirs = append(dirs, dir)
 	}
-	return strings.Join(dirs, string(os.PathListSeparator))
+	out := strings.Join(dirs, string(os.PathListSeparator))
+	if len(dirs) > maxShimDirs || len(out) > maxShimDirsLen {
+		return "", ErrTooManyShimDirs
+	}
+	return out, nil
 }
 
-// parseShimDirs keeps the last maxShimDirs absolute, sanely sized entries.
+// parseShimDirs keeps the absolute, sanely sized entries of v.
 func parseShimDirs(v string) []string {
 	var out []string
 	for _, d := range filepath.SplitList(v) {
@@ -95,9 +116,6 @@ func parseShimDirs(v string) []string {
 			continue
 		}
 		out = append(out, filepath.Clean(d))
-	}
-	if len(out) > maxShimDirs {
-		out = out[len(out)-maxShimDirs:]
 	}
 	return out
 }

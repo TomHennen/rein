@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -126,6 +127,56 @@ func TestShimThreeShimDirsTerminate(t *testing.T) {
 		}
 		if out := runShim(t, filepath.Join(dirs[order[0]], "git"), env); !strings.Contains(out, "REAL-GIT --version") {
 			t.Fatalf("order %v: output = %q, want the real git", order, out)
+		}
+	}
+}
+
+// Deep nesting: N shim dirs (hardlinks of one build, each with git -> rein-git)
+// ahead of the real git. Below the REIN_SHIM_DIRS bound the chain reaches the
+// real git; past it the shim fails closed with a clear error. Neither may loop
+// (truncating the visited set used to loop from 66 dirs).
+func TestShimDeepNestingTerminates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds the shim")
+	}
+	root := t.TempDir()
+	built := filepath.Join(root, "build")
+	buildShim(t, built)
+	realDir := filepath.Join(root, "real")
+	script(t, filepath.Join(realDir, "git"), "echo REAL-GIT \"$@\"\n")
+
+	for _, tc := range []struct {
+		n    int
+		want string
+	}{{40, "REAL-GIT --version"}, {70, "too many nested rein shim dirs"}} {
+		var path []string
+		for i := 0; i < tc.n; i++ {
+			d := filepath.Join(root, fmt.Sprintf("n%d-%d", tc.n, i))
+			if err := os.MkdirAll(d, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(filepath.Join(built, "rein-git"), filepath.Join(d, "rein-git")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("rein-git", filepath.Join(d, "git")); err != nil {
+				t.Fatal(err)
+			}
+			path = append(path, d)
+		}
+		path = append(path, realDir, "/usr/bin", "/bin")
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		cmd := exec.CommandContext(ctx, filepath.Join(path[0], "git"), "--version")
+		cmd.Args[0] = "git"
+		cmd.Env = []string{"XDG_STATE_HOME=" + filepath.Join(root, "state"), "HOME=" + root,
+			"PATH=" + strings.Join(path, string(os.PathListSeparator))}
+		out, _ := cmd.CombinedOutput()
+		timedOut := ctx.Err() != nil
+		cancel()
+		if timedOut {
+			t.Fatalf("%d dirs: shim did not terminate (exec loop?)", tc.n)
+		}
+		if !strings.Contains(string(out), tc.want) {
+			t.Fatalf("%d dirs: output = %q, want %q", tc.n, out, tc.want)
 		}
 	}
 }

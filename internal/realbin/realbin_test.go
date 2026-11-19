@@ -1,8 +1,10 @@
 package realbin
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -65,7 +67,7 @@ func TestFindSkipsOwnDir(t *testing.T) {
 	own := t.TempDir()
 	writeExe(t, own, "git")
 	real := writeExe(t, t.TempDir(), "git")
-	got, err := find("git", own+string(os.PathListSeparator)+filepath.Dir(real), Canonical(own), "", "")
+	got, err := find("git", own+string(os.PathListSeparator)+filepath.Dir(real), Canonical(own), "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +87,7 @@ func TestFindSkipsVisitedShimDirs(t *testing.T) {
 	}
 	real := writeExe(t, t.TempDir(), "git")
 	path := inner + sep + outer + sep + persistent + sep + filepath.Dir(real)
-	got, err := find("git", path, Canonical(outer), persistent, Canonical(inner))
+	got, err := find("git", path, Canonical(outer), persistent, Canonical(inner), "")
 	if err != nil || got != real {
 		t.Fatalf("find = %q, %v; want %q", got, err, real)
 	}
@@ -108,20 +110,75 @@ func TestFindRecordsOwnDir(t *testing.T) {
 
 func TestAppendShimDir(t *testing.T) {
 	sep := string(os.PathListSeparator)
-	if got := AppendShimDir("/a"+sep+"/b", "/a"); got != "/a"+sep+"/b" {
-		t.Errorf("dedupe: %q", got)
+	if got, err := AppendShimDir("/a"+sep+"/b", "/a"); err != nil || got != "/a"+sep+"/b" {
+		t.Errorf("dedupe: %q, %v", got, err)
 	}
-	if got := AppendShimDir("relative"+sep+sep+"/x/../y", "/z"); got != "/y"+sep+"/z" {
-		t.Errorf("malformed entries: %q", got)
+	if got, err := AppendShimDir("relative"+sep+sep+"/x/../y", "/z"); err != nil || got != "/y"+sep+"/z" {
+		t.Errorf("malformed entries: %q, %v", got, err)
 	}
-	var many []string
-	for i := 0; i < 1000; i++ {
-		many = append(many, "/d"+strings.Repeat("x", i%50))
+}
+
+// Overflow is an error, never a truncation (which would re-open the loop).
+func TestAppendShimDir_CountBound(t *testing.T) {
+	sep := string(os.PathListSeparator)
+	var dirs []string
+	for i := 0; i < maxShimDirs-1; i++ {
+		dirs = append(dirs, "/d/"+strconv.Itoa(i))
 	}
-	many = append(many, "/"+strings.Repeat("y", 10000))
-	got := strings.Split(AppendShimDir(strings.Join(many, sep), "/new"), sep)
-	if len(got) > maxShimDirs || got[len(got)-1] != "/new" {
-		t.Errorf("cap: %d entries, last %q", len(got), got[len(got)-1])
+	full, err := AppendShimDir(strings.Join(dirs, sep), "/last")
+	if err != nil || len(strings.Split(full, sep)) != maxShimDirs {
+		t.Fatalf("at the bound: %v", err)
+	}
+	if _, err := AppendShimDir(full, "/d/0"); err != nil {
+		t.Errorf("re-adding a present dir at the bound must not fail: %v", err)
+	}
+	if _, err := AppendShimDir(full, "/one-more"); !errors.Is(err, ErrTooManyShimDirs) {
+		t.Errorf("past the bound: err = %v", err)
+	}
+}
+
+func TestAppendShimDir_LengthBound(t *testing.T) {
+	sep := string(os.PathListSeparator)
+	long := "/" + strings.Repeat("x", 4000)
+	var dirs []string
+	for i := 0; i < 9; i++ {
+		dirs = append(dirs, long+strconv.Itoa(i))
+	}
+	if _, err := AppendShimDir(strings.Join(dirs, sep), long+"new"); !errors.Is(err, ErrTooManyShimDirs) {
+		t.Errorf("length overflow: err = %v", err)
+	}
+	if _, err := AppendShimDir(strings.Repeat("garbage", 10000), "/a"); !errors.Is(err, ErrTooManyShimDirs) {
+		t.Errorf("huge malformed value: err = %v", err)
+	}
+}
+
+func TestFind_FullShimDirsFailsClosed(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	var dirs []string
+	for i := 0; i < maxShimDirs; i++ {
+		dirs = append(dirs, "/d/"+strconv.Itoa(i))
+	}
+	t.Setenv(EnvShimDirs, strings.Join(dirs, string(os.PathListSeparator)))
+	real := writeExe(t, t.TempDir(), "git")
+	t.Setenv("PATH", filepath.Dir(real))
+	if _, err := Find("git", "REIN_TEST_REAL", "git"); err == nil || !strings.Contains(err.Error(), "too many nested rein shim dirs") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// A symlink to the shim in an unlisted dir is not mistaken for the real git.
+func TestFind_SkipsCandidateThatIsSelf(t *testing.T) {
+	shimDir := t.TempDir()
+	self := writeExe(t, shimDir, "rein-git")
+	other := t.TempDir()
+	if err := os.Symlink(self, filepath.Join(other, "git")); err != nil {
+		t.Fatal(err)
+	}
+	real := writeExe(t, t.TempDir(), "git")
+	path := other + string(os.PathListSeparator) + filepath.Dir(real)
+	got, err := find("git", path, Canonical(shimDir), "", "", Canonical(self))
+	if err != nil || got != real {
+		t.Fatalf("find = %q, %v; want %q", got, err, real)
 	}
 }
 
