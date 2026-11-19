@@ -30,10 +30,11 @@ recorded live, and reproducible ([`demo/`](demo/)).*
 ## Prerequisites
 
 **Core:**
-- **Go** — the version in [`go.mod`](go.mod) (currently 1.26.5+). Contributors can
-  instead run `nix develop` (see [`flake.nix`](flake.nix)) for the dev toolchain
-  and test deps, plus (on Linux) the pinned `srt` with its node/socat/ripgrep.
-  Nix is optional; `bubblewrap` and `tmux` stay host-installed either way.
+- **Go** — the version in [`go.mod`](go.mod) (currently 1.26.5+), unless you
+  install with Nix (see [Install](#install)). Contributors can instead run
+  `nix develop` (see [`flake.nix`](flake.nix)) for the dev toolchain and test
+  deps, plus (on Linux) the pinned `srt` with its node/socat/ripgrep. Nix is
+  optional; `bubblewrap` and `tmux` stay host-installed either way.
 - A **GitHub account** that can create GitHub Apps (any personal account can).
 - One or more **throwaway repositories** to point the agent at. Do not use a
   real repo yet. Clone them over **HTTPS** (`https://github.com/...`) — rein
@@ -61,14 +62,77 @@ doctor` checks all of these and tells you exactly what's missing:
 
 ## Install
 
+There are three routes; pick one. **Nix is optional.** Each installs the three
+binaries `rein init` needs side by side: `rein`, `rein-git` and `rein-gh` (init
+copies the last two into its shim dir and refuses to run without them). Install
+the sandbox stack (see [Prerequisites](#prerequisites)) separately on every
+route.
+
+**From source with Go:**
+
 ```bash
 git clone https://github.com/TomHennen/rein.git
 cd rein
 go build -o bin/ ./...
-# install the sandbox stack (see Prerequisites), then:
 ./bin/rein init
 ./bin/rein doctor   # every check should be [ok] — including the sandbox: rows
 ```
+
+**With `go install`:**
+
+```bash
+go install github.com/TomHennen/rein/cmd/...@latest   # into $(go env GOBIN), default ~/go/bin
+rein init
+```
+
+Note the `cmd/...`: `go install github.com/TomHennen/rein/cmd/rein@latest`
+installs only `rein`, and `rein init` then fails because the shims are missing.
+There are no tagged versions yet, so `@latest` is the newest commit on `main`.
+
+**With Nix** (flakes enabled; no Go needed):
+
+```bash
+nix profile add github:TomHennen/rein   # `nix profile install` on older Nix
+rein init --no-symlink                  # the profile already puts rein on PATH
+rein doctor
+
+nix run github:TomHennen/rein -- --help  # try it without installing
+nix build github:TomHennen/rein          # or `nix build` in a checkout; binaries in ./result/bin
+```
+
+On Linux this installs rein together with the pinned `srt` 0.0.63, which
+carries its own Node, `socat` and `ripgrep`, so of the sandbox stack only
+**`bubblewrap`** is left for you to install on the host (plus its AppArmor
+profile on Ubuntu 24.04+; a Nix-store `bwrap` would not match that profile).
+`nix run` does not put `srt` on your `PATH`, so use it for a look, not for
+sandboxed runs. `github:TomHennen/rein#rein` is rein alone, if you manage `srt`
+yourself. Two caveats with how `rein init` currently behaves under Nix:
+
+- **Re-run `rein init` after every upgrade.** init *copies* `rein`, `rein-git`
+  and `rein-gh` into its shim dir, and `rein run --direct` (plus anything you
+  pointed at that dir) runs those copies. An upgrade does not refresh them, and
+  `rein doctor`'s "shim freshness" check compares modification times, which are
+  all 1970 in the Nix store, so it reports stale copies as up to date. (The
+  default sandboxed `rein run` stages fresh copies from the running binary's
+  directory on each launch.)
+- **Use `--no-symlink`.** Without it, init links `~/.local/bin/rein` to the
+  exact `/nix/store/...` path it was run from. Upgrades do not move that link,
+  and it dangles once that store path is garbage-collected (for a `nix run`
+  path, that can be at any time). A newer `rein doctor` reports the mismatch,
+  but `rein doctor --fix` relinks to the new store path, which has the same
+  problem. If `readlink ~/.local/bin/rein` already points into `/nix/store`,
+  remove that link.
+
+**Integrity:** the `go install` and Nix routes build whatever commit they
+resolve — by default the unsigned tip of `main` — and carry no SLSA
+provenance. Pin a commit you have reviewed (`...@<commit>` for `go install`,
+`github:TomHennen/rein/<commit>` for Nix); `nix profile upgrade` otherwise
+follows `main`.
+
+**Release binaries:** none yet. Tagged releases will be built by goreleaser
+with SLSA provenance via [`build-and-publish.yml`](.github/workflows/build-and-publish.yml),
+and each archive carries `rein`, `rein-git` and `rein-gh` side by side, but no
+version has been tagged. Use one of the routes above.
 
 `rein init` is idempotent — safe to re-run.
 
