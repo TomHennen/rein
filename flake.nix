@@ -69,14 +69,11 @@
           # rein is Linux-only for now (design 5.4), so darwin builds without it.
           doCheck = pkgs.stdenv.hostPlatform.isLinux;
           nativeCheckInputs = [ pkgs.git ];
-          # The sandbox's /bin/sh is busybox, which dispatches on the spoofed argv[0]
-          # ("git") this test relies on and fails with "applet not found".
-          checkFlags = [ "-skip=^TestDetectFromProcTree_FindsGitPushAncestor$" ];
           # subPackages would limit tests to cmd/; test the whole module.
           checkPhase = ''
             runHook preCheck
             export GOFLAGS=''${GOFLAGS//-trimpath/}
-            go test -p $NIX_BUILD_CORES $checkFlags ./...
+            go test -p $NIX_BUILD_CORES ./...
             runHook postCheck
           '';
 
