@@ -244,14 +244,19 @@ const shimScopeNote = "only matters if you put the shim dir on PATH yourself; `r
 func shimFreshness(shimDir, self string) checkResult {
 	var stale []string
 	var noSrc bool
-	for _, p := range directShims {
-		shimPath := filepath.Join(shimDir, p.dst)
-		if _, err := os.Stat(shimPath); err != nil {
+	for _, name := range shimSources {
+		shimPath := filepath.Join(shimDir, name)
+		if _, err := os.Lstat(shimPath); err != nil {
+			if name != "rein" {
+				if _, gerr := os.Lstat(filepath.Join(shimDir, "git")); gerr == nil {
+					return checkResult{"shim freshness", statusWarn, fmt.Sprintf("shim dir %s has an older layout (no %s; %s); re-run `rein install-shim`", shimDir, name, shimScopeNote)}
+				}
+			}
 			return checkResult{"shim freshness", statusWarn, fmt.Sprintf("shim %s missing (%s); run `rein install-shim`", shimPath, shimScopeNote)}
 		}
 		src := self
-		if p.src != "rein" {
-			src = filepath.Join(filepath.Dir(self), p.src)
+		if name != "rein" {
+			src = filepath.Join(filepath.Dir(self), name)
 		}
 		if _, err := os.Stat(src); err != nil {
 			noSrc = true
@@ -262,7 +267,12 @@ func shimFreshness(shimDir, self string) checkResult {
 			return checkResult{"shim freshness", statusWarn, fmt.Sprintf("compare %s: %v", shimPath, err)}
 		}
 		if !same {
-			stale = append(stale, p.dst)
+			stale = append(stale, name)
+		}
+	}
+	for _, l := range shimLinks {
+		if target, err := os.Readlink(filepath.Join(shimDir, l.name)); err != nil || target != l.target {
+			stale = append(stale, l.name)
 		}
 	}
 	if len(stale) > 0 {
@@ -271,36 +281,46 @@ func shimFreshness(shimDir, self string) checkResult {
 	if noSrc {
 		return checkResult{"shim freshness", statusWarn, fmt.Sprintf("source binaries not next to %s; can't verify freshness", self)}
 	}
-	return checkResult{"shim freshness", statusOK, fmt.Sprintf("%d shims under %s up to date", len(directShims), shimDir)}
+	return checkResult{"shim freshness", statusOK, fmt.Sprintf("%d shims under %s up to date", len(shimSources), shimDir)}
 }
 
 // sameContent reports whether two files have identical bytes.
 func sameContent(a, b string) (bool, error) {
-	ha, na, err := fileDigest(a)
+	ia, err := os.Stat(a)
 	if err != nil {
 		return false, err
 	}
-	hb, nb, err := fileDigest(b)
+	ib, err := os.Stat(b)
 	if err != nil {
 		return false, err
 	}
-	return na == nb && ha == hb, nil
+	if ia.Size() != ib.Size() {
+		return false, nil
+	}
+	ha, err := fileDigest(a)
+	if err != nil {
+		return false, err
+	}
+	hb, err := fileDigest(b)
+	if err != nil {
+		return false, err
+	}
+	return ha == hb, nil
 }
 
-func fileDigest(path string) ([sha256.Size]byte, int64, error) {
+func fileDigest(path string) ([sha256.Size]byte, error) {
 	var sum [sha256.Size]byte
 	f, err := os.Open(path)
 	if err != nil {
-		return sum, 0, err
+		return sum, err
 	}
 	defer f.Close()
 	h := sha256.New()
-	n, err := io.Copy(h, f)
-	if err != nil {
-		return sum, 0, err
+	if _, err := io.Copy(h, f); err != nil {
+		return sum, err
 	}
 	copy(sum[:], h.Sum(nil))
-	return sum, n, nil
+	return sum, nil
 }
 
 // checkAppKeyReadable verifies REIN_APP_PRIVATE_KEY_PATH points at a

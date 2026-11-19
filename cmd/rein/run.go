@@ -27,7 +27,8 @@
 //     reaches both rein and the child naturally. SIGTERM to rein is
 //     forwarded to the child explicitly via a relay goroutine.
 //
-//   - Cleans the tempdir on exit (deferred + signal-handled).
+//   - Cleans the tempdir on exit and on forwarded SIGTERM; a dir left by
+//     Ctrl-C/SIGKILL is swept by a later launch.
 //
 // What you should NOT expect:
 //
@@ -68,6 +69,7 @@ import (
 	"github.com/TomHennen/rein/internal/config"
 	"github.com/TomHennen/rein/internal/githubapp"
 	"github.com/TomHennen/rein/internal/keystore"
+	"github.com/TomHennen/rein/internal/realbin"
 	"github.com/TomHennen/rein/internal/session"
 	"github.com/TomHennen/rein/internal/tokencache"
 )
@@ -101,7 +103,7 @@ func runWrapped(argv []string) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	shimSrcs, err := locateDirectShims(self)
+	shimSrcs, err := locateShimSources(self)
 	if err != nil {
 		return 127, err
 	}
@@ -117,6 +119,8 @@ func runWrapped(argv []string) (int, error) {
 	// Migration: silently remove any pre-upgrade global approval.json.
 	// Nothing reads it anymore (approvals are per-run now).
 	_ = os.Remove(filepath.Join(stateDir, "approval.json"))
+	// Same backstop for the per-run shim dirs of killed direct runs.
+	sweepStaleRunDirs(os.TempDir())
 
 	// Validate session — same loader used elsewhere, so the same
 	// REIN_SESSION_FILE override and env-fallback rules apply.
@@ -160,7 +164,7 @@ func runWrapped(argv []string) (int, error) {
 	}
 
 	// Allocate tempdir for the per-process git config and staged shims.
-	tempDir, err := os.MkdirTemp("", "rein-run-*")
+	tempDir, err := os.MkdirTemp("", runDirPrefix+"*")
 	if err != nil {
 		return 1, fmt.Errorf("create temp dir: %w", err)
 	}
@@ -168,12 +172,20 @@ func runWrapped(argv []string) (int, error) {
 		os.RemoveAll(tempDir)
 		return 1, err
 	}
-	// Deferred cleanup is the happy path. Signal handler below also
-	// cleans up on early termination.
+	// Removed on normal exit and forwarded SIGTERM (cmd.Wait returns, defers
+	// run); Ctrl-C/SIGKILL skip it and the next launch's sweep reaps it. A
+	// grandchild that outlives the child loses its shims here (gh then
+	// resolves to the real gh; git already lost its gitconfig on main).
 	defer os.RemoveAll(tempDir)
+	if err := writeRunDirPID(tempDir); err != nil {
+		return 1, fmt.Errorf("write run pid file: %w", err)
+	}
 
 	shimDir := tempDir
-	if err := stageDirectShims(shimSrcs, shimDir); err != nil {
+	if err := placeShims(shimSrcs, shimDir); err != nil {
+		return 1, fmt.Errorf("stage shims: %w", err)
+	}
+	if err := probeShims(shimDir); err != nil {
 		return 1, err
 	}
 	gitConfigPath := filepath.Join(tempDir, "gitconfig")
@@ -205,6 +217,7 @@ func runWrapped(argv []string) (int, error) {
 	// Build the wrapped child's env.
 	env := os.Environ()
 	env = setEnv(env, "PATH", shimDir+":"+os.Getenv("PATH"))
+	env = setEnv(env, realbin.EnvShimDirs, realbin.AppendShimDir(os.Getenv(realbin.EnvShimDirs), realbin.Canonical(shimDir)))
 	env = setEnv(env, "GIT_CONFIG_GLOBAL", gitConfigPath)
 	env = setEnv(env, "GIT_CONFIG_SYSTEM", "/dev/null")
 	// Per-run approval scoping: the child's credential helper and rein-gh
@@ -680,49 +693,6 @@ func parseRunArgs(argv []string) ([]string, error) {
 		return nil, fmt.Errorf("usage: rein run -- <cmd> [args...] (no command supplied)")
 	}
 	return argv[1:], nil
-}
-
-// directShims maps each binary `rein run --direct` stages (source name, next
-// to the running rein) to its name on the wrapped process's PATH.
-var directShims = []struct{ src, dst string }{
-	{"rein", "rein"},
-	{"rein-git", "git"},
-	{"rein-gh", "gh"},
-}
-
-// locateDirectShims resolves each directShims source as a sibling of self (the
-// resolved running binary; "rein" is self itself). Siblings only, no PATH
-// fallback: a rein-git found elsewhere may be a different version, which is
-// the staleness this staging exists to remove.
-func locateDirectShims(self string) (map[string]string, error) {
-	srcs := map[string]string{"rein": self}
-	for _, s := range directShims {
-		if s.src == "rein" {
-			continue
-		}
-		p := filepath.Join(filepath.Dir(self), s.src)
-		info, err := os.Stat(p)
-		if err != nil || info.IsDir() {
-			return nil, fmt.Errorf("%s binary not found next to %s; rein, rein-git and rein-gh must be installed side by side (go build -o bin/ ./...)", s.src, self)
-		}
-		srcs[s.src] = p
-	}
-	return srcs, nil
-}
-
-// stageDirectShims copies the located sources into dir under their PATH names
-// (mode 0700). Any failure aborts the launch: never run the agent unshimmed.
-func stageDirectShims(srcs map[string]string, dir string) error {
-	for _, s := range directShims {
-		src, ok := srcs[s.src]
-		if !ok {
-			return fmt.Errorf("stage %s: source not located", s.dst)
-		}
-		if err := copyFile(src, filepath.Join(dir, s.dst), 0o700); err != nil {
-			return fmt.Errorf("stage %s shim: %w", s.dst, err)
-		}
-	}
-	return nil
 }
 
 // writeRunGitConfig writes the per-process git config to path.

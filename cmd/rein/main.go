@@ -1132,10 +1132,10 @@ func installShim() error {
 	return nil
 }
 
-// installShimFiles places the rein-git, rein-gh, and rein binaries in
-// the state dir's shim subdirectory and returns one "installed X" line
-// per binary for the caller to log however it wants. Idempotent — safe
-// to re-run.
+// installShimFiles places rein, rein-git and rein-gh (plus the git/gh
+// links) in the state dir's shim subdirectory and returns one "installed
+// X" line per PATH entry for the caller to log however it wants.
+// Idempotent — safe to re-run.
 //
 // Splitting this out from installShim lets `rein init` keep its tight
 // progress output (no 14-line PATH-activation block interleaved with
@@ -1159,31 +1159,24 @@ func installShimFiles() (shimDir string, installed []string, err error) {
 	}
 	selfDir := filepath.Dir(self)
 
-	shims := []struct{ name, intent string }{
-		{"rein-git", "git"},
-		{"rein-gh", "gh"},
-	}
-	for _, s := range shims {
-		src, err := locateBinary(s.name, selfDir)
+	// rein itself rides along so adding the shim dir to PATH gives you
+	// `rein` (e.g. `rein approval grant` from a fresh terminal), and so that
+	// rein can stage a run from here (its siblings are rein-git/rein-gh).
+	srcs := map[string]string{"rein": self}
+	for _, name := range shimSources[1:] {
+		src, err := locateBinary(name, selfDir)
 		if err != nil {
 			return "", nil, err
 		}
-		dst := filepath.Join(shimDir, s.intent)
-		if err := copyFile(src, dst, 0o700); err != nil {
-			return "", nil, fmt.Errorf("install %s: %w", s.intent, err)
-		}
-		installed = append(installed, fmt.Sprintf("installed shim: %s -> %s", dst, s.name))
+		srcs[name] = src
 	}
-
-	// Place a copy of rein itself in the shim dir so users who prepend
-	// the shim dir to PATH get `rein` available without a separate
-	// install step. Useful for `rein approval grant` from a fresh
-	// terminal.
-	reinDst := filepath.Join(shimDir, "rein")
-	if err := copyFile(self, reinDst, 0o700); err != nil {
-		return "", nil, fmt.Errorf("install rein into shim dir: %w", err)
+	if err := placeShims(srcs, shimDir); err != nil {
+		return "", nil, fmt.Errorf("install shims: %w", err)
 	}
-	installed = append(installed, fmt.Sprintf("installed: %s (rein itself, so adding shim dir to PATH gives you `rein`)", reinDst))
+	for _, l := range shimLinks {
+		installed = append(installed, fmt.Sprintf("installed shim: %s -> %s", filepath.Join(shimDir, l.name), l.target))
+	}
+	installed = append(installed, fmt.Sprintf("installed: %s (rein itself, so adding shim dir to PATH gives you `rein`)", filepath.Join(shimDir, "rein")))
 	return shimDir, installed, nil
 }
 
