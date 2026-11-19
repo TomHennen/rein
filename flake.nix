@@ -21,11 +21,12 @@
       srtFor = pkgs: pkgs.callPackage ./nix/sandbox-runtime { };
       seccompArch = pkgs: if pkgs.stdenv.hostPlatform.isAarch64 then "arm64" else "x64";
 
-      # Date, not rev: commits on the same day share a store path.
-      d = self.lastModifiedDate;
-      version = "0-unstable-${builtins.substring 0 4 d}-${builtins.substring 4 2 d}-${builtins.substring 6 2 d}";
+      # No release tags yet, so the package is named after the commit date
+      # (YYYYMMDD), the nixpkgs convention for an untagged build.
+      version = "0-unstable-${lib.substring 0 8 self.lastModifiedDate}";
 
-      # Only what go build/test reads, so docs, goldens and scripts do not rebuild.
+      # Only what go build/test reads. Docs, scripts and the journey goldens
+      # (read by the Python suite, not by go test) do not trigger a rebuild.
       goSrc = lib.fileset.toSource {
         root = ./.;
         fileset = lib.fileset.unions [
@@ -45,6 +46,8 @@
           pname = "rein";
           inherit version;
           src = goSrc;
+          # Hash of the Go module dependencies (what go.sum resolves to), not of
+          # the Go toolchain. Refresh after any go.mod/go.sum change (CLAUDE.md).
           vendorHash = "sha256-mg/0jfgVYgsOrUNtVcycikjx8Ncasnw/NxAu52ytZJQ=";
 
           # rein init copies rein-git and rein-gh from next to the rein binary.
@@ -62,6 +65,9 @@
             "-w"
           ];
 
+          # The suite assumes Linux paths (/home, /tmp are symlinks on macOS) and
+          # rein is Linux-only for now (design 5.4), so darwin builds without it.
+          doCheck = pkgs.stdenv.hostPlatform.isLinux;
           nativeCheckInputs = [ pkgs.git ];
           # The sandbox's /bin/sh is busybox, which dispatches on the spoofed argv[0]
           # ("git") this test relies on and fails with "applet not found".
