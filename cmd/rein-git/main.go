@@ -4,24 +4,24 @@
 // (git-remote-https et al.) to the credential helper, where the broker
 // reads it to decide between a cached read token and a fresh write token.
 //
-// Installed at the front of $PATH by `rein install-shim` (or `rein run` in
-// Phase 1+). When bypassed (agent calls /usr/bin/git directly), the broker's
-// process-tree fallback recovers the signal on Linux.
+// `rein run` stages a fresh copy as `git` at the front of the wrapped
+// process's PATH each launch; `rein install-shim` also places a persistent
+// copy for manual PATH activation. When bypassed (agent calls /usr/bin/git
+// directly), the broker's process-tree fallback recovers the signal on Linux.
 //
 // Misclassification here causes a wrong-tier mint, not a security breach —
 // GitHub enforces the role's permissions ceiling at the token-mint API.
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"syscall"
 
 	"github.com/TomHennen/rein/internal/gitupstream"
+	"github.com/TomHennen/rein/internal/realbin"
 )
 
 // envUpstreamIntentFile is set only for a sandboxed bound checkout. Its presence
@@ -49,7 +49,7 @@ func main() {
 	args := os.Args[1:]
 	op := classify(args)
 
-	realGit, err := findRealGit(os.Args[0])
+	realGit, err := realbin.Find("git", "REIN_REAL_GIT", os.Args[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rein-git: %v\n", err)
 		os.Exit(127)
@@ -183,51 +183,4 @@ func optionConsumesNextArg(a string) bool {
 		return false
 	}
 	return optionsThatTakeArg[a]
-}
-
-// findRealGit finds the system git, excluding this shim's own dir so we don't
-// recurse. The dir comes from os.Executable() (falling back to shimPath): when
-// invoked as bare `git`, os.Args[0] is just "git" and would resolve to the CWD,
-// making the PATH scan re-find the shim and add a wasteful self-exec hop.
-// REIN_REAL_GIT overrides everything (tests; distros without git on PATH).
-func findRealGit(shimPath string) (string, error) {
-	if override := os.Getenv("REIN_REAL_GIT"); override != "" {
-		if _, err := os.Stat(override); err == nil {
-			return override, nil
-		}
-		return "", fmt.Errorf("REIN_REAL_GIT=%q does not exist", override)
-	}
-
-	shimAbs := shimPath
-	if exe, err := os.Executable(); err == nil {
-		shimAbs = exe
-	} else if abs, err := filepath.Abs(shimPath); err == nil {
-		shimAbs = abs
-	}
-	if resolved, err := filepath.EvalSymlinks(shimAbs); err == nil {
-		shimAbs = resolved
-	}
-	shimDir := filepath.Dir(shimAbs)
-
-	path := os.Getenv("PATH")
-	for _, dir := range filepath.SplitList(path) {
-		if dir == "" {
-			continue
-		}
-		abs, err := filepath.Abs(dir)
-		if err != nil {
-			continue
-		}
-		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-			abs = resolved
-		}
-		if abs == shimDir {
-			continue
-		}
-		cand := filepath.Join(dir, "git")
-		if info, err := os.Stat(cand); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return cand, nil
-		}
-	}
-	return "", errors.New("no git binary found on PATH (excluding rein-git's own directory)")
 }
