@@ -1,0 +1,9 @@
+{
+  "name": "rein-sandbox-runtime",
+  "private": true,
+  "description": "Pins @anthropic-ai/sandbox-runtime for rein's nix dev shell.",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.63"
+  }
+}
