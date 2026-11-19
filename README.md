@@ -30,7 +30,10 @@ recorded live, and reproducible ([`demo/`](demo/)).*
 ## Prerequisites
 
 **Core:**
-- **Go** — the version in [`go.mod`](go.mod) (currently 1.26+).
+- **Go** — the version in [`go.mod`](go.mod) (currently 1.26+). Contributors can
+  instead run `nix develop` (see [`flake.nix`](flake.nix)) for the dev toolchain
+  and test deps; Nix is optional, and the sandbox stack below stays host-installed
+  either way.
 - A **GitHub account** that can create GitHub Apps (any personal account can).
 - One or more **throwaway repositories** to point the agent at. Do not use a
   real repo yet. Clone them over **HTTPS** (`https://github.com/...`) — rein
@@ -415,7 +418,8 @@ Three layers, from hermetic to live:
   a real-agent (`claude`) end-to-end run. Prereqs: a machine set up via
   `rein init` (the suite resolves your App from `state.json` and its throwaway
   from the dev-session), the sandbox stack, host `gh` authed, and `python3` +
-  `pexpect`. See [`tests/interactive/README.md`](tests/interactive/README.md).
+  `pexpect` (all but the sandbox stack come with `nix develop`). See
+  [`tests/interactive/README.md`](tests/interactive/README.md).
 
   ```bash
   tests/interactive/run.sh                    # whole suite (deps-light; no real claude)

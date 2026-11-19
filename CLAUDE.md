@@ -34,7 +34,8 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 - Hardware keys (Phase 1+): `github.com/facebookincubator/sks` (Apache 2.0). Not used in Phase 0.
 - CLI: `github.com/spf13/cobra`
 - Terminal emulation in TESTS ONLY: `pyte` (LGPLv3), installed as the system package
-  `python3-pyte` (`sudo apt install python3-pyte`), same as `pexpect`. It renders a pty's
+  `python3-pyte` (`sudo apt install python3-pyte`), same as `pexpect`, or from the nix dev
+  shell (`flake.nix`). It renders a pty's
   bytes into a SCREEN, which is how `tests/interactive/` asserts on anything that REDRAWS
   (the tmux approval popup, a real `claude` TUI) instead of regex-stripping ANSI out of the
   raw byte stream (issue #100). **Test-only is load-bearing for hard-constraint #4**: it is
@@ -44,7 +45,8 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 
 ## Dev environment
 
-- Development happens directly in this Linux VM. There is no devcontainer.
+- Toolchain: the supported route is the nix dev shell (`flake.nix`: Go, gopls, goreleaser, python3 + pexpect + pyte, tmux, socat, ripgrep, node, git, gh) via `nix develop` or direnv (`.envrc`). It sets `GOTOOLCHAIN=local`. Nix is optional: the host/apt path in `HANDOFF.md` §1 still works, and end users never need nix. There is no devcontainer.
+- The sandbox stack (`bwrap`, `srt`) is deliberately NOT in the dev shell: it stays host-installed (a store `bwrap` would shadow the host one the AppArmor profile in `HANDOFF.md` §1b is keyed to; `srt` is hand-pinned). `rein doctor` checks it.
 - Setup is the `rein init` world: run `rein init` once (see `HANDOFF.md`) and rein resolves your App from `state.json` + the managed keystore — no env vars needed. **Do NOT `source ./dev-env`**: that file is untracked per-developer scaffolding (`dev-env.example` is the template), and the old committed copy pinned a dead App whose `REIN_APP_*` *override* the real one (#126). Only source a dev-env you filled in yourself, and only for the env-var path (e.g. the opt-in live Go tests).
 - The GitHub App private key is at `$REIN_APP_PRIVATE_KEY_PATH` (`~/.config/rein-credentials/app.pem`).
 - Secure Enclave is not available on Linux. Phase 0/1 use the `internal/keystore` file backend. Phase 1's hardware-backed work would require TPM2 (if this VM has one) or shift to a Mac host.
