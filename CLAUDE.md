@@ -53,12 +53,14 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 - Secure Enclave is not available on Linux. Phase 0/1 use the `internal/keystore` file backend. Phase 1's hardware-backed work would require TPM2 (if this VM has one) or shift to a Mac host.
 - srt sandbox is out of scope for Phase 0.
 - run `gofmt -w .` before all commits.
+- `flake.nix` also packages rein (`nix build`; an optional install route, never required). Its `vendorHash` covers the vendored dependency tree: after any `go.mod`/`go.sum` change or first import of another package from a dependency (Dependabot gomod PRs included; the nix workflow fails until it is updated) set it to `lib.fakeHash`, run `nix build`, and paste the `got:` hash. Never run `nix flake update` casually; bump `flake.lock` deliberately.
 
 ## CI/CD
 
 - `.github/workflows/build-and-publish.yml` calls wrangle's Go reusable workflow for source checks, release, and SLSA provenance.
 - `.goreleaser.yml` is the adopter-owned release config wrangle wraps.
 - Don't modify either of these files casually. They're load-bearing for supply-chain hygiene.
+- `.github/workflows/nix.yml` runs `nix flake check` (package build + Go tests + nixfmt/gofmt) and `nix build`. It is not a release path.
 
 ## Working style
 
