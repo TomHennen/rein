@@ -39,7 +39,9 @@ except this repo.
 Arch note: the origin machine is **aarch64** (Apple VZ guest). Commands
 below are arch-agnostic except where noted.
 
-**Dev toolchain (recommended): `nix develop`.** The flake provides Go (with
+**Dev toolchain (recommended): `nix develop`**, or direnv + nix-direnv
+(`direnv allow` once; see the direnv caveat in `CLAUDE.md` before allowing a
+checkout an agent can write to). The flake provides Go (with
 `GOTOOLCHAIN=local`), gopls, goreleaser, python3 + pexpect + pyte, git and gh.
 Nix is optional: the apt/host steps below remain valid. It does NOT provide the
 sandbox stack (`bwrap`, `srt`, node, `socat`, `ripgrep`) or `tmux` — install
