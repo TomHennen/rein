@@ -2,15 +2,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -46,6 +43,7 @@ func locateShimSources(self string) (map[string]string, error) {
 // them. Each entry is written to a temp name and renamed into place, so a
 // re-install never truncates a binary that is running or is its own source.
 func placeShims(srcs map[string]string, dir string) error {
+	removeStaleShimTemps(dir)
 	for _, name := range shimSources {
 		src, ok := srcs[name]
 		if !ok {
@@ -61,6 +59,23 @@ func placeShims(srcs map[string]string, dir string) error {
 		}
 	}
 	return nil
+}
+
+// removeStaleShimTemps clears temp entries an interrupted placeShims left
+// behind (only our own ".<name>.tmp-*" names, never directories).
+func removeStaleShimTemps(dir string) {
+	names := append([]string{}, shimSources...)
+	for _, l := range shimLinks {
+		names = append(names, l.name)
+	}
+	for _, n := range names {
+		matches, _ := filepath.Glob(filepath.Join(dir, "."+n+".tmp-*"))
+		for _, m := range matches {
+			if info, err := os.Lstat(m); err == nil && !info.IsDir() {
+				_ = os.Remove(m)
+			}
+		}
+	}
 }
 
 func atomicCopy(src, dst string) error {
@@ -89,7 +104,7 @@ func atomicCopy(src, dst string) error {
 }
 
 func atomicSymlink(target, dst string) error {
-	tmp := fmt.Sprintf("%s.tmp-%d", dst, time.Now().UnixNano())
+	tmp := filepath.Join(filepath.Dir(dst), fmt.Sprintf(".%s.tmp-%d", filepath.Base(dst), time.Now().UnixNano()))
 	if err := os.Symlink(target, tmp); err != nil {
 		return err
 	}
@@ -99,6 +114,12 @@ func atomicSymlink(target, dst string) error {
 	}
 	return nil
 }
+
+// runDirPrefix / runDirPIDFile identify a direct-mode run dir for the sweep.
+const (
+	runDirPrefix  = "rein-run-"
+	runDirPIDFile = "rein-run.pid"
+)
 
 // probeShims execs each staged PATH name (rein, git, gh) once, harmlessly:
 // rein --help, and the git/gh shims pointed (via their REIN_REAL_* override)
@@ -125,80 +146,9 @@ func probeShims(dir string) error {
 			if msg := strings.TrimSpace(string(out)); msg != "" {
 				detail += ": " + msg[:min(len(msg), 300)]
 			}
-			return fmt.Errorf("staged %s in %s cannot run (%s); is that directory on a noexec mount? point TMPDIR at an exec-capable directory and retry",
+			return fmt.Errorf("staged %s in %s cannot run: %s (e.g. a noexec mount; point TMPDIR at an exec-capable directory and retry)",
 				p.name, dir, detail)
 		}
 	}
 	return nil
-}
-
-// runDirPrefix / runDirPIDFile identify a direct-mode run dir for the sweep.
-const (
-	runDirPrefix  = "rein-run-"
-	runDirPIDFile = "rein-run.pid"
-)
-
-func writeRunDirPID(dir string) error {
-	f, err := os.OpenFile(filepath.Join(dir, runDirPIDFile), os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
-	if err != nil {
-		return err
-	}
-	_, werr := fmt.Fprintf(f, "%d\n", os.Getpid())
-	if cerr := f.Close(); werr == nil {
-		werr = cerr
-	}
-	return werr
-}
-
-// sweepStaleRunDirs removes direct-mode run dirs left by runs that died
-// without their deferred cleanup (Ctrl-C, SIGKILL). Deliberately narrow: only
-// real directories (never symlinks) directly in root named rein-run-*, owned
-// by this uid, mode exactly 0700, holding a regular pid file whose pid is not
-// alive. Anything else, or any error, is left alone.
-func sweepStaleRunDirs(root string) {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), runDirPrefix) || !e.IsDir() {
-			continue
-		}
-		dir := filepath.Join(root, e.Name())
-		if staleRunDir(dir) {
-			_ = os.RemoveAll(dir)
-		}
-	}
-}
-
-func staleRunDir(dir string) bool {
-	info, err := os.Lstat(dir)
-	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
-		return false
-	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || int(st.Uid) != os.Getuid() {
-		return false
-	}
-	f, err := os.OpenFile(filepath.Join(dir, runDirPIDFile), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
-		return false
-	}
-	buf := make([]byte, 32)
-	n, _ := io.ReadFull(f, buf)
-	pid, err := strconv.Atoi(strings.TrimSpace(string(buf[:n])))
-	if err != nil || pid <= 0 || pid == os.Getpid() {
-		return false
-	}
-	return !processAlive(pid)
-}
-
-// processAlive mirrors approvals.pidAlive: signal 0; EPERM means it exists.
-func processAlive(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
 }

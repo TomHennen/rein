@@ -2,9 +2,7 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -221,75 +219,6 @@ func TestRunWrapped_MissingSiblingFailsClosed(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("child launched despite missing shim source")
-	}
-}
-
-// deadPID returns the pid of a process that has exited.
-func deadPID(t *testing.T) int {
-	t.Helper()
-	cmd := exec.Command("true")
-	if err := cmd.Run(); err != nil {
-		t.Fatal(err)
-	}
-	return cmd.Process.Pid
-}
-
-func mkRunDir(t *testing.T, root, name string, mode os.FileMode, pid string) string {
-	t.Helper()
-	dir := filepath.Join(root, name)
-	if err := os.Mkdir(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if pid != "" {
-		writeBin(t, filepath.Join(dir, runDirPIDFile), pid)
-	}
-	writeBin(t, filepath.Join(dir, "rein"), "x")
-	if err := os.Chmod(dir, mode); err != nil {
-		t.Fatal(err)
-	}
-	return dir
-}
-
-func TestSweepStaleRunDirs(t *testing.T) {
-	root := t.TempDir()
-	dead := strconv.Itoa(deadPID(t))
-	live := strconv.Itoa(os.Getppid())
-	stale := mkRunDir(t, root, "rein-run-1", 0o700, dead+"\n")
-	keep := map[string]string{
-		"live pid":    mkRunDir(t, root, "rein-run-2", 0o700, live),
-		"own pid":     mkRunDir(t, root, "rein-run-3", 0o700, strconv.Itoa(os.Getpid())),
-		"no pid file": mkRunDir(t, root, "rein-run-4", 0o700, ""),
-		"bad mode":    mkRunDir(t, root, "rein-run-5", 0o755, dead),
-		"garbage pid": mkRunDir(t, root, "rein-run-6", 0o700, "not-a-pid"),
-		"other name":  mkRunDir(t, root, "rein-sandbox-7", 0o700, dead),
-	}
-	// A symlinked run dir and a symlinked pid file are never followed.
-	target := mkRunDir(t, t.TempDir(), "rein-run-target", 0o700, dead)
-	link := filepath.Join(root, "rein-run-8")
-	if err := os.Symlink(target, link); err != nil {
-		t.Fatal(err)
-	}
-	keep["symlinked dir target"] = target
-	pidLinkDir := mkRunDir(t, root, "rein-run-9", 0o700, "")
-	deadFile := filepath.Join(t.TempDir(), "pid")
-	writeBin(t, deadFile, dead)
-	if err := os.Symlink(deadFile, filepath.Join(pidLinkDir, runDirPIDFile)); err != nil {
-		t.Fatal(err)
-	}
-	keep["symlinked pid file"] = pidLinkDir
-
-	sweepStaleRunDirs(root)
-
-	if _, err := os.Lstat(stale); err == nil {
-		t.Error("dead-pid run dir was not swept")
-	}
-	for why, dir := range keep {
-		if _, err := os.Stat(dir); err != nil {
-			t.Errorf("%s: %s was removed", why, dir)
-		}
-	}
-	if _, err := os.Lstat(link); err != nil {
-		t.Error("symlink entry was removed")
 	}
 }
 

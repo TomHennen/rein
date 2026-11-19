@@ -120,7 +120,7 @@ func runWrapped(argv []string) (int, error) {
 	// Nothing reads it anymore (approvals are per-run now).
 	_ = os.Remove(filepath.Join(stateDir, "approval.json"))
 	// Same backstop for the per-run shim dirs of killed direct runs.
-	sweepStaleRunDirs(os.TempDir())
+	sweepStaleRunDirs(os.TempDir(), runDirSweepMinAge, time.Now())
 
 	// Validate session — same loader used elsewhere, so the same
 	// REIN_SESSION_FILE override and env-fallback rules apply.
@@ -173,12 +173,19 @@ func runWrapped(argv []string) (int, error) {
 		return 1, err
 	}
 	// Removed on normal exit and forwarded SIGTERM (cmd.Wait returns, defers
-	// run); Ctrl-C/SIGKILL skip it and the next launch's sweep reaps it. A
-	// grandchild that outlives the child loses its shims here (gh then
-	// resolves to the real gh; git already lost its gitconfig on main).
+	// run); Ctrl-C/SIGKILL skip it and a later launch's sweep reaps it. A
+	// grandchild that outlives the child loses its shims and gitconfig here:
+	// its git then runs unshimmed with no rein credential helper (no token),
+	// and its gh resolves to the real gh.
 	defer os.RemoveAll(tempDir)
-	if err := writeRunDirPID(tempDir); err != nil {
-		return 1, fmt.Errorf("write run pid file: %w", err)
+	// Held for the run's lifetime and inherited by the child (fd 3), so the
+	// sweep never reaps a dir while rein or anything it launched is alive.
+	runLock, err := lockRunDir(tempDir)
+	if err != nil {
+		return 1, fmt.Errorf("lock run dir: %w", err)
+	}
+	if runLock != nil {
+		defer runLock.Close()
 	}
 
 	shimDir := tempDir
@@ -217,7 +224,11 @@ func runWrapped(argv []string) (int, error) {
 	// Build the wrapped child's env.
 	env := os.Environ()
 	env = setEnv(env, "PATH", shimDir+":"+os.Getenv("PATH"))
-	env = setEnv(env, realbin.EnvShimDirs, realbin.AppendShimDir(os.Getenv(realbin.EnvShimDirs), realbin.Canonical(shimDir)))
+	shimDirs, err := realbin.AppendShimDir(os.Getenv(realbin.EnvShimDirs), realbin.Canonical(shimDir))
+	if err != nil {
+		return 1, err
+	}
+	env = setEnv(env, realbin.EnvShimDirs, shimDirs)
 	env = setEnv(env, "GIT_CONFIG_GLOBAL", gitConfigPath)
 	env = setEnv(env, "GIT_CONFIG_SYSTEM", "/dev/null")
 	// Per-run approval scoping: the child's credential helper and rein-gh
@@ -246,6 +257,9 @@ func runWrapped(argv []string) (int, error) {
 
 	cmd := exec.Command(cmdline[0], cmdline[1:]...)
 	cmd.Env = env
+	if runLock != nil {
+		cmd.ExtraFiles = []*os.File{runLock}
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
