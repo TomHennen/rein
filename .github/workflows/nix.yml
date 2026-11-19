@@ -1,0 +1,42 @@
+# Build and test the Nix flake: `nix flake check` (package build with the Go
+# test suite, plus nixfmt/gofmt) and `nix build`. Nix is an optional install
+# route; releases still go through build-and-publish.yml (goreleaser + SLSA).
+#
+# Actions are pinned by commit SHA; Dependabot (.github/dependabot.yml, "/")
+# bumps them on a cooldown.
+
+name: nix
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flake:
+    name: flake check + build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+      - name: Evaluate every system
+        run: nix flake check --all-systems --no-build
+      - name: Check (build + tests + formatting)
+        run: nix flake check -L
+      - name: Build
+        run: nix build -L
+      - name: Smoke test
+        run: |
+          ls -l result/bin
+          ./result/bin/rein --help
