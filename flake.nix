@@ -8,20 +8,17 @@
     { self, nixpkgs }:
     let
       inherit (nixpkgs) lib;
+      # Linux only for now, like rein itself.
       systems = [
         "x86_64-linux"
         "aarch64-linux"
-        "aarch64-darwin"
       ];
-      linuxSystems = lib.filter (lib.hasSuffix "-linux") systems;
-      forSystems = ss: f: lib.genAttrs ss (system: f nixpkgs.legacyPackages.${system});
-      forAllSystems = forSystems systems;
+      forAllSystems = f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
-      # srt is Linux-only here: rein's sandboxed mode is Linux-only today.
       srtFor = pkgs: pkgs.callPackage ./nix/sandbox-runtime { };
     in
     {
-      packages = forSystems linuxSystems (pkgs: {
+      packages = forAllSystems (pkgs: {
         sandbox-runtime = srtFor pkgs;
       });
 
@@ -39,19 +36,19 @@
               ps.pexpect
               ps.pyte
             ]))
-          ]
-          # srt carries its own node/socat/rg on its wrapper PATH. bwrap and tmux
-          # stay host-provided: the AppArmor userns profile is keyed to
-          # /usr/bin/bwrap (HANDOFF.md 1b), and the approval popup talks to the
-          # user's running tmux server.
-          ++ lib.optional pkgs.stdenv.hostPlatform.isLinux (srtFor pkgs);
+            # srt carries its own node/socat/rg on its wrapper PATH. bwrap and tmux
+            # stay host-provided: the AppArmor userns profile is keyed to
+            # /usr/bin/bwrap (HANDOFF.md 1b), and the approval popup talks to the
+            # user's running tmux server.
+            (srtFor pkgs)
+          ];
           GOTOOLCHAIN = "local";
         };
       });
 
       # The built srt runs and still carries its seccomp helper. Its version is
       # held to rein's PinnedVersion by a Go test (internal/srt/nixpin_test.go).
-      checks = forSystems linuxSystems (
+      checks = forAllSystems (
         pkgs:
         let
           srt = srtFor pkgs;
