@@ -20,6 +20,7 @@ func writeExe(t *testing.T, dir, name string) string {
 }
 
 func TestFindSkipsPersistentShimDir(t *testing.T) {
+	t.Setenv(EnvShimDirs, "")
 	state := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", state)
 	t.Setenv("REIN_TEST_REAL", "")
@@ -38,6 +39,7 @@ func TestFindSkipsPersistentShimDir(t *testing.T) {
 }
 
 func TestFindSkipsSymlinkToPersistentShimDir(t *testing.T) {
+	t.Setenv(EnvShimDirs, "")
 	state := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", state)
 	persistent := filepath.Join(state, "rein", "shim")
@@ -59,27 +61,72 @@ func TestFindSkipsSymlinkToPersistentShimDir(t *testing.T) {
 }
 
 func TestFindSkipsOwnDir(t *testing.T) {
-	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	exe, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	own := filepath.Dir(exe)
-	shim := writeExe(t, own, "git")
-	t.Cleanup(func() { os.Remove(shim) })
+	t.Setenv(EnvShimDirs, "")
+	own := t.TempDir()
+	writeExe(t, own, "git")
 	real := writeExe(t, t.TempDir(), "git")
-	t.Setenv("PATH", own+string(os.PathListSeparator)+filepath.Dir(real))
-
-	got, err := Find("git", "REIN_TEST_REAL", "git")
+	got, err := find("git", own+string(os.PathListSeparator)+filepath.Dir(real), Canonical(own), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != real {
-		t.Fatalf("Find = %q, want %q (own dir must be skipped)", got, real)
+		t.Fatalf("find = %q, want %q (own dir must be skipped)", got, real)
+	}
+}
+
+// Two per-run dirs (nested runs) plus the persistent one: every dir listed in
+// EnvShimDirs is skipped.
+func TestFindSkipsVisitedShimDirs(t *testing.T) {
+	t.Setenv(EnvShimDirs, "")
+	sep := string(os.PathListSeparator)
+	inner, outer, persistent := t.TempDir(), t.TempDir(), t.TempDir()
+	for _, d := range []string{inner, outer, persistent} {
+		writeExe(t, d, "git")
+	}
+	real := writeExe(t, t.TempDir(), "git")
+	path := inner + sep + outer + sep + persistent + sep + filepath.Dir(real)
+	got, err := find("git", path, Canonical(outer), persistent, Canonical(inner))
+	if err != nil || got != real {
+		t.Fatalf("find = %q, %v; want %q", got, err, real)
+	}
+}
+
+func TestFindRecordsOwnDir(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv(EnvShimDirs, "/already/here")
+	real := writeExe(t, t.TempDir(), "git")
+	t.Setenv("PATH", filepath.Dir(real))
+	if _, err := Find("git", "REIN_TEST_REAL", "git"); err != nil {
+		t.Fatal(err)
+	}
+	exe, _ := os.Executable()
+	want := "/already/here" + string(os.PathListSeparator) + Canonical(filepath.Dir(exe))
+	if got := os.Getenv(EnvShimDirs); got != want {
+		t.Fatalf("%s = %q, want %q", EnvShimDirs, got, want)
+	}
+}
+
+func TestAppendShimDir(t *testing.T) {
+	sep := string(os.PathListSeparator)
+	if got := AppendShimDir("/a"+sep+"/b", "/a"); got != "/a"+sep+"/b" {
+		t.Errorf("dedupe: %q", got)
+	}
+	if got := AppendShimDir("relative"+sep+sep+"/x/../y", "/z"); got != "/y"+sep+"/z" {
+		t.Errorf("malformed entries: %q", got)
+	}
+	var many []string
+	for i := 0; i < 1000; i++ {
+		many = append(many, "/d"+strings.Repeat("x", i%50))
+	}
+	many = append(many, "/"+strings.Repeat("y", 10000))
+	got := strings.Split(AppendShimDir(strings.Join(many, sep), "/new"), sep)
+	if len(got) > maxShimDirs || got[len(got)-1] != "/new" {
+		t.Errorf("cap: %d entries, last %q", len(got), got[len(got)-1])
 	}
 }
 
 func TestFindOverride(t *testing.T) {
+	t.Setenv(EnvShimDirs, "")
 	p := writeExe(t, t.TempDir(), "git")
 	t.Setenv("REIN_TEST_REAL", p)
 	t.Setenv("PATH", "")
@@ -93,6 +140,7 @@ func TestFindOverride(t *testing.T) {
 }
 
 func TestFindNoneFound(t *testing.T) {
+	t.Setenv(EnvShimDirs, "")
 	state := t.TempDir()
 	t.Setenv("XDG_STATE_HOME", state)
 	persistent := filepath.Join(state, "rein", "shim")

@@ -11,18 +11,22 @@ import (
 	"time"
 )
 
-// buildShim compiles this package once per test into dir/name.
-func buildShim(t *testing.T, dir, name string) string {
+// buildShim compiles this package to dir/rein-git with dir/git -> rein-git,
+// the layout `rein run` and `rein install-shim` produce.
+func buildShim(t *testing.T, dir string) string {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	out := filepath.Join(dir, name)
+	out := filepath.Join(dir, "rein-git")
 	cmd := exec.Command(filepath.Join(runtime.GOROOT(), "bin", "go"), "build", "-o", out, ".")
 	if b, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, b)
 	}
-	return out
+	if err := os.Symlink("rein-git", filepath.Join(dir, "git")); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(dir, "git")
 }
 
 func script(t *testing.T, path, body string) {
@@ -37,7 +41,7 @@ func script(t *testing.T, path, body string) {
 
 func runShim(t *testing.T, shim string, env []string) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, shim, "--version")
 	cmd.Args[0] = "git" // as a PATH lookup would invoke it
@@ -52,9 +56,9 @@ func runShim(t *testing.T, shim string, env []string) string {
 	return string(out)
 }
 
-// A per-run shim (rein run --direct) with the persistent shim dir ALSO on PATH
-// must go straight to the real git: no hop through the persistent copy (which
-// may be a stale older rein-git) and no run<->persistent exec loop.
+// A per-run shim with the persistent shim dir also on PATH goes straight to
+// the real git: no hop through the persistent copy (possibly a stale older
+// rein-git).
 func TestShimSkipsPersistentShimDir(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the shim")
@@ -66,7 +70,7 @@ func TestShimSkipsPersistentShimDir(t *testing.T) {
 	realDir := filepath.Join(root, "real")
 	marker := filepath.Join(root, "persistent-hop")
 
-	shim := buildShim(t, runDir, "git")
+	shim := buildShim(t, runDir)
 	script(t, filepath.Join(persistent, "git"), "touch "+marker+"\nexit 99\n")
 	script(t, filepath.Join(realDir, "git"), "echo REAL-GIT \"$@\"\n")
 
@@ -85,29 +89,43 @@ func TestShimSkipsPersistentShimDir(t *testing.T) {
 	}
 }
 
-// Even with the persistent shim (current code) FIRST on PATH, ahead of the
-// per-run dir, the chain terminates at the real git.
-func TestShimPersistentFirstTerminates(t *testing.T) {
+// Nested runs put two per-run dirs (inner, outer) plus the persistent dir on
+// PATH. Whatever the order, the chain must end at the real git: each hop
+// records its dir in REIN_SHIM_DIRS, so inner and outer cannot ping-pong.
+func TestShimThreeShimDirsTerminate(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds the shim")
 	}
 	root := t.TempDir()
 	state := filepath.Join(root, "state")
-	persistent := filepath.Join(state, "rein", "shim")
-	runDir := filepath.Join(root, "run")
+	dirs := map[string]string{
+		"inner":      filepath.Join(root, "inner"),
+		"outer":      filepath.Join(root, "outer"),
+		"persistent": filepath.Join(state, "rein", "shim"),
+	}
+	for _, d := range dirs {
+		buildShim(t, d)
+	}
 	realDir := filepath.Join(root, "real")
-
-	shim := buildShim(t, persistent, "git")
-	buildShim(t, runDir, "git")
 	script(t, filepath.Join(realDir, "git"), "echo REAL-GIT \"$@\"\n")
 
-	sep := string(os.PathListSeparator)
-	env := []string{
-		"XDG_STATE_HOME=" + state,
-		"HOME=" + root,
-		"PATH=" + persistent + sep + runDir + sep + realDir + sep + "/usr/bin:/bin",
-	}
-	if out := runShim(t, shim, env); !strings.Contains(out, "REAL-GIT --version") {
-		t.Fatalf("output = %q, want the real git", out)
+	for _, order := range [][]string{
+		{"inner", "outer", "persistent"},
+		{"outer", "inner", "persistent"},
+		{"persistent", "inner", "outer"},
+	} {
+		var path []string
+		for _, name := range order {
+			path = append(path, dirs[name])
+		}
+		path = append(path, realDir, "/usr/bin", "/bin")
+		env := []string{
+			"XDG_STATE_HOME=" + state,
+			"HOME=" + root,
+			"PATH=" + strings.Join(path, string(os.PathListSeparator)),
+		}
+		if out := runShim(t, filepath.Join(dirs[order[0]], "git"), env); !strings.Contains(out, "REAL-GIT --version") {
+			t.Fatalf("order %v: output = %q, want the real git", order, out)
+		}
 	}
 }
