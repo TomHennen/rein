@@ -8,16 +8,13 @@
     { self, nixpkgs }:
     let
       inherit (nixpkgs) lib;
+      # Linux only for now, like rein itself.
       systems = [
         "x86_64-linux"
         "aarch64-linux"
-        "aarch64-darwin"
       ];
-      linuxSystems = lib.filter (lib.hasSuffix "-linux") systems;
-      forSystems = ss: f: lib.genAttrs ss (system: f nixpkgs.legacyPackages.${system});
-      forAllSystems = forSystems systems;
+      forAllSystems = f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
-      # srt is Linux-only here: rein's sandboxed mode is Linux-only today.
       srtFor = pkgs: pkgs.callPackage ./nix/sandbox-runtime { };
       seccompArch = pkgs: if pkgs.stdenv.hostPlatform.isAarch64 then "arm64" else "x64";
 
@@ -78,17 +75,17 @@
             "-w"
           ];
 
-          # The suite assumes Linux paths (/home, /tmp are symlinks on macOS) and
-          # rein is Linux-only for now (design 5.4), so darwin builds without it.
-          doCheck = pkgs.stdenv.hostPlatform.isLinux;
           nativeCheckInputs = [ pkgs.git ];
+          # buildGoModule passes -vet=off; the later empty value restores go
+          # test's default vet checks.
+          checkFlags = [ "-vet=" ];
 
           meta = {
             description = "Local credential broker issuing short-lived, scoped GitHub credentials to AI coding agents";
             homepage = "https://github.com/TomHennen/rein";
             license = lib.licenses.asl20;
             mainProgram = "rein";
-            platforms = lib.platforms.linux ++ lib.platforms.darwin;
+            platforms = lib.platforms.linux;
           };
         };
     in
@@ -97,15 +94,12 @@
         pkgs:
         let
           rein = mkRein pkgs;
+          sandbox-runtime = srtFor pkgs;
         in
         {
-          inherit rein;
-          default = rein;
-        }
-        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux rec {
-          sandbox-runtime = srtFor pkgs;
-          # What `nix profile add` installs on Linux: rein plus the pinned srt (which
-          # carries its own node/socat/rg). bwrap is not included (HANDOFF.md 1b).
+          inherit rein sandbox-runtime;
+          # What `nix profile add` installs: rein plus the pinned srt (which carries
+          # its own node/socat/rg). bwrap is not included (HANDOFF.md 1b).
           default = pkgs.buildEnv {
             name = "rein-with-srt-${version}";
             paths = [
@@ -118,28 +112,23 @@
         }
       );
 
-      checks = forAllSystems (
-        pkgs:
-        {
-          rein = self.packages.${pkgs.stdenv.hostPlatform.system}.rein;
-          fmt = (treefmtFor pkgs).check (
-            lib.fileset.toSource {
-              root = ./.;
-              fileset = lib.fileset.fileFilter (f: f.hasExt "go" || f.hasExt "nix") ./.;
-            }
-          );
-        }
+      checks = forAllSystems (pkgs: {
+        rein = self.packages.${pkgs.stdenv.hostPlatform.system}.rein;
+        fmt = (treefmtFor pkgs).check (
+          lib.fileset.toSource {
+            root = ./.;
+            fileset = lib.fileset.fileFilter (f: f.hasExt "go" || f.hasExt "nix") ./.;
+          }
+        );
         # The built srt runs and still carries its seccomp helper. Its version is
         # held to rein's PinnedVersion by a Go test (internal/srt/nixpin_test.go).
-        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-          srt = pkgs.runCommand "srt-check" { } ''
-            pkg=$(dirname "$(dirname "$(readlink -f ${srtFor pkgs}/bin/srt)")")
-            test -x "$pkg/vendor/seccomp/${seccompArch pkgs}/apply-seccomp"
-            ${srtFor pkgs}/bin/srt --help > /dev/null
-            touch $out
-          '';
-        }
-      );
+        srt = pkgs.runCommand "srt-check" { } ''
+          pkg=$(dirname "$(dirname "$(readlink -f ${srtFor pkgs}/bin/srt)")")
+          test -x "$pkg/vendor/seccomp/${seccompArch pkgs}/apply-seccomp"
+          ${srtFor pkgs}/bin/srt --help > /dev/null
+          touch $out
+        '';
+      });
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
@@ -155,12 +144,12 @@
               ps.pexpect
               ps.pyte
             ]))
-          ]
-          # srt carries its own node/socat/rg on its wrapper PATH. bwrap and tmux
-          # stay host-provided: the AppArmor userns profile is keyed to
-          # /usr/bin/bwrap (HANDOFF.md 1b), and the approval popup talks to the
-          # user's running tmux server.
-          ++ lib.optional pkgs.stdenv.hostPlatform.isLinux (srtFor pkgs);
+            # srt carries its own node/socat/rg on its wrapper PATH. bwrap and tmux
+            # stay host-provided: the AppArmor userns profile is keyed to
+            # /usr/bin/bwrap (HANDOFF.md 1b), and the approval popup talks to the
+            # user's running tmux server.
+            (srtFor pkgs)
+          ];
           GOTOOLCHAIN = "local";
         };
       });
