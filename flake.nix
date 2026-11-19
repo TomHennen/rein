@@ -15,7 +15,7 @@
       ];
       forAllSystems = f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
 
-      # Commit date, not the rev: a rev in the version would rebuild on every docs-only commit.
+      # Date, not rev: commits on the same day share a store path.
       d = self.lastModifiedDate;
       version = "0-unstable-${builtins.substring 0 4 d}-${builtins.substring 4 2 d}-${builtins.substring 6 2 d}";
 
@@ -46,12 +46,11 @@
           ];
 
           env.CGO_ENABLED = "0";
-          # Mirrors .goreleaser.yml (-trimpath and -buildid= come from buildGoModule). As there,
-          # -X main.version is a no-op until cmd/rein defines the variable.
+          # Mirrors .goreleaser.yml (-trimpath and -buildid= come from buildGoModule), minus
+          # its -X main.* flags: cmd/rein defines no such variables yet.
           ldflags = [
             "-s"
             "-w"
-            "-X main.version=${version}"
           ];
 
           nativeCheckInputs = [ pkgs.git ];
@@ -62,7 +61,7 @@
           checkPhase = ''
             runHook preCheck
             export GOFLAGS=''${GOFLAGS//-trimpath/}
-            go test -vet=off -p $NIX_BUILD_CORES $checkFlags ./...
+            go test -p $NIX_BUILD_CORES $checkFlags ./...
             runHook postCheck
           '';
 

@@ -116,7 +116,14 @@ host-installed and version-pinned as described above. Two caveats with how
   and it dangles once that store path is garbage-collected (for a `nix run`
   path, that can be at any time). A newer `rein doctor` reports the mismatch,
   but `rein doctor --fix` relinks to the new store path, which has the same
-  problem. If you already have such a link, `rm ~/.local/bin/rein`.
+  problem. If `readlink ~/.local/bin/rein` already points into `/nix/store`,
+  remove that link.
+
+**Integrity:** the `go install` and Nix routes build whatever commit they
+resolve — by default the unsigned tip of `main` — and carry no SLSA
+provenance. Pin a commit you have reviewed (`...@<commit>` for `go install`,
+`github:TomHennen/rein/<commit>` for Nix); `nix profile upgrade` otherwise
+follows `main`.
 
 **Release binaries:** none yet. Tagged releases will be built by goreleaser
 with SLSA provenance via [`build-and-publish.yml`](.github/workflows/build-and-publish.yml),
