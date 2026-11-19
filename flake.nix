@@ -19,16 +19,6 @@
 
       # srt is Linux-only here: rein's sandboxed mode is Linux-only today.
       srtFor = pkgs: pkgs.callPackage ./nix/sandbox-runtime { };
-      pinnedSrtVersion =
-        let
-          m = builtins.match ''.*const PinnedVersion = "([^"]+)".*'' (
-            builtins.readFile ./internal/srt/preflight.go
-          );
-        in
-        if m == null then
-          throw "flake.nix: PinnedVersion not found in internal/srt/preflight.go"
-        else
-          lib.head m;
       seccompArch = pkgs: if pkgs.stdenv.hostPlatform.isAarch64 then "arm64" else "x64";
 
       # Date, not rev: commits on the same day share a store path.
@@ -41,6 +31,9 @@
         fileset = lib.fileset.unions [
           ./go.mod
           ./go.sum
+          # internal/srt's test holds the Nix srt pin to PinnedVersion.
+          ./nix/sandbox-runtime/package.json
+          ./nix/sandbox-runtime/package-lock.json
           (lib.fileset.fileFilter (f: f.hasExt "go") ./.)
           ./tests/containment/testdata
         ];
@@ -131,15 +124,11 @@
                 touch "$out"
               '';
         }
-        # Fails if the Nix srt drifts from rein's PinnedVersion or loses seccomp.
+        # The built srt runs and still carries its seccomp helper. Its version is
+        # held to rein's PinnedVersion by a Go test (internal/srt/nixpin_test.go).
         // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-          srt-pin = pkgs.runCommand "srt-pin-check" { nativeBuildInputs = [ pkgs.jq ]; } ''
+          srt = pkgs.runCommand "srt-check" { } ''
             pkg=$(dirname "$(dirname "$(readlink -f ${srtFor pkgs}/bin/srt)")")
-            v=$(jq -r .version "$pkg/package.json")
-            if [ "$v" != "${pinnedSrtVersion}" ]; then
-              echo "nix srt is $v, internal/srt PinnedVersion is ${pinnedSrtVersion}" >&2
-              exit 1
-            fi
             test -x "$pkg/vendor/seccomp/${seccompArch pkgs}/apply-seccomp"
             ${srtFor pkgs}/bin/srt --help > /dev/null
             touch $out

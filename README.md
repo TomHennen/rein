@@ -131,9 +131,8 @@ follows `main`.
 
 **Release binaries:** none yet. Tagged releases will be built by goreleaser
 with SLSA provenance via [`build-and-publish.yml`](.github/workflows/build-and-publish.yml),
-but no version has been tagged, and the release build currently packages only
-`rein` (not the `rein-git`/`rein-gh` shims `rein init` requires). Use one of the
-routes above.
+and each archive carries `rein`, `rein-git` and `rein-gh` side by side, but no
+version has been tagged. Use one of the routes above.
 
 `rein init` is idempotent — safe to re-run.
 
