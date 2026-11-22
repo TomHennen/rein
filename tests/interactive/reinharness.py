@@ -1708,6 +1708,8 @@ _NORMALIZE_RULES = [
     # issue number, in every context it appears (BEFORE the hash rule). NB the
     # `agent/\d+/` rule also rewrites the literal example `agent/73/kx3q` in
     # rein's error text — harmless, since it hits both compare sides identically.
+    # the App bot's numeric user id in the delegated noreply address
+    (r"\b\d+\+(?=rein-[a-z]+-[^@\s]*\[bot\]@)", "<BOT_ID>+"),
     (r"#\d+", "#<ISSUE>"),
     (r"agent/\d+/", "agent/<ISSUE>/"),
     # issue number inside a REST API path, e.g. the gh-write journey's

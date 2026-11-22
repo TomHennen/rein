@@ -5,7 +5,7 @@ both the default and the opt-out LIVE in-sandbox.
 
 Invariants (a break is exit 1, independent of the golden):
   - with NO preset configured, a preset host is REACHABLE (pypi.org -> 200) and
-    so is a host behind a *.suffix wildcard (files.pythonhosted.org -> 200: the
+    so is a host behind a *.suffix wildcard (registry.npmjs.org -> 200: the
     hosts real installs hit are all wildcard-covered, so the contract's
     "dependency installs work" rests on this),
   - a NON-preset host stays blocked (example.com -> 000, the srt allowlist deny),
@@ -40,7 +40,7 @@ def default_script() -> str:
 cd "$0"
 emit "@EGRESS_PRESET  (default dev preset: package registries reachable, other hosts blocked)"
 {_code("pypi.org", "PRESET_HOST")}
-{_code("files.pythonhosted.org", "PRESET_WILDCARD_HOST")}
+{_code("registry.npmjs.org", "PRESET_WILDCARD_HOST")}
 {_code("example.com", "OTHER_HOST")}
 """
 
@@ -109,7 +109,7 @@ def main() -> int:
 
         checks = {
             "default: preset host pypi.org is reachable (200)": _val(raw, "PRESET_HOST") == "200",
-            "default: wildcard preset host files.pythonhosted.org is reachable (200)": _val(raw, "PRESET_WILDCARD_HOST") == "200",
+            "default: wildcard preset host registry.npmjs.org is reachable (200)": _val(raw, "PRESET_WILDCARD_HOST") == "200",
             "default: non-preset host example.com is blocked (000)": _val(raw, "OTHER_HOST") == "000",
             "default: the launch banner names the dev bundle": 'egress preset "dev" active' in raw,
             "none: preset host pypi.org is blocked (000)": _val(raw, "NONE_PRESET_HOST") == "000",
@@ -124,7 +124,7 @@ def main() -> int:
             return 1
 
         print("--- outcomes (asserted; not all in the golden) ---", flush=True)
-        print("  default: pypi.org 200, files.pythonhosted.org 200 (wildcard), example.com 000 — registries only", flush=True)
+        print("  default: pypi.org 200, registry.npmjs.org 200 (wildcard), example.com 000 — registries only", flush=True)
         print("  egress_preset: none: pypi.org 000 — the opt-out closes them again", flush=True)
 
         if os.getenv("REIN_UPDATE_GOLDEN"):
