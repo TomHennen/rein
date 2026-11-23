@@ -62,7 +62,7 @@ def probe_script() -> str:
     return f"""
 {H.sandbox_preamble()}
 emit "@CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR"
-emit "@HOST_CLAUDE_ENTRIES=[$(ls -A ~/.claude 2>/dev/null | sort | tr '\\n' ' ')]"
+emit "@HOST_CLAUDE_UNEXPECTED_ENTRIES=[$(ls -A ~/.claude 2>/dev/null | grep -vx -e claude.json -e debug | sort | tr '\\n' ' ')]"
 emit "@HOST_HISTORY_JSONL_READABLE=$(test -r ~/.claude/history.jsonl && echo YES-LEAK || echo no)"
 emit "@HOST_CLAUDE_JSON_READABLE=$(test -s ~/.claude/claude.json -a -r ~/.claude/claude.json && echo YES-LEAK || echo no)"
 emit "@HOST_CLAUDE_SENSITIVE_READABLE=[$(for f in history.jsonl claude.json .credentials.json settings.json projects sessions todos shell-snapshots; do test -s ~/.claude/"$f" -a -r ~/.claude/"$f" && printf '%s ' "$f"; done)]"
@@ -311,6 +311,10 @@ def main() -> int:
             # Not an empty-listing assertion (#150): rein's deny of the
             # ~/.claude.json symlink lands a tombstone INSIDE the denied dir.
             # The claim is: nothing readable, nothing writable.
+            ("@HOST_CLAUDE_UNEXPECTED_ENTRIES=[]" in probe_text,
+             "HIDING: the only names that may show under the developer's real ~/.claude "
+             "are the two mount stubs (claude.json, debug), and only where the host has "
+             "them — so they are filtered out and anything else visible is a finding"),
             ("@HOST_CLAUDE_SENSITIVE_READABLE=[]" in probe_text,
              "HIDING: no sensitive entry under the developer's real ~/.claude may be "
              "READABLE in-sandbox (history, config, credentials, settings, per-project "
