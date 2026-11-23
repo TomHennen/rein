@@ -33,6 +33,9 @@ def main() -> int:
     # mint check runs against a real App.
     extra = {**H.isolated_home_env(home), **H.init_app_env()}
     extra["REIN_MACHINE_HOSTNAME"] = "demo-box"
+    # Put the binary under test on PATH so doctor's `rein on PATH` row does not
+    # depend on whether (and which) rein this machine happens to have installed.
+    extra["PATH"] = f"{H.REIN_BIN.parent}{os.pathsep}{env.get('PATH', '')}"
 
     # DECLARE STEPS ONLY — argv + the ordered answers to each prompt. The runner
     # captures the COMPLETE session (issue #82); this journey never slices it.
