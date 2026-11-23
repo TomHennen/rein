@@ -412,3 +412,41 @@ func dedupePaths(in []string) []string {
 	}
 	return out
 }
+
+// sandboxPathEnv rewrites PATH entries that sit under the hidden home but
+// resolve outside it (~/.nix-profile/bin -> /nix/store/...) to their targets.
+// The link vanishes under the home tmpfs and srt cannot re-expose a symlink
+// (it binds the target at the target's own path), so without this the tools
+// simply disappear in-sandbox. Widens nothing: the target was never hidden.
+func sandboxPathEnv(env []string, home, homeDeny string) []string {
+	if homeDeny == "" {
+		return env
+	}
+	out := make([]string, len(env))
+	for i, kv := range env {
+		out[i] = kv
+		value, ok := strings.CutPrefix(kv, "PATH=")
+		if !ok {
+			continue
+		}
+		dirs := filepath.SplitList(value)
+		for j, d := range dirs {
+			if !filepath.IsAbs(d) || !(pathWithin(d, home) || pathWithin(d, homeDeny)) {
+				continue
+			}
+			if r, err := filepath.EvalSymlinks(d); err == nil && !pathWithin(r, homeDeny) {
+				dirs[j] = r
+			}
+		}
+		out[i] = "PATH=" + strings.Join(dirs, string(os.PathListSeparator))
+	}
+	return out
+}
+
+func pathWithin(p, dir string) bool {
+	if dir == "" {
+		return false
+	}
+	rel, err := filepath.Rel(dir, filepath.Clean(p))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
