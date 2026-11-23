@@ -1709,6 +1709,8 @@ _NORMALIZE_RULES = [
     # issue number, in every context it appears (BEFORE the hash rule). NB the
     # `agent/\d+/` rule also rewrites the literal example `agent/73/kx3q` in
     # rein's error text — harmless, since it hits both compare sides identically.
+    # the App bot's numeric user id in the delegated noreply address
+    (r"\b\d+\+(?=rein-[a-z]+-[^@\s]*\[bot\]@)", "<BOT_ID>+"),
     (r"#\d+", "#<ISSUE>"),
     (r"agent/\d+/", "agent/<ISSUE>/"),
     # issue number inside a REST API path, e.g. the gh-write journey's
@@ -1757,7 +1759,8 @@ _NORMALIZE_RULES = [
     (r"/\S*/rein-sandbox-home/\.claude", "<OVERLAY>"),
     # scratch dirs (the trailing char class excludes '/', so a suffix like
     # /session.yaml is preserved: <TMP>/session.yaml)
-    (r"/tmp/rein-[A-Za-z0-9_.-]+", "<TMP>"),
+    # (`nix develop` points TMPDIR at /tmp/nix-shell.<id>)
+    (r"/tmp/(?:nix-shell\.[^/\s]+/)?rein-[A-Za-z0-9_.-]+", "<TMP>"),
     # machine-variable absolute paths -> placeholders (issue #82: `rein doctor`'s
     # transcript names real box paths — the running binary, the operator's home,
     # the App key, srt. Normalize them so the golden is stable run-to-run and not
@@ -1765,6 +1768,8 @@ _NORMALIZE_RULES = [
     # collapses to <REIN_BIN> whole rather than <HOME>/.../bin/rein. These run
     # AFTER the /tmp rule so tmp paths are already <TMP>.
     (r"[^\s()]+/bin/rein(?:-git|-gh)?\b", "<REIN_BIN>"),
+    # srt is npm-global on a bare host, a /nix/store path in the dev shell
+    (r"[^\s()]+/bin/srt\b", "<SRT>"),
     (r"/home/[^/\s]+|/Users/[^/\s]+", "<HOME>"),
     # git transfer chatter: keep the line, normalize every volatile number so the
     # golden is identical whatever the repo's object count / network speed is.

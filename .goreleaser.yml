@@ -14,6 +14,8 @@ before:
   hooks:
     - go mod tidy
 
+# rein init copies rein-git and rein-gh from next to the rein binary, so all
+# three ship in one archive. Keep the three builds' settings identical.
 builds:
   - id: rein
     main: ./cmd/rein
@@ -38,9 +40,46 @@ builds:
       - -X main.version={{.Version}}
       - -X main.commit={{.Commit}}
       - -X main.date={{.Date}}
+  - id: rein-git
+    main: ./cmd/rein-git
+    binary: rein-git
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+  - id: rein-gh
+    main: ./cmd/rein-gh
+    binary: rein-gh
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
 
 archives:
-  - formats: [tar.gz]
+  - ids: [rein, rein-git, rein-gh]
+    formats: [tar.gz]
     name_template: >-
       {{ .ProjectName }}_
       {{- .Version }}_
