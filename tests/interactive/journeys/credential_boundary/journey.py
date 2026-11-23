@@ -163,7 +163,8 @@ def main() -> int:
         # here would report this journey as green on any machine without bagel —
         # a skipped check masquerading as coverage, which is exactly the #68
         # footgun. 3 makes the runner print "SKIP ... did NOT run" instead.
-        print("SKIP: bagel not on PATH — this journey did NOT run. Install with "
+        print("SKIP: bagel not on PATH — this journey did NOT run. Use the nix dev "
+              "shell (it provides bagel), or install with "
               "`go install github.com/boostsecurityio/bagel/cmd/bagel@latest` "
               "(external CLI only; do NOT add to go.mod, it is GPL-3.0).", flush=True)
         return 3
