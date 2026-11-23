@@ -180,7 +180,7 @@ def journey_overlay_dir() -> str:
             with open(os.path.join(overlay, ".claude.json"), "w") as fh:
                 json.dump(kept, fh)
     except (OSError, ValueError):
-        pass  # no real overlay yet (fresh box): journey may hit the wizard (#151)
+        pass  # fresh box: ensure_claude_onboarded walks the wizard instead
     atexit.register(lambda: shutil.rmtree(root, ignore_errors=True))
     _JOURNEY_OVERLAY = overlay
     return overlay
@@ -1008,8 +1008,8 @@ class ReinRun:
                 ready = True
                 break
             # Auto-answer ONLY the folder-trust dialog (plumbing); a theme/login
-            # dialog still reaches the caller as `dialog` — that one is a finding
-            # (missing onboarding state, #151).
+            # dialog still reaches the caller as `dialog` — ensure_claude_onboarded
+            # should have cleared it before launch, so that one is a finding.
             if not trust_answered and CLAUDE_TRUST_DIALOG_RE.search(text):
                 self._answer_trust_dialog(scr)
                 trust_answered = True
@@ -1186,6 +1186,12 @@ def spawn_claude_interactive(
     env = dict(env or rein_env())
     if extra_env:
         env.update(extra_env)
+    if "-p" not in (extra_args or []):
+        ensure_claude_onboarded(env)
+    return _spawn_claude(extra_args, cwd=cwd, env=env, timeout=timeout)
+
+
+def _spawn_claude(extra_args, *, cwd, env, timeout) -> ReinRun:
     args = ["run", "--", "claude", *(extra_args or [])]
     transcript = io.StringIO()
     child = pexpect.spawn(
@@ -1200,6 +1206,54 @@ def spawn_claude_interactive(
     )
     child.logfile_read = transcript
     return ReinRun(child=child, transcript=transcript, workdir=str(cwd or REPO_ROOT))
+
+
+# claude's first-run screens, each answered with its default (Enter). Matched by
+# their own text, never a blind Enter: the folder-trust dialog that follows
+# defaults to `No, exit` (#151).
+_CLAUDE_FIRST_RUN_SCREENS = ("choose the text style", "press enter to continue")
+
+
+def _overlay_onboarded(env: dict) -> bool:
+    try:
+        with open(os.path.join(env[SANDBOX_CLAUDE_HOME_DIR_ENV], ".claude.json")) as fh:
+            return bool(json.load(fh).get("hasCompletedOnboarding"))
+    except (KeyError, OSError, ValueError):
+        return False
+
+
+def ensure_claude_onboarded(env: dict, timeout: int = 90) -> None:
+    """Walk claude's own first-run screens in the throwaway overlay, as a new
+    user would on their first `rein run -- claude`, unless the overlay is already
+    onboarded. Call before launching an interactive claude. Raises with the
+    rendered screen if the flow does not complete (a new screen, a login step)."""
+    if _overlay_onboarded(env):
+        return
+    run = _spawn_claude(
+        None, cwd=None, timeout=timeout,
+        env={**env, "REIN_SANDBOX_ALLOW_UNHARDENED_GIT": "1", "REIN_ALLOW_UNSCOPED_WORKTREE": "1"})
+    scr = run.screen()
+    answered: set[str] = set()
+    try:
+        deadline = time.time() + timeout
+        while time.time() < deadline and not _overlay_onboarded(env):
+            try:
+                scr.feed(run.child.read_nonblocking(size=4096, timeout=2))
+            except pexpect.TIMEOUT:
+                pass
+            except pexpect.EOF:
+                break
+            low = scr.text().lower()
+            for marker in _CLAUDE_FIRST_RUN_SCREENS:
+                if marker in low and marker not in answered:
+                    answered.add(marker)
+                    run.child.send("\r")
+        if not _overlay_onboarded(env):
+            raise RuntimeError(
+                "claude's first-run flow did not complete in the sandbox "
+                f"(answered: {sorted(answered)}). Screen:\n{scr.text()}")
+    finally:
+        run.child.close(force=True)
 
 
 # --------------------------------------------------------------------------
