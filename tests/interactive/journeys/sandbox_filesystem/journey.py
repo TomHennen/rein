@@ -71,7 +71,7 @@ run sh -c 'echo scratch > {EPHEMERAL_PROBE} && cat {EPHEMERAL_PROBE}'
 emit "@GIT_ESCAPE_CLOSED  (.git is a pinned mountpoint; hooks + config read-only)"
 run mv .git .git.aside
 emit "@MV_RC=$?"
-run sh -c 'echo evil > .git/hooks/pre-commit'
+run bash -c 'echo evil > .git/hooks/pre-commit'
 emit "@HOOK_RC=$?"
 run git config --local core.pager 'sh -c pwned'
 emit "@CFG_RC=$?"

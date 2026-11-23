@@ -110,8 +110,8 @@ def overlay_dir(env: dict) -> str:
     return os.path.join(base, "rein-sandbox-home")
 
 
-# Onboarding keys the wipe must preserve (#151): a virgin overlay puts every later
-# interactive run on a wizard whose login step needs a browser OAuth round-trip.
+# Onboarding keys the wipe preserves, so later interactive runs in this process
+# need not walk the first-run wizard again (H.ensure_claude_onboarded).
 ONBOARDING_KEYS = ("theme", "hasCompletedOnboarding", "lastOnboardingVersion")
 
 
@@ -119,7 +119,7 @@ def reset_overlay_preserving_onboarding(env: dict) -> dict:
     """Wipe the overlay for determinism, but carry the onboarding keys across.
 
     Returns the preserved keys (empty when the box has none yet, e.g. a first
-    run — that box still hits the wizard, which is #151's open half)."""
+    run; interactive launches then walk the wizard via H.ensure_claude_onboarded)."""
     parent = overlay_dir(env)
     # Guardrail: this rmtree once nuked the developer's REAL ~/.config/rein-sandbox-home
     # (#176). rein_env sets REIN_SANDBOX_CLAUDE_HOME_DIR to a throwaway under the temp
@@ -259,11 +259,7 @@ def main() -> int:
     # Start from a clean overlay so the run is deterministic and isolated from prior
     # box state (resume is still proven WITHIN this journey: run 1 → run 2). Onboarding
     # state is the one thing carried across — see reset_overlay_preserving_onboarding.
-    kept = reset_overlay_preserving_onboarding(env)
-    if not kept:
-        print("note: the overlay had no onboarding state to preserve — an INTERACTIVE "
-              "claude in-sandbox will hit the first-run wizard (#151). Headless (-p), "
-              "which this journey drives, is unaffected.", flush=True)
+    reset_overlay_preserving_onboarding(env)
 
     workdir = None
     try:

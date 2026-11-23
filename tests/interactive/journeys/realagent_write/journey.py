@@ -209,6 +209,7 @@ def run_agent(env: dict, repo: str, issue: int, workdir: str) -> dict:
     # this journey reads back is the one the run writes).
     # Pre-accept both blocking dialogs (folder trust; the bypass disclaimer this
     # journey's own launch flag triggers). dismiss_claude_trust_dialog is the fallback.
+    H.ensure_claude_onboarded(env)
     H.pretrust_workspace(workdir, env=env)
     H.accept_bypass_permissions_disclaimer(env=env)
 
