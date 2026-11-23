@@ -82,15 +82,15 @@ run git push --progress origin HEAD:refs/heads/{good1}
 emit "@PHASE2_RC=$?"
 
 emit "@PHASE3_BUSY_START  busy window (~25s, GitHub traffic every ~5s) -- the approval AGE bound must still expire despite continuous activity"
-run git ls-remote origin
+run git ls-remote origin HEAD
 run sleep 5
-run git ls-remote origin
+run git ls-remote origin HEAD
 run sleep 5
-run git ls-remote origin
+run git ls-remote origin HEAD
 run sleep 5
-run git ls-remote origin
+run git ls-remote origin HEAD
 run sleep 5
-run git ls-remote origin
+run git ls-remote origin HEAD
 emit "@PHASE3_BUSY_END"
 
 emit "@PHASE4_START  push agent/{issue}/<nonce2> WITHOUT re-declaring (expect: locked -- the confirmation aged out)"
