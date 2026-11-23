@@ -431,22 +431,15 @@ func sandboxPathEnv(env []string, home, homeDeny string) []string {
 		}
 		dirs := filepath.SplitList(value)
 		for j, d := range dirs {
-			if !filepath.IsAbs(d) || !(pathWithin(d, home) || pathWithin(d, homeDeny)) {
+			d = filepath.Clean(d)
+			if !filepath.IsAbs(d) || !(pathAtOrUnder(d, home) || pathAtOrUnder(d, homeDeny)) {
 				continue
 			}
-			if r, err := filepath.EvalSymlinks(d); err == nil && !pathWithin(r, homeDeny) {
+			if r, err := filepath.EvalSymlinks(d); err == nil && !pathAtOrUnder(r, homeDeny) {
 				dirs[j] = r
 			}
 		}
 		out[i] = "PATH=" + strings.Join(dirs, string(os.PathListSeparator))
 	}
 	return out
-}
-
-func pathWithin(p, dir string) bool {
-	if dir == "" {
-		return false
-	}
-	rel, err := filepath.Rel(dir, filepath.Clean(p))
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
