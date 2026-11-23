@@ -1828,6 +1828,8 @@ _NORMALIZE_RULES = [
     (r"[^\s()]+/bin/rein(?:-git|-gh)?\b", "<REIN_BIN>"),
     # srt is npm-global on a bare host, a /nix/store path in the dev shell
     (r"[^\s()]+/bin/srt\b", "<SRT>"),
+    # bagel likewise: ~/go/bin from `go install`, /nix/store in the dev shell
+    (r"[^\s()]+/bin/bagel\b", "<BAGEL>"),
     (r"/home/[^/\s]+|/Users/[^/\s]+", "<HOME>"),
     # git transfer chatter: keep the line, normalize every volatile number so the
     # golden is identical whatever the repo's object count / network speed is.

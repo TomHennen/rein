@@ -152,6 +152,9 @@
             # /usr/bin/bwrap (HANDOFF.md 1b), and the approval popup talks to the
             # user's running tmux server.
             (srtFor pkgs)
+            # GPL-3.0 test tool for the credential_boundary journey; dev shell only.
+            (pkgs.callPackage ./nix/bagel { })
+            pkgs.jq
           ];
           GOTOOLCHAIN = "local";
         };
