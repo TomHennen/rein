@@ -737,7 +737,7 @@ func runSandboxed(cmdline []string) (int, error) {
 	}
 
 	execEnv := srt.BuildEnv(srt.EnvParams{
-		Parent:              os.Environ(),
+		Parent:              sandboxPathEnv(os.Environ(), home, homeDeny),
 		CABundlePath:        bundlePath,
 		StubGHToken:         stubGHToken,
 		ExposePorts:         exposePortsCSV(sess.ExposePorts),

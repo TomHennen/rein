@@ -522,3 +522,42 @@ func TestCredentialDenyReadHidesCargoCredentials(t *testing.T) {
 		}
 	}
 }
+
+func TestSandboxPathEnv(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(root, "home")
+	store := filepath.Join(root, "store", "profile", "bin")
+	inHome := filepath.Join(home, "tools", "bin")
+	for _, d := range []string{store, inHome} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// ~/.nix-profile -> outside home; ~/.link -> still inside home.
+	if err := os.Symlink(filepath.Join(root, "store", "profile"), filepath.Join(home, ".nix-profile")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "tools"), filepath.Join(home, ".link")); err != nil {
+		t.Fatal(err)
+	}
+	profileBin := filepath.Join(home, ".nix-profile", "bin")
+	linkBin := filepath.Join(home, ".link", "bin")
+	missing := filepath.Join(home, "nope")
+	in := []string{"FOO=" + profileBin, "PATH=" + strings.Join([]string{profileBin, linkBin, inHome, missing, "/usr/bin", "rel"}, ":")}
+
+	got := sandboxPathEnv(in, home, home)
+	want := "PATH=" + strings.Join([]string{store, linkBin, inHome, missing, "/usr/bin", "rel"}, ":")
+	if got[1] != want {
+		t.Errorf("PATH\n got %s\nwant %s", got[1], want)
+	}
+	if got[0] != in[0] {
+		t.Errorf("non-PATH var rewritten: %s", got[0])
+	}
+	// SHOW_HOME kill switch: home is visible, nothing to rewrite.
+	if got := sandboxPathEnv(in, home, ""); got[1] != in[1] {
+		t.Errorf("rewrote PATH with home visible: %s", got[1])
+	}
+}
