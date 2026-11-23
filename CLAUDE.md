@@ -33,8 +33,13 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 - Key storage: hand-rolled `internal/keystore` file backend (PEMs under ConfigDir with uid + mode `0o077` + O_NOFOLLOW checks). `github.com/99designs/keyring` (MIT) was planned but never adopted — it is NOT in go.mod; `internal/keystore` is the swap point for future backends (hard-constraint #6).
 - Hardware keys (Phase 1+): `github.com/facebookincubator/sks` (Apache 2.0). Not used in Phase 0.
 - CLI: `github.com/spf13/cobra`
+- Credential scanner in TESTS ONLY: `bagel` (GPL-3.0), an external CLI the
+  `credential_boundary` journey runs on both sides of the sandbox. The dev shell
+  builds it (`nix/bagel`); off nix, `go install` it. **Never add it to go.mod or a
+  package closure** — it is a standalone tool, not linked or shipped (hard-constraint #4).
 - Terminal emulation in TESTS ONLY: `pyte` (LGPLv3), installed as the system package
-  `python3-pyte` (`sudo apt install python3-pyte`), same as `pexpect`. It renders a pty's
+  `python3-pyte` (`sudo apt install python3-pyte`), same as `pexpect`, or from the nix dev
+  shell (`flake.nix`). It renders a pty's
   bytes into a SCREEN, which is how `tests/interactive/` asserts on anything that REDRAWS
   (the tmux approval popup, a real `claude` TUI) instead of regex-stripping ANSI out of the
   raw byte stream (issue #100). **Test-only is load-bearing for hard-constraint #4**: it is
@@ -44,7 +49,10 @@ A local credential broker for AI coding agents on a developer's laptop. Issues s
 
 ## Dev environment
 
-- Development happens directly in this Linux VM. There is no devcontainer.
+- Toolchain: the supported route is the nix dev shell (`flake.nix`: Go, gopls, goreleaser, python3 + pexpect + pyte, git, gh, jq, `bagel`, and on Linux `srt` 0.0.63 with its own node/socat/ripgrep) via `nix develop`, or automatically with direnv + nix-direnv (`.envrc` is `use flake`; run `direnv allow` once). It sets `GOTOOLCHAIN=local`. Nix is optional: the host/apt path in `HANDOFF.md` §1 still works, and end users never need nix. There is no devcontainer.
+- The dev shell's `srt` (`nix/sandbox-runtime/`) is the npm registry tarball, so the prebuilt `apply-seccomp` ships; its wrapper runs a pinned node and prefixes socat/rg/which onto srt's PATH only. `bwrap` and `tmux` are deliberately NOT in the dev shell: a store `bwrap` misses the path-keyed AppArmor profile in `HANDOFF.md` §1b, and the approval popup talks to your running tmux server. Install both on the host. `rein doctor` checks `srt` and `bwrap`.
+- Bumping srt: the pin lives in TWO places, `PinnedVersion` in `internal/srt/preflight.go` and `nix/sandbox-runtime/package.json`. Change both, regenerate the lock in `nix/sandbox-runtime/` with `nix shell nixpkgs#nodejs_24 -c npm install --package-lock-only --ignore-scripts` (refreshes every tarball's sha512; there is no other hash), confirm every `resolved` URL in the lock is on `registry.npmjs.org` (an `~/.npmrc` mirror would leak in), and run `go test ./internal/srt` (`TestNixSrtMatchesPinnedVersion` fails on drift) and `nix flake check`. Then update the version in the prose (this file, `HANDOFF.md` §1, `README.md` Prerequisites) and re-verify the injection hook per `docs/phase1-srt-spike-findings.md`.
+- direnv caveat: `direnv allow` trusts `flake.nix` transitively (direnv re-prompts only when `.envrc` itself changes), so an agent that can write `flake.nix` in this checkout gets host execution on your next `cd`. Don't `direnv allow` a checkout you point a sandboxed agent at; use explicit `nix develop` there.
 - Setup is the `rein init` world: run `rein init` once (see `HANDOFF.md`) and rein resolves your App from `state.json` + the managed keystore — no env vars needed. **Do NOT `source ./dev-env`**: that file is untracked per-developer scaffolding (`dev-env.example` is the template), and the old committed copy pinned a dead App whose `REIN_APP_*` *override* the real one (#126). Only source a dev-env you filled in yourself, and only for the env-var path (e.g. the opt-in live Go tests).
 - The GitHub App private key is at `$REIN_APP_PRIVATE_KEY_PATH` (`~/.config/rein-credentials/app.pem`).
 - Secure Enclave is not available on Linux. Phase 0/1 use the `internal/keystore` file backend. Phase 1's hardware-backed work would require TPM2 (if this VM has one) or shift to a Mac host.
