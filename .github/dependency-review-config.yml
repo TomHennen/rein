@@ -1,0 +1,10 @@
+# Native config for actions/dependency-review-action, picked up by wrangle's
+# scan. Severity threshold and the other options stay with wrangle's inputs.
+#
+# allow-ghsas is repo-wide and has no expiry of its own, so every entry must
+# also be in an osv-scanner.toml with an ignoreUntil date; drop it here when
+# that entry is removed or expires.
+allow-ghsas:
+  # zod < 4.6.6 via the vendored srt lockfile. Reason and review date:
+  # nix/sandbox-runtime/osv-scanner.toml (until 2027-02-19).
+  - GHSA-mrhx-c7xc-m3w5

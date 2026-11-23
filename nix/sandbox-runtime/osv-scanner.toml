@@ -1,0 +1,14 @@
+# Accepted findings for the vendored srt lockfile. Each entry expires, so it is
+# re-examined; remove it once srt depends on a fixed version.
+
+# zod < 4.6.6 (CVE-2023-54404 / GHSA-mrhx-c7xc-m3w5): memory exhaustion
+# validating an oversized array against an unbounded array schema. No fixed 3.x
+# exists and srt (through 0.0.83) requires zod 3.x. srt only uses zod to
+# validate its settings file, which rein writes itself on every run, and the
+# failure mode is srt crashing, not running unprotected.
+# `npm i -g @anthropic-ai/sandbox-runtime` installs the same zod.
+# Keep in step with .github/dependency-review-config.yml.
+[[IgnoredVulns]]
+id = "CVE-2023-54404"
+ignoreUntil = 2027-02-19T00:00:00Z
+reason = "No fixed zod 3.x; srt validates only rein-generated settings with it. Re-check when srt moves to zod >= 4.6.6."

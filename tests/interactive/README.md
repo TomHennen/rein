@@ -108,8 +108,13 @@ plain `test_init_interactive.py` (8 live specs) — App *creation* is **UNDRIVEA
   (isolated-home init journeys); no `REIN_APP_*` env vars are needed and **no
   `dev-env` is sourced** — its old committed copy pinned a dead App that shadowed the
   real one (#126). Hard-constraint #1: the suite touches **only** that throwaway.
+- **Python deps, the easy way:** `nix develop` from the repo root gives
+  `python3` + `pexpect` + `pyte` and `gh` (optional; the apt instructions below
+  still work), and on Linux the pinned `srt` with its own socat/ripgrep. It does
+  NOT provide `bwrap` or `tmux`.
 - **A healthy sandbox stack:** `srt`, `bwrap`, `socat`, `ripgrep`, and working
-  unprivileged user namespaces. (`rein doctor` checks these.)
+  unprivileged user namespaces. (`rein doctor` checks `srt` and `bwrap`; `bwrap`
+  and `tmux` are host-installed even under nix.)
 - **`python3` + `pexpect`** (developed against 4.9.0).
 - **`pyte`** (`sudo apt install python3-pyte`) — a TEST-ONLY, in-memory terminal
   emulator, needed only by the surfaces that REDRAW (`realagent_write`,

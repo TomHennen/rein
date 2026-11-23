@@ -39,7 +39,21 @@ except this repo.
 Arch note: the origin machine is **aarch64** (Apple VZ guest). Commands
 below are arch-agnostic except where noted.
 
+**Dev toolchain (recommended): `nix develop`**, or direnv + nix-direnv
+(`direnv allow` once; see the direnv caveat in `CLAUDE.md` before allowing a
+checkout an agent can write to). The flake provides Go (with
+`GOTOOLCHAIN=local`), gopls, goreleaser, python3 + pexpect + pyte, git and gh.
+Nix is optional: the apt/host steps below remain valid. On Linux it also
+provides `srt` pinned at 0.0.63 (from the npm tarball, so `apply-seccomp`
+ships), running under its own node with socat/ripgrep on its wrapper PATH. It
+does NOT provide `bwrap` or `tmux`: install `bubblewrap` (plus the 1b AppArmor
+profile, which is keyed to `/usr/bin/bwrap`, so a nix-store `bwrap` would not
+match it) and `tmux` on the host either way.
+
 ### 1a. System deps for `srt`
+
+Under `nix develop`, only `sudo apt-get install -y bubblewrap tmux` is needed
+here; skip the rest of 1a. Without nix:
 
 `srt` (Anthropic's sandbox-runtime) needs `bubblewrap`, `ripgrep`, `socat`,
 and Node. Install directly (NOTE: a stale `cli.github.com` apt repo key can
@@ -56,6 +70,8 @@ npm install -g @anthropic-ai/sandbox-runtime   # pin the version; see below
 from 0.0.54 on 2026-07-05; CP3 builds + re-verifies against it). Its
 mitm/proxy hooks are undocumented and may move across versions — install
 the pinned version and re-verify if you bump (`docs/phase1-srt-spike-findings.md`).
+A bump touches `PinnedVersion` and the nix pin together (see "Bumping srt" in
+`CLAUDE.md`).
 
 ### 1b. AppArmor profile for bwrap (Ubuntu 24.04+ ONLY)
 
