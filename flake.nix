@@ -135,6 +135,9 @@
           name = "rein-dev";
           inputsFrom = [ self.packages.${pkgs.stdenv.hostPlatform.system}.rein ];
           packages = [
+            # stdenv's bash has no readline; anything that starts an interactive
+            # `bash` from this shell (a tmux pane, the journey harness) needs it.
+            pkgs.bashInteractive
             pkgs.gopls
             pkgs.goreleaser
             pkgs.git
