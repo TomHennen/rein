@@ -227,3 +227,45 @@ func TestCheckGhShimCache_Aggregate(t *testing.T) {
 		t.Errorf("all-invalid: message %q, want '2 cached scope(s) expired/unreadable'", res.message)
 	}
 }
+
+func TestCheckReinOnPath(t *testing.T) {
+	self, err := resolveSelf()
+	if err != nil {
+		t.Fatal(err)
+	}
+	withRein := func(t *testing.T, install func(path string)) {
+		t.Helper()
+		dir := t.TempDir()
+		if install != nil {
+			install(filepath.Join(dir, "rein"))
+		}
+		t.Setenv("PATH", dir)
+	}
+
+	t.Run("not on PATH fails", func(t *testing.T) {
+		withRein(t, nil)
+		if r := checkReinOnPath(); r.status != statusFail || !strings.Contains(r.message, "not on PATH") {
+			t.Errorf("got %v %q", r.status, r.message)
+		}
+	})
+	t.Run("a different rein on PATH warns", func(t *testing.T) {
+		withRein(t, func(p string) {
+			if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if r := checkReinOnPath(); r.status != statusWarn || !strings.Contains(r.message, "differs from running binary") {
+			t.Errorf("got %v %q", r.status, r.message)
+		}
+	})
+	t.Run("a symlink to the running binary is ok", func(t *testing.T) {
+		withRein(t, func(p string) {
+			if err := os.Symlink(self, p); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if r := checkReinOnPath(); r.status != statusOK {
+			t.Errorf("got %v %q", r.status, r.message)
+		}
+	})
+}
