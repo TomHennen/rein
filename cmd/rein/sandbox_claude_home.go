@@ -7,13 +7,15 @@
 //
 // Everything here runs HOST-SIDE, before the in-sandbox deny is applied. rein
 // seeds ONLY .credentials.json (copied fresh from the host every launch — the
-// OAuth token lives ~6h). It does NOT author a settings.json (see
-// prepareClaudeOverlay), does NOT seed .claude.json (the overlay regenerates it —
-// seeding would leak host project history), and NEVER copies the sandbox's
-// rotated creds back to host.
+// OAuth token lives ~6h) and, once, claude's three onboarding keys (so the
+// first-run wizard does not replay in-sandbox). It does NOT author a
+// settings.json (see prepareClaudeOverlay), does NOT copy the rest of
+// .claude.json (the overlay regenerates it — the host's holds project history),
+// and NEVER copies the sandbox's rotated creds back to host.
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -63,7 +65,69 @@ func prepareClaudeOverlay(logger *log.Logger, home string) (string, error) {
 	if err := seedClaudeCredentials(logger, home, overlay); err != nil {
 		return "", err
 	}
+	seedClaudeOnboarding(logger, home, overlay)
 	return overlay, nil
+}
+
+// claudeOnboardingKeys are the only .claude.json keys rein carries into the
+// overlay: they mark the first-run wizard as done and hold nothing sensitive.
+var claudeOnboardingKeys = []string{"theme", "hasCompletedOnboarding", "lastOnboardingVersion"}
+
+// seedClaudeOnboarding copies claudeOnboardingKeys from the host's ~/.claude.json
+// into an overlay that has not been onboarded, so a user who set claude up long
+// ago is not walked through its wizard again in-sandbox. A convenience, not a
+// security control: any failure is logged and skipped, never fatal. The overlay
+// file is agent-writable, so it is only parsed as opaque JSON and, once it says
+// onboarding is done, never touched again.
+func seedClaudeOnboarding(logger *log.Logger, home, overlay string) {
+	skip := func(why string, err error) {
+		logger.Printf("claude overlay: not seeding onboarding state (%s: %v)", why, err)
+	}
+	hostData, err := readUserFileNoFollow(filepath.Join(home, ".claude.json"))
+	if err != nil {
+		if !os.IsNotExist(err) {
+			skip("read host .claude.json", err)
+		}
+		return
+	}
+	var host map[string]json.RawMessage
+	if err := json.Unmarshal(hostData, &host); err != nil {
+		skip("parse host .claude.json", err)
+		return
+	}
+
+	dst := filepath.Join(overlay, ".claude.json")
+	cfg := map[string]json.RawMessage{}
+	if data, err := readUserFileNoFollow(dst); err == nil {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			skip("parse overlay .claude.json", err)
+			return
+		}
+	} else if !os.IsNotExist(err) {
+		skip("read overlay .claude.json", err)
+		return
+	}
+	if _, done := cfg["hasCompletedOnboarding"]; done {
+		return
+	}
+	seeded := false
+	for _, k := range claudeOnboardingKeys {
+		if v, ok := host[k]; ok {
+			cfg[k] = v
+			seeded = true
+		}
+	}
+	if !seeded {
+		return
+	}
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		skip("encode overlay .claude.json", err)
+		return
+	}
+	if err := writeOverlayFile(dst, out); err != nil {
+		skip("write overlay .claude.json", err)
+	}
 }
 
 // seedClaudeCredentials copies the host's ~/.claude/.credentials.json into the

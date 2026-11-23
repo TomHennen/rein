@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"log"
 	"os"
@@ -11,8 +12,8 @@ import (
 func discardLogger() *log.Logger { return log.New(io.Discard, "", 0) }
 
 // TestPrepareClaudeOverlaySeeds asserts the #94 overlay: created 0700, host
-// ~/.claude/.credentials.json copied in 0600. ~/.claude.json is deliberately NOT
-// seeded, and rein authors NO settings.json (it must not weaken claude's own
+// ~/.claude/.credentials.json copied in 0600. ~/.claude.json is NOT copied (only its
+// onboarding keys, see TestSeedClaudeOnboarding), and rein authors NO settings.json (it must not weaken claude's own
 // permission posture — the host's is likewise never copied).
 func TestPrepareClaudeOverlaySeeds(t *testing.T) {
 	home := t.TempDir()
@@ -66,9 +67,9 @@ func TestPrepareClaudeOverlaySeeds(t *testing.T) {
 		t.Errorf("rein must NOT author/copy settings.json into the overlay (err=%v)", err)
 	}
 
-	// .claude.json is NOT seeded (regenerated in-sandbox; seeding would leak host history).
+	// No host ~/.claude.json here, so nothing is seeded.
 	if _, err := os.Stat(filepath.Join(overlay, ".claude.json")); !os.IsNotExist(err) {
-		t.Errorf(".claude.json must NOT be seeded into the overlay (err=%v)", err)
+		t.Errorf(".claude.json must not appear without a host one (err=%v)", err)
 	}
 }
 
@@ -186,4 +187,102 @@ func TestPrepareClaudeOverlayRejectsLooseHostCreds(t *testing.T) {
 	if _, err := prepareClaudeOverlay(discardLogger(), home); err == nil {
 		t.Error("prepareClaudeOverlay accepted a group/world-readable host credential; it must fail closed")
 	}
+}
+
+func TestSeedClaudeOnboarding(t *testing.T) {
+	const hostJSON = `{"theme":"dark","hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.0","projects":{"/secret/repo":{}},"oauthAccount":{"email":"x"}}`
+	read := func(t *testing.T, p string) map[string]any {
+		t.Helper()
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	setup := func(t *testing.T, host, overlayJSON string) (home, cfg string) {
+		t.Helper()
+		home = t.TempDir()
+		overlay := filepath.Join(home, "overlay")
+		if err := os.MkdirAll(overlay, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if host != "" {
+			if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(host), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cfg = filepath.Join(overlay, ".claude.json")
+		if overlayJSON != "" {
+			if err := os.WriteFile(cfg, []byte(overlayJSON), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		seedClaudeOnboarding(discardLogger(), home, overlay)
+		return home, cfg
+	}
+
+	t.Run("fresh overlay gets only the onboarding keys", func(t *testing.T) {
+		_, cfg := setup(t, hostJSON, "")
+		got := read(t, cfg)
+		if len(got) != 3 || got["theme"] != "dark" || got["hasCompletedOnboarding"] != true || got["lastOnboardingVersion"] != "2.1.0" {
+			t.Errorf("overlay = %v, want exactly the three onboarding keys", got)
+		}
+		if fi, _ := os.Stat(cfg); fi.Mode().Perm() != 0o600 {
+			t.Errorf("mode = %o, want 0600", fi.Mode().Perm())
+		}
+	})
+	t.Run("merges into an un-onboarded overlay, keeping its content", func(t *testing.T) {
+		_, cfg := setup(t, hostJSON, `{"userID":"sandbox","projects":{"/tmp/x":{}}}`)
+		got := read(t, cfg)
+		if got["userID"] != "sandbox" || got["hasCompletedOnboarding"] != true {
+			t.Errorf("overlay = %v", got)
+		}
+		if p, _ := got["projects"].(map[string]any); len(p) != 1 || p["/tmp/x"] == nil {
+			t.Errorf("overlay projects = %v, want the overlay's own only", got["projects"])
+		}
+	})
+	t.Run("an onboarded overlay is left alone", func(t *testing.T) {
+		const own = `{"theme":"light","hasCompletedOnboarding":true}`
+		_, cfg := setup(t, hostJSON, own)
+		if data, _ := os.ReadFile(cfg); string(data) != own {
+			t.Errorf("overlay rewritten: %s", data)
+		}
+	})
+	t.Run("unparseable overlay is left alone", func(t *testing.T) {
+		_, cfg := setup(t, hostJSON, `{not json`)
+		if data, _ := os.ReadFile(cfg); string(data) != `{not json` {
+			t.Errorf("overlay rewritten: %s", data)
+		}
+	})
+	t.Run("no host file, nothing written", func(t *testing.T) {
+		_, cfg := setup(t, "", "")
+		if _, err := os.Stat(cfg); !os.IsNotExist(err) {
+			t.Errorf("overlay .claude.json created without a host one (err=%v)", err)
+		}
+	})
+	t.Run("symlinked overlay file is not followed", func(t *testing.T) {
+		home := t.TempDir()
+		overlay := filepath.Join(home, "overlay")
+		if err := os.MkdirAll(overlay, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(hostJSON), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(home, "victim")
+		if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(overlay, ".claude.json")); err != nil {
+			t.Fatal(err)
+		}
+		seedClaudeOnboarding(discardLogger(), home, overlay)
+		if data, _ := os.ReadFile(target); string(data) != "{}" {
+			t.Errorf("wrote through a symlink: %s", data)
+		}
+	})
 }
