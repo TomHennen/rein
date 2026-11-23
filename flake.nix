@@ -26,6 +26,9 @@
         default = pkgs.mkShell {
           name = "rein-dev";
           packages = [
+            # stdenv's bash has no readline; anything that starts an interactive
+            # `bash` from this shell (a tmux pane, the journey harness) needs it.
+            pkgs.bashInteractive
             pkgs.go_1_26
             pkgs.gopls
             pkgs.goreleaser
