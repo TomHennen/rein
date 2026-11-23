@@ -1756,6 +1756,11 @@ _NORMALIZE_RULES = [
     # placeholder — anchored on the leading '/' so `@CLAUDE_CONFIG_DIR=` and any
     # other prefix survive — BEFORE the <TMP>/<HOME> rules would split them apart.
     (r"/\S*/rein-sandbox-home/\.claude", "<OVERLAY>"),
+    # the allow-back list follows where srt, node and the agent are installed
+    # (npm-global, nix store, native installer), so it differs per machine; the
+    # set itself is pinned by TestSandboxAllowReadPathsCuratedSet and
+    # TestInstallChainAllowReads.
+    (r"(allowed back read-only: ).*", r"\1<ALLOW_BACK>"),
     # scratch dirs (the trailing char class excludes '/', so a suffix like
     # /session.yaml is preserved: <TMP>/session.yaml)
     # (`nix develop` points TMPDIR at /tmp/nix-shell.<id>)
@@ -1777,6 +1782,8 @@ _NORMALIZE_RULES = [
     # count rules below and normalize to <N>. A real git SHA effectively always
     # has a letter, so this keeps SHA normalization intact.
     (r"\b(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b", "<HASH>"),
+    # git >= 2.46 appends "(from N)" to pack-reused; older git does not
+    (r"(pack-reused \d+) \(from \d+\)", r"\1"),
     (r"\((?:delta|deltas) \d+\)", "(delta <N>)"),
     (r"\(from \d+\)", "(from <N>)"),
     (r"\b(reused|pack-reused|Total|Enumerating objects:|Counting objects:|"
