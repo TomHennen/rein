@@ -254,7 +254,7 @@ func (c *Client) MintIssueWriteToken(ctx context.Context) (token string, expires
 // the call doesn't actually need any of Client's config because the token
 // itself authenticates the request. The 5s timeout is honored via ctx.
 //
-// Status handling (issue #67): 204 is "revoked"; 404 is "this token is not a
+// Status handling (issue #67): 204 is "revoked"; 404 (or 401, see below) is "this token is not a
 // live installation token" — i.e. it is ALREADY GONE (revoked earlier, or
 // expired). Both mean the token is dead, which is the entire goal, so both are
 // success. Only a network error or some OTHER status is an error. Mapping 404
@@ -285,8 +285,10 @@ func (c *Client) RevokeToken(ctx context.Context, token string) error {
 	switch resp.StatusCode {
 	case http.StatusNoContent:
 		return nil // revoked
-	case http.StatusNotFound:
-		return nil // already gone (revoked earlier, or expired) — same end state
+	case http.StatusNotFound, http.StatusUnauthorized:
+		// Already gone (revoked earlier, or expired). The token is this
+		// request's only credential, so a 401 means GitHub no longer accepts it.
+		return nil
 	default:
 		return fmt.Errorf("revoke: unexpected status %d", resp.StatusCode)
 	}
