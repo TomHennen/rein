@@ -20,7 +20,7 @@ import (
 // "1.0.0" while the npm package is genuinely 0.0.63 (package.json + `npm ls`).
 // The CLI flag is a hardcoded stub and MUST NOT be used for the pin check —
 // PackageVersion reads package.json instead.
-const PinnedVersion = "0.0.63"
+const PinnedVersion = "0.0.83"
 
 // Status is a preflight verdict, matching doctor's three-value framing.
 type Status int
