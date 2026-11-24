@@ -1,4 +1,4 @@
-$ rein run -- bash -c <sandbox declare-new script> /tmp/nix-shell.AGuz5T/rein-declnew-2wz45ziz
+$ rein run -- bash -c <sandbox declare-new script> /tmp/nix-shell.C0m1gQ/rein-declnew-tpgm51at
 rein: sandbox preflight:
   [ok]   srt present: /nix/store/gvizfjscyw9rw7s2j909p3l1wbix6b3n-sandbox-runtime-0.0.83/bin/srt
   [ok]   srt version: 0.0.83
@@ -9,11 +9,11 @@ rein: egress preset "dev" active (11 package-registry/advisory hosts; egress_pre
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked; egress answered by rein).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_declare_new (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/nix-shell.AGuz5T/rein-journey-sess-k63ytrna/session.yaml]
-  proxy socket (out of sandbox): /run/user/501/rein/run-CwdvpFSdecmmiEl6R4QTOg/proxy.sock
-  working tree (writable in sandbox): /tmp/nix-shell.AGuz5T/rein-declnew-2wz45ziz  [TomHennen/agentcreds-validation-a]
+  session: sess_journey_declare_new (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/nix-shell.C0m1gQ/rein-journey-sess-xlq6zs6r/session.yaml]
+  proxy socket (out of sandbox): /run/user/501/rein/run-rXpKBaq-0nkHORusnBqA6Q/proxy.sock
+  working tree (writable in sandbox): /tmp/nix-shell.C0m1gQ/rein-declnew-tpgm51at  [TomHennen/agentcreds-validation-a]
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/nix-shell.AGuz5T/rein-agent-tmp-3169431496
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/nix-shell.C0m1gQ/rein-agent-tmp-1781259441
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -24,7 +24,7 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/nix-shell.AGuz5T/rein-declnew-2wz45ziz
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/nix-shell.C0m1gQ/rein-declnew-tpgm51at
     => work the agent must keep has to be written INTO the working tree.
     allowed back read-only: /home/tom.linux/.local/bin, /home/tom.linux/.cargo, /home/tom.linux/.rustup, /home/tom.linux/go, /home/tom.linux/.pyenv, /home/tom.linux/.cache/ms-playwright
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
@@ -63,12 +63,12 @@ emit "@PHASE1_RC=$?"
 NEW_ISSUE=$(printf '%s' "$DECLARE_LAST_OUT" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
 emit "@FILED_ISSUE=#$NEW_ISSUE"
 
-emit "@PHASE2_START  push agent/$NEW_ISSUE/declnew-20261124-125019-30405d using the number rein just returned"
-run git checkout -b "agent/$NEW_ISSUE/declnew-20261124-125019-30405d"
+emit "@PHASE2_START  push agent/$NEW_ISSUE/declnew-20261124-125518-96ca1b using the number rein just returned"
+run git checkout -b "agent/$NEW_ISSUE/declnew-20261124-125518-96ca1b"
 echo "declare_new journey: probe commit for the newly filed issue" >> declare-new-probe.txt
 run git add -A
 run git commit -q -m "declare_new journey: probe for the newly filed issue"
-run git push origin HEAD:refs/heads/agent/$NEW_ISSUE/declnew-20261124-125019-30405d
+run git push origin HEAD:refs/heads/agent/$NEW_ISSUE/declnew-20261124-125518-96ca1b
 emit "@PUSH_RC=$?"
 
 emit "@PHASE3_START  gh issue view (read) — the filed issue as seen from inside the sandbox"
@@ -79,12 +79,12 @@ emit "@PHASE4_START  rein declare --new AGAIN, answered with the WRONG word (exp
 declare_new rein declare --new 'JourneyDeclareNewDeny: must be refused by a wrong first-word answer'
 emit "@PHASE4_RC=$?"
 emit "@SCRIPT_DONE"
- /tmp/nix-shell.AGuz5T/rein-declnew-2wz45ziz
+ /tmp/nix-shell.C0m1gQ/rein-declnew-tpgm51at
 ---
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/nix-shell.AGuz5T/rein-declnew-2wz45ziz
+- Your work persists ONLY in the working tree: /tmp/nix-shell.C0m1gQ/rein-declnew-tpgm51at
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
@@ -145,25 +145,25 @@ To approve, type the proposed title's first word (JourneyDeclareNew) and press e
 To deny, press Ctrl-C or type anything else.
 > JourneyDeclareNew
   [approved]
-SBX| issue #787 filed and confirmed — writes are unlocked (push to agent/787/<nonce>)
+SBX| issue #800 filed and confirmed — writes are unlocked (push to agent/800/<nonce>)
 SBX| @PHASE1_RC=0
-SBX| @FILED_ISSUE=#787
-SBX| @PHASE2_START  push agent/787/declnew-20261124-125019-30405d using the number rein just returned
-SBX| $ git checkout -b agent/787/declnew-20261124-125019-30405d
-SBX| Switched to a new branch 'agent/787/declnew-20261124-125019-30405d'
+SBX| @FILED_ISSUE=#800
+SBX| @PHASE2_START  push agent/800/declnew-20261124-125518-96ca1b using the number rein just returned
+SBX| $ git checkout -b agent/800/declnew-20261124-125518-96ca1b
+SBX| Switched to a new branch 'agent/800/declnew-20261124-125518-96ca1b'
 SBX| $ git add -A
 SBX| $ git commit -q -m declare_new journey: probe for the newly filed issue
-SBX| $ git push origin HEAD:refs/heads/agent/787/declnew-20261124-125019-30405d
+SBX| $ git push origin HEAD:refs/heads/agent/800/declnew-20261124-125518-96ca1b
 SBX| remote:
-SBX| remote: Create a pull request for 'agent/787/declnew-20261124-125019-30405d' on GitHub by visiting:
-SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/787/declnew-20261124-125019-30405d
+SBX| remote: Create a pull request for 'agent/800/declnew-20261124-125518-96ca1b' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/800/declnew-20261124-125518-96ca1b
 SBX| remote:
 SBX| To https://github.com/TomHennen/agentcreds-validation-a.git
-SBX|  * [new branch]      HEAD -> agent/787/declnew-20261124-125019-30405d
+SBX|  * [new branch]      HEAD -> agent/800/declnew-20261124-125518-96ca1b
 SBX| @PUSH_RC=0
 SBX| @PHASE3_START  gh issue view (read) — the filed issue as seen from inside the sandbox
-SBX| $ gh issue view 787 --repo TomHennen/agentcreds-validation-a --json number,title,author,url
-SBX| {"author":{"is_bot":true,"login":"app/rein-primary-56e410c903"},"number":787,"title":"JourneyDeclareNew: files this runs declared issue via Form A (safe to close)","url":"https://github.com/TomHennen/agentcreds-validation-a/issues/787"}
+SBX| $ gh issue view 800 --repo TomHennen/agentcreds-validation-a --json number,title,author,url
+SBX| {"author":{"is_bot":true,"login":"app/rein-primary-56e410c903"},"number":800,"title":"JourneyDeclareNew: files this runs declared issue via Form A (safe to close)","url":"https://github.com/TomHennen/agentcreds-validation-a/issues/800"}
 SBX| @VIEW_RC=0
 SBX| @PHASE4_START  rein declare --new AGAIN, answered with the WRONG word (expect: refused, nothing filed)
 SBX| $ rein declare --new JourneyDeclareNewDeny: must be refused by a wrong first-word answer
@@ -173,7 +173,7 @@ SBX| $ rein declare --new JourneyDeclareNewDeny: must be refused by a wrong firs
    title:    "JourneyDeclareNewDeny: must be refused by a wrong first-word answer"
    body:     (none)
              (rein appends an attribution line to the body when it files.)
-   NOTE:     this run ALREADY confirmed #787 — approve only if this
+   NOTE:     this run ALREADY confirmed #800 — approve only if this
              is genuinely separate work.
    session:  sess_journey_declare_new (role=implement, repos=[TomHennen/agentcreds-validation-a])
    approving FILES this issue under rein's bot identity and makes it
@@ -186,5 +186,4 @@ To deny, press Ctrl-C or type anything else.
 SBX| rein: filing a new issue in TomHennen/agentcreds-validation-a was NOT confirmed (denied, timed out, or no approval surface). Nothing was filed.
 SBX| @PHASE4_RC=1
 SBX| @SCRIPT_DONE
-rein: warning: revoke of a write token on exit failed (best-effort; it expires on its own): revoke: unexpected status 401
-rein: revoked 1 of 2 write token(s) on exit
+rein: revoked 2 of 2 write token(s) on exit
