@@ -31,7 +31,7 @@ func TestRemediationTiers(t *testing.T) {
 		// An ABSENT cache is normal — no fix offered (would be noise, and there
 		// is nothing stale to clear).
 		{"gh-cache-absent", checkResult{"gh-shim cache", statusWarn, "absent (next gh read will mint)"}, false, 0},
-		{"sandbox-srt", checkResult{"sandbox: srt present", statusFail, "npm i -g ...@0.0.63"}, true, remedyPrivileged},
+		{"sandbox-srt", checkResult{"sandbox: srt present", statusFail, "npm i -g ...@0.0.83"}, true, remedyPrivileged},
 		{"sandbox-bwrap", checkResult{"sandbox: bwrap userns", statusFail, "sudo sysctl ..."}, true, remedyPrivileged},
 		{"session", checkResult{"session", statusFail, "no session"}, true, remedyGuide},
 		{"app-key", checkResult{"app key", statusFail, "chmod 600"}, true, remedyGuide},

@@ -16,10 +16,7 @@ import (
 // preflight refuses (run) / warns (doctor) rather than trusting an unverified
 // build.
 //
-// NOTE (schema-spec discrepancy, verified on this VM): `srt --version` reports
-// "1.0.0" while the npm package is genuinely 0.0.63 (package.json + `npm ls`).
-// The CLI flag is a hardcoded stub and MUST NOT be used for the pin check —
-// PackageVersion reads package.json instead.
+// The pin check reads package.json (PackageVersion), which needs no srt exec.
 const PinnedVersion = "0.0.83"
 
 // Status is a preflight verdict, matching doctor's three-value framing.
@@ -120,7 +117,7 @@ func checkSrtVersion(env Env, srtPath string) Check {
 			fmt.Sprintf("srt package version is %s, pinned is %s; the config shape/fail-open behavior is only verified for %s. Reinstall: npm i -g @anthropic-ai/sandbox-runtime@%s",
 				v, PinnedVersion, PinnedVersion, PinnedVersion)}
 	}
-	return Check{"srt version", StatusOK, v + " (package.json; note `srt --version` misreports 1.0.0)"}
+	return Check{"srt version", StatusOK, v}
 }
 
 func checkSeccomp(env Env, srtPath string) Check {
@@ -170,8 +167,7 @@ type pkgMeta struct {
 // findSrtPackage resolves the srt symlink (npm global bin is a symlink into
 // lib/node_modules/.../dist) and walks up to the nearest package.json whose name
 // is the sandbox-runtime package, returning that dir (the package ROOT) and its
-// parsed metadata. This is ground truth for the version — unlike
-// `srt --version`, which returns a hardcoded "1.0.0" on 0.0.63.
+// parsed metadata.
 func findSrtPackage(srtPath string) (root string, meta pkgMeta, err error) {
 	resolved, e := filepath.EvalSymlinks(srtPath)
 	if e != nil {

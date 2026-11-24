@@ -19,7 +19,7 @@
 //
 // The privileged/guide text is derived from the check's OWN message
 // wherever possible (the srt preflight messages already carry the exact
-// `npm i -g …@0.0.63` / `sudo sysctl …` commands), so there is one source
+// `npm i -g …@<pin>` / `sudo sysctl …` commands), so there is one source
 // of truth and no drift-prone hardcoded command strings.
 
 package main

@@ -116,7 +116,7 @@ func writeManagedGitConfig(path string, id gitidentity.Identity) error {
 
 // srtInjectedDotfiles are the agent-environment dotfiles srt drops into the
 // agent's cwd (= rein's repo working tree). Observed on the pinned srt
-// (internal/srt.PinnedVersion 0.0.63); revisit on a pin bump — rein re-verifies
+// (internal/srt.PinnedVersion; same 12 entries on 0.0.63 and 0.0.83); revisit on a pin bump — rein re-verifies
 // srt then, so this list is checked alongside. Named exactly (not a broad
 // `.*` glob) so a repo's OWN untracked dotfiles (a new .gitignore, .github, …)
 // are NOT hidden — only srt's are.
@@ -134,7 +134,7 @@ func writeSrtDotfileExcludes(path string) error {
 	var b strings.Builder
 	b.WriteString("# rein: srt injects these agent-env dotfiles into the working\n")
 	b.WriteString("# tree's root; hide them from git so they aren't noise or an\n")
-	b.WriteString("# accidental `git add -A` commit. (#102; mirrors srt 0.0.63.)\n")
+	b.WriteString("# accidental `git add -A` commit. (#102; mirrors the pinned srt.)\n")
 	for _, f := range srtInjectedDotfiles {
 		b.WriteString("/" + f + "\n")
 	}

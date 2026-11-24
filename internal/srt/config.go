@@ -11,16 +11,14 @@
 // VerifyConfigApplied. The typed struct only avoids hand-rolled-JSON mistakes;
 // the verify step is the guarantee.
 //
-// Verified on 0.0.63 (schema-spec discrepancy, cli.js:121-129): the spec warns
-// that loadConfig returns null on a missing/malformed settings file and cli
-// falls back to getDefaultConfig() with an EMPTY denyRead — a fail-open. That
-// fallback only fires when NO --settings flag is passed. rein ALWAYS passes
-// `-s <settings>`, and on that path srt EXITS 1 ("Refusing to run with the
-// default config") on any load failure rather than falling open. So the empty-
-// denyRead fail-open is NOT reachable on rein's path in 0.0.63 — but rein keeps
-// VerifyConfigApplied anyway: it guards against that behavior changing in a
-// future srt, proves denyRead SEMANTICS (file => /dev/null) hold for this
-// version, and catches srt running the probe unsandboxed. srt's own exit-1 is
+// srt falls back to getDefaultConfig() with an EMPTY denyRead (a fail-open)
+// only when NO --settings flag is passed. rein ALWAYS passes `-s <settings>`,
+// and on that path srt refuses to run on any load failure rather than falling
+// open (0.0.83 also refuses an empty, unreadable or invalid file without the
+// flag). rein keeps VerifyConfigApplied anyway:
+// it guards against that behavior changing in a future srt, proves denyRead
+// SEMANTICS (file => /dev/null) hold for this version, and catches srt running
+// the probe unsandboxed. srt's own exit-1 is
 // itself caught (VerifyConfigApplied sees a non-ProbeOK code => fail closed).
 package srt
 
@@ -360,8 +358,7 @@ func Build(p Params) (Config, error) {
 	allowWrite = append(allowWrite, extraWrite...)
 	allowWrite = append(allowWrite, gitPins...)
 
-	// Deny back srt's own default write paths under $HOME (#153).
-	denyWrite := append(gitDeny, srtDefaultHomeWriteDenies(homeDeny)...)
+	denyWrite := gitDeny
 
 	denyRead := make([]string, 0, len(p.DenyReadCredStores)+len(p.RuntimeDenyRead)+2)
 	denyRead = append(denyRead, cleanAll(p.DenyReadCredStores)...)
@@ -420,39 +417,20 @@ func Build(p Params) (Config, error) {
 }
 
 // srtDefaultHomeWritePaths are the $HOME-relative entries of srt's
-// getDefaultWritePaths() (verified 0.0.63). srt merges them into allowWrite
-// unconditionally and re-binds them over the $HOME deny tmpfs, so without a
-// denyWrite these HOST dirs are writable in-sandbox (#153). /tmp/claude is
-// excluded: rein already points TMPDIR at a per-run dir.
+// getDefaultWritePaths(). srt 0.0.63 re-bound them writable over the $HOME deny
+// tmpfs (#153); since 0.0.77 it drops any that a denyRead covers, so rein no
+// longer denies them. TestHomeWriteSemantics_E2E and the containment harness
+// still probe them to catch a regression.
 var srtDefaultHomeWritePaths = []string{
 	filepath.Join(".claude", "debug"),
 	filepath.Join(".npm", "_logs"),
 }
 
-// DefaultHomeWritePaths returns srt's own $HOME-relative default write paths
-// resolved under home — the substrate-chosen set the containment harness must
-// sweep (#153: rein's config never names them, which is how they leaked).
+// DefaultHomeWritePaths returns srtDefaultHomeWritePaths resolved under home.
 func DefaultHomeWritePaths(home string) []string {
 	out := make([]string, 0, len(srtDefaultHomeWritePaths))
 	for _, rel := range srtDefaultHomeWritePaths {
 		out = append(out, filepath.Join(home, rel))
-	}
-	return out
-}
-
-// srtDefaultHomeWriteDenies returns the denyWrite entries neutralizing
-// srtDefaultHomeWritePaths under home; empty when home is empty (no $HOME deny).
-// Existence-gated: a denyWrite of a missing source fails the bwrap launch.
-func srtDefaultHomeWriteDenies(home string) []string {
-	if home == "" {
-		return nil
-	}
-	out := make([]string, 0, len(srtDefaultHomeWritePaths))
-	for _, rel := range srtDefaultHomeWritePaths {
-		p := filepath.Join(home, rel)
-		if _, err := os.Lstat(p); err == nil {
-			out = append(out, p)
-		}
 	}
 	return out
 }

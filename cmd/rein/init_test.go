@@ -168,7 +168,7 @@ func TestPromptWithDefault_NonInteractive(t *testing.T) {
 func TestSandboxHealthOutcome(t *testing.T) {
 	allOK := []checkResult{
 		{"sandbox: srt present", statusOK, "found"},
-		{"sandbox: srt version", statusOK, "0.0.63"},
+		{"sandbox: srt version", statusOK, "0.0.83"},
 		{"sandbox: seccomp", statusOK, "available"},
 		{"sandbox: bwrap userns", statusOK, "ok"},
 	}

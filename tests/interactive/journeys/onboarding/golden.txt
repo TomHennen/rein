@@ -1,22 +1,22 @@
 $ rein init --no-symlink --skip-mint-check --shell bash
 rein init: setting up local scaffolding
-  state dir:  /tmp/rein-itest-home-y83ubkyq/.local/state/rein
-  config dir: /tmp/rein-itest-home-y83ubkyq/.config/rein
+  state dir:  /tmp/nix-shell.AGuz5T/rein-itest-home-boddf_ov/.local/state/rein
+  config dir: /tmp/nix-shell.AGuz5T/rein-itest-home-boddf_ov/.config/rein
 Name this machine [demo-box]:
   machine:    demo-box (label for this machine's App name)
   setup:      no state.json; REIN_APP_* env vars detected — using env-managed path (marker state.json will be written)
               wrote managed_externally marker (state.json)
   app:        client_id=Iv23lihaPgKgifHps75d installation_id=145330081
-  shim:       3 binaries under /tmp/rein-itest-home-y83ubkyq/.local/state/rein/shim
+  shim:       3 binaries under /tmp/nix-shell.AGuz5T/rein-itest-home-boddf_ov/.local/state/rein/shim
   symlink:    skipped (--no-symlink)
   mint check: skipped (--skip-mint-check)
   (add more later with `rein session add-repo`, or approve the agent's
    expansion requests as it encounters work)
 Which repo should the agent work on? (default detected from this dir) [TomHennen/rein]: octo-example/demo-repo
-  session:    scaffolded at /tmp/rein-itest-home-y83ubkyq/.config/rein/dev-session.yaml (repos: [octo-example/demo-repo])
+  session:    scaffolded at /tmp/nix-shell.AGuz5T/rein-itest-home-boddf_ov/.config/rein/dev-session.yaml (repos: [octo-example/demo-repo])
               writes are agent-declared (#35): the agent runs `rein declare <n>`,
               you confirm on your terminal, then writes flow for that run. Reads work immediately.
-Add alias claude='rein run -- claude' to /tmp/rein-itest-home-y83ubkyq/.bashrc? [y/N]:
+Add alias claude='rein run -- claude' to /tmp/nix-shell.AGuz5T/rein-itest-home-boddf_ov/.bashrc? [y/N]:
   alias:      not installed (opt-in; enable with `rein init --alias`)
   install on repo:
     to let the agent work on octo-example/demo-repo, install the App on it.
@@ -27,22 +27,22 @@ Add alias claude='rein run -- claude' to /tmp/rein-itest-home-y83ubkyq/.bashrc? 
 
 rein init: done.
 Next:
-  - /tmp/rein-itest-home-y83ubkyq/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
+  - /tmp/nix-shell.AGuz5T/rein-itest-home-boddf_ov/.config/rein/dev-session.yaml is repo-scoped; reads work now. Writes unlock per run when the agent runs `rein declare <n>` and you confirm (#35)
   - run `rein run -- claude` (or another agent) to launch with rein in effect
   - (optional) enable the `claude` alias with `rein init --alias`
   - run `rein doctor` to verify everything is wired up
 
 $ rein doctor
-[ok]    rein on PATH:              /tmp/claude-501/-Users-tom-dev-rein/45a2cd64-21cb-4149-a16f-27714dd13208/scratchpad/main/bin/rein
-[ok]    shim freshness:            3 shims under /tmp/rein-itest-home-y83ubkyq/.local/state/rein/shim up to date
+[ok]    rein on PATH:              /tmp/claude-501/-Users-tom-dev-rein/45a2cd64-21cb-4149-a16f-27714dd13208/scratchpad/srtbump/bin/rein
+[ok]    shim freshness:            3 shims under /tmp/nix-shell.AGuz5T/rein-itest-home-boddf_ov/.local/state/rein/shim up to date
 [ok]    app key:                   /home/tom.linux/.config/rein/primary.pem (mode 0600)
-[ok]    app credentials:           mint ok (token expires 2026-11-23T16:54:23Z)
-[ok]    session:                   file:/tmp/rein-itest-home-y83ubkyq/.config/rein/dev-session.yaml (id=sess_dev_init_caae1b44 role=implement repos=[octo-example/demo-repo])
+[ok]    app credentials:           mint ok (token expires 2026-11-24T19:52:28Z)
+[ok]    session:                   file:/tmp/nix-shell.AGuz5T/rein-itest-home-boddf_ov/.config/rein/dev-session.yaml (id=sess_dev_init_3dc20229 role=implement repos=[octo-example/demo-repo])
 [warn]  $TMUX:                     unset; tmux-popup grant layer will not fire (use the tty layer or `rein approval grant` from another terminal)
 [warn]  approval cache:            no active runs (per-run approvals; first write inside `rein run` will prompt)
 [warn]  gh-shim cache:             absent (next gh read will mint)
-[ok]    sandbox: srt present:      /home/tom.linux/.npm-global/bin/srt
-[ok]    sandbox: srt version:      0.0.63 (package.json; note `srt --version` misreports 1.0.0)
+[ok]    sandbox: srt present:      /nix/store/gvizfjscyw9rw7s2j909p3l1wbix6b3n-sandbox-runtime-0.0.83/bin/srt
+[ok]    sandbox: srt version:      0.0.83
 [ok]    sandbox: seccomp:          apply-seccomp present (unix-socket block available)
 [ok]    sandbox: bwrap userns:     unprivileged user namespace works
 [ok]    sandbox: system CA bundle:  /etc/ssl/certs/ca-certificates.crt

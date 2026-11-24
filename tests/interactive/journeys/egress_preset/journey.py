@@ -1,5 +1,5 @@
 """egress_preset — the "dev" egress preset is ON BY DEFAULT and opens package
-registries, nothing more (#163); `egress_preset: none` turns it off. srt 0.0.63
+registries, nothing more (#163); `egress_preset: none` turns it off. srt
 can't express true allow-all, so a curated bundle is the substitute; this walks
 both the default and the opt-out LIVE in-sandbox.
 
