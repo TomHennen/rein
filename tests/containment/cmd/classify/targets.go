@@ -6,6 +6,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,10 @@ const WriteProbeName = ".rein-containment-write-probe"
 // sandbox means the egress boundary is gone entirely.
 const deniedCanary = "example.com"
 
+// reachableControl must be reachable under rein's default egress, so a broken
+// proxy or CA cannot read as "denied host correctly unreachable".
+const reachableControl = "api.github.com"
+
 // sampleFile returns the lexically-first regular file directly inside dir, or
 // "" (dir absent, not a dir, or nothing sampleable).
 func sampleFile(dir string) string {
@@ -39,8 +44,7 @@ func sampleFile(dir string) string {
 }
 
 type targets struct {
-	// Network hosts to probe (reachability; the probe script adds the
-	// api.github.com token heuristic on its own).
+	// Network hosts to probe for reachability.
 	Network []string `json:"network"`
 	// Files/dirs to probe for readability. Target is the policy entry the row
 	// is reported under; Probe is what is actually read.
@@ -57,28 +61,39 @@ type fileTarget struct {
 }
 
 func emitTargets(cfg srt.Config) error {
-	t := targets{Env: containment.SensitiveEnv}
-
-	// Inject hosts other than api.github.com are skipped: the probe's only
-	// honest token evidence is the api.github.com rate-limit heuristic, and a
-	// reachable inject host with unverifiable token reads as a false
-	// regression. Local virtual hosts (declare.rein.internal) are skipped too.
-	inject := map[string]bool{}
-	if cfg.Network.MitmProxy != nil {
-		for _, d := range cfg.Network.MitmProxy.Domains {
-			inject[strings.ToLower(d)] = true
-		}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
 	}
+	t, nothingToHide, err := buildTargets(cfg, home)
+	if err != nil {
+		return err
+	}
+	for _, d := range nothingToHide {
+		fmt.Fprintf(os.Stderr, "NOTE: %s is absent or empty on this host: its deny row proves nothing here\n", d)
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(t)
+}
+
+// buildTargets derives the probe targets. home is run.sh's fixture: every
+// policy entry under it must be planted. nothingToHide lists deny entries
+// OUTSIDE it with no host content, whose "correctly unreadable" row is vacuous.
+func buildTargets(cfg srt.Config, home string) (t targets, nothingToHide []string, err error) {
+	t = targets{Env: containment.SensitiveEnv}
+	if err := requirePlanted(home, append(append([]string{}, cfg.Filesystem.DenyRead...), cfg.Filesystem.AllowRead...)); err != nil {
+		return t, nil, err
+	}
+
 	local := map[string]bool{}
 	for _, d := range proxy.LocalHosts {
 		local[strings.ToLower(d)] = true
 	}
 	for _, d := range cfg.Network.AllowedDomains {
-		l := strings.ToLower(d)
-		if local[l] || (inject[l] && l != "api.github.com") {
-			continue
+		if !local[strings.ToLower(d)] {
+			t.Network = append(t.Network, d)
 		}
-		t.Network = append(t.Network, d)
 	}
 	t.Network = append(t.Network, deniedCanary)
 
@@ -97,6 +112,8 @@ func emitTargets(cfg srt.Config) error {
 		probe := d
 		if f := sampleFile(d); f != "" {
 			probe = f
+		} else if !underHome(home, d) && sampleDeep(d) == "" {
+			nothingToHide = append(nothingToHide, d)
 		}
 		t.Files = append(t.Files, fileTarget{Target: d, Probe: probe})
 	}
@@ -125,15 +142,7 @@ func emitTargets(cfg srt.Config) error {
 			t.Writes = append(t.Writes, filepath.Join(w, WriteProbeName))
 		}
 	}
-	// $HOME is run.sh's fixture: every policy entry under it must be planted,
-	// and the wholesale home deny is judged against the sentinels.
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	if err := requirePlanted(home, append(append([]string{}, cfg.Filesystem.DenyRead...), cfg.Filesystem.AllowRead...)); err != nil {
-		return err
-	}
+	// The wholesale home deny is judged against the sentinels.
 	for _, rel := range HomeSentinels {
 		p := filepath.Join(home, rel)
 		t.Files = append(t.Files, fileTarget{Target: p, Probe: p})
@@ -142,8 +151,5 @@ func emitTargets(cfg srt.Config) error {
 		t.Writes = append(t.Writes, filepath.Join(w, WriteProbeName))
 	}
 	t.Writes = append(t.Writes, filepath.Join(home, WriteProbeName))
-
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(t)
+	return t, nothingToHide, nil
 }

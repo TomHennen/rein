@@ -4,7 +4,7 @@
 #
 #   kind | target | why it is acceptable
 #
-# Hand-edited only. Everything else is compared exactly to golden-report.txt.
+# Targets are matched literally, before normalization. Hand-edited only. Everything else is compared exactly to golden-report.txt.
 file | /etc/passwd | account names only; hashes live in root-only /etc/shadow
 file | /etc/group | group names only, no secrets
 file | /etc/hostname | host name, not a secret
@@ -14,4 +14,4 @@ file | /etc/ssh/sshd_config | world-readable server config; host keys are separa
 file | /proc/self/cgroup | the probe's own process metadata
 file | /proc/self/mountinfo | the sandbox's own mount table; paths, no contents
 file | /proc/self/status | the probe's own process metadata
-file | /proc/<PID>/cgroup | pid 1 of the sandbox's own pid namespace, not a host process
+file | /proc/1/cgroup | pid 1 of the sandbox's own pid namespace, not a host process

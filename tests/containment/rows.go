@@ -13,7 +13,7 @@ import (
 // run.sh probes a fixture $HOME, so the report is the same on every machine
 // and is compared to an exact golden. The exceptions live outside the fixture
 // and vary by host: "unknown" rows a human triaged (tolerated.txt), and
-// visible-but-unconnectable unix sockets. See README "Golden and tolerated rows".
+// visible unix-socket paths. See README "Golden and tolerated rows".
 
 // Row is one normalized report line.
 type Row struct {
@@ -33,8 +33,13 @@ type Sub struct{ Path, Label string }
 // Normalizer collapses per-run and per-box values. Only THIS user's uid is
 // collapsed: another user's /run/user/<n> stays literal and so shows up.
 type Normalizer struct {
-	Subs []Sub // applied in order; list longer paths first
-	UID  int
+	subs    []Sub
+	runUser *regexp.Regexp
+}
+
+// NewNormalizer applies subs in order (list longer paths first).
+func NewNormalizer(subs []Sub, uid int) Normalizer {
+	return Normalizer{subs, regexp.MustCompile(`/run/user/` + strconv.Itoa(uid) + `(/|$)`)}
 }
 
 var (
@@ -44,13 +49,12 @@ var (
 
 // Norm normalizes a target or reason string.
 func (n Normalizer) Norm(s string) string {
-	for _, sub := range n.Subs {
+	for _, sub := range n.subs {
 		if sub.Path != "" {
 			s = strings.ReplaceAll(s, sub.Path, sub.Label)
 		}
 	}
-	runUser := regexp.MustCompile(`/run/user/` + strconv.Itoa(n.UID) + `(/|$)`)
-	s = runUser.ReplaceAllString(s, "/run/user/<UID>$1")
+	s = n.runUser.ReplaceAllString(s, "/run/user/<UID>$1")
 	s = reProcPID.ReplaceAllString(s, "/proc/<PID>/")
 	return reRunID.ReplaceAllString(s, "/rein/run-<RUNID>")
 }
@@ -86,9 +90,10 @@ func ParseTolerated(r io.Reader) ([]Tolerated, error) {
 
 // Split normalizes results and separates them into the rows the golden must
 // match exactly and the problems that fail the run regardless of the golden:
-// any "unknown" row tolerated.txt does not list. Tolerated unknowns and
-// visible-but-unconnectable socket paths (connect-tested every run) are
-// host-dependent and dropped from the golden set.
+// any "unknown" row tolerated.txt does not list. Tolerated unknowns and visible
+// unix-socket paths are host-dependent and dropped from the golden set.
+//
+// Tolerated targets match the RAW target, so /proc/1/cgroup excuses pid 1 only.
 func Split(results []Result, n Normalizer, tolerated []Tolerated) (golden []Row, untriaged []Row) {
 	tol := map[string]bool{}
 	for _, t := range tolerated {
@@ -97,16 +102,15 @@ func Split(results []Result, n Normalizer, tolerated []Tolerated) (golden []Row,
 	seen := map[Row]bool{}
 	for _, r := range results {
 		row := Row{r.Verdict, r.Observation.Kind, n.Norm(r.Observation.Target), n.Norm(r.Reason)}
-		if seen[row] {
-			continue
-		}
-		seen[row] = true
 		switch {
-		case row.Verdict == VerdictUnknown && tol[string(row.Kind)+"\x00"+row.Target]:
-		case row.Verdict == VerdictUnknown:
-			untriaged = append(untriaged, row)
+		case row.Verdict == VerdictUnknown && tol[string(row.Kind)+"\x00"+r.Observation.Target]:
 		case row.Verdict == VerdictOK && row.Kind == KindSocket && r.Observation.Target != SocketCreate:
+		case seen[row]:
+		case row.Verdict == VerdictUnknown:
+			seen[row] = true
+			untriaged = append(untriaged, row)
 		default:
+			seen[row] = true
 			golden = append(golden, row)
 		}
 	}

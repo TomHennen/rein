@@ -2,8 +2,7 @@
 // probe harness (issue #136B, docs/containment-probe-harness.md).
 //
 // sandbox-probe (github.com/controlplaneio/sandbox-probe, Apache-2.0) supplies
-// the ENUMERATION: run on the host unconfined, run again inside the srt sandbox,
-// diff. sandbox-probe is invoked as an external process (like pyte in
+// the ENUMERATION, run inside the srt sandbox. sandbox-probe is invoked as an external process (like pyte in
 // tests/interactive) and is NEVER imported here — its license never touches the
 // shipped binary (hard-constraint #4). This package supplies the one piece it
 // cannot: the judgement of whether a surviving-reachable observation is EXPECTED
@@ -33,7 +32,7 @@ const (
 	KindFile    Kind = "file"    // sensitive-path readability
 	KindEnv     Kind = "env"     // sensitive env-var presence
 	KindWrite   Kind = "write"   // in-sandbox write PERSISTED on the host (#153)
-	KindSocket  Kind = "socket"  // unix-socket creation / connect
+	KindSocket  Kind = "socket"  // unix-socket creation / visible socket path
 )
 
 // Observation is one normalized finding from the differential probe, describing
@@ -45,7 +44,7 @@ type Observation struct {
 
 	// Reachable is the in-sandbox result: host connectable / file readable /
 	// env var present / write persisted on the HOST after the run (KindWrite) /
-	// socket created or connected (KindSocket).
+	// socket created (KindSocket).
 	// This is the security-relevant bit.
 	Reachable bool `json:"reachable"`
 
@@ -263,9 +262,10 @@ func (o *Oracle) classifyWrite(obs Observation) Result {
 // socket at all"; every other socket target is a path the probe found.
 const SocketCreate = "AF_UNIX"
 
-// classifySocket judges unix sockets by what the sandbox can DO with them. A
-// socket path merely being visible is host-dependent noise; creating or
-// connecting one is the escape (docker, the nix daemon, tmux approval).
+// classifySocket: without AF_UNIX creation no socket can be connected, so that
+// one row carries the judgement (docker, the nix daemon, tmux approval). Which
+// socket paths are merely visible is host-dependent noise, unless one shows
+// through a read deny.
 func (o *Oracle) classifySocket(obs Observation) Result {
 	if obs.Target == SocketCreate {
 		if obs.Reachable {
@@ -273,15 +273,12 @@ func (o *Oracle) classifySocket(obs Observation) Result {
 		}
 		return Result{obs, VerdictOK, "AF_UNIX socket creation blocked"}
 	}
-	if obs.Reachable {
-		return Result{obs, VerdictLeak, "unix socket connectable from the sandbox"}
-	}
 	p := filepath.Clean(obs.Target)
 	denyEntry, denyLen := deepestMatch(p, o.denyRead)
 	if _, allowLen := deepestMatch(p, o.allowRead); denyLen > allowLen {
 		return Result{obs, VerdictLeak, "unix socket visible under denyRead " + denyEntry}
 	}
-	return Result{obs, VerdictOK, "unix socket path visible but not connectable"}
+	return Result{obs, VerdictOK, "unix socket path visible"}
 }
 
 func (o *Oracle) classifyEnv(obs Observation) Result {

@@ -60,16 +60,50 @@ func writeFixture(home string) error {
 	return nil
 }
 
+// underHome reports whether p is inside home, in either its given or its
+// symlink-resolved spelling (the policy may carry the resolved one).
+func underHome(home, p string) bool {
+	homes := []string{home}
+	if r, err := filepath.EvalSymlinks(home); err == nil && r != home {
+		homes = append(homes, r)
+	}
+	for _, h := range homes {
+		if strings.HasPrefix(p, h+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
 // requirePlanted fails when a policy entry under the fixture home has nothing
 // planted: it could not be judged, and would silently drop out of the report.
+// A policy with NO entry under home means home is not what rein hid.
 func requirePlanted(home string, entries []string) error {
+	n := 0
 	for _, e := range entries {
-		if !strings.HasPrefix(e, home+string(filepath.Separator)) {
+		if !underHome(home, e) {
 			continue
 		}
-		if _, err := os.Stat(e); err != nil {
+		n++
+		if st, err := os.Stat(e); err != nil || (st.IsDir() && sampleDeep(e) == "") {
 			return fmt.Errorf("policy entry %s has no content in the fixture home: add it to fixtureFiles (tests/containment/cmd/classify/fixture.go)", e)
 		}
 	}
+	if n == 0 {
+		return fmt.Errorf("no policy entry is under the fixture home %s", home)
+	}
 	return nil
+}
+
+// sampleDeep returns some file (or symlink) under dir, or "".
+func sampleDeep(dir string) string {
+	found := ""
+	_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			found = p
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
 }

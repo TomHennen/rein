@@ -14,14 +14,16 @@ func res(v Verdict, k Kind, target, reason string) Result {
 }
 
 func TestSplit(t *testing.T) {
-	n := Normalizer{Subs: []Sub{{"/tmp/fx/home", "<HOME>"}}, UID: 501}
-	tol := []Tolerated{{KindFile, "/etc/passwd", "names only"}}
+	n := NewNormalizer([]Sub{{"/tmp/fx/home", "<HOME>"}}, 501)
+	tol := []Tolerated{{KindFile, "/etc/passwd", "names only"}, {KindFile, "/proc/1/cgroup", "sandbox pid 1"}}
 	golden, untriaged := Split([]Result{
 		res(VerdictOK, KindFile, "/tmp/fx/home/.ssh", "unreadable"),
 		res(VerdictOK, KindFile, "/tmp/fx/home/.ssh", "unreadable"), // duplicate
 		res(VerdictOK, KindFile, "/run/user/501", "unreadable"),
 		res(VerdictUnknown, KindFile, "/etc/passwd", "readable"),       // tolerated
 		res(VerdictUnknown, KindFile, "/etc/shadow", "readable"),       // NOT tolerated
+		res(VerdictUnknown, KindFile, "/proc/1/cgroup", "readable"),    // tolerated: literal pid 1
+		res(VerdictUnknown, KindFile, "/proc/4242/cgroup", "readable"), // NOT: a host pid
 		res(VerdictOK, KindSocket, "/tmp/tmux-501/default", "visible"), // host-dependent
 		res(VerdictOK, KindSocket, SocketCreate, "blocked"),
 		res(VerdictLeak, KindFile, "/etc/passwd", "leak"), // a tolerated target never hides a leak
@@ -42,8 +44,8 @@ func TestSplit(t *testing.T) {
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("golden rows:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
-	if len(untriaged) != 1 || untriaged[0].Target != "/etc/shadow" {
-		t.Errorf("untriaged = %v, want only /etc/shadow", untriaged)
+	if len(untriaged) != 2 || untriaged[0].Target != "/etc/shadow" || untriaged[1].Target != "/proc/<PID>/cgroup" {
+		t.Errorf("untriaged = %v, want /etc/shadow and the host-pid cgroup", untriaged)
 	}
 }
 
@@ -83,17 +85,17 @@ func TestCommittedGoldenIsAllOK(t *testing.T) {
 
 func TestNormalizerIsPerBoxNeutral(t *testing.T) {
 	for _, uid := range []int{501, 1000} {
-		n := Normalizer{UID: uid}
+		n := NewNormalizer(nil, uid)
 		u := map[int]string{501: "501", 1000: "1000"}[uid]
 		if got := n.Norm("/run/user/" + u + "/rein/run-aB_9-x"); got != "/run/user/<UID>/rein/run-<RUNID>" {
 			t.Errorf("uid %d: got %q", uid, got)
 		}
 	}
 	// Another user's runtime dir is not this box's noise: keep it literal.
-	if got := (Normalizer{UID: 501}).Norm("/run/user/1000"); got != "/run/user/1000" {
+	if got := NewNormalizer(nil, 501).Norm("/run/user/1000"); got != "/run/user/1000" {
 		t.Errorf("other uid collapsed: %q", got)
 	}
-	if got := (Normalizer{UID: 50}).Norm("/run/user/501"); got != "/run/user/501" {
+	if got := NewNormalizer(nil, 50).Norm("/run/user/501"); got != "/run/user/501" {
 		t.Errorf("uid prefix collapsed: %q", got)
 	}
 }
@@ -108,8 +110,7 @@ func TestClassifySocket(t *testing.T) {
 	}{
 		{"creation blocked", Observation{Kind: KindSocket, Target: SocketCreate}, VerdictOK},
 		{"creation allowed is a LEAK", Observation{Kind: KindSocket, Target: SocketCreate, Reachable: true}, VerdictLeak},
-		{"visible, not connectable", Observation{Kind: KindSocket, Target: "/run/docker.sock"}, VerdictOK},
-		{"connectable is a LEAK", Observation{Kind: KindSocket, Target: "/run/docker.sock", Reachable: true}, VerdictLeak},
+		{"visible", Observation{Kind: KindSocket, Target: "/run/docker.sock", Reachable: true}, VerdictOK},
 		{"visible under a read deny is a LEAK", Observation{Kind: KindSocket, Target: filepath.Join(home, ".gnupg", "S.gpg-agent")}, VerdictLeak},
 	}
 	for _, tc := range tests {

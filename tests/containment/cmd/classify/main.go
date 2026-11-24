@@ -1,7 +1,6 @@
 // Command classify is the oracle CLI for the containment harness (issue #136B).
 // It reads rein's emitted settings.json and a NORMALIZED observations file (the
-// differential probe's host-vs-sandbox result, mapped into the oracle's schema
-// — see tests/containment/README.md), classifies each observation against the
+// in-sandbox probe's result — see tests/containment/README.md), classifies each observation against the
 // config-derived oracle, and prints a report. Exit 3 if any leak is found, so
 // the harness / CI fails closed on a containment regression.
 package main
@@ -11,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/TomHennen/rein/internal/srt"
@@ -20,7 +20,7 @@ import (
 func main() {
 	settingsPath := flag.String("settings", "", "path to rein's emitted srt settings.json")
 	obsPath := flag.String("observations", "", "path to the normalized observations JSON (see README)")
-	probeReportPath := flag.String("probe-report", "", "optional sandbox-probe report from the IN-SANDBOX run, mapped and merged")
+	probeReportPath := flag.String("probe-report", "", "sandbox-probe report from the IN-SANDBOX run, mapped and merged (run.sh always passes it)")
 	emitTargetsFlag := flag.Bool("targets", false, "emit the config-derived probe targets as JSON and exit")
 	jsonOut := flag.Bool("json", false, "emit the classified results as JSON instead of text")
 	fixtureDir := flag.String("fixture", "", "write the fixture $HOME into this dir and exit")
@@ -48,6 +48,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "classify: load settings: %v\n", err)
 		os.Exit(2)
 	}
+	// rein, not srt, enforces egress (#185), so settings.json lists no hosts.
+	cfg.Network.AllowedDomains = append(cfg.Network.AllowedDomains, reachableControl)
 	if *emitTargetsFlag {
 		if err := emitTargets(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "classify: emit targets: %v\n", err)
@@ -61,18 +63,11 @@ func main() {
 		os.Exit(2)
 	}
 	if *probeReportPath != "" {
-		// Paths the in-sandbox probe judged itself: connect-tested sockets, and
-		// dirs it found empty.
-		probed := map[string]bool{}
-		for _, o := range obs {
-			if o.Kind == containment.KindSocket {
-				probed[judgedKey("unix_socket_detection", o.Target)] = true
-			}
-		}
+		empty := map[string]bool{}
 		for _, d := range emptyDirs {
-			probed[judgedKey("sensitive_readable_paths", d)] = true
+			empty[d] = true
 		}
-		mapped, err := mapProbeReport(*probeReportPath, probed)
+		mapped, err := mapProbeReport(*probeReportPath, empty)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "classify: map probe report: %v\n", err)
 			os.Exit(2)
@@ -93,7 +88,7 @@ func main() {
 	// A leak outranks an untriaged row, but both are always printed.
 	rc := 0
 	if *toleratedPath != "" {
-		untriaged, err := splitRows(*toleratedPath, *normOut, containment.Normalizer{Subs: subs, UID: *uid}, results)
+		untriaged, err := splitRows(*toleratedPath, *normOut, containment.NewNormalizer(subs, *uid), results)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "classify: tolerated: %v\n", err)
 			os.Exit(2)
@@ -118,6 +113,10 @@ func (s *subFlag) Set(v string) error {
 	label, path, ok := strings.Cut(v, "=")
 	if !ok || label == "" {
 		return fmt.Errorf("want LABEL=PATH, got %q", v)
+	}
+	// The policy may name the path through its symlink-resolved form.
+	if r, err := filepath.EvalSymlinks(path); err == nil && r != path {
+		*s = append(*s, containment.Sub{Path: r, Label: "<" + label + ">"})
 	}
 	*s = append(*s, containment.Sub{Path: path, Label: "<" + label + ">"})
 	return nil
@@ -204,7 +203,7 @@ func loadObservations(path string) (obs []containment.Observation, emptyDirs []s
 func printText(results []containment.Result) {
 	var leaks, regressions, unknown, ok int
 	for _, r := range results {
-		fmt.Printf("[%-10s] %-7s %s — %s\n", r.Verdict, r.Observation.Kind, r.Observation.Target, r.Reason)
+		fmt.Println(containment.Row{Verdict: r.Verdict, Kind: r.Observation.Kind, Target: r.Observation.Target, Reason: r.Reason})
 		switch r.Verdict {
 		case containment.VerdictLeak:
 			leaks++
