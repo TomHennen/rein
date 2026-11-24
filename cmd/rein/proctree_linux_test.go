@@ -83,8 +83,14 @@ func TestDetectFromProcTree_FindsGitPushAncestor(t *testing.T) {
 	// exec-optimize a single-command script — an exec would replace the
 	// spoofed-argv sh, collapsing the ancestor the walk must find.
 	script := fmt.Sprintf("%q -test.run '^TestProcTreeHelperProbe$' -test.v; :", exe)
+	// Prefer bash: a busybox /bin/sh (e.g. the Nix build sandbox) dispatches on
+	// argv[0] and would try to run a "git" applet.
+	shell := "/bin/sh"
+	if p, err := exec.LookPath("bash"); err == nil {
+		shell = p
+	}
 	cmd := &exec.Cmd{
-		Path: "/bin/sh",
+		Path: shell,
 		// /proc/<pid>/cmdline of this sh: git\0-c\0<script>\0push\0 —
 		// isGitVerb sees base(argv[0])=="git", skips -c + its value, and
 		// matches the verb "push".
