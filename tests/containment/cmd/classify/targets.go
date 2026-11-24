@@ -42,13 +42,23 @@ type targets struct {
 	// Network hosts to probe (reachability; the probe script adds the
 	// api.github.com token heuristic on its own).
 	Network []string `json:"network"`
-	// Files/dirs to probe for readability.
-	Files []string `json:"files"`
+	// Files/dirs to probe for readability. Target is the policy entry the row
+	// is reported under; Probe is what is actually read.
+	Files []fileTarget `json:"files"`
 	// Env var names to probe for presence.
 	Env []string `json:"env"`
 	// Write-probe FILE paths: create in-sandbox; persistence is judged host-side.
 	Writes []string `json:"writes"`
 }
+
+type fileTarget struct {
+	Target string `json:"target"`
+	Probe  string `json:"probe"`
+}
+
+// ReadSentinelName is a file run.sh plants in $HOME so the home deny is always
+// judged against known content, whatever else the developer's home holds.
+const ReadSentinelName = ".rein-containment-read-sentinel"
 
 func emitTargets(cfg srt.Config) error {
 	t := targets{Env: containment.SensitiveEnv}
@@ -80,18 +90,20 @@ func emitTargets(cfg srt.Config) error {
 	// tmpfs legitimately lists allow-back scaffolding (#150), so "listing
 	// non-empty" would be a false leak — "a real host file readable" is the
 	// truth. Dirs with no sampleable file keep the dir probe.
+	// The row is keyed by the deny ENTRY, not the sampled file, so it is the
+	// same on every machine.
 	for _, d := range cfg.Filesystem.DenyRead {
+		probe := d
 		if f := sampleFile(d); f != "" {
-			t.Files = append(t.Files, f)
-		} else {
-			t.Files = append(t.Files, d)
+			probe = f
 		}
+		t.Files = append(t.Files, fileTarget{Target: d, Probe: probe})
 	}
 	// Allow-backs are existence-gated at mount time by srt; probing an absent
-	// one reads as a false regression.
+	// or empty one reads as a false regression.
 	for _, a := range cfg.Filesystem.AllowRead {
-		if _, err := os.Stat(a); err == nil {
-			t.Files = append(t.Files, a)
+		if containment.HasContent(a) {
+			t.Files = append(t.Files, fileTarget{Target: a, Probe: a})
 		}
 	}
 
@@ -113,6 +125,8 @@ func emitTargets(cfg srt.Config) error {
 		}
 	}
 	if home, err := os.UserHomeDir(); err == nil {
+		sentinel := filepath.Join(home, ReadSentinelName)
+		t.Files = append(t.Files, fileTarget{Target: sentinel, Probe: sentinel})
 		for _, w := range srt.DefaultHomeWritePaths(home) {
 			t.Writes = append(t.Writes, filepath.Join(w, WriteProbeName))
 		}

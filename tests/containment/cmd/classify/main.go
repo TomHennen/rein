@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/TomHennen/rein/internal/srt"
 	"github.com/TomHennen/rein/tests/containment"
@@ -22,6 +23,11 @@ func main() {
 	probeReportPath := flag.String("probe-report", "", "optional sandbox-probe report from the IN-SANDBOX run, mapped and merged")
 	emitTargetsFlag := flag.Bool("targets", false, "emit the config-derived probe targets as JSON and exit")
 	jsonOut := flag.Bool("json", false, "emit the classified results as JSON instead of text")
+	expectPath := flag.String("expect", "", "expectations file to check the normalized rows against (exit 4 on a mismatch)")
+	normOut := flag.String("normalized-out", "", "with -expect: also write the normalized rows here")
+	home := flag.String("home", os.Getenv("HOME"), "with -expect: home dir, normalized to <HOME>")
+	worktree := flag.String("worktree", "", "with -expect: the run's working tree, normalized to <WORKTREE>")
+	uid := flag.Int("uid", os.Getuid(), "with -expect: uid, normalized to <UID>")
 	flag.Parse()
 
 	if *settingsPath == "" || (*obsPath == "" && !*emitTargetsFlag) {
@@ -47,7 +53,13 @@ func main() {
 		os.Exit(2)
 	}
 	if *probeReportPath != "" {
-		mapped, err := mapProbeReport(*probeReportPath)
+		probed := map[string]bool{}
+		for _, o := range obs {
+			if o.Kind == containment.KindSocket {
+				probed[o.Target] = true
+			}
+		}
+		mapped, err := mapProbeReport(*probeReportPath, probed)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "classify: map probe report: %v\n", err)
 			os.Exit(2)
@@ -65,10 +77,54 @@ func main() {
 		printText(results)
 	}
 
+	// A leak outranks an expectation mismatch, but both are always printed.
+	rc := 0
+	if *expectPath != "" {
+		n := containment.Normalizer{Home: *home, Worktree: *worktree, UID: *uid}
+		problems, err := checkExpectations(*expectPath, *normOut, n, results)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "classify: expectations: %v\n", err)
+			os.Exit(2)
+		}
+		if len(problems) > 0 {
+			fmt.Fprintf(os.Stderr, "classify: %d EXPECTATION MISMATCH(ES) against %s:\n", len(problems), *expectPath)
+			for _, p := range problems {
+				fmt.Fprintln(os.Stderr, "  "+p)
+			}
+			rc = 4
+		}
+	}
 	if containment.HasLeak(results) {
 		fmt.Fprintln(os.Stderr, "classify: CONTAINMENT LEAK(S) DETECTED — failing closed")
-		os.Exit(3)
+		rc = 3
 	}
+	os.Exit(rc)
+}
+
+func checkExpectations(path, normOut string, n containment.Normalizer, results []containment.Result) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	exps, err := containment.ParseExpectations(f)
+	if err != nil {
+		return nil, err
+	}
+	rows := n.Rows(results)
+	if normOut != "" {
+		var b strings.Builder
+		for _, r := range rows {
+			b.WriteString(r.String() + "\n")
+		}
+		if err := os.WriteFile(normOut, []byte(b.String()), 0o644); err != nil {
+			return nil, err
+		}
+	}
+	exists := func(target string) bool {
+		return containment.HasContent(strings.ReplaceAll(target, "<HOME>", n.Home))
+	}
+	return containment.Check(rows, exps, exists), nil
 }
 
 func loadConfig(path string) (srt.Config, error) {
@@ -94,6 +150,7 @@ func loadObservations(path string) ([]containment.Observation, error) {
 		Files   []containment.Observation `json:"files"`
 		Env     []containment.Observation `json:"env"`
 		Writes  []containment.Observation `json:"writes"`
+		Sockets []containment.Observation `json:"sockets"`
 	}
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, err
@@ -114,6 +171,10 @@ func loadObservations(path string) ([]containment.Observation, error) {
 	}
 	for _, o := range doc.Writes {
 		o.Kind = containment.KindWrite
+		out = append(out, o)
+	}
+	for _, o := range doc.Sockets {
+		o.Kind = containment.KindSocket
 		out = append(out, o)
 	}
 	return out, nil

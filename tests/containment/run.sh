@@ -8,18 +8,21 @@
 #      writing results into the bound working tree
 #   4. host-side write-persistence check (#153 channel)
 #   5. classify judges every observation against the emitted settings.json
-#   6. compare to the committed golden (REIN_UPDATE_GOLDEN=1 adopts)
+#   6. check the normalized rows against expected.txt (README "Expectations")
 #
-# Any leak => classify exits 3 => this script fails. Golden drift also fails.
+# Any leak => classify exits 3 => this script fails. A row expected.txt does
+# not account for (or a required row gone missing) also fails, exit 4.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
 out_dir="${OUT_DIR:-$here/_out}"
-golden="$here/golden-report.txt"
+expected="$here/expected.txt"
 mkdir -p "$out_dir"
 
 die() { echo "run.sh: $*" >&2; exit 1; }
+
+[ -z "${REIN_UPDATE_GOLDEN:-}" ] || die "REIN_UPDATE_GOLDEN is gone: there is no per-box golden to adopt. Review the reported rows and edit $expected by hand."
 
 SANDBOX_PROBE="${SANDBOX_PROBE:-$(command -v sandbox-probe || echo "$HOME/go/bin/sandbox-probe")}"
 [ -x "$SANDBOX_PROBE" ] || die "sandbox-probe not found/executable ($SANDBOX_PROBE). Install: go install github.com/controlplaneio/sandbox-probe@latest (Apache-2.0; external process only, never in go.mod — hard-constraint #4)."
@@ -42,7 +45,11 @@ echo "run.sh: [1/6] host baseline -> $host_report"
 # below captures its own settings again — same box, same config; the two-step
 # exists only because targets must be in the working tree BEFORE launch.
 wd="$(mktemp -d /tmp/rein-containment-XXXXXX)"
-trap 'rm -rf "$wd"' EXIT
+# A known file in $HOME, so the home deny is judged against real content on
+# every box (the name must match classify's ReadSentinelName).
+sentinel="$HOME/.rein-containment-read-sentinel"
+trap 'rm -rf "$wd"; rm -f "$sentinel"' EXIT
+echo "rein-containment-read-sentinel" > "$sentinel"
 settings="$out_dir/settings.json"
 echo "run.sh: [2/6] capture settings + derive targets"
 REIN_SRT_SETTINGS_COPY="$settings" REIN_SANDBOX_WORKDIR="$wd" \
@@ -60,10 +67,10 @@ cat > "$wd/probe.sh" <<'PROBE'
 cd "$(dirname "$0")"
 ./sandbox-probe scan --fast --output_path sandbox-report.json >/dev/null 2>&1 || echo "probe-scan-failed" > sandbox-report.failed
 python3 - <<'PY'
-import json, os, subprocess
+import json, os, socket, subprocess
 
 t = json.load(open("targets.json"))
-obs = {"network": [], "files": [], "env": [], "writes_attempted": []}
+obs = {"network": [], "files": [], "env": [], "sockets": [], "writes_attempted": []}
 
 for host in t["network"]:
     code = subprocess.run(
@@ -105,9 +112,46 @@ def dir_readable(path, depth=3):
             return True
     return False
 
-for p in t["files"]:
+for f in t["files"]:
+    # The row is reported under the policy entry; the probe is what is read.
+    p = f["probe"]
     readable = dir_readable(p) if os.path.isdir(p) else file_readable(p)
-    obs["files"].append({"target": p, "reachable": readable})
+    obs["files"].append({"target": f["target"], "probe": p, "reachable": readable})
+
+# Unix sockets are judged by what the sandbox can DO, not by a path being
+# visible: can it create an AF_UNIX socket at all, and can it connect to any
+# socket sandbox-probe found.
+creatable = []
+for ty in (socket.SOCK_STREAM, socket.SOCK_DGRAM, socket.SOCK_SEQPACKET):
+    try:
+        socket.socket(socket.AF_UNIX, ty).close()
+        creatable.append(ty)
+    except OSError:
+        pass
+obs["sockets"].append({"target": "AF_UNIX", "reachable": bool(creatable)})
+
+def connectable(path):
+    for ty in creatable:
+        s = socket.socket(socket.AF_UNIX, ty)
+        s.settimeout(3)
+        try:
+            s.connect(path)
+            return True
+        except OSError:
+            pass
+        finally:
+            s.close()
+    return False
+
+found = set()
+try:
+    for f in json.load(open("sandbox-report.json"))["findings"]:
+        if f.get("findingType") == "unix_socket_detection" and isinstance(f.get("value"), list):
+            found.update(v for v in f["value"] if isinstance(v, str))
+except (OSError, ValueError, KeyError):
+    pass  # no report: classify keeps any unprobed socket as an untriaged row
+for path in sorted(found):
+    obs["sockets"].append({"target": path, "reachable": connectable(path)})
 
 for name in t["env"]:
     val = os.environ.get(name)
@@ -159,48 +203,23 @@ json.dump(obs, open(os.path.join(out_dir, "observations.json"), "w"), indent=1)
 PY
 
 # --- 5. Classification --------------------------------------------------------
-echo "run.sh: [5/6] oracle classification"
+echo "run.sh: [5/6] oracle classification + expectations"
 report="$out_dir/report.txt"
 probe_report_flag=()
 [ -s "$out_dir/sandbox-report.json" ] && probe_report_flag=(-probe-report "$out_dir/sandbox-report.json")
 classify_rc=0
 "$classify_bin" -settings "$settings" -observations "$out_dir/observations.json" \
-  "${probe_report_flag[@]}" > "$report" || classify_rc=$?
+  "${probe_report_flag[@]}" \
+  -expect "$expected" -home "$HOME" -worktree "$wd" -normalized-out "$out_dir/report.normalized.txt" \
+  > "$report" || classify_rc=$?
 cat "$report"
 
-# --- 6. Golden ----------------------------------------------------------------
-# Normalize per-run/per-box volatiles (the temp working tree, $HOME) the same
-# way the journey goldens do: both sides through the same lens.
-# Collapse per-run and per-boot volatiles so the golden is stable: the temp
-# working tree, $HOME, pids in /proc paths, and the stale srt-mux socket herd
-# (each class keeps ONE representative row via the awk dedupe).
-normalize() {
-  sed -e "s|$wd|<WORKTREE>|g" -e "s|$HOME|<HOME>|g" \
-      -e "s|/proc/[0-9]\{1,\}/|/proc/<PID>/|g" \
-      -e "s|/tmp/srt-mux-[0-9-]*\.sock|/tmp/srt-mux-<N>.sock|g" \
-      -e "s|/run/user/1000/rein/run-[A-Za-z0-9_-]*|/run/user/1000/rein/run-<RUNID>|g" \
-      -e "s|^summary: .*|summary: <normalized — counts vary with the host socket herd>|" \
-      -e "s|[0-9a-f]\{16\}|<HEX>|g" -e "s|[0-9a-f]\{8\}\.|<HEX>.|g" \
-      -e "s|cc-daemon-1000/[0-9a-f]*|cc-daemon-1000/<HEX>|g" \
-      "$1" | sort -u
-}
-echo "run.sh: [6/6] golden compare"
-if [ "${REIN_UPDATE_GOLDEN:-}" = "1" ]; then
-  normalize "$report" > "$golden"
-  echo "run.sh: [golden UPDATED] $golden"
-else
-  if [ ! -f "$golden" ]; then
-    die "no golden at $golden — run with REIN_UPDATE_GOLDEN=1 to adopt one"
-  fi
-  if ! diff -u "$golden" <(normalize "$report") > "$out_dir/golden.diff"; then
-    echo "run.sh: GOLDEN DRIFT (see $out_dir/golden.diff):" >&2
-    cat "$out_dir/golden.diff" >&2
-    exit 4
-  fi
-  echo "run.sh: [golden OK]"
-fi
-
-if [ "$classify_rc" -ne 0 ]; then
-  die "CONTAINMENT LEAK(S) — classify exit $classify_rc (see $report)"
-fi
-echo "run.sh: PASS"
+# --- 6. Verdict ---------------------------------------------------------------
+# classify printed any leak and any expectation mismatch to stderr above.
+case "$classify_rc" in
+  0) echo "run.sh: [6/6] expectations OK"; echo "run.sh: PASS" ;;
+  3) die "CONTAINMENT LEAK(S) — classify exit 3 (see $report)" ;;
+  4) echo "run.sh: EXPECTATION MISMATCH (normalized rows: $out_dir/report.normalized.txt; expectations: $expected)" >&2
+     exit 4 ;;
+  *) die "classify failed (exit $classify_rc)" ;;
+esac

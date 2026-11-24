@@ -33,6 +33,7 @@ const (
 	KindFile    Kind = "file"    // sensitive-path readability
 	KindEnv     Kind = "env"     // sensitive env-var presence
 	KindWrite   Kind = "write"   // in-sandbox write PERSISTED on the host (#153)
+	KindSocket  Kind = "socket"  // unix-socket creation / connect
 )
 
 // Observation is one normalized finding from the differential probe, describing
@@ -43,7 +44,8 @@ type Observation struct {
 	Target string `json:"target"` // host, absolute path, or env-var name
 
 	// Reachable is the in-sandbox result: host connectable / file readable /
-	// env var present / write persisted on the HOST after the run (KindWrite).
+	// env var present / write persisted on the HOST after the run (KindWrite) /
+	// socket created or connected (KindSocket).
 	// This is the security-relevant bit.
 	Reachable bool `json:"reachable"`
 
@@ -144,6 +146,8 @@ func (o *Oracle) Classify(obs Observation) Result {
 		return o.classifyEnv(obs)
 	case KindWrite:
 		return o.classifyWrite(obs)
+	case KindSocket:
+		return o.classifySocket(obs)
 	default:
 		return Result{obs, VerdictUnknown, "unrecognized observation kind"}
 	}
@@ -253,6 +257,31 @@ func (o *Oracle) classifyWrite(obs Observation) Result {
 		}
 		return Result{obs, VerdictOK, "write outside writable binds evaporated (deny tmpfs)"}
 	}
+}
+
+// SocketCreate is the socket target for "can the sandbox create an AF_UNIX
+// socket at all"; every other socket target is a path the probe found.
+const SocketCreate = "AF_UNIX"
+
+// classifySocket judges unix sockets by what the sandbox can DO with them. A
+// socket path merely being visible is host-dependent noise; creating or
+// connecting one is the escape (docker, the nix daemon, tmux approval).
+func (o *Oracle) classifySocket(obs Observation) Result {
+	if obs.Target == SocketCreate {
+		if obs.Reachable {
+			return Result{obs, VerdictLeak, "AF_UNIX socket creation allowed in sandbox (seccomp block missing)"}
+		}
+		return Result{obs, VerdictOK, "AF_UNIX socket creation blocked"}
+	}
+	if obs.Reachable {
+		return Result{obs, VerdictLeak, "unix socket connectable from the sandbox"}
+	}
+	p := filepath.Clean(obs.Target)
+	denyEntry, denyLen := deepestMatch(p, o.denyRead)
+	if _, allowLen := deepestMatch(p, o.allowRead); denyLen > allowLen {
+		return Result{obs, VerdictLeak, "unix socket visible under denyRead " + denyEntry}
+	}
+	return Result{obs, VerdictOK, "unix socket path visible but not connectable"}
 }
 
 func (o *Oracle) classifyEnv(obs Observation) Result {

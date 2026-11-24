@@ -22,7 +22,11 @@ type probeReport struct {
 // only what it FOUND (reached hosts, readable paths), so every mapped
 // observation is Reachable=true; the "correctly blocked" rows come from the
 // config-derived supplement, which probes known targets in both directions.
-func mapProbeReport(path string) ([]containment.Observation, error) {
+//
+// A unix socket the in-sandbox probe already tried to connect (socketsProbed)
+// is judged by that socket observation. One it did NOT try stays a readable
+// file row, which is "unknown" and fails as untriaged — never silently dropped.
+func mapProbeReport(path string, socketsProbed map[string]bool) ([]containment.Observation, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -47,6 +51,9 @@ func mapProbeReport(path string) ([]containment.Observation, error) {
 			continue // value not a string list (shape drift) — leave in raw report
 		}
 		for _, v := range vals {
+			if f.FindingType == "unix_socket_detection" && socketsProbed[v] {
+				continue
+			}
 			out = append(out, containment.Observation{Kind: kind, Target: v, Reachable: true})
 		}
 	}

@@ -37,7 +37,7 @@ drifting copy. For each observation it returns:
 | `ok`         | matches intent (expected-open reachable / denied blocked)     |
 | `leak`       | containment failure — **fails the run** (`HasLeak` → exit 3)  |
 | `regression` | an expected-open channel is unexpectedly closed (needs agent) |
-| `unknown`    | outside config-derived knowledge — surfaced for triage        |
+| `unknown`    | outside config-derived knowledge — fails until triaged        |
 
 Channels classified today, fully from the emitted config:
 
@@ -53,6 +53,10 @@ Channels classified today, fully from the emitted config:
   deeper `allowRead` re-bind (the #59 home-deny model's toolchain/working-tree
   allow-backs) is expected-readable. A path outside both is `unknown` (triage,
   never silently ok).
+- **Unix sockets** — judged by what the sandbox can *do*: creating an `AF_UNIX`
+  socket, or connecting to any socket sandbox-probe found, is a leak. A socket
+  path that is merely visible is `ok`, as is expected on any host (docker, the
+  nix daemon, tmux, systemd).
 - **Sensitive env** — a fixed denylist (`SensitiveEnv`: `ANTHROPIC_API_KEY`,
   `GH_TOKEN`, `AWS_*`, `SSH_AUTH_SOCK`, …) must be scrubbed; present ⟹ leak.
   (rein's env allowlist is build-time, not in `settings.json`, so this list is
@@ -103,8 +107,7 @@ fabricates results.
 ```sh
 go install github.com/controlplaneio/sandbox-probe@latest   # once per box
 go build -o bin/ ./cmd/...
-tests/containment/run.sh                    # compare to the committed golden
-REIN_UPDATE_GOLDEN=1 tests/containment/run.sh   # adopt a new golden
+tests/containment/run.sh                    # check against expected.txt
 ```
 
 `run.sh` (1) runs `sandbox-probe scan --fast` on the host, (2) captures the
@@ -113,15 +116,51 @@ from it (`classify -targets`: allowlists, deny paths, srt's own default write
 paths — the substrate-chosen set that leaked in #153), (3) runs sandbox-probe
 plus the target probes through the REAL `rein run --sandbox` launch, (4) checks
 write PERSISTENCE host-side, (5) classifies everything against that run's own
-settings.json, and (6) compares the normalized report to
-`golden-report.txt` (drift = exit 4; any leak = exit 3/1).
+settings.json, and (6) checks the normalized rows against `expected.txt`
+(mismatch = exit 4; any leak = exit 1).
+
+## Expectations (`expected.txt`)
+
+There is no per-box golden. One committed file says what the report must look
+like on **every** developer machine, and `run.sh` fails on any row it does not
+account for. Each line is `class | verdict | kind | target | reason [| note]`:
+
+| Class       | Rule                                                              |
+|-------------|-------------------------------------------------------------------|
+| `required`  | must appear everywhere (the denies rein always configures, the env denylist, the write sweep, the planted read sentinel) |
+| `ifexists`  | must appear exactly when the path has content on this host (the curated toolchain allow-backs) |
+| `optional`  | depends on what is installed; present or absent                   |
+| `oneof:<g>` | at least one row of the group (same check, host-dependent outcome)|
+| `triaged`   | an `unknown` row a human reviewed; the note says why it is fine    |
+
+What still fails, on any machine:
+
+- a `required` row missing (a probe silently dropped), or an `ifexists` path
+  that is on the host but no longer allowed back;
+- a listed row with a different verdict or reason (`CHANGED`);
+- any row not listed at all: a new allow-back, a new write result, or an
+  `unknown` nobody triaged (`UNEXPECTED` / `UNTRIAGED`).
+
+`leak` and `regression` can never be listed, an `unknown` must be `triaged` with
+a note, and the `*` target is accepted only for `optional | ok | socket` (those
+rows are connect-tested on every run, so they need no per-path review). To
+accept a new row, review it and add a line by hand; there is no auto-adopt.
+
+Rows are normalized so they compare across machines: `<HOME>`, `<WORKTREE>`,
+`<UID>` (this user's uid only; another user's `/run/user/N` stays literal),
+`<PID>`, `<RUNID>`, `<HEX>`, and the srt-mux socket herd collapsed to one row.
+`_out/report.txt` is the raw report, `_out/report.normalized.txt` the compared
+rows, and `_out/observations.json` records which file each deny was read through.
 
 Probe semantics, decided the hard way:
 
 - **Reads are CONTENT-level, not name-level.** A denied dir is probed through a
   host-sampled file inside it, and dir readability means "a real file readable
   within depth 3" — the deny tmpfs legitimately lists allow-back scaffolding and
-  tombstones (#150), so a non-empty listing is not a leak.
+  tombstones (#150), so a non-empty listing is not a leak. The row is reported
+  under the deny ENTRY, not the sampled file, so it reads the same everywhere.
+  `run.sh` also plants `~/.rein-containment-read-sentinel` (removed on exit) so
+  the home deny is always judged against known content.
 - **Token placement is probed only where there is observable evidence**: the
   api.github.com rate-limit heuristic (anonymous = 60; the injected read token
   raises it). Other inject hosts are skipped rather than guessed; their token
@@ -130,9 +169,10 @@ Probe semantics, decided the hard way:
   non-stub value counts as present.
 - **The ephemeral clone dir is skipped** in the write sweep (discarded by rein
   after the run by design, and per-run).
-- **The golden is a normalized, sorted SET** (temp paths, $HOME, pids, socket
-  hashes and the srt-mux herd collapsed) and is PER-BOX, like the journey
-  goldens; `_out/report.txt` keeps the raw ordered report.
+- **Egress is mostly out of this harness's reach.** rein is the egress proxy
+  (#185), so the emitted srt allowlist is empty and only the denied canary
+  (`example.com`) is probed. rein's own egress policy is covered by the proxy
+  tests and the egress journeys, not here.
 
 Remaining (tracked in #141): the mitm-socket-placement custom probe, and wiring
 this into a journey / CI once srt runs anywhere in CI (#93).
