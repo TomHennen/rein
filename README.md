@@ -106,15 +106,13 @@ carries its own Node, `socat` and `ripgrep`, so of the sandbox stack only
 profile on Ubuntu 24.04+; a Nix-store `bwrap` would not match that profile).
 `nix run` does not put `srt` on your `PATH`, so use it for a look, not for
 sandboxed runs. `github:TomHennen/rein#rein` is rein alone, if you manage `srt`
-yourself. Two caveats with how `rein init` currently behaves under Nix:
+yourself. Two things to know about `rein init` under Nix:
 
-- **Re-run `rein init` after every upgrade.** init *copies* `rein`, `rein-git`
-  and `rein-gh` into its shim dir, and `rein run --direct` (plus anything you
-  pointed at that dir) runs those copies. An upgrade does not refresh them, and
-  `rein doctor`'s "shim freshness" check compares modification times, which are
-  all 1970 in the Nix store, so it reports stale copies as up to date. (The
-  default sandboxed `rein run` stages fresh copies from the running binary's
-  directory on each launch.)
+- **Upgrades take effect without re-running `rein init`.** Both `rein run` and
+  `rein run --direct` stage fresh shims from next to the running binary on each
+  launch. The copies init leaves in its shim dir matter only if you put that dir
+  on `PATH` yourself; `rein doctor` compares them by content and warns when they
+  differ (`rein install-shim` refreshes them).
 - **Use `--no-symlink`.** Without it, init links `~/.local/bin/rein` to the
   exact `/nix/store/...` path it was run from. Upgrades do not move that link,
   and it dangles once that store path is garbage-collected (for a `nix run`
@@ -153,8 +151,9 @@ version has been tagged. Use one of the routes above.
    (used to inject on the wire) is generated on first `rein run` and stored the
    same way. **No `REIN_APP_*` environment variables are needed** — rein reads
    `state.json` and fetches the installation id automatically on first use.
-3. **Wire up your shell.** rein installs its git/`gh` shims and puts `rein` on
-   your `PATH` (`~/.local/bin/rein`). The `alias claude='rein run -- claude'`
+3. **Wire up your shell.** rein installs its git/`gh` shims (a persistent copy
+   for manual `PATH` use; `rein run` stages fresh ones on every launch) and puts
+   `rein` on your `PATH` (`~/.local/bin/rein`). The `alias claude='rein run -- claude'`
    convenience is **opt-in** and is **not installed by default**. On a real
    terminal init asks *"Add alias claude='rein run -- claude' to <rc>? [y/N]"*
    (defaulting to **No**); pass `--alias` to install it non-interactively, or

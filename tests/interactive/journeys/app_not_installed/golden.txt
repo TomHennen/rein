@@ -22,7 +22,7 @@ rein: WARNING — DIRECT (UNSANDBOXED) MODE
 ===============================================================
 rein: launching wrapped process with:
   session: sess_journey_control (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-tji66vzx/session.yaml]
-  PATH-front shim dir: /home/admin/.local/state/rein/shim
+  PATH-front shim dir: /tmp/rein-run-1188529206
   per-process git config: /tmp/rein-run-1188529206/gitconfig
   (your real ~/.gitconfig is layered in via include.path)
 

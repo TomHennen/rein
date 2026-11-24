@@ -209,6 +209,17 @@ func WarnPartialAppEnv(w io.Writer) {
 // StateDir is $XDG_STATE_HOME/rein (defaulting to ~/.local/state/rein).
 // Created with mode 0700 on first use.
 func StateDir() (string, error) {
+	dir, err := stateDirPath()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create state dir: %w", err)
+	}
+	return dir, nil
+}
+
+func stateDirPath() (string, error) {
 	base := os.Getenv("XDG_STATE_HOME")
 	if base == "" {
 		home, err := os.UserHomeDir()
@@ -217,11 +228,18 @@ func StateDir() (string, error) {
 		}
 		base = filepath.Join(home, ".local", "state")
 	}
-	dir := filepath.Join(base, "rein")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("create state dir: %w", err)
+	return filepath.Join(base, "rein"), nil
+}
+
+// ShimDir is the persistent shim dir `rein install-shim` populates
+// (<StateDir>/shim). Does NOT create anything, so the git/gh shims can call it
+// on every invocation (including in-sandbox, where StateDir is hidden).
+func ShimDir() (string, error) {
+	dir, err := stateDirPath()
+	if err != nil {
+		return "", err
 	}
-	return dir, nil
+	return filepath.Join(dir, "shim"), nil
 }
 
 // ConfigDir is $XDG_CONFIG_HOME/rein (defaulting to ~/.config/rein).
