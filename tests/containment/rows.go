@@ -42,11 +42,6 @@ func NewNormalizer(subs []Sub, uid int) Normalizer {
 	return Normalizer{subs, regexp.MustCompile(`/run/user/` + strconv.Itoa(uid) + `(/|$)`)}
 }
 
-var (
-	reProcPID = regexp.MustCompile(`/proc/[0-9]+/`)
-	reRunID   = regexp.MustCompile(`/rein/run-[A-Za-z0-9_-]+`)
-)
-
 // Norm normalizes a target or reason string.
 func (n Normalizer) Norm(s string) string {
 	for _, sub := range n.subs {
@@ -54,9 +49,7 @@ func (n Normalizer) Norm(s string) string {
 			s = strings.ReplaceAll(s, sub.Path, sub.Label)
 		}
 	}
-	s = n.runUser.ReplaceAllString(s, "/run/user/<UID>$1")
-	s = reProcPID.ReplaceAllString(s, "/proc/<PID>/")
-	return reRunID.ReplaceAllString(s, "/rein/run-<RUNID>")
+	return n.runUser.ReplaceAllString(s, "/run/user/<UID>$1")
 }
 
 // Tolerated is a reviewed "unknown" row that may or may not appear on a host.
@@ -88,12 +81,13 @@ func ParseTolerated(r io.Reader) ([]Tolerated, error) {
 	return out, sc.Err()
 }
 
-// Split normalizes results and separates them into the rows the golden must
-// match exactly and the problems that fail the run regardless of the golden:
-// any "unknown" row tolerated.txt does not list. Tolerated unknowns and visible
-// unix-socket paths are host-dependent and dropped from the golden set.
+// Split separates results into the normalized rows the golden must match
+// exactly and the untriaged ones: any "unknown" row tolerated.txt does not
+// list, which fails the run. Tolerated unknowns and visible unix-socket paths
+// are host-dependent and dropped.
 //
-// Tolerated targets match the RAW target, so /proc/1/cgroup excuses pid 1 only.
+// Tolerated entries match the RAW target, and untriaged rows keep it, so the
+// printed row is what goes into tolerated.txt.
 func Split(results []Result, n Normalizer, tolerated []Tolerated) (golden []Row, untriaged []Row) {
 	tol := map[string]bool{}
 	for _, t := range tolerated {
@@ -101,12 +95,16 @@ func Split(results []Result, n Normalizer, tolerated []Tolerated) (golden []Row,
 	}
 	seen := map[Row]bool{}
 	for _, r := range results {
-		row := Row{r.Verdict, r.Observation.Kind, n.Norm(r.Observation.Target), n.Norm(r.Reason)}
+		o := r.Observation
+		row := Row{r.Verdict, o.Kind, n.Norm(o.Target), n.Norm(r.Reason)}
+		if r.Verdict == VerdictUnknown {
+			row.Target = o.Target
+		}
 		switch {
-		case row.Verdict == VerdictUnknown && tol[string(row.Kind)+"\x00"+r.Observation.Target]:
-		case row.Verdict == VerdictOK && row.Kind == KindSocket && r.Observation.Target != SocketCreate:
+		case r.Verdict == VerdictUnknown && tol[string(o.Kind)+"\x00"+o.Target]:
+		case r.Verdict == VerdictOK && o.Kind == KindSocket && o.Target != SocketCreate:
 		case seen[row]:
-		case row.Verdict == VerdictUnknown:
+		case r.Verdict == VerdictUnknown:
 			seen[row] = true
 			untriaged = append(untriaged, row)
 		default:

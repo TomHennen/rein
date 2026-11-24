@@ -43,9 +43,6 @@ Channels classified today, fully from the emitted config:
 
 - **Network egress** — reachable ⟺ host in `allowedDomains`; a denied host
   reachable in-sandbox is a leak (egress escape).
-- **Token placement** — the oracle can judge `tokenInjected`, but `run.sh` has
-  no observable evidence for it and does not produce it; token placement is
-  covered by the proxy unit tests.
 - **Filesystem read** — most-specific rule wins (as srt applies it): a path
   whose deepest covering rule is a `denyRead` (gh/ssh/`app.pem`/history + rein
   state/key/audit) must be unreadable, readable ⟹ leak; a path re-exposed by a
@@ -56,102 +53,76 @@ Channels classified today, fully from the emitted config:
   nothing can be connected, so that one row carries the judgement. A socket
   path that is merely visible is `ok`, as is expected on any host (docker, the
   nix daemon, tmux, systemd), unless it shows through a read deny (leak).
-- **Sensitive env** — a fixed denylist (`SensitiveEnv`: `ANTHROPIC_API_KEY`,
-  `GH_TOKEN`, `AWS_*`, `SSH_AUTH_SOCK`, …) must be scrubbed; present ⟹ leak.
-  (rein's env allowlist is build-time, not in `settings.json`, so this list is
-  encoded in the oracle rather than derived.)
+- **Host env** — rein's env policy is an allowlist, so the check is by value:
+  the host sets a random canary under each `EnvCanaryNames` entry (the usual
+  secrets plus one arbitrary name), and the canary appearing in ANY in-sandbox
+  variable is a leak.
 
-## Normalized observation schema
-
-The oracle CLI consumes a flat JSON object of channel arrays; `kind` is stamped
-from the section. See `testdata/observations.sample.json`:
-
-```json
-{
-  "network": [{ "target": "api.github.com", "reachable": true, "tokenInjected": true }],
-  "files":   [{ "target": "/home/dev/.ssh/id_ed25519", "reachable": false }],
-  "env":     [{ "target": "ANTHROPIC_API_KEY", "reachable": false }]
-}
-```
-
-`reachable` is the **in-sandbox** result (host connectable / file readable / env
-present). `run.sh` also writes `writes` (persisted on the host), `sockets` (the
-`AF_UNIX` creation row), `empty_dirs` (dirs sandbox-probe flagged that are empty
-in-sandbox), and a `probe` path on each file entry (what was actually read).
-sandbox-probe's own in-sandbox report is merged in with `-probe-report`.
-
-## Running
-
-Oracle CLI directly (works today; use the sample fixture or your own normalized
-file plus a real emitted `settings.json`):
+## How to run
 
 ```sh
-go build -o /tmp/classify ./tests/containment/cmd/classify
-/tmp/classify -settings /path/to/emitted/settings.json \
-              -observations tests/containment/testdata/observations.sample.json
-# exit 3 if any leak
-```
-
-Full harness:
-
-```sh
-SANDBOX_PROBE=/path/to/sandbox-probe REIN_BIN=/path/to/rein \
-  tests/containment/run.sh
-```
-
-`run.sh` **hard-fails** if sandbox-probe or the rein binary is absent — it never
-fabricates results.
-
-## How to run (wired end-to-end, #141)
-
-```sh
-go install github.com/controlplaneio/sandbox-probe@latest   # once per box
+go install github.com/controlplaneio/sandbox-probe@v1.1.0   # once per box
 go build -o bin/ ./cmd/...
 tests/containment/run.sh                        # compare to the committed golden
 REIN_UPDATE_GOLDEN=1 tests/containment/run.sh   # adopt a new golden
 ```
 
+`SANDBOX_PROBE`, `REIN_BIN` and `OUT_DIR` override the defaults. sandbox-probe
+is pinned: `run.sh` refuses any other version, because the real home is
+readable to that binary while the suite runs (see "Fixture home").
+
 `run.sh` (0) builds a throwaway fixture `$HOME`, (1) captures the emitted
 settings.json via `REIN_SRT_SETTINGS_COPY` and derives probe TARGETS from it
 (`classify -targets`: deny paths, allow-backs, srt's own default write paths —
 the substrate-chosen set that leaked in #153), (2) runs sandbox-probe plus the
-target probes through the REAL `rein run --sandbox` launch, (3) checks write
-PERSISTENCE host-side, (4) classifies everything against that run's own
-settings.json, and (5) compares the normalized rows to `golden-report.txt`
-(drift or an untriaged row = exit 4; any leak = exit 1).
+target probes through the REAL `rein run --sandbox` launch, (3) classifies
+everything, including host-side write PERSISTENCE, against that run's own
+settings.json, and (4) compares the normalized rows to `golden-report.txt`.
+
+| Exit | Meaning |
+|------|---------|
+| 0 | pass |
+| 1 | a leak, or the harness itself failed |
+| 4 | golden drift, or an `unknown` row `tolerated.txt` does not list |
+| 5 | a `CONTAINMENT_WEAKEN` run that was not detected (never a pass) |
 
 It fails closed on its own inputs: stale outputs are removed first, and the run
 dies if sandbox-probe fails or writes no report in-sandbox, if the report lacks
-a finding type the oracle maps, or if it does not list `/etc/passwd` as readable
-(the liveness canary: a scan that saw nothing did not run).
+a finding type the oracle maps, if it does not list `/etc/passwd` as readable
+(the liveness canary: a scan that saw nothing did not run), or if the
+supplementary probe's observations are missing a section.
 
 ## Fixture home
 
 The suite does not probe the developer's home. `run.sh` points `$HOME` at a
-fresh directory that `classify -fixture` fills with fake files: one for every
-denyRead and allowRead entry rein configures under home, srt's default write
-dirs, and sentinels only the wholesale home deny hides (`.aws/credentials`,
-`.docker/config.json`, `.bash_history`, ...). The list is
-`cmd/classify/fixture.go`; `classify -targets` fails if the policy has a home
-entry the fixture does not plant, so a new deny or allow-back cannot go unprobed.
+fresh directory that `classify -fixture` fills with fake files
+(`cmd/classify/fixture.go`): one for every denyRead and allowRead entry rein
+configures under home, srt's default write dirs, and files only the wholesale
+home deny hides (`.aws/credentials`, `.docker/config.json`, ...).
+`classify -targets` fails if the policy has a home entry the fixture does not
+plant, so a new deny or allow-back cannot go unprobed. That check runs against
+the real emitted policy on every run; no unit test can reach those lists.
+
+A deny row is judged by walking the whole entry in-sandbox: ANY non-empty file
+readable under it is a leak, except inside the binds rein nests there on
+purpose (allow-backs, writable binds). So the `<HOME>` row covers every
+fixture file no narrower rule names.
 
 rein still needs its real App config and state, so `XDG_CONFIG_HOME` and
 `XDG_STATE_HOME` are pinned to the real locations. rein denies those dirs
 in-sandbox as usual (the `<XDG_CONFIG>` / `<XDG_STATE>` rows), and writes its
-normal audit log there. Nothing else in the real home is written; the claude
-overlay is a throwaway inside the fixture home (a writable bind nested in the
-home deny). The rest of the real home is NOT hidden during this run, since it
-is no longer `$HOME`: only the suite's own probes run in it.
+normal audit log there. Nothing else in the real home is written. The rest of
+the real home is NOT hidden during this run, since it is no longer `$HOME`:
+the suite's own probes and the pinned sandbox-probe run with it readable, and
+rein has no knob to deny an extra directory.
 
 Those `<XDG_*>` rows and `/run/user/<UID>` are the only deny rows outside the
-fixture. Where such a path is absent or empty on a host, its "correctly
-unreadable" row proves nothing there; `run.sh` says so in a `NOTE:` line before
-`PASS`. The same rules are content-tested through their fixture copies
+fixture. Where such a path has no readable content on a host, its "correctly
+unreadable" row proves nothing there; the report says so in a `NOTE:` line.
+The same rules are content-tested through their fixture copies
 (`<HOME>/.config/gh`, ...).
 
-Every `REIN_*` variable is unset before launch (they change the emitted
-policy), and every name in `SensitiveEnv` is set to a canary value on the host,
-so "correctly scrubbed" is proven even where the developer has no such variable.
+Every `REIN_*` variable is unset before launch: they change the emitted policy.
 
 What this gives up: a developer's own layout (tools under `~/.nvm`, a symlinked
 `~/.nix-profile`, relocated `GNUPGHOME`) is not exercised here, and neither are
@@ -159,10 +130,16 @@ the install-chain allow-backs rein adds when srt itself lives under `$HOME`
 (`~/.npm-global`). The `--sandbox` journeys run against the real home, and
 `TestSandboxPathEnv` covers the symlinked-PATH case.
 
+Known gap, srt 0.0.63 only: srt re-binds `~/.claude/debug` and `~/.npm/_logs`
+over the home deny, and rein pins them read-only (#153) but they stay
+READABLE. `targets.go` excepts them from the walk; srt 0.0.83 no longer
+re-binds them, and the exception goes with that bump.
+
 ### Checking the suite itself
 
 `CONTAINMENT_WEAKEN` re-applies knobs after the scrub, to confirm a weakened
-sandbox fails (`$HOME` is the fixture):
+sandbox fails (`$HOME` is the fixture). Such a run prints a banner, cannot
+update the golden, and never exits 0: if the weakening goes unnoticed it exits 5.
 
 ```sh
 CONTAINMENT_WEAKEN='REIN_SANDBOX_SHOW_HOME=1' tests/containment/run.sh             # leak
@@ -178,36 +155,34 @@ by host, and are left out of the golden:
 - **`tolerated.txt`**: reviewed `unknown` rows (`/etc`, `/proc`), one per line
   as `kind | target | why it is acceptable`. Each may or may not appear. Targets
   match literally (`/proc/1/cgroup` excuses pid 1 only). Any other `unknown` row
-  fails the run until someone triages it here. Hand-edited;
-  `REIN_UPDATE_GOLDEN` never touches it, and the golden can only hold `ok` rows.
+  fails the run and is printed with the exact target to add. Hand-edited;
+  `REIN_UPDATE_GOLDEN` never touches it, and refuses a golden with a non-`ok` row.
 - **Visible unix sockets**: which sockets a host has is arbitrary. A visible
   path is `ok` and not in the golden; the pinned `AF_UNIX` creation row is what
   proves none of them can be connected. Visible under a read deny is a leak.
 
-Rows are normalized: `<HOME>` (the fixture), `<WORKTREE>`, `<FIXTURE>`,
-`<XDG_CONFIG>`, `<XDG_STATE>`, `<UID>` (this user's uid only; another user's
-`/run/user/N` stays literal), `<PID>`, `<RUNID>`. `_out/report.txt` is the raw
-report, `_out/report.normalized.txt` the compared rows, and
-`_out/observations.json` records which file each deny was read through.
+Golden rows are normalized: `<HOME>` (the fixture), `<WORKTREE>`,
+`<XDG_CONFIG>`, `<XDG_STATE>`, and `<UID>` (this user's uid only; another
+user's `/run/user/N` stays literal). `_out/report.txt` is the raw report and
+`_out/report.normalized.txt` the compared rows.
 
 Probe semantics, decided the hard way:
 
-- **Reads are CONTENT-level, not name-level.** A denied dir is probed through a
-  host-sampled file inside it, and dir readability means "a real file readable
-  within depth 3" — the deny tmpfs legitimately lists allow-back scaffolding and
-  tombstones (#150), so a non-empty listing is not a leak. The row is reported
-  under the deny ENTRY, not the sampled file, so it reads the same everywhere.
-  sandbox-probe itself calls a dir readable when it can list it, so a denied
-  dir it flags that is EMPTY in-sandbox (the tmpfs mount point) is not counted.
-- **GH_TOKEN in-sandbox is rein's deliberate stub**, not a secret; only a
-  non-stub value counts as present.
+- **Reads are CONTENT-level, not name-level.** The deny tmpfs legitimately
+  lists allow-back scaffolding and tombstones (#150), so a non-empty listing is
+  not a leak; a readable non-empty file is. sandbox-probe itself calls a dir
+  readable when it can list it, so a denied dir it flags that is EMPTY
+  in-sandbox (the tmpfs mount point) is not counted.
 - **The ephemeral clone dir is skipped** in the write sweep (discarded by rein
   after the run by design, and per-run).
 - **Egress is mostly out of this harness's reach.** rein is the egress proxy
-  (#185), so the emitted srt allowlist is empty. Two fixed hosts are probed: a
-  denied canary (`example.com`) and a control that must be reachable
-  (`api.github.com`), so a broken proxy or CA cannot pass as "denied". rein's
-  own egress policy is covered by the proxy tests and the egress journeys.
+  (#185), so the emitted srt allowlist is empty. Three fixed probes: a denied
+  canary (`example.com`), a control that must be reachable (`api.github.com`),
+  so a broken proxy or CA cannot pass as "denied", and a direct connection to
+  `1.1.1.1:443` that the network namespace must stop.
+  Coverage debt: rein's allowlist itself is not swept here, so a default-policy
+  change that opens another host passes this suite. The proxy tests and the
+  egress journeys cover it.
 - **The in-sandbox probe is Python + curl**, so both must be on `PATH` and
   visible in the sandbox. Porting it into `classify` would drop that; not done.
 

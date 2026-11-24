@@ -9,17 +9,13 @@ import (
 	"github.com/TomHennen/rein/internal/srt"
 )
 
-func TestFixtureCoversPolicy(t *testing.T) {
+// The fixture's coverage of the REAL policy is enforced at run time: the
+// policy lists live in package main of cmd/rein, out of a test's reach.
+func TestRequirePlanted(t *testing.T) {
 	home := t.TempDir()
 	if err := writeFixture(home); err != nil {
 		t.Fatal(err)
 	}
-	for _, rel := range append(append([]string{".gitconfig"}, fixtureFiles...), HomeSentinels...) {
-		if st, err := os.Stat(filepath.Join(home, rel)); err != nil || st.Size() == 0 {
-			t.Errorf("fixture file %s missing or empty", rel)
-		}
-	}
-
 	planted := []string{filepath.Join(home, ".ssh"), filepath.Join(home, ".netrc")}
 	if err := requirePlanted(home, planted); err != nil {
 		t.Errorf("planted entries rejected: %v", err)
@@ -27,9 +23,13 @@ func TestFixtureCoversPolicy(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(home, ".newcreds"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(home, ".emptyfile"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for name, entries := range map[string][]string{
 		"entry absent from the fixture": append(planted, filepath.Join(home, ".absent")),
 		"entry is an empty dir":         append(planted, filepath.Join(home, ".newcreds")),
+		"entry is a zero-byte file":     append(planted, filepath.Join(home, ".emptyfile")),
 		"no entry under home at all":    {"/etc/shadow"},
 	} {
 		if err := requirePlanted(home, entries); err == nil {
@@ -52,11 +52,21 @@ func TestBuildTargets(t *testing.T) {
 		t.Fatal(err)
 	}
 	absent := filepath.Join(outside, "git")
+	// Only a zero-byte file: unreadable in-sandbox would prove nothing.
+	hollow := filepath.Join(outside, "hollow")
+	if err := os.MkdirAll(hollow, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hollow, "lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	overlay := filepath.Join(home, "overlay")
 	cfg := srt.Config{
 		Network: srt.Network{AllowedDomains: []string{reachableControl}},
 		Filesystem: srt.Filesystem{
-			DenyRead:  []string{home, filepath.Join(home, ".ssh"), withContent, absent},
-			AllowRead: []string{filepath.Join(home, "go"), filepath.Join(home, ".nvm")},
+			DenyRead:   []string{home, filepath.Join(home, ".ssh"), withContent, absent, hollow},
+			AllowRead:  []string{filepath.Join(home, "go"), filepath.Join(home, ".nvm")},
+			AllowWrite: []string{overlay},
 		},
 	}
 	// .nvm is an allow-back the fixture does not plant.
@@ -68,23 +78,39 @@ func TestBuildTargets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(nothingToHide) != 1 || nothingToHide[0] != absent {
-		t.Errorf("nothingToHide = %v, want only %s", nothingToHide, absent)
+	if strings.Join(nothingToHide, ",") != absent+","+hollow {
+		t.Errorf("nothingToHide = %v, want %s and %s", nothingToHide, absent, hollow)
 	}
 	if strings.Join(tg.Network, ",") != reachableControl+","+deniedCanary {
 		t.Errorf("network targets = %v", tg.Network)
 	}
-	probes := map[string]string{}
+	except := map[string]string{}
 	for _, f := range tg.Files {
-		probes[f.Target] = f.Probe
+		except[f.Target] = strings.Join(f.Except, ",")
 	}
-	// A denied dir is read through a real file inside it, reported under the entry.
-	if got := probes[withContent]; got != filepath.Join(withContent, "hosts.yml") {
-		t.Errorf("probe for %s = %q", withContent, got)
+	// The home deny is judged outside the binds nested in it, and nothing else is.
+	want := strings.Join(append([]string{filepath.Join(home, "go"), overlay}, srt.DefaultHomeWritePaths(home)...), ",")
+	if got := except[home]; got != want {
+		t.Errorf("except for home = %q, want %q", got, want)
 	}
-	for _, want := range []string{filepath.Join(home, ".ssh"), filepath.Join(home, "go"), filepath.Join(home, HomeSentinels[0])} {
-		if _, ok := probes[want]; !ok {
-			t.Errorf("no file target for %s", want)
+	for _, target := range []string{filepath.Join(home, ".ssh"), filepath.Join(home, "go"), withContent} {
+		if e, ok := except[target]; !ok || e != "" {
+			t.Errorf("target %s: present=%v except=%q", target, ok, e)
 		}
+	}
+}
+
+func TestWriteObservations(t *testing.T) {
+	dir := t.TempDir()
+	persisted, gone := filepath.Join(dir, "persisted"), filepath.Join(dir, "gone")
+	if err := os.WriteFile(persisted, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	obs := writeObservations([]string{persisted, gone})
+	if !obs[0].Reachable || obs[1].Reachable {
+		t.Errorf("got %+v", obs)
+	}
+	if _, err := os.Stat(persisted); err == nil {
+		t.Error("persisted probe file was not removed")
 	}
 }

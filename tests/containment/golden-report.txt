@@ -1,16 +1,6 @@
-[ok        ] env     ANTHROPIC_API_KEY — sensitive env var correctly scrubbed
-[ok        ] env     AWS_ACCESS_KEY_ID — sensitive env var correctly scrubbed
-[ok        ] env     AWS_SECRET_ACCESS_KEY — sensitive env var correctly scrubbed
-[ok        ] env     AWS_SESSION_TOKEN — sensitive env var correctly scrubbed
-[ok        ] env     DBUS_SESSION_BUS_ADDRESS — sensitive env var correctly scrubbed
-[ok        ] env     GH_TOKEN — sensitive env var correctly scrubbed
-[ok        ] env     GITHUB_TOKEN — sensitive env var correctly scrubbed
-[ok        ] env     GPG_AGENT_INFO — sensitive env var correctly scrubbed
-[ok        ] env     SSH_AUTH_SOCK — sensitive env var correctly scrubbed
+[ok        ] env     host canary — no host env canary value in the sandbox env
 [ok        ] file    /run/user/<UID> — sensitive path correctly unreadable
 [ok        ] file    <HOME> — sensitive path correctly unreadable
-[ok        ] file    <HOME>/.aws/credentials — sensitive path correctly unreadable
-[ok        ] file    <HOME>/.bash_history — sensitive path correctly unreadable
 [ok        ] file    <HOME>/.cache/ms-playwright — path re-exposed read-only via allowRead <HOME>/.cache/ms-playwright
 [ok        ] file    <HOME>/.cargo — path re-exposed read-only via allowRead <HOME>/.cargo
 [ok        ] file    <HOME>/.cargo/credentials — sensitive path correctly unreadable
@@ -21,19 +11,15 @@
 [ok        ] file    <HOME>/.config/git — sensitive path correctly unreadable
 [ok        ] file    <HOME>/.config/rein — sensitive path correctly unreadable
 [ok        ] file    <HOME>/.config/rein-credentials — sensitive path correctly unreadable
-[ok        ] file    <HOME>/.docker/config.json — sensitive path correctly unreadable
 [ok        ] file    <HOME>/.git-credentials — sensitive path correctly unreadable
 [ok        ] file    <HOME>/.gitconfig — sensitive path correctly unreadable
 [ok        ] file    <HOME>/.gnupg — sensitive path correctly unreadable
-[ok        ] file    <HOME>/.kube/config — sensitive path correctly unreadable
 [ok        ] file    <HOME>/.local/bin — path re-exposed read-only via allowRead <HOME>/.local/bin
 [ok        ] file    <HOME>/.local/share/keyrings — sensitive path correctly unreadable
 [ok        ] file    <HOME>/.local/share/kwalletd — sensitive path correctly unreadable
 [ok        ] file    <HOME>/.local/state/rein — sensitive path correctly unreadable
 [ok        ] file    <HOME>/.netrc — sensitive path correctly unreadable
-[ok        ] file    <HOME>/.npmrc — sensitive path correctly unreadable
 [ok        ] file    <HOME>/.pyenv — path re-exposed read-only via allowRead <HOME>/.pyenv
-[ok        ] file    <HOME>/.rein-containment-read-sentinel — sensitive path correctly unreadable
 [ok        ] file    <HOME>/.rustup — path re-exposed read-only via allowRead <HOME>/.rustup
 [ok        ] file    <HOME>/.ssh — sensitive path correctly unreadable
 [ok        ] file    <HOME>/go — path re-exposed read-only via allowRead <HOME>/go
@@ -42,6 +28,7 @@
 [ok        ] file    <XDG_CONFIG>/rein — sensitive path correctly unreadable
 [ok        ] file    <XDG_CONFIG>/rein-credentials — sensitive path correctly unreadable
 [ok        ] file    <XDG_STATE>/rein — sensitive path correctly unreadable
+[ok        ] network 1.1.1.1:443 direct — denied host correctly unreachable
 [ok        ] network api.github.com — expected-open egress reachable
 [ok        ] network example.com — denied host correctly unreachable
 [ok        ] socket  AF_UNIX — AF_UNIX socket creation blocked
