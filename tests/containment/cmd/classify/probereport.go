@@ -23,10 +23,12 @@ type probeReport struct {
 // observation is Reachable=true; the "correctly blocked" rows come from the
 // config-derived supplement, which probes known targets in both directions.
 //
-// A unix socket the in-sandbox probe already tried to connect (socketsProbed)
-// is judged by that socket observation. One it did NOT try stays a readable
-// file row, which is "unknown" and fails as untriaged — never silently dropped.
-func mapProbeReport(path string, socketsProbed map[string]bool) ([]containment.Observation, error) {
+// judged holds findings the in-sandbox probe settled itself, keyed by
+// judgedKey: a unix socket it tried to connect (reported as a socket
+// observation) and a "readable" dir it found empty (a deny tmpfs mount point).
+// Anything else stays a readable file row — an unprobed socket is "unknown"
+// and fails as untriaged, never silently dropped.
+func mapProbeReport(path string, judged map[string]bool) ([]containment.Observation, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -51,7 +53,7 @@ func mapProbeReport(path string, socketsProbed map[string]bool) ([]containment.O
 			continue // value not a string list (shape drift) — leave in raw report
 		}
 		for _, v := range vals {
-			if f.FindingType == "unix_socket_detection" && socketsProbed[v] {
+			if judged[judgedKey(f.FindingType, v)] {
 				continue
 			}
 			out = append(out, containment.Observation{Kind: kind, Target: v, Reachable: true})
@@ -59,3 +61,5 @@ func mapProbeReport(path string, socketsProbed map[string]bool) ([]containment.O
 	}
 	return out, nil
 }
+
+func judgedKey(findingType, path string) string { return findingType + "\x00" + path }

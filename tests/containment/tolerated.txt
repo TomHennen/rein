@@ -1,0 +1,17 @@
+# Reviewed "unknown" rows: readable in the sandbox, outside the fixture home and
+# outside rein's deny/allow model, and present only on some hosts. Each may or
+# may not appear; any OTHER unknown row fails the run until it is triaged here.
+#
+#   kind | target | why it is acceptable
+#
+# Hand-edited only. Everything else is compared exactly to golden-report.txt.
+file | /etc/passwd | account names only; hashes live in root-only /etc/shadow
+file | /etc/group | group names only, no secrets
+file | /etc/hostname | host name, not a secret
+file | /etc/hosts | static name table the agent's tools resolve with
+file | /etc/resolv.conf | resolver config; DNS itself is confined by the network namespace
+file | /etc/ssh/sshd_config | world-readable server config; host keys are separate root-only files
+file | /proc/self/cgroup | the probe's own process metadata
+file | /proc/self/mountinfo | the sandbox's own mount table; paths, no contents
+file | /proc/self/status | the probe's own process metadata
+file | /proc/<PID>/cgroup | pid 1 of the sandbox's own pid namespace, not a host process

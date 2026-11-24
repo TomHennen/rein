@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Containment probe harness driver (issue #136B/#141; tests/containment/README.md).
 #
+#   0. build a throwaway fixture $HOME (fake credentials, toolchain dirs) so
+#      the report is the same on every machine; the real home is not probed
 #   1. sandbox-probe on the host, unconfined                    -> host baseline
 #   2. classify -targets from a captured settings.json          -> probe targets
 #      (config-derived: allowlists, deny paths, srt's own default write paths)
@@ -8,21 +10,21 @@
 #      writing results into the bound working tree
 #   4. host-side write-persistence check (#153 channel)
 #   5. classify judges every observation against the emitted settings.json
-#   6. check the normalized rows against expected.txt (README "Expectations")
+#   6. compare the normalized rows to the committed golden
+#      (REIN_UPDATE_GOLDEN=1 adopts; README "Golden and tolerated rows")
 #
-# Any leak => classify exits 3 => this script fails. A row expected.txt does
-# not account for (or a required row gone missing) also fails, exit 4.
+# Any leak => classify exits 3 => this script fails. Golden drift, or an
+# "unknown" row tolerated.txt does not list, also fails (exit 4).
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
 out_dir="${OUT_DIR:-$here/_out}"
-expected="$here/expected.txt"
+golden="$here/golden-report.txt"
+tolerated="$here/tolerated.txt"
 mkdir -p "$out_dir"
 
 die() { echo "run.sh: $*" >&2; exit 1; }
-
-[ -z "${REIN_UPDATE_GOLDEN:-}" ] || die "REIN_UPDATE_GOLDEN is gone: there is no per-box golden to adopt. Review the reported rows and edit $expected by hand."
 
 SANDBOX_PROBE="${SANDBOX_PROBE:-$(command -v sandbox-probe || echo "$HOME/go/bin/sandbox-probe")}"
 [ -x "$SANDBOX_PROBE" ] || die "sandbox-probe not found/executable ($SANDBOX_PROBE). Install: go install github.com/controlplaneio/sandbox-probe@latest (Apache-2.0; external process only, never in go.mod — hard-constraint #4)."
@@ -34,22 +36,33 @@ classify_bin="$out_dir/classify"
 
 echo "run.sh: sandbox-probe=$SANDBOX_PROBE rein=$REIN_BIN out=$out_dir"
 
+# --- 0. Fixture home ----------------------------------------------------------
+# rein keeps finding its real App config and state through XDG_*, and still
+# denies those dirs in-sandbox; everything else that is home-relative moves to
+# the fixture. The developer's own relocations are dropped so every box
+# resolves the same policy.
+root="$(mktemp -d /tmp/rein-containment-XXXXXX)"
+trap 'rm -rf "$root"' EXIT
+wd="$root/wd"
+mkdir -p -m 700 "$wd" "$root/home" "$root/overlay"
+real_config="${XDG_CONFIG_HOME:-$HOME/.config}"
+real_state="${XDG_STATE_HOME:-$HOME/.local/state}"
+unset GNUPGHOME GH_CONFIG_DIR CARGO_HOME XDG_DATA_HOME CLAUDE_CONFIG_DIR
+export XDG_CONFIG_HOME="$real_config" XDG_STATE_HOME="$real_state"
+export REIN_SANDBOX_CLAUDE_HOME_DIR="$root/overlay"
+export HOME="$root/home"
+"$classify_bin" -fixture "$HOME" || die "failed to write the fixture home"
+
 # --- 1. Host baseline ---------------------------------------------------------
 host_report="$out_dir/host-report.json"
 echo "run.sh: [1/6] host baseline -> $host_report"
 "$SANDBOX_PROBE" scan --fast --output_path "$host_report" >/dev/null 2>&1 || die "sandbox-probe host run failed"
 
 # --- 2. Config capture + targets ---------------------------------------------
-# The settings.json for THIS box is captured from a minimal sandboxed run
+# The settings.json is captured from a minimal sandboxed run
 # (REIN_SRT_SETTINGS_COPY), then targets are derived from it. The main probe run
 # below captures its own settings again — same box, same config; the two-step
 # exists only because targets must be in the working tree BEFORE launch.
-wd="$(mktemp -d /tmp/rein-containment-XXXXXX)"
-# A known file in $HOME, so the home deny is judged against real content on
-# every box (the name must match classify's ReadSentinelName).
-sentinel="$HOME/.rein-containment-read-sentinel"
-trap 'rm -rf "$wd"; rm -f "$sentinel"' EXIT
-echo "rein-containment-read-sentinel" > "$sentinel"
 settings="$out_dir/settings.json"
 echo "run.sh: [2/6] capture settings + derive targets"
 REIN_SRT_SETTINGS_COPY="$settings" REIN_SANDBOX_WORKDIR="$wd" \
@@ -143,13 +156,22 @@ def connectable(path):
             s.close()
     return False
 
-found = set()
+found, flagged = set(), set()
 try:
     for f in json.load(open("sandbox-report.json"))["findings"]:
-        if f.get("findingType") == "unix_socket_detection" and isinstance(f.get("value"), list):
-            found.update(v for v in f["value"] if isinstance(v, str))
+        if not isinstance(f.get("value"), list):
+            continue
+        vals = {v for v in f["value"] if isinstance(v, str)}
+        if f.get("findingType") == "unix_socket_detection":
+            found |= vals
+        elif f.get("findingType") == "sensitive_readable_paths":
+            flagged |= vals
 except (OSError, ValueError, KeyError):
     pass  # no report: classify keeps any unprobed socket as an untriaged row
+# sandbox-probe calls a dir "readable" when it can list it. A denied dir is an
+# EMPTY tmpfs in-sandbox: listable, nothing in it. Report those so classify
+# does not read the mount point itself as a leak.
+obs["empty_dirs"] = sorted(p for p in flagged if os.path.isdir(p) and not os.listdir(p))
 for path in sorted(found):
     obs["sockets"].append({"target": path, "reachable": connectable(path)})
 
@@ -210,16 +232,30 @@ probe_report_flag=()
 classify_rc=0
 "$classify_bin" -settings "$settings" -observations "$out_dir/observations.json" \
   "${probe_report_flag[@]}" \
-  -expect "$expected" -home "$HOME" -worktree "$wd" -normalized-out "$out_dir/report.normalized.txt" \
+  -tolerated "$tolerated" -normalized-out "$out_dir/report.normalized.txt" \
+  -norm "WORKTREE=$wd" -norm "HOME=$HOME" -norm "FIXTURE=$root" \
+  -norm "XDG_CONFIG=$(realpath -m "$real_config")" -norm "XDG_CONFIG=$real_config" \
+  -norm "XDG_STATE=$(realpath -m "$real_state")" -norm "XDG_STATE=$real_state" \
   > "$report" || classify_rc=$?
 cat "$report"
 
-# --- 6. Verdict ---------------------------------------------------------------
-# classify printed any leak and any expectation mismatch to stderr above.
+# --- 6. Golden ----------------------------------------------------------------
+# classify printed any leak and any untriaged row to stderr above.
 case "$classify_rc" in
-  0) echo "run.sh: [6/6] expectations OK"; echo "run.sh: PASS" ;;
+  0) ;;
   3) die "CONTAINMENT LEAK(S) — classify exit 3 (see $report)" ;;
-  4) echo "run.sh: EXPECTATION MISMATCH (normalized rows: $out_dir/report.normalized.txt; expectations: $expected)" >&2
-     exit 4 ;;
+  4) echo "run.sh: UNTRIAGED ROW(S) — review and add to $tolerated" >&2; exit 4 ;;
   *) die "classify failed (exit $classify_rc)" ;;
 esac
+echo "run.sh: [6/6] golden compare"
+if [ "${REIN_UPDATE_GOLDEN:-}" = "1" ]; then
+  cp "$out_dir/report.normalized.txt" "$golden"
+  echo "run.sh: [golden UPDATED] $golden"
+elif ! diff -u "$golden" "$out_dir/report.normalized.txt" > "$out_dir/golden.diff"; then
+  echo "run.sh: GOLDEN DRIFT (see $out_dir/golden.diff):" >&2
+  cat "$out_dir/golden.diff" >&2
+  exit 4
+else
+  echo "run.sh: [golden OK]"
+fi
+echo "run.sh: PASS"

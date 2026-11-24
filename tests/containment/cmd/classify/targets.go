@@ -56,10 +56,6 @@ type fileTarget struct {
 	Probe  string `json:"probe"`
 }
 
-// ReadSentinelName is a file run.sh plants in $HOME so the home deny is always
-// judged against known content, whatever else the developer's home holds.
-const ReadSentinelName = ".rein-containment-read-sentinel"
-
 func emitTargets(cfg srt.Config) error {
 	t := targets{Env: containment.SensitiveEnv}
 
@@ -93,6 +89,11 @@ func emitTargets(cfg srt.Config) error {
 	// The row is keyed by the deny ENTRY, not the sampled file, so it is the
 	// same on every machine.
 	for _, d := range cfg.Filesystem.DenyRead {
+		// The per-run socket dir is the CAPTURE run's: gone before the probe
+		// run starts, so there is nothing to judge.
+		if strings.HasPrefix(filepath.Base(d), "run-") && filepath.Base(filepath.Dir(d)) == "rein" {
+			continue
+		}
 		probe := d
 		if f := sampleFile(d); f != "" {
 			probe = f
@@ -100,9 +101,9 @@ func emitTargets(cfg srt.Config) error {
 		t.Files = append(t.Files, fileTarget{Target: d, Probe: probe})
 	}
 	// Allow-backs are existence-gated at mount time by srt; probing an absent
-	// or empty one reads as a false regression.
+	// one reads as a false regression.
 	for _, a := range cfg.Filesystem.AllowRead {
-		if containment.HasContent(a) {
+		if _, err := os.Stat(a); err == nil {
 			t.Files = append(t.Files, fileTarget{Target: a, Probe: a})
 		}
 	}
@@ -124,14 +125,23 @@ func emitTargets(cfg srt.Config) error {
 			t.Writes = append(t.Writes, filepath.Join(w, WriteProbeName))
 		}
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		sentinel := filepath.Join(home, ReadSentinelName)
-		t.Files = append(t.Files, fileTarget{Target: sentinel, Probe: sentinel})
-		for _, w := range srt.DefaultHomeWritePaths(home) {
-			t.Writes = append(t.Writes, filepath.Join(w, WriteProbeName))
-		}
-		t.Writes = append(t.Writes, filepath.Join(home, WriteProbeName))
+	// $HOME is run.sh's fixture: every policy entry under it must be planted,
+	// and the wholesale home deny is judged against the sentinels.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
 	}
+	if err := requirePlanted(home, append(append([]string{}, cfg.Filesystem.DenyRead...), cfg.Filesystem.AllowRead...)); err != nil {
+		return err
+	}
+	for _, rel := range HomeSentinels {
+		p := filepath.Join(home, rel)
+		t.Files = append(t.Files, fileTarget{Target: p, Probe: p})
+	}
+	for _, w := range srt.DefaultHomeWritePaths(home) {
+		t.Writes = append(t.Writes, filepath.Join(w, WriteProbeName))
+	}
+	t.Writes = append(t.Writes, filepath.Join(home, WriteProbeName))
 
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")

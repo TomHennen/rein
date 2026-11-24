@@ -107,50 +107,61 @@ fabricates results.
 ```sh
 go install github.com/controlplaneio/sandbox-probe@latest   # once per box
 go build -o bin/ ./cmd/...
-tests/containment/run.sh                    # check against expected.txt
+tests/containment/run.sh                        # compare to the committed golden
+REIN_UPDATE_GOLDEN=1 tests/containment/run.sh   # adopt a new golden
 ```
 
-`run.sh` (1) runs `sandbox-probe scan --fast` on the host, (2) captures the
-emitted settings.json via `REIN_SRT_SETTINGS_COPY` and derives probe TARGETS
-from it (`classify -targets`: allowlists, deny paths, srt's own default write
-paths — the substrate-chosen set that leaked in #153), (3) runs sandbox-probe
-plus the target probes through the REAL `rein run --sandbox` launch, (4) checks
-write PERSISTENCE host-side, (5) classifies everything against that run's own
-settings.json, and (6) checks the normalized rows against `expected.txt`
-(mismatch = exit 4; any leak = exit 1).
+`run.sh` (0) builds a throwaway fixture `$HOME`, (1) runs `sandbox-probe scan
+--fast` on the host, (2) captures the emitted settings.json via
+`REIN_SRT_SETTINGS_COPY` and derives probe TARGETS from it (`classify -targets`:
+allowlists, deny paths, srt's own default write paths — the substrate-chosen set
+that leaked in #153), (3) runs sandbox-probe plus the target probes through the
+REAL `rein run --sandbox` launch, (4) checks write PERSISTENCE host-side, (5)
+classifies everything against that run's own settings.json, and (6) compares the
+normalized rows to `golden-report.txt` (drift or an untriaged row = exit 4; any
+leak = exit 1).
 
-## Expectations (`expected.txt`)
+## Fixture home
 
-There is no per-box golden. One committed file says what the report must look
-like on **every** developer machine, and `run.sh` fails on any row it does not
-account for. Each line is `class | verdict | kind | target | reason [| note]`:
+The suite does not probe the developer's home. `run.sh` points `$HOME` at a
+fresh directory that `classify -fixture` fills with fake files: one for every
+denyRead and allowRead entry rein configures under home, srt's default write
+dirs, and sentinels only the wholesale home deny hides (`.aws/credentials`,
+`.docker/config.json`, `.bash_history`, ...). The list is
+`cmd/classify/fixture.go`; `classify -targets` fails if the policy has a home
+entry the fixture does not plant, so a new deny or allow-back cannot go unprobed.
 
-| Class       | Rule                                                              |
-|-------------|-------------------------------------------------------------------|
-| `required`  | must appear everywhere (the denies rein always configures, the env denylist, the write sweep, the planted read sentinel) |
-| `ifexists`  | must appear exactly when the path has content on this host (the curated toolchain allow-backs) |
-| `optional`  | depends on what is installed; present or absent                   |
-| `oneof:<g>` | at least one row of the group (same check, host-dependent outcome)|
-| `triaged`   | an `unknown` row a human reviewed; the note says why it is fine    |
+rein still needs its real App config and state, so `XDG_CONFIG_HOME` and
+`XDG_STATE_HOME` are pinned to the real locations. rein denies those dirs
+in-sandbox as usual (the `<XDG_CONFIG>` / `<XDG_STATE>` rows), and writes its
+normal audit log there. Nothing else in the real home is written; the claude
+overlay is a throwaway too. The rest of the real home is NOT hidden during this
+run, since it is no longer `$HOME`: only the suite's own probes run in it.
 
-What still fails, on any machine:
+What this gives up: a developer's own layout (tools under `~/.nvm`, a symlinked
+`~/.nix-profile`, relocated `GNUPGHOME`) is not exercised here. The `--sandbox`
+journeys run against the real home, and `TestSandboxPathEnv` covers the
+symlinked-PATH case.
 
-- a `required` row missing (a probe silently dropped), or an `ifexists` path
-  that is on the host but no longer allowed back;
-- a listed row with a different verdict or reason (`CHANGED`);
-- any row not listed at all: a new allow-back, a new write result, or an
-  `unknown` nobody triaged (`UNEXPECTED` / `UNTRIAGED`).
+## Golden and tolerated rows
 
-`leak` and `regression` can never be listed, an `unknown` must be `triaged` with
-a note, and the `*` target is accepted only for `optional | ok | socket` (those
-rows are connect-tested on every run, so they need no per-path review). To
-accept a new row, review it and add a line by hand; there is no auto-adopt.
+With the fixture, the report is the same on every machine and is compared
+exactly to `golden-report.txt`. Two kinds of row live outside the fixture, vary
+by host, and are left out of the golden:
 
-Rows are normalized so they compare across machines: `<HOME>`, `<WORKTREE>`,
-`<UID>` (this user's uid only; another user's `/run/user/N` stays literal),
-`<PID>`, `<RUNID>`, `<HEX>`, and the srt-mux socket herd collapsed to one row.
-`_out/report.txt` is the raw report, `_out/report.normalized.txt` the compared
-rows, and `_out/observations.json` records which file each deny was read through.
+- **`tolerated.txt`**: reviewed `unknown` rows (`/etc`, `/proc`), one per line
+  as `kind | target | why it is acceptable`. Each may or may not appear. Any
+  other `unknown` row fails the run until someone triages it here. Hand-edited;
+  `REIN_UPDATE_GOLDEN` never touches it, and the golden can only hold `ok` rows.
+- **Visible unix sockets**: which sockets a host has is arbitrary, so each one
+  sandbox-probe finds is connect-tested on every run. Connectable, or visible
+  under a read deny, is a leak; visible only is `ok` and not in the golden.
+
+Rows are normalized: `<HOME>` (the fixture), `<WORKTREE>`, `<FIXTURE>`,
+`<XDG_CONFIG>`, `<XDG_STATE>`, `<UID>` (this user's uid only; another user's
+`/run/user/N` stays literal), `<PID>`, `<RUNID>`. `_out/report.txt` is the raw
+report, `_out/report.normalized.txt` the compared rows, and
+`_out/observations.json` records which file each deny was read through.
 
 Probe semantics, decided the hard way:
 
@@ -159,8 +170,8 @@ Probe semantics, decided the hard way:
   within depth 3" — the deny tmpfs legitimately lists allow-back scaffolding and
   tombstones (#150), so a non-empty listing is not a leak. The row is reported
   under the deny ENTRY, not the sampled file, so it reads the same everywhere.
-  `run.sh` also plants `~/.rein-containment-read-sentinel` (removed on exit) so
-  the home deny is always judged against known content.
+  sandbox-probe itself calls a dir readable when it can list it, so a denied
+  dir it flags that is EMPTY in-sandbox (the tmpfs mount point) is not counted.
 - **Token placement is probed only where there is observable evidence**: the
   api.github.com rate-limit heuristic (anonymous = 60; the injected read token
   raises it). Other inject hosts are skipped rather than guessed; their token

@@ -16,7 +16,7 @@ func TestMapProbeReportKeepsUnprobedSockets(t *testing.T) {
 	if err := os.WriteFile(report, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	got, err := mapProbeReport(report, map[string]bool{"/run/a.sock": true})
+	got, err := mapProbeReport(report, map[string]bool{judgedKey("unix_socket_detection", "/run/a.sock"): true})
 	if err != nil {
 		t.Fatal(err)
 	}
