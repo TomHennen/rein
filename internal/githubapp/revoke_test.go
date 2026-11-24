@@ -31,7 +31,8 @@ func TestRevokeToken_StatusMapping(t *testing.T) {
 		// token is gone — which is the whole goal — so this must NOT be an
 		// error, and must not print a scary best-effort warning.
 		{"404 already gone", http.StatusNotFound, false},
-		{"401 unauthorized", http.StatusUnauthorized, true},
+		// What GitHub answers a repeat revoke with as of 2026-11.
+		{"401 already gone", http.StatusUnauthorized, false},
 		{"403 forbidden", http.StatusForbidden, true},
 		{"500 server error", http.StatusInternalServerError, true},
 	}
