@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/TomHennen/rein/internal/proxy"
 	"github.com/TomHennen/rein/internal/srt"
 )
 
@@ -38,17 +37,13 @@ func TestOracle_Network(t *testing.T) {
 		obs  Observation
 		want Verdict
 	}{
-		{"inject host reachable + token", Observation{KindNetwork, "api.github.com", true, true}, VerdictOK},
-		{"inject host reachable no token", Observation{KindNetwork, "api.github.com", true, false}, VerdictRegression},
-		{"git host token injected", Observation{KindNetwork, "github.com", true, true}, VerdictOK},
-		{"CDN host reachable un-injected", Observation{KindNetwork, "codeload.github.com", true, false}, VerdictOK},
-		{"CDN host with token is a LEAK", Observation{KindNetwork, "codeload.github.com", true, true}, VerdictLeak},
-		{"extra egress reachable", Observation{KindNetwork, "api.anthropic.com", true, false}, VerdictOK},
-		{"extra egress with token is a LEAK", Observation{KindNetwork, "api.anthropic.com", true, true}, VerdictLeak},
-		{"denied host reachable is a LEAK", Observation{KindNetwork, "evil.example.com", true, false}, VerdictLeak},
-		{"denied host blocked is OK", Observation{KindNetwork, "evil.example.com", false, false}, VerdictOK},
-		{"allowed host unreachable is a regression", Observation{KindNetwork, "api.github.com", false, false}, VerdictRegression},
-		{"case/dot normalized", Observation{KindNetwork, "API.GitHub.com.", true, true}, VerdictOK},
+		{"allowed host reachable", Observation{KindNetwork, "api.github.com", true}, VerdictOK},
+		{"extra egress reachable", Observation{KindNetwork, "api.anthropic.com", true}, VerdictOK},
+		{"denied host reachable is a LEAK", Observation{KindNetwork, "evil.example.com", true}, VerdictLeak},
+		{"denied host blocked is OK", Observation{KindNetwork, "evil.example.com", false}, VerdictOK},
+		{"direct IP reachable is a LEAK", Observation{KindNetwork, "1.1.1.1:443 direct", true}, VerdictLeak},
+		{"allowed host unreachable is a regression", Observation{KindNetwork, "api.github.com", false}, VerdictRegression},
+		{"case/dot normalized", Observation{KindNetwork, "API.GitHub.com.", true}, VerdictOK},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -75,21 +70,21 @@ func TestOracle_File(t *testing.T) {
 	o := NewOracle(cfg)
 
 	// A file under a denyRead cred store, still readable in-sandbox → leak.
-	leak := Observation{KindFile, filepath.Join(cred, "hosts.yml"), true, false}
+	leak := Observation{KindFile, filepath.Join(cred, "hosts.yml"), true}
 	if got := o.Classify(leak); got.Verdict != VerdictLeak {
 		t.Errorf("readable cred file: got %s, want leak (%s)", got.Verdict, got.Reason)
 	}
 	// Same file correctly hidden → ok.
-	hidden := Observation{KindFile, filepath.Join(cred, "hosts.yml"), false, false}
+	hidden := Observation{KindFile, filepath.Join(cred, "hosts.yml"), false}
 	if got := o.Classify(hidden); got.Verdict != VerdictOK {
 		t.Errorf("hidden cred file: got %s, want ok", got.Verdict)
 	}
 	// The exact denyRead dir itself, readable → leak.
-	if got := o.Classify(Observation{KindFile, cred, true, false}); got.Verdict != VerdictLeak {
+	if got := o.Classify(Observation{KindFile, cred, true}); got.Verdict != VerdictLeak {
 		t.Errorf("readable denyRead dir: got %s, want leak", got.Verdict)
 	}
 	// A path outside any denyRead → unknown (triage, never silently ok).
-	if got := o.Classify(Observation{KindFile, filepath.Join(work, "README"), true, false}); got.Verdict != VerdictUnknown {
+	if got := o.Classify(Observation{KindFile, filepath.Join(work, "README"), true}); got.Verdict != VerdictUnknown {
 		t.Errorf("uncovered path: got %s, want unknown", got.Verdict)
 	}
 }
@@ -118,45 +113,40 @@ func TestOracle_AllowReadReexposed(t *testing.T) {
 	o := NewOracle(cfg)
 
 	// Under the allowRead re-bind, readable → expected (ok).
-	if got := o.Classify(Observation{KindFile, filepath.Join(tool, "bin", "node"), true, false}); got.Verdict != VerdictOK {
+	if got := o.Classify(Observation{KindFile, filepath.Join(tool, "bin", "node"), true}); got.Verdict != VerdictOK {
 		t.Errorf("allowRead re-exposed path: got %s, want ok (%s)", got.Verdict, got.Reason)
 	}
 	// The allowRead path unreadable → regression (agent needs it), not a leak.
-	if got := o.Classify(Observation{KindFile, filepath.Join(tool, "bin", "node"), false, false}); got.Verdict != VerdictRegression {
+	if got := o.Classify(Observation{KindFile, filepath.Join(tool, "bin", "node"), false}); got.Verdict != VerdictRegression {
 		t.Errorf("allowRead path unreadable: got %s, want regression", got.Verdict)
 	}
 	// Cred store under the SAME home deny but deeper-denied → still a leak.
-	if got := o.Classify(Observation{KindFile, filepath.Join(cred, "hosts.yml"), true, false}); got.Verdict != VerdictLeak {
+	if got := o.Classify(Observation{KindFile, filepath.Join(cred, "hosts.yml"), true}); got.Verdict != VerdictLeak {
 		t.Errorf("cred under home deny readable: got %s, want leak", got.Verdict)
 	}
 	// A plain path under the home deny with no allowRead → leak.
-	if got := o.Classify(Observation{KindFile, filepath.Join(home, ".secret"), true, false}); got.Verdict != VerdictLeak {
+	if got := o.Classify(Observation{KindFile, filepath.Join(home, ".secret"), true}); got.Verdict != VerdictLeak {
 		t.Errorf("plain home path readable: got %s, want leak", got.Verdict)
 	}
 }
 
 func TestOracle_Env(t *testing.T) {
 	o := NewOracle(buildConfig(t))
-	if got := o.Classify(Observation{KindEnv, "ANTHROPIC_API_KEY", true, false}); got.Verdict != VerdictLeak {
-		t.Errorf("present sensitive env: got %s, want leak", got.Verdict)
+	// Any variable carrying the host canary is a leak, listed or not.
+	if got := o.Classify(Observation{KindEnv, "SOME_UNLISTED_VAR", true}); got.Verdict != VerdictLeak {
+		t.Errorf("canary present: got %s, want leak", got.Verdict)
 	}
-	if got := o.Classify(Observation{KindEnv, "anthropic_api_key", true, false}); got.Verdict != VerdictLeak {
-		t.Errorf("sensitive env is case-insensitive: got %s, want leak", got.Verdict)
-	}
-	if got := o.Classify(Observation{KindEnv, "GH_TOKEN", false, false}); got.Verdict != VerdictOK {
-		t.Errorf("scrubbed sensitive env: got %s, want ok", got.Verdict)
-	}
-	if got := o.Classify(Observation{KindEnv, "PATH", true, false}); got.Verdict != VerdictUnknown {
-		t.Errorf("non-sensitive env: got %s, want unknown", got.Verdict)
+	if got := o.Classify(Observation{KindEnv, "host canary", false}); got.Verdict != VerdictOK {
+		t.Errorf("canary absent: got %s, want ok", got.Verdict)
 	}
 }
 
 func TestOracle_HasLeakAndSort(t *testing.T) {
 	o := NewOracle(buildConfig(t))
 	obs := []Observation{
-		{KindNetwork, "api.github.com", true, true},    // ok
-		{KindNetwork, "evil.example.com", true, false}, // leak
-		{KindEnv, "PATH", true, false},                 // unknown
+		{KindNetwork, "api.github.com", true},   // ok
+		{KindNetwork, "evil.example.com", true}, // leak
+		{KindFile, "/etc/passwd", true},         // unknown
 	}
 	results := o.ClassifyAll(obs)
 	if !HasLeak(results) {
@@ -164,22 +154,6 @@ func TestOracle_HasLeakAndSort(t *testing.T) {
 	}
 	if results[0].Verdict != VerdictLeak {
 		t.Errorf("leaks must sort first, got %s", results[0].Verdict)
-	}
-}
-
-// Guard that the oracle's expected-open set actually contains the managed hosts
-// it must never flag — a smoke test that Build wired the config as assumed.
-func TestOracle_ManagedHostsAreExpectedOpen(t *testing.T) {
-	o := NewOracle(buildConfig(t))
-	for _, h := range append(append([]string{}, proxy.InjectHosts...), proxy.CDNHosts...) {
-		if !o.allowedDomains[normHost(h)] {
-			t.Errorf("managed host %q missing from allowedDomains oracle set", h)
-		}
-	}
-	for _, h := range proxy.InjectHosts {
-		if !o.injectDomains[normHost(h)] {
-			t.Errorf("inject host %q missing from injectDomains oracle set", h)
-		}
 	}
 }
 

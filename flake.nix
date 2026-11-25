@@ -33,7 +33,6 @@
           ./nix/sandbox-runtime/package.json
           ./nix/sandbox-runtime/package-lock.json
           (lib.fileset.fileFilter (f: f.hasExt "go") ./.)
-          ./tests/containment/testdata
         ];
       };
 

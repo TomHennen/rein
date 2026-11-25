@@ -1,11 +1,10 @@
-// -targets mode: emit the probe-target lists DERIVED from the emitted
-// settings.json (plus the oracle's env denylist, srt's own default write paths,
-// and fixed canaries), so the in-sandbox probe script never hand-maintains a
-// list that can drift from the config (#141).
+// Probe targets are DERIVED from the emitted settings.json (plus srt's own
+// default write paths and fixed canaries), so the in-sandbox probe never
+// hand-maintains a list that can drift from the config (#141).
 package main
 
 import (
-	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,111 +14,167 @@ import (
 	"github.com/TomHennen/rein/tests/containment"
 )
 
-// WriteProbeName is the file the probe tries to create inside each write target
-// dir; run.sh checks host-side persistence of exactly these paths afterwards.
-const WriteProbeName = ".rein-containment-write-probe"
+// writeProbeName is the file the probe tries to create inside each write target.
+const writeProbeName = ".rein-containment-write-probe"
 
 // deniedCanary is a well-known host outside every allowlist — reachable in the
 // sandbox means the egress boundary is gone entirely.
 const deniedCanary = "example.com"
 
-// sampleFile returns the lexically-first regular file directly inside dir, or
-// "" (dir absent, not a dir, or nothing sampleable).
-func sampleFile(dir string) string {
-	ents, err := os.ReadDir(dir)
-	if err != nil {
-		return ""
-	}
-	for _, e := range ents { // ReadDir sorts by name
-		if e.Type().IsRegular() {
-			return filepath.Join(dir, e.Name())
-		}
-	}
-	return ""
-}
+// reachableControl must be reachable under rein's default egress, so a broken
+// proxy or CA cannot read as "denied host correctly unreachable".
+const reachableControl = "api.github.com"
 
 type targets struct {
-	// Network hosts to probe (reachability; the probe script adds the
-	// api.github.com token heuristic on its own).
-	Network []string `json:"network"`
-	// Files/dirs to probe for readability.
-	Files []string `json:"files"`
-	// Env var names to probe for presence.
+	Network []string     `json:"network"`
+	Files   []fileTarget `json:"files"`
+	// Env names the host sets to a canary value before launch.
 	Env []string `json:"env"`
-	// Write-probe FILE paths: create in-sandbox; persistence is judged host-side.
+	// Files to create in-sandbox; persistence is judged host-side.
 	Writes []string `json:"writes"`
 }
 
-func emitTargets(cfg srt.Config) error {
-	t := targets{Env: containment.SensitiveEnv}
+// fileTarget is readable when any non-empty file at or under Target, outside
+// Except, can be read. Except holds the binds nested in a deny: content there
+// is meant to show.
+type fileTarget struct {
+	Target string   `json:"target"`
+	Except []string `json:"except,omitempty"`
+}
 
-	// Inject hosts other than api.github.com are skipped: the probe's only
-	// honest token evidence is the api.github.com rate-limit heuristic, and a
-	// reachable inject host with unverifiable token reads as a false
-	// regression. Local virtual hosts (declare.rein.internal) are skipped too.
-	inject := map[string]bool{}
-	if cfg.Network.MitmProxy != nil {
-		for _, d := range cfg.Network.MitmProxy.Domains {
-			inject[strings.ToLower(d)] = true
-		}
+// buildTargets derives the probe targets. home is run.sh's fixture: every
+// policy entry under it must be planted. nothingToHide lists deny entries
+// with no host content, whose "correctly unreadable" row is vacuous.
+func buildTargets(cfg srt.Config, home string) (t targets, nothingToHide []string, err error) {
+	t = targets{Env: containment.EnvCanaryNames}
+	fs := cfg.Filesystem
+	if err := requirePlanted(home, append(append([]string{}, fs.DenyRead...), fs.AllowRead...)); err != nil {
+		return t, nil, err
 	}
+
 	local := map[string]bool{}
 	for _, d := range proxy.LocalHosts {
 		local[strings.ToLower(d)] = true
 	}
 	for _, d := range cfg.Network.AllowedDomains {
-		l := strings.ToLower(d)
-		if local[l] || (inject[l] && l != "api.github.com") {
-			continue
+		if !local[strings.ToLower(d)] {
+			t.Network = append(t.Network, d)
 		}
-		t.Network = append(t.Network, d)
 	}
 	t.Network = append(t.Network, deniedCanary)
 
-	// A denied DIR is probed through a host-sampled file inside it: the deny
-	// tmpfs legitimately lists allow-back scaffolding (#150), so "listing
-	// non-empty" would be a false leak — "a real host file readable" is the
-	// truth. Dirs with no sampleable file keep the dir probe.
-	for _, d := range cfg.Filesystem.DenyRead {
-		if f := sampleFile(d); f != "" {
-			t.Files = append(t.Files, f)
-		} else {
-			t.Files = append(t.Files, d)
+	binds := append(append([]string{}, fs.AllowRead...), fs.AllowWrite...)
+	// KNOWN GAP on srt 0.0.63: it re-binds its default write dirs over the
+	// deny, and rein only pins them read-only (#153), so they stay READABLE.
+	// srt 0.0.83 stops doing that: delete this line with that bump (#219).
+	binds = append(binds, srt.DefaultHomeWritePaths(home)...)
+	for _, d := range fs.DenyRead {
+		// The per-run socket dir is the CAPTURE run's: gone before the probe
+		// run starts, so there is nothing to judge.
+		if strings.HasPrefix(filepath.Base(d), "run-") && filepath.Base(filepath.Dir(d)) == "rein" {
+			continue
 		}
+		var except []string
+		for _, b := range binds {
+			if strings.HasPrefix(b, d+string(filepath.Separator)) {
+				except = append(except, b)
+			}
+		}
+		if !hasContent(d, except) {
+			nothingToHide = append(nothingToHide, d)
+		}
+		t.Files = append(t.Files, fileTarget{Target: d, Except: except})
 	}
 	// Allow-backs are existence-gated at mount time by srt; probing an absent
 	// one reads as a false regression.
-	for _, a := range cfg.Filesystem.AllowRead {
+	for _, a := range fs.AllowRead {
 		if _, err := os.Stat(a); err == nil {
-			t.Files = append(t.Files, a)
+			t.Files = append(t.Files, fileTarget{Target: a})
 		}
 	}
 
 	// Write sweep: every writable bind, every denyWrite DIR pin, srt's own
 	// default write paths (the substrate-chosen set that leaked in #153), and a
 	// bare-$HOME canary for the deny tmpfs.
-	for _, w := range cfg.Filesystem.AllowWrite {
-		// The ephemeral clone dir is discarded by rein AFTER the run by design
-		// (and is per-run, so the capture run's path never exists in the probe
-		// run) — persistence is unjudgeable there.
+	for _, w := range fs.AllowWrite {
+		// rein discards the ephemeral clone dir after the run, and it is
+		// per-run: persistence is unjudgeable there.
 		if strings.HasPrefix(filepath.Base(w), "rein-agent-tmp-") {
 			continue
 		}
-		t.Writes = append(t.Writes, filepath.Join(w, WriteProbeName))
+		t.Writes = append(t.Writes, filepath.Join(w, writeProbeName))
 	}
-	for _, w := range cfg.Filesystem.DenyWrite {
+	for _, w := range fs.DenyWrite {
 		if st, err := os.Stat(w); err == nil && st.IsDir() {
-			t.Writes = append(t.Writes, filepath.Join(w, WriteProbeName))
+			t.Writes = append(t.Writes, filepath.Join(w, writeProbeName))
 		}
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		for _, w := range srt.DefaultHomeWritePaths(home) {
-			t.Writes = append(t.Writes, filepath.Join(w, WriteProbeName))
-		}
-		t.Writes = append(t.Writes, filepath.Join(home, WriteProbeName))
+	for _, w := range srt.DefaultHomeWritePaths(home) {
+		t.Writes = append(t.Writes, filepath.Join(w, writeProbeName))
 	}
+	t.Writes = append(t.Writes, filepath.Join(home, writeProbeName))
+	return t, nothingToHide, nil
+}
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(t)
+// requirePlanted fails when a policy entry under the fixture home has nothing
+// planted: it could not be judged. A policy with NO entry under home means
+// home is not what rein hid.
+func requirePlanted(home string, entries []string) error {
+	n := 0
+	for _, e := range entries {
+		if !strings.HasPrefix(e, home+string(filepath.Separator)) {
+			continue
+		}
+		n++
+		if !hasContent(e, nil) {
+			return fmt.Errorf("policy entry %s has no content in the fixture home: add it to fixtureFiles (tests/containment/cmd/classify/fixture.go)", e)
+		}
+	}
+	if n == 0 {
+		return fmt.Errorf("no policy entry is under the fixture home %s", home)
+	}
+	return nil
+}
+
+// hasContent reports whether a readable, non-empty file exists at or under
+// path, outside except. It mirrors the in-sandbox read probe.
+func hasContent(path string, except []string) bool {
+	skip := map[string]bool{}
+	for _, e := range except {
+		skip[e] = true
+	}
+	found := false
+	_ = filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
+		switch {
+		case err != nil:
+		case skip[p] && d.IsDir():
+			return filepath.SkipDir
+		case skip[p] || d.IsDir():
+		default:
+			if f, err := os.Open(p); err == nil {
+				n, _ := f.Read(make([]byte, 1))
+				f.Close()
+				if n > 0 {
+					found = true
+					return filepath.SkipAll
+				}
+			}
+		}
+		return nil
+	})
+	return found
+}
+
+// writeObservations judges write PERSISTENCE on the host, and removes what
+// persisted. The paths are derived here, not taken from the sandbox.
+func writeObservations(paths []string) []containment.Observation {
+	var out []containment.Observation
+	for _, p := range paths {
+		_, err := os.Lstat(p)
+		out = append(out, containment.Observation{Kind: containment.KindWrite, Target: p, Reachable: err == nil})
+		if err == nil {
+			_ = os.Remove(p)
+		}
+	}
+	return out
 }
