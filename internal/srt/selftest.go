@@ -24,7 +24,7 @@ const (
 	ProbeSeccompFailOpen = 10
 	// ProbeDenyReadFailOpen: the sentinel file read back its known marker
 	// content inside the sandbox — denyRead did NOT apply, so credential stores
-	// would be readable. On 0.0.63's `-s` path srt refuses to run rather than
+	// would be readable. On the `-s` path srt refuses to run rather than
 	// applying an empty-denyRead default (see config.go), so this is a
 	// version-drift / denyRead-semantics guard rather than a live gap #3 on this
 	// version — but it must still hard-fail the launch if it ever fires.

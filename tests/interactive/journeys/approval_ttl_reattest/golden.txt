@@ -1,20 +1,20 @@
-$ rein run -- bash -c <approval-ttl re-attestation script> /tmp/rein-itest-99uehueg
+$ rein run -- bash -c <approval-ttl re-attestation script> /tmp/nix-shell.AGuz5T/rein-itest-iugo8jn7
 rein: sandbox preflight:
-  [ok]   srt present: /home/tom.linux/.npm-global/bin/srt
-  [ok]   srt version: 0.0.63 (package.json; note `srt --version` misreports 1.0.0)
+  [ok]   srt present: /nix/store/gvizfjscyw9rw7s2j909p3l1wbix6b3n-sandbox-runtime-0.0.83/bin/srt
+  [ok]   srt version: 0.0.83
   [ok]   seccomp: apply-seccomp present (unix-socket block available)
   [ok]   bwrap userns: unprivileged user namespace works
   [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
 rein: egress preset "dev" active (11 package-registry/advisory hosts; egress_preset: none in the session file turns it off)
-rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-99uehueg (git -C /tmp/rein-itest-99uehueg rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
+rein: worktrees: could not detect a GitHub repo for the working tree /tmp/nix-shell.AGuz5T/rein-itest-iugo8jn7 (git -C /tmp/nix-shell.AGuz5T/rein-itest-iugo8jn7 rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked; egress answered by rein).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_approval_ttl_reattest (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-6ad7gzai/session.yaml]
-  proxy socket (out of sandbox): /run/user/501/rein/run-h9wStRce_rZEAZUM9-ko0Q/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-itest-99uehueg
+  session: sess_journey_approval_ttl_reattest (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/nix-shell.AGuz5T/rein-journey-sess-n5o4n7gm/session.yaml]
+  proxy socket (out of sandbox): /run/user/501/rein/run-_S2GJYzWNUp1BavECndwKA/proxy.sock
+  working tree (writable in sandbox): /tmp/nix-shell.AGuz5T/rein-itest-iugo8jn7
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-2086813568
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/nix-shell.AGuz5T/rein-agent-tmp-1455566594
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -25,9 +25,9 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-itest-99uehueg
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/nix-shell.AGuz5T/rein-itest-iugo8jn7
     => work the agent must keep has to be written INTO the working tree.
-    allowed back read-only: /home/tom.linux/.npm-global/bin, /home/tom.linux/.npm-global/lib/node_modules, /home/tom.linux/.local/bin, /home/tom.linux/.cargo, /home/tom.linux/.rustup, /home/tom.linux/go, /home/tom.linux/.pyenv, /home/tom.linux/.cache/ms-playwright
+    allowed back read-only: /home/tom.linux/.local/bin, /home/tom.linux/.cargo, /home/tom.linux/.rustup, /home/tom.linux/go, /home/tom.linux/.pyenv, /home/tom.linux/.cache/ms-playwright
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
       REIN_SANDBOX_ALLOW_READ=/abs/path[:/more] rein run --sandbox -- …
     or (NOT recommended — exposes your whole home dir): REIN_SANDBOX_SHOW_HOME=1
@@ -55,15 +55,15 @@ run git clone --progress https://github.com/TomHennen/agentcreds-validation-a re
 cd repo || { emit "@CLONE_FAIL"; exit 3; }
 emit "@CLONE_OK"
 
-emit "@PHASE1_START  rein declare 686 (first Form A; blocks for the human)"
-run rein declare 686
+emit "@PHASE1_START  rein declare 786 (first Form A; blocks for the human)"
+run rein declare 786
 emit "@PHASE1_RC=$?"
 
-emit "@PHASE2_START  push agent/686/<nonce1> (expect: lands)"
+emit "@PHASE2_START  push agent/786/<nonce1> (expect: lands)"
 echo "approval-ttl-reattest: write #1, before the busy window" >> probe-1.txt
 run git add -A
 run git commit -q -m "approval-ttl-reattest: write #1, before the busy window"
-run git push --progress origin HEAD:refs/heads/agent/686/ttl1-20261122-175357-5bc764
+run git push --progress origin HEAD:refs/heads/agent/786/ttl1-20261124-124932-8df81c
 emit "@PHASE2_RC=$?"
 
 emit "@PHASE3_BUSY_START  busy window (~25s, GitHub traffic every ~5s) -- the approval AGE bound must still expire despite continuous activity"
@@ -78,27 +78,27 @@ run sleep 5
 run git ls-remote origin HEAD
 emit "@PHASE3_BUSY_END"
 
-emit "@PHASE4_START  push agent/686/<nonce2> WITHOUT re-declaring (expect: locked -- the confirmation aged out)"
+emit "@PHASE4_START  push agent/786/<nonce2> WITHOUT re-declaring (expect: locked -- the confirmation aged out)"
 echo "approval-ttl-reattest: write #2, after the busy window (should be refused)" >> probe-2.txt
 run git add -A
 run git commit -q -m "approval-ttl-reattest: write #2, after the busy window"
-run git push --progress origin HEAD:refs/heads/agent/686/ttl2-20261122-175357-92f8ba
+run git push --progress origin HEAD:refs/heads/agent/786/ttl2-20261124-124932-42b357
 emit "@PHASE4_RC=$?"
 
-emit "@PHASE5_START  rein declare 686 again (second Form A; re-confirm required)"
-run rein declare 686
+emit "@PHASE5_START  rein declare 786 again (second Form A; re-confirm required)"
+run rein declare 786
 emit "@PHASE5_RC=$?"
 
-emit "@PHASE6_START  push agent/686/<nonce2> again (expect: lands)"
-run git push --progress origin HEAD:refs/heads/agent/686/ttl2-20261122-175357-92f8ba
+emit "@PHASE6_START  push agent/786/<nonce2> again (expect: lands)"
+run git push --progress origin HEAD:refs/heads/agent/786/ttl2-20261124-124932-42b357
 emit "@PHASE6_RC=$?"
 emit "@SCRIPT_DONE"
- /tmp/rein-itest-99uehueg
+ /tmp/nix-shell.AGuz5T/rein-itest-iugo8jn7
 ---
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/rein-itest-99uehueg
+- Your work persists ONLY in the working tree: /tmp/nix-shell.AGuz5T/rein-itest-iugo8jn7
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
@@ -152,37 +152,37 @@ SBX| remote: Total 60 (delta 3), reused 2 (delta 2), pack-reused 55 (from 1)
 SBX| Receiving objects: 100% (60/60), 5.30 KiB | 5.30 MiB/s, done.
 SBX| Resolving deltas: 100% (18/18), done.
 SBX| @CLONE_OK
-SBX| @PHASE1_START  rein declare 686 (first Form A; blocks for the human)
-SBX| $ rein declare 686
+SBX| @PHASE1_START  rein declare 786 (first Form A; blocks for the human)
+SBX| $ rein declare 786
 
 === rein: agent declares work on an issue ===
-   issue:    #686 "rein journey: approval-age re-attestation walkthrough (safe to close)"  [open]
+   issue:    #786 "rein journey: approval-age re-attestation walkthrough (safe to close)"  [open]
              in TomHennen/agentcreds-validation-a
    session:  sess_journey_approval_ttl_reattest (role=implement, repos=[TomHennen/agentcreds-validation-a])
    approving covers ALL writes for this run (git push, gh, API).
 
-To approve, type the issue number (686) and press enter.
+To approve, type the issue number (786) and press enter.
 To deny, press Ctrl-C or type anything else.
-> 686
+> 786
   [approved]
-SBX| issue #686 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/686/<nonce>)
+SBX| issue #786 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/786/<nonce>)
 SBX| @PHASE1_RC=0
-SBX| @PHASE2_START  push agent/686/<nonce1> (expect: lands)
+SBX| @PHASE2_START  push agent/786/<nonce1> (expect: lands)
 SBX| $ git add -A
 SBX| $ git commit -q -m approval-ttl-reattest: write #1, before the busy window
-SBX| $ git push --progress origin HEAD:refs/heads/agent/686/ttl1-20261122-175357-5bc764
+SBX| $ git push --progress origin HEAD:refs/heads/agent/786/ttl1-20261124-124932-8df81c
 SBX| Enumerating objects: 4, done.
 SBX| Counting objects: 100% (4/4), done.
 SBX| Delta compression using up to 4 threads
 SBX| Compressing objects: 100% (3/3), done.
-SBX| Writing objects: 100% (3/3), 404 bytes | 404.00 KiB/s, done.
-SBX| Total 3 (delta 1), reused 0 (delta 0), pack-reused 0
+SBX| Writing objects: 100% (3/3), 403 bytes | 403.00 KiB/s, done.
+SBX| Total 3 (delta 1), reused 0 (delta 0), pack-reused 0 (from 0)
 SBX| remote:
-SBX| remote: Create a pull request for 'agent/686/ttl1-20261122-175357-5bc764' on GitHub by visiting:
-SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/686/ttl1-20261122-175357-5bc764
+SBX| remote: Create a pull request for 'agent/786/ttl1-20261124-124932-8df81c' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/786/ttl1-20261124-124932-8df81c
 SBX| remote:
 SBX| To https://github.com/TomHennen/agentcreds-validation-a
-SBX|  * [new branch]      HEAD -> agent/686/ttl1-20261122-175357-5bc764
+SBX|  * [new branch]      HEAD -> agent/786/ttl1-20261124-124932-8df81c
 SBX| @PHASE2_RC=0
 SBX| @PHASE3_BUSY_START  busy window (~25s, GitHub traffic every ~5s) -- the approval AGE bound must still expire despite continuous activity
 SBX| $ git ls-remote origin HEAD
@@ -208,41 +208,41 @@ SBX| $ sleep 5
 SBX| $ git ls-remote origin HEAD
 SBX| e78b80096e4ca59ce7c27e57584faa52d6e40178	HEAD
 SBX| @PHASE3_BUSY_END
-SBX| @PHASE4_START  push agent/686/<nonce2> WITHOUT re-declaring (expect: locked -- the confirmation aged out)
+SBX| @PHASE4_START  push agent/786/<nonce2> WITHOUT re-declaring (expect: locked -- the confirmation aged out)
 SBX| $ git add -A
 SBX| $ git commit -q -m approval-ttl-reattest: write #2, after the busy window
-SBX| $ git push --progress origin HEAD:refs/heads/agent/686/ttl2-20261122-175357-92f8ba
+SBX| $ git push --progress origin HEAD:refs/heads/agent/786/ttl2-20261124-124932-42b357
 SBX| fatal: remote error: rein: writes are locked until you declare your issue. Run: rein declare <n> (then push to agent/<n>/<nonce>)
 SBX| @PHASE4_RC=128
-SBX| @PHASE5_START  rein declare 686 again (second Form A; re-confirm required)
-SBX| $ rein declare 686
+SBX| @PHASE5_START  rein declare 786 again (second Form A; re-confirm required)
+SBX| $ rein declare 786
 
 === rein: agent declares work on an issue ===
-   issue:    #686 "rein journey: approval-age re-attestation walkthrough (safe to close)"  [open]
+   issue:    #786 "rein journey: approval-age re-attestation walkthrough (safe to close)"  [open]
              in TomHennen/agentcreds-validation-a
    session:  sess_journey_approval_ttl_reattest (role=implement, repos=[TomHennen/agentcreds-validation-a])
    approving covers ALL writes for this run (git push, gh, API).
 
-To approve, type the issue number (686) and press enter.
+To approve, type the issue number (786) and press enter.
 To deny, press Ctrl-C or type anything else.
-> 686
+> 786
   [approved]
-SBX| issue #686 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/686/<nonce>)
+SBX| issue #786 in TomHennen/agentcreds-validation-a confirmed — writes are unlocked for this run (push to agent/786/<nonce>)
 SBX| @PHASE5_RC=0
-SBX| @PHASE6_START  push agent/686/<nonce2> again (expect: lands)
-SBX| $ git push --progress origin HEAD:refs/heads/agent/686/ttl2-20261122-175357-92f8ba
+SBX| @PHASE6_START  push agent/786/<nonce2> again (expect: lands)
+SBX| $ git push --progress origin HEAD:refs/heads/agent/786/ttl2-20261124-124932-42b357
 SBX| Enumerating objects: 4, done.
 SBX| Counting objects: 100% (4/4), done.
 SBX| Delta compression using up to 4 threads
 SBX| Compressing objects: 100% (3/3), done.
-SBX| Writing objects: 100% (3/3), 420 bytes | 420.00 KiB/s, done.
-SBX| Total 3 (delta 1), reused 0 (delta 0), pack-reused 0
+SBX| Writing objects: 100% (3/3), 419 bytes | 419.00 KiB/s, done.
+SBX| Total 3 (delta 1), reused 0 (delta 0), pack-reused 0 (from 0)
 SBX| remote:
-SBX| remote: Create a pull request for 'agent/686/ttl2-20261122-175357-92f8ba' on GitHub by visiting:
-SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/686/ttl2-20261122-175357-92f8ba
+SBX| remote: Create a pull request for 'agent/786/ttl2-20261124-124932-42b357' on GitHub by visiting:
+SBX| remote:      https://github.com/TomHennen/agentcreds-validation-a/pull/new/agent/786/ttl2-20261124-124932-42b357
 SBX| remote:
 SBX| To https://github.com/TomHennen/agentcreds-validation-a
-SBX|  * [new branch]      HEAD -> agent/686/ttl2-20261122-175357-92f8ba
+SBX|  * [new branch]      HEAD -> agent/786/ttl2-20261124-124932-42b357
 SBX| @PHASE6_RC=0
 SBX| @SCRIPT_DONE
 rein: revoked 1 of 1 write token(s) on exit

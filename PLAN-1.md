@@ -414,6 +414,18 @@ closes that gap.
 
 (Append as you work. Format: date — issue — resolution.)
 
+- 2026-11-24 — **srt pin 0.0.63 -> 0.0.83.** Observed on the bump: (1) srt now
+  drops its default write paths (`~/.claude/debug`, `~/.npm/_logs`) under a read
+  deny (upstream #506, 0.0.77), so rein's #153 denyWrite is removed;
+  `TestHomeWriteSemantics_E2E` and the containment sweep still probe both and
+  fail on 0.0.63. (2) `srt --version` reports the real version. (3) The sandboxed
+  command can no longer create a user/mount namespace (`allowNestedUserNamespaces`
+  is the opt-out; rein does not set it): Playwright's default `chromium.launch()`
+  still works, Chromium's own sandbox (`chromiumSandbox: true`) does not. (4) The
+  12 injected cwd dotfiles are unchanged. (5) Needs Node 22.12+ for an npm-installed
+  srt. (6) `tests/containment/golden-report.txt` is stale and box-specific (uid
+  1000, pre-#185 network rows); it drifts on main too. Not regenerated here.
+
 - 2026-09-05 — **#164: out-of-scope READS relay anonymously; refusals are
   machine-readable.** The proxy refused out-of-scope reads with a placeholder /
   text 403 — breaking legit PUBLIC reads (an upstream dep's tags/releases) and

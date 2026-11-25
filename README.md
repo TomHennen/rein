@@ -45,9 +45,9 @@ recorded live, and reproducible ([`demo/`](demo/)).*
 
 **The sandbox stack (Linux)** — required for the default `rein run`; `rein
 doctor` checks all of these and tells you exactly what's missing:
-- **`srt`** — pin `@anthropic-ai/sandbox-runtime@0.0.63` (rein re-verifies on
-  bump; other versions may move the injection hook). Needs Node 20+:
-  `npm install -g @anthropic-ai/sandbox-runtime@0.0.63` (already provided under
+- **`srt`** — pin `@anthropic-ai/sandbox-runtime@0.0.83` (rein re-verifies on
+  bump; other versions may move the injection hook). Needs Node 22.12+:
+  `npm install -g @anthropic-ai/sandbox-runtime@0.0.83` (already provided under
   `nix develop`, along with its node, `ripgrep` and `socat`)
 - **`bubblewrap`, `ripgrep`, `socat`** — `sudo apt-get install -y bubblewrap ripgrep socat`
   (or your distro's equivalent; under `nix develop` only `bubblewrap` is needed). The `apply-seccomp` helper that blocks the
@@ -100,7 +100,7 @@ nix run github:TomHennen/rein -- --help  # try it without installing
 nix build github:TomHennen/rein          # or `nix build` in a checkout; binaries in ./result/bin
 ```
 
-On Linux this installs rein together with the pinned `srt` 0.0.63, which
+On Linux this installs rein together with the pinned `srt` 0.0.83, which
 carries its own Node, `socat` and `ripgrep`, so of the sandbox stack only
 **`bubblewrap`** is left for you to install on the host (plus its AppArmor
 profile on Ubuntu 24.04+; a Nix-store `bwrap` would not match that profile).

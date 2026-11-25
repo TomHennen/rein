@@ -39,7 +39,7 @@ const DefaultEgressPreset = "dev"
 const EgressPresetNone = "none"
 
 // egressPresets are curated egress bundles selected by NAME instead of listing
-// hosts. srt 0.0.63 cannot express true allow-all (its schema rejects a bare
+// hosts. srt cannot express true allow-all (its schema rejects a bare
 // "*"; see issue #163), so "dev" is the pragmatic substitute: the package
 // registries + advisory hosts a dependency-fetching agent needs, as srt-legal
 // *.suffix wildcards. NONE cover a GitHub inject/CDN host (Validate would reject

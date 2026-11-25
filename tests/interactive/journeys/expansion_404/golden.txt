@@ -1,20 +1,20 @@
-$ rein run -- bash -c <declare-uninstalled agent script> /tmp/rein-itest-pq1jslsi
+$ rein run -- bash -c <declare-uninstalled agent script> /tmp/nix-shell.AGuz5T/rein-itest-kganpw6x
 rein: sandbox preflight:
-  [ok]   srt present: /home/admin/.npm-global/bin/srt
-  [ok]   srt version: 0.0.63 (package.json; note `srt --version` misreports 1.0.0)
+  [ok]   srt present: /nix/store/gvizfjscyw9rw7s2j909p3l1wbix6b3n-sandbox-runtime-0.0.83/bin/srt
+  [ok]   srt version: 0.0.83
   [ok]   seccomp: apply-seccomp present (unix-socket block available)
   [ok]   bwrap userns: unprivileged user namespace works
   [ok]   system CA bundle: /etc/ssl/certs/ca-certificates.crt
 rein: egress preset "dev" active (11 package-registry/advisory hosts; egress_preset: none in the session file turns it off)
-rein: worktrees: could not detect a GitHub repo for the working tree /tmp/rein-itest-pq1jslsi (git -C /tmp/rein-itest-pq1jslsi rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
+rein: worktrees: could not detect a GitHub repo for the working tree /tmp/nix-shell.AGuz5T/rein-itest-kganpw6x (git -C /tmp/nix-shell.AGuz5T/rein-itest-kganpw6x rev-parse --show-toplevel: exit status 128); the agent is not told which repo it is standing in
 rein: verifying sandbox config applies (deny-read + seccomp self-test)…
 rein: sandbox self-test passed (credential stores hidden; unix sockets blocked; egress answered by rein).
 rein: launching SANDBOXED (srt) run:
-  session: sess_journey_expansion_404 (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/rein-journey-sess-404-f4ull_xx/session.yaml]
-  proxy socket (out of sandbox): /run/user/1000/rein/run-SQbJOmaWlh4qHmguA-EOUw/proxy.sock
-  working tree (writable in sandbox): /tmp/rein-itest-pq1jslsi
+  session: sess_journey_expansion_404 (role=implement, repos=[TomHennen/agentcreds-validation-a]) [source=file:/tmp/nix-shell.AGuz5T/rein-journey-sess-404-hx558p7i/session.yaml]
+  proxy socket (out of sandbox): /run/user/501/rein/run-hZJfrJtf1R_23ZkdAWWNeQ/proxy.sock
+  working tree (writable in sandbox): /tmp/nix-shell.AGuz5T/rein-itest-kganpw6x
   a repo approved MID-RUN cannot be bound (bwrap binds are fixed at launch);
-    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/rein-agent-tmp-4141624078
+    the agent clones it into REIN_EPHEMERAL_CLONE_DIR=/tmp/nix-shell.AGuz5T/rein-agent-tmp-2639330270
     (writable, DISCARDED at run end — the durable artifact is the push, not the tree;
      never inside the working tree, where a nested clone can be committed into it).
     map it under `worktrees:` to use your own checkout on the NEXT run.
@@ -25,9 +25,9 @@ rein: launching SANDBOXED (srt) run:
     WRITES under hidden $HOME SILENTLY SUCCEED into a scratch tmpfs, then are
       DISCARDED at run end — caches (~/.cache, ~/.npm) work, but start cold every run.
     WRITES to the allowed-back paths below ERROR (read-only): 'Read-only file system'.
-  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/rein-itest-pq1jslsi
+  NOTHING under $HOME PERSISTS. Only the working tree does: /tmp/nix-shell.AGuz5T/rein-itest-kganpw6x
     => work the agent must keep has to be written INTO the working tree.
-    allowed back read-only: /home/admin/.npm-global/bin, /home/admin/.npm-global/lib/node_modules, /home/admin/.local/bin, /home/admin/.cargo, /home/admin/.rustup, /home/admin/go, /home/admin/.pyenv, /home/admin/.cache/ms-playwright
+    allowed back read-only: /home/tom.linux/.local/bin, /home/tom.linux/.cargo, /home/tom.linux/.rustup, /home/tom.linux/go, /home/tom.linux/.pyenv, /home/tom.linux/.cache/ms-playwright
     if a tool breaks on a hidden $HOME path, allow it back narrowly:
       REIN_SANDBOX_ALLOW_READ=/abs/path[:/more] rein run --sandbox -- …
     or (NOT recommended — exposes your whole home dir): REIN_SANDBOX_SHOW_HOME=1
@@ -53,19 +53,19 @@ emit "@DECLARE_START  rein declare 1 --repo TomHennen/definitely-not-installed  
 run rein declare 1 --repo TomHennen/definitely-not-installed
 emit "@DECLARE_RC=$?"
 emit "@SCRIPT_DONE"
- /tmp/rein-itest-pq1jslsi
+ /tmp/nix-shell.AGuz5T/rein-itest-kganpw6x
 ---
 rein sandbox: you are running inside a sandbox managed by rein. These rules are ENFORCED, not advice.
 
 FILES
-- Your work persists ONLY in the working tree: /tmp/rein-itest-pq1jslsi
+- Your work persists ONLY in the working tree: /tmp/nix-shell.AGuz5T/rein-itest-kganpw6x
   Write anything that must outlive this run THERE. Nothing else survives.
 - $HOME is EPHEMERAL. Writes under it SUCCEED and read back normally, then are
   DISCARDED when the run ends. You will get no error. Do not keep work there.
 - Most of $HOME reads as empty/missing; a few paths are re-exposed READ-ONLY, where
   writes fail with "Read-only file system". Caches work but start cold each run.
 - A headless Chromium is available: Playwright browsers are host-installed under
-  /home/admin/.cache/ms-playwright (read-only; found automatically by playwright/playwright-core).
+  /home/tom.linux/.cache/ms-playwright (read-only; found automatically by playwright/playwright-core).
   Use it to render, screenshot, and test web UIs. Do NOT run `npx playwright install`
   (that dir is read-only). If Playwright reports a missing chromium-<rev>, the host's
   version differs from your pinned playwright: ask the human to run `npx playwright
@@ -108,17 +108,17 @@ SBX| $ rein declare 1 --repo TomHennen/definitely-not-installed
 
 === rein: NOTICE — App not installed (nothing to approve) ===
    the agent asked for:  TomHennen/definitely-not-installed  (for issue #1)
-   but the GitHub App rein-primary-735a3bbe20 is NOT installed on it,
+   but the GitHub App rein-primary-56e410c903 is NOT installed on it,
    so rein cannot mint any credential for it — there is no approval to give.
-   Install it here:  https://github.com/apps/rein-primary-735a3bbe20/installations/new
+   Install it here:  https://github.com/apps/rein-primary-56e410c903/installations/new
    Then the agent re-runs its declare, and you will be asked to APPROVE the repo.
 
 Press ENTER when the install is done (the agent will retry), or 's' to skip.
 > s
   [acknowledged — the agent must re-run its declare; you will be asked to approve the repo then]
-SBX| rein: cannot request TomHennen/definitely-not-installed — the GitHub App rein-primary-735a3bbe20 is not installed on it.
+SBX| rein: cannot request TomHennen/definitely-not-installed — the GitHub App rein-primary-56e410c903 is not installed on it.
 SBX|       The human must install it first:
-SBX|       https://github.com/apps/rein-primary-735a3bbe20/installations/new
+SBX|       https://github.com/apps/rein-primary-56e410c903/installations/new
 SBX|       Then run this command again.
 SBX| @DECLARE_RC=1
 SBX| @SCRIPT_DONE

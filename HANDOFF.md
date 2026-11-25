@@ -44,7 +44,7 @@ below are arch-agnostic except where noted.
 checkout an agent can write to). The flake provides Go (with
 `GOTOOLCHAIN=local`), gopls, goreleaser, python3 + pexpect + pyte, git and gh.
 Nix is optional: the apt/host steps below remain valid. On Linux it also
-provides `srt` pinned at 0.0.63 (from the npm tarball, so `apply-seccomp`
+provides `srt` pinned at 0.0.83 (from the npm tarball, so `apply-seccomp`
 ships), running under its own node with socat/ripgrep on its wrapper PATH. It
 does NOT provide `bwrap` or `tmux`: install `bubblewrap` (plus the 1b AppArmor
 profile, which is keyed to `/usr/bin/bwrap`, so a nix-store `bwrap` would not
@@ -66,8 +66,8 @@ sudo apt-get install -y bubblewrap ripgrep socat
 npm install -g @anthropic-ai/sandbox-runtime   # pin the version; see below
 ```
 
-**Pin srt.** Current pin is `@anthropic-ai/sandbox-runtime@0.0.63` (bumped
-from 0.0.54 on 2026-07-05; CP3 builds + re-verifies against it). Its
+**Pin srt.** Current pin is `@anthropic-ai/sandbox-runtime@0.0.83` (bumped
+from 0.0.63 on 2026-11-24; needs Node 22.12+). Its
 mitm/proxy hooks are undocumented and may move across versions — install
 the pinned version and re-verify if you bump (`docs/phase1-srt-spike-findings.md`).
 A bump touches `PinnedVersion` and the nix pin together (see "Bumping srt" in
@@ -214,7 +214,7 @@ hiding incl. XDG-relocated stores, env scrub, audit redaction).
 NOT a resident daemon** (Tom's decision, 2026-07-05). No control socket, no
 approval relay; `internal/daemon` is shelf code for later tracks. Write
 approval is **run-scoped** (approve once per run, covers the session's whole
-repo set until token expiry). srt pin is **0.0.63** (bumped from 0.0.54). The
+repo set until token expiry). srt pin was **0.0.63** at the time (now 0.0.83). The
 `--sandbox` flag is CP3 opt-in; CP4 makes sandboxed the default where srt is
 healthy. Details in `PLAN-1.md` Notes (2026-07-05) + the correction banner atop
 `docs/phase1-design.md`.

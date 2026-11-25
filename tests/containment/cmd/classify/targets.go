@@ -64,10 +64,6 @@ func buildTargets(cfg srt.Config, home string) (t targets, nothingToHide []strin
 	t.Network = append(t.Network, deniedCanary)
 
 	binds := append(append([]string{}, fs.AllowRead...), fs.AllowWrite...)
-	// KNOWN GAP on srt 0.0.63: it re-binds its default write dirs over the
-	// deny, and rein only pins them read-only (#153), so they stay READABLE.
-	// srt 0.0.83 stops doing that: delete this line with that bump (#219).
-	binds = append(binds, srt.DefaultHomeWritePaths(home)...)
 	for _, d := range fs.DenyRead {
 		// The per-run socket dir is the CAPTURE run's: gone before the probe
 		// run starts, so there is nothing to judge.

@@ -32,8 +32,8 @@
 [ok        ] network api.github.com — expected-open egress reachable
 [ok        ] network example.com — denied host correctly unreachable
 [ok        ] socket  AF_UNIX — AF_UNIX socket creation blocked
-[ok        ] write   <HOME>/.claude/debug/.rein-containment-write-probe — write correctly blocked by denyWrite pin
-[ok        ] write   <HOME>/.npm/_logs/.rein-containment-write-probe — write correctly blocked by denyWrite pin
+[ok        ] write   <HOME>/.claude/debug/.rein-containment-write-probe — write outside writable binds evaporated (deny tmpfs)
+[ok        ] write   <HOME>/.npm/_logs/.rein-containment-write-probe — write outside writable binds evaporated (deny tmpfs)
 [ok        ] write   <HOME>/.rein-containment-write-probe — write outside writable binds evaporated (deny tmpfs)
 [ok        ] write   <HOME>/overlay/.rein-containment-write-probe — write persisted inside a writable bind (expected)
 [ok        ] write   <WORKTREE>/.rein-containment-write-probe — write persisted inside a writable bind (expected)

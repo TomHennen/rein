@@ -265,9 +265,10 @@ func buildReinForProbe(t *testing.T) string {
 // ... read-only file system") — measured on this box — whereas under the tmpfs
 // it simply rebuilds.
 //
-// (4) exists because (2) passed while #153 leaked: srt re-binds its own default
-// write paths over the deny tmpfs, so only a path srt re-binds can catch that
-// class. Full mechanism: PLAN-1 2026-08-30 and issue #153.
+// (4) exists because (2) passed while #153 leaked: srt 0.0.63 re-bound its own
+// default write paths over the deny tmpfs. rein used to deny-write them; srt now
+// drops them itself under a read deny, and (4) is the guard against that
+// regressing. Full mechanism: PLAN-1 2026-08-30 and issue #153.
 //
 // Run: REIN_SANDBOX_E2E=1 go test ./internal/srt/ -run E2E -v
 func TestHomeWriteSemantics_E2E(t *testing.T) {
@@ -310,21 +311,35 @@ func TestHomeWriteSemantics_E2E(t *testing.T) {
 	}
 	defer os.Remove(ephemeral)
 
-	// (4) An srt DEFAULT write path under hidden $HOME. srt re-binds these host
-	// dirs over the deny tmpfs, so they are the ONE shape (2) cannot catch (#153).
-	// Created here when the box lacks it, since the deny is existence-gated.
-	srtDefault := filepath.Join(home, ".claude", "debug")
-	if _, serr := os.Stat(srtDefault); os.IsNotExist(serr) {
-		if err := os.MkdirAll(srtDefault, 0o700); err != nil {
-			t.Fatalf("create %s: %v", srtDefault, err)
+	// (4) srt's DEFAULT write paths under hidden $HOME (#153). Created when the
+	// box lacks them: srt only binds a source that exists. A host-side canary in
+	// each tells "the real dir is bound" apart from "the tmpfs is showing".
+	const srtDefaultCanary, srtDefaultWrite = ".rein-e2e-srt-default-canary", ".rein-e2e-srt-default-write"
+	var srtDefaultChecks strings.Builder
+	srtDefaults := DefaultHomeWritePaths(home)
+	for _, d := range srtDefaults {
+		var created []string // deepest first
+		for dir := d; dir != home; dir = filepath.Dir(dir) {
+			if _, serr := os.Stat(dir); os.IsNotExist(serr) {
+				created = append(created, dir)
+			}
 		}
-		defer os.RemoveAll(srtDefault)
+		defer func() {
+			for _, dir := range created {
+				os.Remove(dir)
+			}
+		}()
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatalf("create %s: %v", d, err)
+		}
+		if err := os.WriteFile(filepath.Join(d, srtDefaultCanary), []byte("hi"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(filepath.Join(d, srtDefaultCanary))
+		defer os.Remove(filepath.Join(d, srtDefaultWrite))
+		fmt.Fprintf(&srtDefaultChecks, "[ -e %q ] && exit 29\n\t\t", filepath.Join(d, srtDefaultCanary))
+		fmt.Fprintf(&srtDefaultChecks, "mkdir -p %q 2>/dev/null; echo nope > %q 2>/dev/null\n\t\t", d, filepath.Join(d, srtDefaultWrite))
 	}
-	srtDefaultProbe := filepath.Join(srtDefault, ".rein-e2e-srt-default-write")
-	if err := os.Remove(srtDefaultProbe); err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
-	defer os.Remove(srtDefaultProbe)
 
 	workTree := t.TempDir()
 	cfg, err := Build(Params{
@@ -356,10 +371,11 @@ func TestHomeWriteSemantics_E2E(t *testing.T) {
 		[ "$REIN_IN_SANDBOX" = 1 ] || exit 26
 		[ "$REIN_IN_SANDBOX_WORKTREE" = %[5]q ] || exit 27
 		[ "$REIN_IN_SANDBOX_HOME" = ephemeral ] || exit 28
-		# (5) an srt DEFAULT write path under hidden $HOME must NOT be writable.
-		echo nope > %[6]q 2>/dev/null && exit 29
+		# (5) srt's DEFAULT write paths under hidden $HOME must not be the host's
+		# dirs: the host canary is absent, and a write must not reach the host.
+		%[6]s
 		exit 0
-	`, hidden, ephemeral, filepath.Join(allowDir, "readable"), filepath.Join(allowDir, "written"), workTree, srtDefaultProbe)
+	`, hidden, ephemeral, filepath.Join(allowDir, "readable"), filepath.Join(allowDir, "written"), workTree, srtDefaultChecks.String())
 
 	cmd := exec.Command(srtPath, "-s", settings, "--", "/bin/sh", "-c", script)
 	cmd.Env = BuildEnv(EnvParams{
@@ -391,11 +407,10 @@ func TestHomeWriteSemantics_E2E(t *testing.T) {
 			"If it is writable now, the banner's 'writes to allowed-back paths ERROR' clause is wrong, and "+
 			"an agent could mutate the developer's real ~/.claude, ~/.cargo, ~/go. output: %s", strings.TrimSpace(string(out)))
 	case 29:
-		t.Errorf("a write to the srt DEFAULT write path %s SUCCEEDED in-sandbox — srt re-binds its "+
-			"getDefaultWritePaths() entries over rein's $HOME deny tmpfs, and rein's denyWrite for them "+
-			"(srtDefaultHomeWriteDenies) is not taking effect. The agent can write the developer's real "+
-			"~/.claude/debug, those writes PERSIST after the run, and it can repoint the `latest` symlink "+
-			"the host's claude writes through. See #153. output: %s", srtDefault, strings.TrimSpace(string(out)))
+		t.Errorf("an srt DEFAULT write path (%v) shows the HOST directory in-sandbox — srt is re-binding "+
+			"its getDefaultWritePaths() entries over rein's $HOME deny again. rein dropped its denyWrite "+
+			"for them when srt stopped doing this (0.0.77); restore it. See #153. output: %s",
+			srtDefaults, strings.TrimSpace(string(out)))
 	case 26, 27, 28:
 		t.Errorf("an agent-visible fact did NOT reach the sandboxed child (exit %d: %s). srt is filtering the "+
 			"REIN_IN_SANDBOX_* env vars out, so rein's ONLY channel for telling the AGENT that $HOME is "+
@@ -415,14 +430,15 @@ func TestHomeWriteSemantics_E2E(t *testing.T) {
 		t.Log("on host after run: the in-sandbox $HOME write is GONE (evaporated with the tmpfs)")
 	}
 
-	// #153: the srt-default write path must not have reached the host either. The
-	// in-sandbox write already failed above; this catches the case where it fails
-	// for a DIFFERENT reason while the host bind is still live.
-	if _, err := os.Stat(srtDefaultProbe); err == nil {
-		t.Errorf("the in-sandbox write to the srt default write path %s REACHED THE HOST — a sandboxed "+
-			"agent is writing into the developer's real home directory, and those writes persist (#153)",
-			srtDefaultProbe)
-	} else if !os.IsNotExist(err) {
-		t.Fatalf("stat %s: %v", srtDefaultProbe, err)
+	// #153: the in-sandbox writes to srt's default write paths must not have
+	// reached the host.
+	for _, d := range srtDefaults {
+		probe := filepath.Join(d, srtDefaultWrite)
+		if _, err := os.Stat(probe); err == nil {
+			t.Errorf("the in-sandbox write to the srt default write path %s REACHED THE HOST — a sandboxed "+
+				"agent is writing into the developer's real home directory, and those writes persist (#153)", probe)
+		} else if !os.IsNotExist(err) {
+			t.Fatalf("stat %s: %v", probe, err)
+		}
 	}
 }

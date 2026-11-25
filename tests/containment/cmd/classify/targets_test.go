@@ -89,7 +89,7 @@ func TestBuildTargets(t *testing.T) {
 		except[f.Target] = strings.Join(f.Except, ",")
 	}
 	// The home deny is judged outside the binds nested in it, and nothing else is.
-	want := strings.Join(append([]string{filepath.Join(home, "go"), overlay}, srt.DefaultHomeWritePaths(home)...), ",")
+	want := strings.Join([]string{filepath.Join(home, "go"), overlay}, ",")
 	if got := except[home]; got != want {
 		t.Errorf("except for home = %q, want %q", got, want)
 	}
