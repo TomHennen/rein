@@ -2,14 +2,12 @@
 // probe harness (issue #136B, docs/containment-probe-harness.md).
 //
 // sandbox-probe (github.com/controlplaneio/sandbox-probe, Apache-2.0) supplies
-// the ENUMERATION: run on the host unconfined, run again inside the srt sandbox,
-// diff. sandbox-probe is invoked as an external process (like pyte in
+// the ENUMERATION, run inside the srt sandbox. sandbox-probe is invoked as an external process (like pyte in
 // tests/interactive) and is NEVER imported here — its license never touches the
 // shipped binary (hard-constraint #4). This package supplies the one piece it
 // cannot: the judgement of whether a surviving-reachable observation is EXPECTED
-// (egress allowlist, a CDN host getting direct un-injected TLS, the writable
-// working tree) or a LEAK (a credential store still readable, a denied host
-// still reachable, a token injected onto a non-inject host).
+// (egress allowlist, the writable working tree) or a LEAK (a credential store
+// still readable, a denied host still reachable).
 //
 // The oracle consumes rein's EMITTED sandbox config (srt.Config, unmarshaled
 // from the settings.json rein wrote) so the expected/denied sets are the real
@@ -21,7 +19,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/TomHennen/rein/internal/proxy"
 	"github.com/TomHennen/rein/internal/srt"
 )
 
@@ -29,27 +26,23 @@ import (
 type Kind string
 
 const (
-	KindNetwork Kind = "network" // egress reachability + token injection
+	KindNetwork Kind = "network" // egress reachability
 	KindFile    Kind = "file"    // sensitive-path readability
-	KindEnv     Kind = "env"     // sensitive env-var presence
+	KindEnv     Kind = "env"     // host env values surviving into the sandbox
 	KindWrite   Kind = "write"   // in-sandbox write PERSISTED on the host (#153)
+	KindSocket  Kind = "socket"  // unix-socket creation / visible socket path
 )
 
 // Observation is one normalized finding from the differential probe, describing
-// what the IN-SANDBOX run saw. The harness maps sandbox-probe's native report
-// into this shape (see README: the mapping is the current stub).
+// what the IN-SANDBOX run saw.
 type Observation struct {
 	Kind   Kind   `json:"kind"`
 	Target string `json:"target"` // host, absolute path, or env-var name
 
 	// Reachable is the in-sandbox result: host connectable / file readable /
-	// env var present / write persisted on the HOST after the run (KindWrite).
-	// This is the security-relevant bit.
+	// host env value present / write persisted on the HOST after the run
+	// (KindWrite) / socket created (KindSocket).
 	Reachable bool `json:"reachable"`
-
-	// TokenInjected (network only): a rein credential was observed on the
-	// request to Target. Must be true IFF Target is an inject host.
-	TokenInjected bool `json:"tokenInjected,omitempty"`
 }
 
 // Verdict is the oracle's classification of one observation.
@@ -57,11 +50,10 @@ type Verdict string
 
 const (
 	// VerdictOK: the observation matches intent (expected-open reachable, or
-	// expected-denied blocked, or token present exactly on an inject host).
+	// expected-denied blocked).
 	VerdictOK Verdict = "ok"
 	// VerdictLeak: a containment failure — a denied channel survived
-	// confinement, or a token appeared where it must never appear. Any leak
-	// fails the harness.
+	// confinement. Any leak fails the harness.
 	VerdictLeak Verdict = "leak"
 	// VerdictRegression: an EXPECTED-open channel is unexpectedly closed. Not a
 	// security failure, but it means the sandbox broke a path the agent needs;
@@ -80,44 +72,32 @@ type Result struct {
 	Reason      string      `json:"reason"`
 }
 
-// SensitiveEnv are env-var names that must NEVER survive into the sandbox
-// (docs/containment-probe-harness.md channel table). rein's env allowlist is
-// build-time, not carried in settings.json, so this denylist is encoded here
-// rather than derived from the config. Any of these observed present in-sandbox
-// is a leak. Extend as the allowlist model firms up.
-var SensitiveEnv = []string{
+// EnvCanaryNames are set to a canary VALUE on the host before launch. rein's
+// env policy is an allowlist (internal/srt/env.go), so the check is by value:
+// the canary must not appear anywhere in the sandbox environment. The last
+// name is arbitrary, standing in for any variable nobody thought to list.
+var EnvCanaryNames = []string{
 	"ANTHROPIC_API_KEY",
 	"GH_TOKEN", "GITHUB_TOKEN",
 	"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
 	"SSH_AUTH_SOCK",
 	"GPG_AGENT_INFO",
 	"DBUS_SESSION_BUS_ADDRESS",
+	"CONTAINMENT_UNLISTED_VAR",
 }
 
 // Oracle holds the config-derived expected/denied sets for one run.
 type Oracle struct {
 	allowedDomains map[string]bool // expected-open egress
-	injectDomains  map[string]bool // token expected here, nowhere else
-	cdnHosts       map[string]bool // reachable but must be un-injected
 	denyRead       []string        // sensitive paths that must be unreadable
 	allowRead      []string        // read-only re-binds inside a deny region
 	allowWrite     []string        // writable binds — the only places a write may persist
 	denyWrite      []string        // ro pins inside writable binds (hooks/config, #153 denies)
-	sensitiveEnv   map[string]bool
 }
 
 // NewOracle builds an oracle from rein's emitted sandbox config.
 func NewOracle(cfg srt.Config) *Oracle {
-	o := &Oracle{
-		allowedDomains: lowerSet(cfg.Network.AllowedDomains),
-		cdnHosts:       lowerSet(proxy.CDNHosts),
-		sensitiveEnv:   lowerSet(SensitiveEnv),
-	}
-	if cfg.Network.MitmProxy != nil {
-		o.injectDomains = lowerSet(cfg.Network.MitmProxy.Domains)
-	} else {
-		o.injectDomains = map[string]bool{}
-	}
+	o := &Oracle{allowedDomains: lowerSet(cfg.Network.AllowedDomains)}
 	for _, d := range cfg.Filesystem.DenyRead {
 		o.denyRead = append(o.denyRead, filepath.Clean(d))
 	}
@@ -144,6 +124,8 @@ func (o *Oracle) Classify(obs Observation) Result {
 		return o.classifyEnv(obs)
 	case KindWrite:
 		return o.classifyWrite(obs)
+	case KindSocket:
+		return o.classifySocket(obs)
 	default:
 		return Result{obs, VerdictUnknown, "unrecognized observation kind"}
 	}
@@ -164,24 +146,6 @@ func (o *Oracle) ClassifyAll(obs []Observation) []Result {
 func (o *Oracle) classifyNetwork(obs Observation) Result {
 	host := normHost(obs.Target)
 	allowed := o.allowedDomains[host]
-	inject := o.injectDomains[host]
-
-	// Token placement is the sharpest leak: a token must appear IFF this is an
-	// inject host. A token on a CDN/passthrough host leaks it onto a pre-signed
-	// asset URL (hosts.go classPassthrough rationale).
-	if obs.TokenInjected && !inject {
-		reason := "rein token injected onto non-inject host " + host
-		if o.cdnHosts[host] {
-			reason = "rein token injected onto CDN host " + host + " (leaks onto a pre-signed asset URL)"
-		}
-		return Result{obs, VerdictLeak, reason}
-	}
-	if inject && obs.Reachable && !obs.TokenInjected {
-		// Reachable inject host with no token would 401 — a functional break,
-		// not a leak. Surface as regression.
-		return Result{obs, VerdictRegression, "inject host reachable but no token observed"}
-	}
-
 	if allowed {
 		if obs.Reachable {
 			return Result{obs, VerdictOK, "expected-open egress reachable"}
@@ -255,14 +219,36 @@ func (o *Oracle) classifyWrite(obs Observation) Result {
 	}
 }
 
-func (o *Oracle) classifyEnv(obs Observation) Result {
-	if o.sensitiveEnv[strings.ToLower(obs.Target)] {
+// SocketCreate is the socket target for "can the sandbox create an AF_UNIX
+// socket at all"; every other socket target is a path the probe found.
+const SocketCreate = "AF_UNIX"
+
+// classifySocket: without AF_UNIX creation no socket can be connected, so that
+// one row carries the judgement (docker, the nix daemon, tmux approval). Which
+// socket paths are merely visible is host-dependent noise, unless one shows
+// through a read deny.
+func (o *Oracle) classifySocket(obs Observation) Result {
+	if obs.Target == SocketCreate {
 		if obs.Reachable {
-			return Result{obs, VerdictLeak, "sensitive env var " + obs.Target + " present in sandbox"}
+			return Result{obs, VerdictLeak, "AF_UNIX socket creation allowed in sandbox (seccomp block missing)"}
 		}
-		return Result{obs, VerdictOK, "sensitive env var correctly scrubbed"}
+		return Result{obs, VerdictOK, "AF_UNIX socket creation blocked"}
 	}
-	return Result{obs, VerdictUnknown, "env var not in the sensitive denylist — triage"}
+	p := filepath.Clean(obs.Target)
+	denyEntry, denyLen := deepestMatch(p, o.denyRead)
+	if _, allowLen := deepestMatch(p, o.allowRead); denyLen > allowLen {
+		return Result{obs, VerdictLeak, "unix socket visible under denyRead " + denyEntry}
+	}
+	return Result{obs, VerdictOK, "unix socket path visible"}
+}
+
+// classifyEnv: Target is a variable whose in-sandbox value carries the host
+// canary; the probe sends one unreachable row when none does.
+func (o *Oracle) classifyEnv(obs Observation) Result {
+	if obs.Reachable {
+		return Result{obs, VerdictLeak, "host env value present in sandbox env (" + obs.Target + ")"}
+	}
+	return Result{obs, VerdictOK, "no host env canary value in the sandbox env"}
 }
 
 // deepestMatch returns the longest entry that covers p (p equals it or nests
