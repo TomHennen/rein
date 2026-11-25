@@ -130,11 +130,6 @@ the install-chain allow-backs rein adds when srt itself lives under `$HOME`
 (`~/.npm-global`). The `--sandbox` journeys run against the real home, and
 `TestSandboxPathEnv` covers the symlinked-PATH case.
 
-Known gap, srt 0.0.63 only: srt re-binds `~/.claude/debug` and `~/.npm/_logs`
-over the home deny, and rein pins them read-only (#153) but they stay
-READABLE. `targets.go` excepts them from the walk; srt 0.0.83 no longer
-re-binds them, and the exception goes with that bump.
-
 ### Checking the suite itself
 
 `CONTAINMENT_WEAKEN` re-applies knobs after the scrub, to confirm a weakened
