@@ -2,6 +2,7 @@ package srt
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -12,6 +13,7 @@ func stubEnv() Env {
 	return Env{
 		LookPath:       func(string) (string, error) { return "/usr/bin/srt", nil },
 		PackageVersion: func(string) (string, error) { return PinnedVersion, nil },
+		RunVersion:     func(string) (string, error) { return PinnedVersion, nil },
 		BwrapUserns:    func() error { return nil },
 		SeccompPresent: func(string) (bool, error) { return true, nil },
 		SystemCA:       func() (string, error) { return "/etc/ssl/certs/ca-certificates.crt", nil },
@@ -101,5 +103,39 @@ func TestPreflightBwrapUnhealthy(t *testing.T) {
 	e.BwrapUserns = func() error { return errors.New("userns disabled by AppArmor") }
 	if statusOf(Preflight(e), "bwrap userns") != StatusFail {
 		t.Error("broken userns should fail")
+	}
+}
+
+func TestPreflightSrtDoesNotStart(t *testing.T) {
+	e := stubEnv()
+	e.RunVersion = func(string) (string, error) {
+		return "", errors.New("exit status 1: SyntaxError: Unexpected token 'with'")
+	}
+	checks := Preflight(e)
+	if statusOf(checks, "srt version") != StatusFail {
+		t.Error("an srt that cannot start should fail the version check")
+	}
+	for _, c := range checks {
+		if c.Name == "srt version" && !strings.Contains(c.Message, "Node") {
+			t.Errorf("message should point at node: %s", c.Message)
+		}
+	}
+}
+
+func TestPreflightRunVersionMismatch(t *testing.T) {
+	e := stubEnv()
+	e.RunVersion = func(string) (string, error) { return "0.0.1", nil }
+	if statusOf(Preflight(e), "srt version") != StatusFail {
+		t.Error("a running version other than the pin should fail")
+	}
+}
+
+func TestErrorLine(t *testing.T) {
+	out := "file:///x/cli.js:2\nimport pkg from '../package.json' with { type: 'json' };\n    ^^^^\n\nSyntaxError: Unexpected token 'with'\n    at ModuleLoader\n"
+	if got := errorLine(out); got != "SyntaxError: Unexpected token 'with'" {
+		t.Errorf("errorLine = %q", got)
+	}
+	if got := errorLine("\nboom\n"); got != "boom" {
+		t.Errorf("errorLine fallback = %q", got)
 	}
 }

@@ -62,7 +62,7 @@ on `update`, or fix the key first):
 
 ```
 sudo apt-get install -y bubblewrap ripgrep socat
-# Node 20+ if absent (nodesource or distro). Then srt:
+# Node 22.12+ if absent (nodesource; Ubuntu 24.04's distro node is 18, too old). Then srt:
 npm install -g @anthropic-ai/sandbox-runtime   # pin the version; see below
 ```
 
