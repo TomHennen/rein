@@ -1,12 +1,14 @@
 package srt
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -16,7 +18,8 @@ import (
 // preflight refuses (run) / warns (doctor) rather than trusting an unverified
 // build.
 //
-// The pin check reads package.json (PackageVersion), which needs no srt exec.
+// The pin check reads package.json (PackageVersion); RunVersion then execs srt,
+// which catches a node too old to load it.
 const PinnedVersion = "0.0.83"
 
 // Status is a preflight verdict, matching doctor's three-value framing.
@@ -50,6 +53,9 @@ type Env struct {
 	// PackageVersion returns the srt npm package version given the srt binary
 	// path (reads package.json in production).
 	PackageVersion func(srtPath string) (string, error)
+	// RunVersion execs `srt --version` and returns what it printed; an error
+	// means srt cannot start under the node it resolves.
+	RunVersion func(srtPath string) (string, error)
 	// BwrapUserns runs the userns/AppArmor health probe and returns nil on a
 	// healthy sandbox (bwrap --unshare-user --uid 0 --bind / / -- true).
 	BwrapUserns func() error
@@ -69,6 +75,7 @@ func DefaultEnv() Env {
 	return Env{
 		LookPath:       exec.LookPath,
 		PackageVersion: packageVersionOf,
+		RunVersion:     runSrtVersion,
 		BwrapUserns:    bwrapUsernsProbe,
 		SeccompPresent: seccompPresentFor,
 		SystemCA:       systemCAProbe,
@@ -117,6 +124,17 @@ func checkSrtVersion(env Env, srtPath string) Check {
 			fmt.Sprintf("srt package version is %s, pinned is %s; the config shape/fail-open behavior is only verified for %s. Reinstall: npm i -g @anthropic-ai/sandbox-runtime@%s",
 				v, PinnedVersion, PinnedVersion, PinnedVersion)}
 	}
+	ran, err := env.RunVersion(srtPath)
+	if err != nil {
+		return Check{"srt version", StatusFail,
+			fmt.Sprintf("srt %s is installed but does not start (%v). It needs Node %s; check `node --version` and upgrade node, or use the nix dev shell's srt.",
+				v, err, nodeRequirement(srtPath))}
+	}
+	if ran != PinnedVersion {
+		return Check{"srt version", StatusFail,
+			fmt.Sprintf("`srt --version` printed %q, pinned is %s. Reinstall: npm i -g @anthropic-ai/sandbox-runtime@%s",
+				ran, PinnedVersion, PinnedVersion)}
+	}
 	return Check{"srt version", StatusOK, v}
 }
 
@@ -162,6 +180,9 @@ func checkSystemCA(env Env) Check {
 type pkgMeta struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
+	Engines struct {
+		Node string `json:"node"`
+	} `json:"engines"`
 }
 
 // findSrtPackage resolves the srt symlink (npm global bin is a symlink into
@@ -197,6 +218,45 @@ func packageVersionOf(srtPath string) (string, error) {
 		return "", err
 	}
 	return meta.Version, nil
+}
+
+// runSrtVersion execs `srt --version`; on failure the error carries the first
+// line of node's diagnostic that names the cause.
+func runSrtVersion(srtPath string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, srtPath, "--version").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%v: %s", err, errorLine(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// errorLine picks the "SomeError: ..." line out of a node stack trace, falling
+// back to the first non-empty line.
+func errorLine(out string) string {
+	first := ""
+	for _, l := range strings.Split(out, "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		if first == "" {
+			first = l
+		}
+		if i := strings.Index(l, "Error: "); i > 0 && !strings.ContainsAny(l[:i], " \t") {
+			return l
+		}
+	}
+	return first
+}
+
+// nodeRequirement is srt's declared engines.node, for the failure message.
+func nodeRequirement(srtPath string) string {
+	if _, meta, err := findSrtPackage(srtPath); err == nil && meta.Engines.Node != "" {
+		return meta.Engines.Node
+	}
+	return "(see srt's package.json engines)"
 }
 
 // seccompArch maps GOARCH to srt's vendored seccomp dir name.
